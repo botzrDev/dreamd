@@ -1,0 +1,11 @@
+[package]
+name = "dreamd"
+version = "0.0.0"
+edition = "2021"
+description = "Portable memory layer for AI coding agents — pre-release"
+license = "Apache-2.0"
+repository = "https://github.com/botzrDev/dreamd"
+authors = ["Austin Green <austin@botzr.com>"]
+readme = "README.md"
+
+[dependencies]
