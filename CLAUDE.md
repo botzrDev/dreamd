@@ -85,3 +85,19 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion ben
 - Public-facing names and accounts already claimed: see `~/.claude/projects/-home-austingreen-Documents-botzr-projects-dreamd/memory/dreamd_surface_area.md` and `npm_account.md`
 - The `context/` and `.claude/` directories are gitignored on purpose — local working notes, not artifacts
 - Story IDs in commits/PRs follow `DR-XXX` (see `context/AGILE/plan1.md` for the backlog)
+
+## Planning discipline (locked 2026-05-09 after grill round 6)
+
+**Authoritative resolution stack:** PRD Part IV > PRD Part III > PRD Parts I-II > plan1.md grill-revision > plan1.md prior text. When editing either document, treat later layers as overrides; do not silently rewrite earlier text — add resolution sections with cross-references, mirroring the existing Part III pattern.
+
+**Velocity floor:** Plan against **18-22 sustained pts/sprint** with a first-sprint spike of 28-32 that decays. The original `~30 pts/sprint` figure in `context/AGILE/plan1.md` Appendix B is a celebration number, not a planning number. Cumulative complexity (debugging unfamiliar stacks, ops setup, comms reactive work, dogfooding overhead at ~10% of weekly capacity) eats raw build hours faster than the original plan allowed. Sprint 1 is the first measurement; recalibrate Sprints 2-4 from real data, not vibes.
+
+**Scope-discipline rule (applies from grill round 7 onward):** Any further grilling-round scope addition must trade 1:1.5 against existing scope — net +10 points of new work means -15 points of existing work. The grilling round must surface a candidate cut list as part of every "this should be locked" recommendation; the founder retains veto on what gets cut. Without this rule the meta-process generates work faster than the velocity floor can absorb regardless of whether each individual addition is correct. Six rounds added 46 points; round 7 cannot continue the pattern. **Round 7 (2026-05-09 CEO PRD review) was applied with proposed cuts (DR-906, DR-911, DR-410, DR-913 deferred/folded; DR-909 acceptance softened) totaling ~10 pts against ~7 pts of additions; founder vetoed nothing in the trade.**
+
+**Grilling cadence rule (locked grill round 7 / 2026-05-09):** **No further grilling rounds before Sprint 1 ships.** Late-stage grilling rounds before measured velocity exists are the highest-risk cadence — they add scope to a plan whose realistic capacity is still hypothetical. Any "round 8" content the founder wants to surface defers to the post-Sprint-1 retrospective at minimum, where Sprint 2–4 plans can absorb additions through the velocity-gate cut sequence. The v0.1.1 scope freeze gets its own scheduled grilling round between week 9 (v0.1 ships) and week 10 (v0.1.1 freeze) — calendar event, not "if the founder feels like it."
+
+**v0.1.1 scope freeze:** The cuts taken in Q6 (LLM dream cycle, OpenCode adapter, Windows lifecycle, semantic indexing pipeline DR-211) defer to v0.1.1, which gets its own scope freeze ONE WEEK after v0.1 ships. v0.1.1 is a real release with its own discipline — not an "everything that didn't make v0.1" graveyard. Kill criterion: if v0.1.1 is over capacity at end of Sprint 5, OpenCode adapter drops to v0.1.2.
+
+**Launch target:** v0.1 ships **week 9** (was week 7; slipped two weeks after Q6). Pre-write the slip-announcement post in week 6.
+
+**v0.1 wedge sentence (sacred):** *"AGENTS.md is what you wrote down. dreamd is what your agent learned."* Recommendations that weaken this are higher-bar; recommendations that strengthen it can be made aggressively. The post-Q6 v0.1 wedge framing is *"salience-scored cross-harness episodic recall + on-demand deterministic consolidation"* — LLM-assisted lessons land at v0.1.1, do NOT lead the README or HN draft with them.
