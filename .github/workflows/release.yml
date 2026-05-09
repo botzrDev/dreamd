@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+# Workflow-level default: read only.
+# The publish job explicitly elevates to contents:write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Build release binaries ────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (GNU)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: dreamd
+            asset_name: dreamd-linux-x86_64
+          # Linux (musl — fully static)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: dreamd
+            asset_name: dreamd-linux-x86_64-musl
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: dreamd
+            asset_name: dreamd-macos-x86_64
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: dreamd
+            asset_name: dreamd-macos-aarch64
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: dreamd.exe
+            asset_name: dreamd-windows-x86_64.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux musl only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Enforce binary size limit — NFR-2 (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BINARY=target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          SIZE_BYTES=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY")
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+          echo "Stripped binary: ${SIZE_MB} MB"
+          MAX_BYTES=$((15 * 1024 * 1024))
+          if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
+            echo "::error::Binary ${SIZE_MB} MB exceeds 15 MB limit (NFR-2)"
+            exit 1
+          fi
+
+      - name: Rename binary for upload
+        shell: bash
+        run: |
+          SRC=target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          cp "$SRC" "${{ matrix.asset_name }}"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  # ── Publish to GitHub Releases ────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # elevated only for this job
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Generate SHA-256 checksums
+        run: |
+          find dist/ -maxdepth 2 -type f | sort | xargs sha256sum > checksums.txt
+          cat checksums.txt
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Pull the block for this version from CHANGELOG.md, if present
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md 2>/dev/null || true)
+          if [ -z "$NOTES" ]; then
+            NOTES="See [CHANGELOG.md](./CHANGELOG.md) for details."
+          fi
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Read checksums file
+        id: checksums
+        run: |
+          echo "content<<EOF" >> "$GITHUB_OUTPUT"
+          cat checksums.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        # Pinned to v2.6.2 (SHA: 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65)
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          name: dreamd ${{ github.ref_name }}
+          body: |
+            ${{ steps.changelog.outputs.notes }}
+
+            ---
+            **SHA-256 checksums**
+            ```
+            ${{ steps.checksums.outputs.content }}
+            ```
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/**/*
+            checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
