@@ -30,10 +30,10 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [advisories]
-# Deny crates with known security vulnerabilities.
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
+# Deny crates with known security vulnerabilities (workspace + transitive).
+vulnerability = "all"
+unmaintained = "workspace"
+yanked = "all"
 
 [sources]
 # Only allow crates from crates.io and your own git repositories.
