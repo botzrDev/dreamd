@@ -33,7 +33,7 @@ wildcards = "deny"
 # Deny crates with known security vulnerabilities (workspace + transitive).
 vulnerability = "all"
 unmaintained = "workspace"
-yanked = "all"
+yanked = "deny"
 
 [sources]
 # Only allow crates from crates.io and your own git repositories.
