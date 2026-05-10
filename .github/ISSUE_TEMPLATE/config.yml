@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/botzrDev/dreamd/security/advisories/new
+    about: Do not file security issues publicly. Use a private advisory or follow SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/botzrDev/dreamd/discussions
+    about: For open-ended questions, ideas, or "how do I…" — use Discussions, not issues.
