@@ -2,7 +2,7 @@
 
 > **Status: pre-release.** The reference implementation does not yet exist. The current `src/main.rs` is a stub. The spec ([`SPEC.md`](./SPEC.md)) is the contract; everything else is in flight. Track progress in [issues](https://github.com/botzrDev/dreamd/issues) and the [changelog](./CHANGELOG.md). Public APIs and on-disk formats may change before v0.1.
 
-A local-first, single-binary daemon that gives AI coding agents a portable memory layer.
+A local-first memory layer for AI coding agents. Ships as an MCP server (`npx dreamd-mcp`) so any MCP-aware harness can read and write a shared `.agent/` folder. A standalone binary and persistent-daemon mode are also available.
 
 `dreamd` is the reference implementation of [`.agent/`](./SPEC.md) — a directory convention any AI coding agent or harness can read and write to share runtime memory across tools. It sits beside [`AGENTS.md`](https://agents.md) and [`SKILL.md`](https://www.anthropic.com/news/skills) in a project root.
 
@@ -10,9 +10,11 @@ A local-first, single-binary daemon that gives AI coding agents a portable memor
 
 ## What it does
 
-- Exposes a standardized `.agent/` folder (`working/`, `episodic/`, `semantic/`, `personal/`) as the source of truth — plain markdown and JSONL files you can read, edit, and check into git.
-- Serves a small local HTTP API for `learn` (append an episode), `recall` (BM25 × salience search), and `dream` (consolidate episodic into semantic lessons).
-- Ships an MCP server so Claude Code, Cursor, OpenCode, Aider, Continue, Cline, and any other MCP-aware harness can share memory across sessions and tools.
+- Exposes a standardized `.agent/` folder as the source of truth — plain markdown and JSONL files you can read, edit, and check into git. v0.1 ships four directories (`episodic/`, `semantic/`, `personal/`, `working/`); `episodic/` and `semantic/` are the two active memory systems, `personal/` is user-authored static context, and `working/` is reserved for v0.2's session model.
+- Serves a small local API for `learn` (append an episodic event), `recall` (BM25 × salience search over episodic events), and `cycle` (run a deterministic dream cycle that promotes recurring events into `LESSONS.md`). LLM-assisted consolidation and blended episodic + semantic recall arrive in v0.1.1.
+- Ships an MCP server so Claude Code and any other MCP-aware harness can share memory across sessions and tools. Additional adapters (Cursor, OpenCode, Aider, Continue, Cline) land progressively after v0.1.
+
+> *AGENTS.md belongs to a project; PREFERENCES.md belongs to you. Same agent reads both; different ownership.*
 
 ## Install (planned)
 
@@ -30,11 +32,13 @@ Standalone binary and Cargo install paths arrive with v0.1. See the [v0.1 milest
 # scaffold .agent/ into the current project
 dreamd init
 
-# start the daemon
-dreamd serve
-
-# from any AI coding agent that supports MCP, point it at dreamd-mcp
+# point any MCP-aware harness at dreamd-mcp; the writer process self-starts
+npx dreamd-mcp
 ```
+
+## Platforms
+
+v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
 
 ## Spec
 
