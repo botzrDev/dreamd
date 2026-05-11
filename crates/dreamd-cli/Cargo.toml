@@ -1,0 +1,19 @@
+[package]
+name = "dreamd"
+description = "Portable memory layer for AI coding agents — pre-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "dreamd"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dreamd-core = { path = "../dreamd-core" }
