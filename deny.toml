@@ -18,10 +18,7 @@ allow = [
     "Zlib",
 ]
 # Reject any dependency whose license is not in the allow list above.
-unlicensed = "deny"
-# Warn (not deny) on copyleft licenses so you see them but CI does not break.
-# Promote to "deny" if you want hard enforcement.
-copyleft = "warn"
+# (cargo-deny now denies unlicensed and copyleft dependencies by default)
 
 [bans]
 # Deny multiple versions of the same crate to avoid dependency bloat.
@@ -31,7 +28,7 @@ wildcards = "deny"
 
 [advisories]
 # Deny crates with known security vulnerabilities (workspace + transitive).
-vulnerability = "all"
+# (cargo-deny now denies vulnerabilities by default)
 unmaintained = "workspace"
 yanked = "deny"
 
