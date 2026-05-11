@@ -4,6 +4,7 @@
 [licenses]
 # Licenses that are allowed for all dependencies.
 # dreamd is Apache-2.0; these permissive licenses are compatible.
+unmatched = "allow"
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
