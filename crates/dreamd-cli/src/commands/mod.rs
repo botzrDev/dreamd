@@ -1,2 +1,2 @@
 pub mod init;
-pub(crate) mod version;
+pub mod version;

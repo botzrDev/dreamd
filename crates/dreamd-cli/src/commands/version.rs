@@ -45,7 +45,7 @@ const SHA_FULL: &str = or_unknown(match option_env!("VERGEN_GIT_SHA") {
     None => "unknown",
 });
 
-pub(crate) const SHA: &str = str_index!(SHA_FULL, ..7);
+pub const SHA: &str = str_index!(SHA_FULL, ..7);
 
 const BUILD_DATE: &str = or_unknown(match option_env!("VERGEN_BUILD_DATE") {
     Some(s) => s,
@@ -59,18 +59,18 @@ const TARGET: &str = or_unknown(match option_env!("VERGEN_CARGO_TARGET_TRIPLE") 
 
 const SCHEMA: &str = "1.0";
 
-pub(crate) const VERSION_SHORT: &str = concatcp!(
+pub const VERSION_SHORT: &str = concatcp!(
     "dreamd ", VERSION, " (", SHA, " build:", BUILD_DATE, " target:", TARGET, " schema:", SCHEMA,
     ")",
 );
 
-pub(crate) fn render_long() -> String {
+pub fn render_long() -> String {
     format!(
         "dreamd {VERSION}\n  commit:  {SHA}\n  built:   {BUILD_DATE}\n  target:  {TARGET}\n  schema:  {SCHEMA}\n"
     )
 }
 
-pub(crate) fn run(out: &mut impl Write) -> io::Result<()> {
+pub fn run(out: &mut impl Write) -> io::Result<()> {
     out.write_all(render_long().as_bytes())
 }
 

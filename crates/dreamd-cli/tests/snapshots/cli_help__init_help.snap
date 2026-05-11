@@ -1,0 +1,12 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 48
+expression: "subcommand_help(\"init\")"
+---
+Scaffold per-project .agent/ store and register it with the daemon
+
+Usage: init
+
+Options:
+  -h, --help
+          Print help
