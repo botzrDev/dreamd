@@ -1,0 +1,16 @@
+created .agent/working/
+created .agent/episodic/
+created .agent/semantic/
+created .agent/personal/
+initialized .agent/.dreamd/state.json
+appended .gitignore (1 entry: .agent/.dreamd/)
+registered .agent/ in ~/.agent/registry.toml
+
+dreamd: first run — When LLM mode is enabled, the content
+of AGENT_LEARNINGS.jsonl entries meeting the salience
+threshold is sent to the configured LLM provider. No data
+is sent in --no-llm mode. Users working with sensitive
+codebases should use --no-llm or a local model via Ollama.
+The personal/ layer is excluded from LLM calls unless
+--share-personal is passed.
+See docs/security.md#privacy-disclosure for details.
