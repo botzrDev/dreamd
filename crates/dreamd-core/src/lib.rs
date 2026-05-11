@@ -7,5 +7,6 @@
 //! than building strings.
 
 pub mod layout;
+pub mod privacy;
 
 pub use layout::{AgentRoot, DaemonHome, GITIGNORE_SNIPPET};
