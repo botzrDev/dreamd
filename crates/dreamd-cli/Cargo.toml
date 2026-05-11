@@ -18,8 +18,18 @@ workspace = true
 [dependencies]
 dreamd-core = { path = "../dreamd-core", version = "0.0.0" }
 clap = { version = "4", features = ["derive"] }
+const_format = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[build-dependencies]
+vergen-gitcl = { version = "1", features = ["build", "cargo", "rustc"] }
+# Pin vergen to 9.0.6: vergen-gitcl 1.0.8 re-exports `Emitter` from vergen-lib
+# 0.1.6 but its build/cargo/rustc feature flags route through `vergen`. Newer
+# vergen 9.1+ depends on vergen-lib 9.1, which trips a duplicate-vergen-lib
+# trait mismatch at the `add_instructions` call sites. 9.0.6 still uses
+# vergen-lib 0.1.6 and resolves cleanly.
+vergen = "=9.0.6"
 
 [dev-dependencies]
 tempfile = "3"
