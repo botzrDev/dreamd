@@ -101,3 +101,35 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion ben
 **Launch target:** v0.1 ships **week 9** (was week 7; slipped two weeks after Q6). Pre-write the slip-announcement post in week 6.
 
 **v0.1 wedge sentence (sacred):** *"AGENTS.md is what you wrote down. dreamd is what your agent learned."* Recommendations that weaken this are higher-bar; recommendations that strengthen it can be made aggressively. The post-Q6 v0.1 wedge framing is *"salience-scored cross-harness episodic recall + on-demand deterministic consolidation"* — LLM-assisted lessons land at v0.1.1, do NOT lead the README or HN draft with them.
+
+## dreamd-cli package name is `dreamd`, not `dreamd-cli`
+
+The `[package]` name in `crates/dreamd-cli/Cargo.toml` is `dreamd`.
+The directory is `dreamd-cli`; the package name and binary name are both `dreamd`.
+
+Correct invocations:
+  cargo test -p dreamd
+  cargo run -p dreamd -- <subcommand>
+  cargo build -p dreamd
+
+`-p dreamd-cli` will error with "package not found." Do not use it in bare
+prompts, CI scripts, or verification commands.
+
+Source: WEG-9 dev report, 2026-05-12.
+
+## Error output belongs on stderr; verification pattern for CLI commands
+
+Any `dreamd` subcommand that exits non-zero must write its error message to
+stderr, not stdout. Success output goes to stdout only.
+
+Verification pattern (paste into bare prompts and Step 5 checks):
+  # stdout must be empty on error:
+  cargo run -q -p dreamd -- <subcommand> 2>/dev/null
+  # stderr must contain the error message:
+  cargo run -q -p dreamd -- <subcommand> 2>&1 1>/dev/null
+
+WEG-9 incident: "no project root" message was initially routed to stdout.
+Caught in Step 5; fixed before commit. Exit code 2 for missing-root, 1 for
+other I/O errors.
+
+Source: WEG-9 dev report, 2026-05-12.
