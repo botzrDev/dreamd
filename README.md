@@ -26,6 +26,12 @@ npx dreamd-mcp
 
 Standalone binary and Cargo install paths arrive with v0.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
 
+### Privacy
+
+> When LLM mode is enabled, the content of `AGENT_LEARNINGS.jsonl` entries meeting the salience threshold is sent to the configured LLM provider. No data is sent in `--no-llm` mode. Users working with sensitive codebases should use `--no-llm` or a local model via Ollama. The `personal/` layer is excluded from LLM calls unless `--share-personal` is passed.
+
+LLM mode ships in v0.1.1; v0.1 makes no network calls. Full disclosure, redaction details, and the v0.1.1 contract: [`docs/security.md#privacy-disclosure`](./docs/security.md#privacy-disclosure).
+
 ## Quickstart (planned)
 
 ```bash
