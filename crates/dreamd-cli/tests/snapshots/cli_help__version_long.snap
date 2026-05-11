@@ -1,0 +1,10 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 78
+expression: render_long()
+---
+dreamd 0.0.0
+  commit:  [sha]
+  built:   [date]
+  target:  [target]
+  schema:  1.0

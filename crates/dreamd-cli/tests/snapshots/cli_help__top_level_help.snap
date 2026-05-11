@@ -1,0 +1,20 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 43
+expression: top_help()
+---
+Portable memory layer for AI coding agents
+
+Usage: dreamd [COMMAND]
+
+Commands:
+  init     Scaffold per-project .agent/ store and register it with the daemon
+  version  Print structured version information (semver, commit, build date, target, schema)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -V, --version
+          Print version information
+
+  -h, --help
+          Print help

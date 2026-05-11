@@ -1,0 +1,12 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 53
+expression: "subcommand_help(\"version\")"
+---
+Print structured version information (semver, commit, build date, target, schema)
+
+Usage: version
+
+Options:
+  -h, --help
+          Print help
