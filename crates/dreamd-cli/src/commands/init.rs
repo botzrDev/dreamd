@@ -9,20 +9,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use dreamd_core::privacy::DR413_DISCLOSURE;
 use dreamd_core::{AgentRoot, GITIGNORE_SNIPPET};
 use serde::Serialize;
-
-/// PRD §5 privacy disclosure, ASCII-rendered, 60-col wrapped (locked verbatim).
-/// WEG-17 (Sat 5/16) relocates this constant; the stdout text does not change.
-pub const DR413_DISCLOSURE: &str = "\
-dreamd: first run — When LLM mode is enabled, the content
-of AGENT_LEARNINGS.jsonl entries meeting the salience
-threshold is sent to the configured LLM provider. No data
-is sent in --no-llm mode. Users working with sensitive
-codebases should use --no-llm or a local model via Ollama.
-The personal/ layer is excluded from LLM calls unless
---share-personal is passed.
-See docs/security.md#privacy-disclosure for details.";
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
 
