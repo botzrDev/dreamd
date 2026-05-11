@@ -151,6 +151,57 @@ jobs:
           echo "### Binary size gate" >> "$GITHUB_STEP_SUMMARY"
           echo "Stripped size: **${SIZE_MB} MB** (limit: 15 MB)" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Tarball-build sentinel check (WEG-18) ────────────────────────────────────
+  # Simulates `cargo install dreamd` from a crates.io tarball (no `.git/`).
+  # vergen-gitcl with default `fail_on_error=false` emits `VERGEN_IDEMPOTENT_OUTPUT`
+  # as the value for unresolvable instructions; `or_unknown` in commands::version
+  # must convert that to "unknown". This job catches the regression where the
+  # sentinel leaks into the shipped binary.
+  tarball-sentinel:
+    name: Tarball build (no .git) sentinel check
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-tarball-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tarball-
+
+      - name: Rename .git/ to simulate tarball build
+        run: mv .git .git.disabled
+
+      - name: Build release without .git/
+        run: cargo build --release --workspace
+
+      - name: Assert no VERGEN_ sentinel in binary output
+        run: |
+          BINARY=target/release/dreamd
+          SHORT=$("$BINARY" --version)
+          LONG=$("$BINARY" version)
+          echo "--version: $SHORT"
+          echo "version:"
+          echo "$LONG"
+          if echo "$SHORT$LONG" | grep -q "VERGEN_"; then
+            echo "::error::vergen sentinel leaked into binary output"
+            exit 1
+          fi
+          if ! echo "$SHORT" | grep -q "unknown"; then
+            echo "::error::expected 'unknown' in --version output when .git is absent"
+            exit 1
+          fi
+
   # ── DCO sign-off check ────────────────────────────────────────────────────────
   dco:
     name: DCO sign-off

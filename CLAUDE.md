@@ -133,3 +133,77 @@ Caught in Step 5; fixed before commit. Exit code 2 for missing-root, 1 for
 other I/O errors.
 
 Source: WEG-9 dev report, 2026-05-12.
+
+## vergen-gitcl `fail_on_error(false)` emits sentinels, not unset env vars
+
+`vergen-gitcl` (and umbrella vergen 9+) with `fail_on_error(false)` does NOT
+leave failed-instruction env vars unset. It emits the literal string
+`VERGEN_IDEMPOTENT_OUTPUT` as the value. So `option_env!("VERGEN_GIT_SHA")`
+returns `Some("VERGEN_IDEMPOTENT_OUTPUT")` on tarball-from-crates.io builds,
+NOT `None`.
+
+Any fallback pattern that relies on `match option_env!(...) { Some(s) => s,
+None => "unknown" }` is broken — the `Some` arm fires with sentinel content.
+Worst case: a 7-char-truncated SHA reading `VERGEN_` ships to crates.io users
+and no test catches it because the with-`.git` build path looks fine.
+
+Correct pattern: explicit sentinel-substitution after the `option_env!`:
+
+```rust
+const VERGEN_PLACEHOLDER: &str = "VERGEN_IDEMPOTENT_OUTPUT";
+
+const fn str_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes(); let b = b.as_bytes();
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len() { if a[i] != b[i] { return false; } i += 1; }
+    true
+}
+
+const fn or_unknown(s: &'static str) -> &'static str {
+    if str_eq(s, VERGEN_PLACEHOLDER) { "unknown" } else { s }
+}
+```
+
+The rename-`.git` simulation is the only thing that catches this pre-merge;
+keep it in every vergen-touching ticket's verification block.
+
+Also: vergen-gitcl 1.0.8 re-exports `Emitter` from `vergen-lib 0.1.6` but its
+build/cargo/rustc feature flags route through `vergen`. vergen ≥9.1 brings in
+`vergen-lib 9.1`, causing duplicate-`vergen-lib` trait mismatches at the
+`add_instructions(...)` call sites. Pin `vergen = "=9.0.6"` as a build-dep to
+keep the resolver from upgrading; revisit the pin in v0.1.1's dep-audit pass.
+
+Source: WEG-18 dev report, 2026-05-13.
+
+## clap auto-`--version` prepends the bin name
+
+clap's `#[command(version = LITERAL)]` formats `--version` output as
+`<bin_name> <LITERAL>`. If `LITERAL` already includes the bin name (e.g.,
+`"dreamd 0.0.0 (...)"`), the output becomes `"dreamd dreamd 0.0.0 (...)"` —
+double prefix, byte-exact spec contracts break.
+
+Fix: `#[command(disable_version_flag = true)]` + manual `-V` / `--version`
+handling in the dispatch. Side effect: `cli.command` becomes `Option<Command>`
+because `--version` is valid with no subcommand; add an explicit exit-2-to-
+stderr arm for the missing-subcommand case.
+
+Source: WEG-18 dev report, 2026-05-13.
+
+## Compile-time string assembly: `const_format` over `LazyLock`
+
+For CLI strings that must be `&'static str` (clap's `version = ...` attribute,
+embedded asset identifiers, etc.), the established dreamd-cli pattern is
+`const_format` — `concatcp!` for assembly, `str_index!` for slicing — not
+`std::sync::LazyLock<String>`. Reasons:
+
+- Keeps the value usable in const position (clap attributes, match arms).
+- `str_index!(..7)` on a 7-char `"unknown"` fallback string is a no-op; on a
+  40-char vergen SHA it returns the first 7 — same code path, no panic.
+- Adds one tiny pure-Rust dep (`const_format = "0.2"` → `konst`), no runtime
+  init ceremony.
+
+Use `LazyLock<String>` only if you genuinely need allocation-backed assembly
+(format args that const_format can't express, runtime env reads).
+
+Source: WEG-18 dev report, 2026-05-13.

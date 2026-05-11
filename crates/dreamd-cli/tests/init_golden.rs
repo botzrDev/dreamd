@@ -1,9 +1,7 @@
 use std::process::Command;
 
-const FIRST_RUN_FIXTURE: &[u8] =
-    include_bytes!("../../../tests/fixtures/init.golden.txt");
-const RERUN_FIXTURE: &[u8] =
-    include_bytes!("../../../tests/fixtures/init.rerun.golden.txt");
+const FIRST_RUN_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/init.golden.txt");
+const RERUN_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/init.rerun.golden.txt");
 
 fn dreamd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_dreamd")
@@ -59,7 +57,10 @@ fn first_run_matches_golden() {
     assert!(workspace.exists());
 
     for sub in ["skills", "protocols"] {
-        assert!(tmp.path().join(".agent").join(sub).is_dir(), "{sub}/ silently created");
+        assert!(
+            tmp.path().join(".agent").join(sub).is_dir(),
+            "{sub}/ silently created"
+        );
     }
 }
 
