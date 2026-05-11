@@ -40,7 +40,7 @@ Concretely, the daemon enforces:
 - **The `personal/` layer is excluded from any network call (LLM or otherwise) unless the user opts in with `--share-personal`.**
 - **LLM cost cap.** Token usage is estimated before each dream-cycle call; if the estimate exceeds `$0.10` the cycle aborts and falls back to deterministic mode. A `--no-llm` mode always works without network.
 
-A fuller threat model will be published with v0.1.
+A fuller threat model, lesson-injection analysis, privacy disclosure, and untrusted-input caps live in [`docs/security.md`](./docs/security.md).
 
 ## Out of scope
 
