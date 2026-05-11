@@ -90,6 +90,17 @@ impl AgentRoot {
         self.semantic_dir().join("LESSONS.md")
     }
 
+    /// `<project>/.agent/.dreamd/state.json` — per-project daemon state.
+    ///
+    /// Schema lives with DR-106 / WEG-10; the writer is `dreamd init`
+    /// (DR-105 / WEG-9), whose locked stdout reads
+    /// "initialized .agent/.dreamd/state.json" verbatim against this path.
+    /// Distinct from `~/.agent/registry.toml` (DaemonHome) — there is no
+    /// daemon-home `state.json` file.
+    pub fn state_json(&self) -> PathBuf {
+        self.dreamd_dir().join("state.json")
+    }
+
     /// All seven `.agent/` subdirectories, in canonical order. Useful for
     /// scaffolding (`dreamd init`, DR-105) and integrity checks (DR-107).
     pub fn subdirs(&self) -> [PathBuf; 7] {
@@ -150,8 +161,11 @@ impl DaemonHome {
 /// Snippet appended to a project's `.gitignore` by `dreamd init` (DR-105).
 ///
 /// Only `.dreamd/` is ignored. Episodic, semantic, and personal content are
-/// meant to be committed so memory travels with the repo.
-pub const GITIGNORE_SNIPPET: &str = ".agent/.dreamd/\n";
+/// meant to be committed so memory travels with the repo. The leading `/`
+/// anchors the pattern at the repo root — a project store is, by definition,
+/// at the repo root (DR-101), so we do not want to match a nested
+/// `something/.agent/.dreamd/` the user might create elsewhere in the tree.
+pub const GITIGNORE_SNIPPET: &str = "/.agent/.dreamd/\n";
 
 #[cfg(test)]
 mod tests {
@@ -191,6 +205,12 @@ mod tests {
         assert_eq!(
             r.lessons_md(),
             PathBuf::from("/tmp/proj/.agent/semantic/LESSONS.md"),
+        );
+        // Per-project state.json — matches the locked WEG-9 stdout line
+        // "initialized .agent/.dreamd/state.json".
+        assert_eq!(
+            r.state_json(),
+            PathBuf::from("/tmp/proj/.agent/.dreamd/state.json"),
         );
     }
 
@@ -240,12 +260,18 @@ mod tests {
 
     #[test]
     fn gitignore_snippet_targets_only_dreamd_subdir() {
-        assert!(GITIGNORE_SNIPPET.contains(".agent/.dreamd/"));
+        // Anchored at repo root with leading `/` so we never match a nested
+        // `something/.agent/.dreamd/` the user might create elsewhere.
+        assert!(GITIGNORE_SNIPPET.contains("/.agent/.dreamd/"));
+        assert!(GITIGNORE_SNIPPET
+            .lines()
+            .all(|l| l.is_empty() || l.starts_with('/')));
         // Must NOT ignore the whole .agent/ tree — episodic/semantic/personal
         // are meant to be committed so memory travels with the repo.
-        assert!(!GITIGNORE_SNIPPET
-            .lines()
-            .any(|l| l.trim() == ".agent" || l.trim() == ".agent/"));
+        assert!(!GITIGNORE_SNIPPET.lines().any(|l| {
+            let t = l.trim();
+            t == ".agent" || t == ".agent/" || t == "/.agent" || t == "/.agent/"
+        }));
         // Trailing newline so successive appends don't run together.
         assert!(GITIGNORE_SNIPPET.ends_with('\n'));
     }

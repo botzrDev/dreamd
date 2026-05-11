@@ -16,4 +16,4 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-dreamd-core = { path = "../dreamd-core" }
+dreamd-core = { path = "../dreamd-core", version = "0.0.0" }
