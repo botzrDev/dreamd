@@ -1,0 +1,126 @@
+use std::process::Command;
+
+const FIRST_RUN_FIXTURE: &[u8] =
+    include_bytes!("../../../tests/fixtures/init.golden.txt");
+const RERUN_FIXTURE: &[u8] =
+    include_bytes!("../../../tests/fixtures/init.rerun.golden.txt");
+
+fn dreamd_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_dreamd")
+}
+
+#[test]
+fn first_run_matches_golden() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+    let out = Command::new(dreamd_bin())
+        .arg("init")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("run dreamd init");
+
+    assert!(
+        out.status.success(),
+        "exit={:?}\nstderr={}\nstdout={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        out.stdout.as_slice(),
+        FIRST_RUN_FIXTURE,
+        "stdout does not match init.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(FIRST_RUN_FIXTURE)
+    );
+
+    let jsonl = tmp.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl");
+    assert!(jsonl.exists(), "AGENT_LEARNINGS.jsonl should pre-exist");
+    assert_eq!(
+        std::fs::metadata(&jsonl).unwrap().len(),
+        0,
+        "AGENT_LEARNINGS.jsonl must be zero bytes on creation (Clip A beat 0:22)"
+    );
+
+    let state_path = tmp.path().join(".agent/.dreamd/state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state["schema_version"], "1.0");
+    assert_eq!(state["last_dream_cycle_status"], "idle");
+    assert!(state["last_dream_cycle_at"].is_null());
+    assert!(state["daemon_version"].is_string());
+
+    let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("/.agent/.dreamd/"));
+
+    let workspace = tmp.path().join(".agent/working/WORKSPACE.md");
+    assert!(workspace.exists());
+
+    for sub in ["skills", "protocols"] {
+        assert!(tmp.path().join(".agent").join(sub).is_dir(), "{sub}/ silently created");
+    }
+}
+
+#[test]
+fn rerun_matches_golden() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+    let first = Command::new(dreamd_bin())
+        .arg("init")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("first init");
+    assert!(first.status.success());
+
+    let out = Command::new(dreamd_bin())
+        .arg("init")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("rerun init");
+
+    assert!(out.status.success(), "rerun must exit 0");
+    assert_eq!(
+        out.stdout.as_slice(),
+        RERUN_FIXTURE,
+        "stdout does not match init.rerun.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(RERUN_FIXTURE)
+    );
+}
+
+#[test]
+fn no_project_root_fails_and_skips_scaffold() {
+    let tmp = tempfile::tempdir().unwrap();
+    // intentionally no .git / Cargo.toml / package.json / pyproject.toml
+
+    let out = Command::new(dreamd_bin())
+        .arg("init")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("run dreamd init");
+
+    assert!(
+        !out.status.success(),
+        "must exit non-zero when no project root found"
+    );
+    assert!(
+        !tmp.path().join(".agent").exists(),
+        ".agent/ must not be created on failure"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must be empty on error; got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no project root found"),
+        "stderr must explain the failure; got: {stderr}"
+    );
+}
