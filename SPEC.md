@@ -1,6 +1,6 @@
 # `.agent/` — Portable Memory for AI Coding Agents
 
-**Status:** v0.1-draft · 2026-05-08
+**Status:** v0.1-draft · 2026-05-12
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
@@ -24,10 +24,10 @@ A compliant `init` scaffolds:
 
 ```
 .agent/
-  working/      # Short-lived scratchpad for the active session. Format and lifecycle are implementation-defined.
+  working/      # Short-lived scratchpad for the active session. Format and lifecycle are implementation-defined. Implementations MAY omit `working/`.
   episodic/     # Append-only JSONL log of timestamped events. Canonical file: AGENT_LEARNINGS.jsonl.
   semantic/     # Lessons distilled from episodic by the dream cycle. Canonical file: LESSONS.md.
-  personal/     # User preferences scoped to the human, not the project. Markdown. Implementations MUST NOT include `personal/` contents in any network call without explicit per-call user consent.
+  personal/     # User preferences scoped to the human, not the project. Markdown. Implementations MUST NOT include `personal/` contents in any LLM invocation (local or remote) without explicit per-call user consent. The dream cycle MUST NOT distill `personal/` into `semantic/`.
 ```
 
 All text files MUST be UTF-8. `.agent/` is checked into the project's repo. Implementations MAY keep derived state (indexes, snapshots, write-ahead logs) under a hidden subfolder such as `.<impl>/`; such state MUST be `.gitignore`d.
@@ -54,15 +54,15 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | Exactly `"1.0.0"` for this revision. |
-| `id` | string | Time-sortable identifier (ULID or UUIDv7). Assigned by the writer. |
-| `timestamp` | string | ISO 8601, UTC. |
-| `source_harness` | string | Lowercase ASCII identifier. Reference values: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. New values added by RFC. |
-| `skill_action` | string | Hierarchical clustering key; segments separated by `::`. Implementations SHOULD lowercase. The dream cycle clusters on exact match. |
-| `content` | string | Lesson body. Markdown allowed. |
-| `pain` | number | 0.0–10.0. Severity of the moment that produced this entry. |
-| `importance` | number | 0.0–10.0. Strategic weight. |
-| `pinned` | boolean | Default `false`. The dream cycle sets it to `true` when the event is cited by a promoted lesson; pinned events MUST be skipped by pruning. |
+| `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1-draft. |
+| `id` | string | MUST be lexically sortable by creation time. ULID and UUIDv7 are the recommended formats. Assigned by the writer. |
+| `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
+| `source_harness` | string | Lowercase ASCII identifier matching `[a-z0-9_-]+`. Implementations MAY use any value; the following are reserved and MUST resolve to their canonical owner: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. New reserved values are added via RFC. |
+| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The dream cycle clusters on exact match. |
+| `content` | string | Lesson body. Markdown allowed. Writers SHOULD keep `content` under 4 KiB; readers MUST accept up to 64 KiB. |
+| `pain` | number | 0.0–10.0. Severity of the moment that produced this entry. See rubric below. |
+| `importance` | number | 0.0–10.0. Strategic weight. See rubric below. |
+| `pinned` | boolean | Default `false`. MAY be set to `true` by any writer to indicate the event MUST NOT be pruned. The dream cycle MUST set `pinned: true` on events cited by a promoted lesson, and MUST NOT unset a `pinned` value set by another writer. |
 
 **Optional fields**
 
@@ -71,6 +71,21 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 | `client_dedup_key` | string | Idempotency key; implementations MAY use it to drop duplicate appends. |
 
 `recurrence` is **not** an event field. It is a per-cluster count (events sharing a `skill_action`) computed by the dream cycle and stored separately by the implementation.
+
+**Pain and importance rubric (informative).** The 0.0–10.0 ranges are intentionally open. A starting rubric:
+
+- Routine success: ≈ 2
+- Recoverable failure: ≈ 5
+- Hard failure: ≈ 7
+- Constraint violation, security-relevant: ≈ 8–10
+
+Implementations MAY adopt any rubric provided it is documented in the implementation's README.
+
+**Forward compatibility.** Writers MAY include additional fields beyond those specified above and SHOULD prefix experimental field names with `x_` (lowercase). Readers MUST ignore unknown fields and MUST NOT halt on their presence.
+
+**Corrupt input.** Readers MUST skip JSONL lines that fail schema validation and SHOULD log the line number and reason. Readers MUST NOT halt on the first invalid line.
+
+**Secret redaction.** Writers SHOULD redact obvious secrets (high-entropy strings matching common token patterns, such as API keys and access tokens) from `content` before append. The spec does not mandate a redaction algorithm.
 
 ## Salience formula
 
@@ -85,7 +100,36 @@ final_score = bm25 * salience
 
 ## Dream cycle
 
-The *dream cycle* is the consolidation pass that turns `episodic/` into `semantic/`. Inputs: the JSONL log plus per-cluster recurrence counts. A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window; the reference implementation uses ≥ 3 events in either a 7-day or 30-day window. Output: `semantic/LESSONS.md`, where every lesson MUST cite the source episodic `id`s it was distilled from. The cycle MUST be idempotent — running it twice on the same input produces the same output — and pinned events MUST NOT be pruned. An implementation MAY use an LLM for distillation but MUST also support a deterministic, network-free fallback.
+The *dream cycle* is the consolidation pass that turns `episodic/` into `semantic/`. Inputs: the JSONL log plus per-cluster recurrence counts.
+
+**Promotion.** A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
+
+**Output format.** The dream cycle writes to `semantic/LESSONS.md`. Each promoted cluster produces one lesson with the following shape:
+
+```
+## <skill_action>
+
+<lesson body>
+
+---
+*Sources:* `<id>`, `<id>`, `<id>`
+```
+
+The `## <skill_action>` header MUST be the cluster's full `skill_action` string. The trailing `*Sources:*` line MUST list every `id` cited by the lesson, comma-separated, each wrapped in backticks. Implementations MAY add additional formatting between the lesson body and the `*Sources:*` line provided the line itself appears verbatim and is the lesson's final line.
+
+**Distillation modes.** An implementation MAY use an LLM to author the lesson body. An implementation MUST also support a deterministic, network-free fallback. In deterministic mode, the lesson body is the `content` of the highest-`pain` event in the cluster (ties broken by highest `importance`, then by lowest `id`). Implementations MAY use richer deterministic strategies (extractive summarization, template merging) provided they remain pure functions of the input.
+
+**Idempotency.** Running the cycle twice on identical input — including `pinned` state set by previous runs — MUST produce byte-identical `LESSONS.md` output.
+
+**Pruning.** The dream cycle MAY prune unpinned episodic events whose salience falls below an implementation-defined threshold. Pruned events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted, retaining the ability to reverse a prune. Pinned events MUST NOT be pruned.
+
+## Concurrency and file operations
+
+Writers MUST use OS-atomic append when writing to `episodic/AGENT_LEARNINGS.jsonl` (`O_APPEND` on POSIX; equivalent atomic-append behavior on Windows). Each JSONL line MUST be written in a single append call and MUST end with a single `\n`.
+
+The spec does not require file locking. Implementations that need stronger guarantees MAY layer locking on top, but lock files MUST live under the implementation's hidden subfolder (`.<impl>/`) and MUST NOT block readers that ignore them.
+
+Implementations that maintain derived indexes MUST tolerate out-of-band edits to `episodic/AGENT_LEARNINGS.jsonl` (e.g., a `git pull` brings in new events). The recommended pattern is mtime-watching or content hashing; the spec does not mandate a mechanism.
 
 ## Scope
 
@@ -95,7 +139,11 @@ The *dream cycle* is the consolidation pass that turns `episodic/` into `semanti
 
 ## Versioning
 
-This is **v0.1-draft**. Breaking changes are possible before v1.0. Proposals: open a GitHub issue with the prefix `[RFC]` on the reference implementation. After v1.0, `schema_version` follows semver, and any breaking change requires a migration path.
+This SPEC is **v0.1-draft**; breaking changes are possible before v1.0. The `schema_version` field in episodic records evolves independently of the SPEC version. After SPEC v1.0, `schema_version` follows semver, and any breaking change requires a documented migration path.
+
+**Migration ownership.** Migrations are the writer's responsibility. A writer encountering a lower-versioned log MAY rewrite the file in place, but MUST preserve every original `id`, `timestamp`, and `pinned` value.
+
+**Proposing changes.** Open a GitHub issue with the prefix `[RFC]` on the reference implementation.
 
 ## Reference implementation
 

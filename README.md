@@ -1,46 +1,63 @@
 # dreamd
 
-> **Status: pre-release.** The reference implementation does not yet exist. The current `src/main.rs` is a stub. The spec ([`SPEC.md`](./SPEC.md)) is the contract; everything else is in flight. Track progress in [issues](https://github.com/botzrDev/dreamd/issues) and the [changelog](./CHANGELOG.md). Public APIs and on-disk formats may change before v0.1.
+**Same memory in every IDE.**
 
-A local-first memory layer for AI coding agents. Ships as an MCP server (`npx dreamd-mcp`) so any MCP-aware harness can read and write a shared `.agent/` folder. A standalone binary and persistent-daemon mode are also available.
+dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP (Model Context Protocol) -aware coding agent reads and writes to the same memory -- episodic events, lessons, your preferences -- checked into git alongside your code.
 
-`dreamd` is the reference implementation of [`.agent/`](./SPEC.md) — a directory convention any AI coding agent or harness can read and write to share runtime memory across tools. It sits beside [`AGENTS.md`](https://agents.md) and [`SKILL.md`](https://www.anthropic.com/news/skills) in a project root.
+Every coding agent ships its own memory format. dreamd is what they could share.
 
-> **AGENTS.md is what you wrote down. `.agent/` is what your agent learned.**
+`AGENTS.md` is what you wrote down. `.agent/` is what your agent learned. dreamd is how it learns it once and remembers it everywhere.
 
-## What it does
+## The moment it earns its name
 
-- Exposes a standardized `.agent/` folder as the source of truth — plain markdown and JSONL files you can read, edit, and check into git. v0.1 ships four directories (`episodic/`, `semantic/`, `personal/`, `working/`); `episodic/` and `semantic/` are the two active memory systems, `personal/` is user-authored static context, and `working/` is reserved for v0.2's session model.
-- Serves a small local API for `learn` (append an episodic event), `recall` (BM25 × salience search over episodic events), and `cycle` (run a deterministic dream cycle that promotes recurring events into `LESSONS.md`). LLM-assisted consolidation and blended episodic + semantic recall arrive in v0.1.1.
-- Ships an MCP server so Claude Code and any other MCP-aware harness can share memory across sessions and tools. Additional adapters (Cursor, OpenCode, Aider, Continue, Cline) land progressively after v0.1.
+```text
+~/project $ npx dreamd-mcp init
 
-> *AGENTS.md belongs to a project; PREFERENCES.md belongs to you. Same agent reads both; different ownership.*
+# In Claude Code, Tuesday afternoon:
+you   ▸ axum keeps blowing up when I unwrap in route handlers
+claude▸ filed under rust::error_handling::axum_rejection
 
-## Install (planned)
-
-The primary distribution surface is the MCP server:
-
-```bash
-npx dreamd-mcp
+# In Cursor, Friday morning, fresh session:
+you   ▸ why is this build failing?
+cursor▸ You're unwrapping in a route handler. dreamd has a
+        lesson from Tuesday -- axum needs IntoResponse on
+        custom Error types. Try `?` and a typed error.
 ```
 
-Standalone binary and Cargo install paths arrive with v0.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
+No re-explaining. No re-pasting. No "as I mentioned before."
 
-### Privacy
+## What dreamd is -- and isn't
 
-> When LLM mode is enabled, the content of `AGENT_LEARNINGS.jsonl` entries meeting the salience threshold is sent to the configured LLM provider. No data is sent in `--no-llm` mode. Users working with sensitive codebases should use `--no-llm` or a local model via Ollama. The `personal/` layer is excluded from LLM calls unless `--share-personal` is passed.
+| dreamd is | dreamd isn't |
+|---|---|
+| A portable memory format (`.agent/`) checked into your repo | A vector database |
+| A reference MCP server for reading and writing it | A knowledge graph engine |
+| Local-first by default -- zero network calls without `--llm` | A hosted SaaS |
+| One source of truth across every coding agent you use | A replacement for `AGENTS.md` or `SKILL.md` |
 
-LLM mode ships in v0.1.1; v0.1 makes no network calls. Full disclosure, redaction details, and the v0.1.1 contract: [`docs/security.md#privacy-disclosure`](./docs/security.md#privacy-disclosure).
+If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteretes/cognee). If you need a single-file portable memory capsule, use [Memvid](https://github.com/Olow304/memvid). dreamd does the one thing they don't: makes your memory follow you between coding agents.
 
-## Quickstart (planned)
+## Status
+
+**v0.1 (spec drafted, implementation starting).** Episodic memory + BM25-by-salience recall + deterministic dream cycle. Claude Code and Cursor adapters land in v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract, [`FUTURE.md`](./FUTURE.md) for where this is going, and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+
+## Getting started
+
+*v0.1 is being implemented. The commands below are the target surface.*
 
 ```bash
 # scaffold .agent/ into the current project
-dreamd init
+npx dreamd-mcp init
 
-# point any MCP-aware harness at dreamd-mcp; the writer process self-starts
+# point Claude Code, Cursor, or any MCP-aware harness at the server
 npx dreamd-mcp
 ```
+
+Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
+
+### Privacy
+
+When LLM mode is enabled in v0.1.1, episodic content meeting the salience threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. Full disclosure: [`docs/security.md`](./docs/security.md).
 
 ## Platforms
 
@@ -52,7 +69,7 @@ The on-disk layout, JSON schema, salience formula, and dream-cycle contract are 
 
 To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## Project status
+## v0.1 progress
 
 | Layer | Status |
 |---|---|
