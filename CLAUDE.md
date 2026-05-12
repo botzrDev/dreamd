@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Pre-release. Sprint 1 of 6, near-end. Seven of nine originally-queued Sprint-1 tickets shipped (WEG-5, 9, 10, 17, 26, 28, 18); two remain (WEG-20 snapshot tests, WEG-21 UDS writer-process lifecycle). Workspace version stays at `0.0.0` through v0.1 release-bump.
+Pre-release. Sprint 1 of 6, near-end. Eight of nine originally-queued Sprint-1 tickets shipped (WEG-5, 9, 10, 17, 26, 28, 18, 20 as of 2026-05-11); WEG-21 (UDS writer-process lifecycle) remains. Workspace version stays at `0.0.0` through v0.1 release-bump.
+
+**2026-05-12 strategic additions (founder override).** Competitor-research synthesis drove 23 new Linear tickets (WEG-174–WEG-196, ~97 pts) plus description updates to WEG-89 + WEG-107. Public v0.1 wedge becomes Framing A (cross-harness memory portability); post-Q6 engineering wedge stays internal only. New differentiator angles slotted across v0.1.1 (memory observability), v0.2 backlog (branchable memory, cryptographic forgetting), and research backlog (MCP-for-memory spec, CRDT, compression-unified, hyperagent meta-memory). See "## 2026-05-12 strategic additions" section below; full ticket batch in `context/linear-batch-2026-05-12.md`; wedge text in `context/framing-a-rewrite.md`; comparison FAQ in `context/competitor-comparison.md`. Founder explicitly overrode the Q6/Q7 1:1.5 scope-discipline rule for this batch.
 
 The intended end-state architecture (below) lives in `context/PRD.md` and `context/AGILE/plan1.md` — both gitignored and local-only. Treat those documents as the engineering ground truth; what's on disk is partial.
 
@@ -131,6 +133,33 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion ben
 **Launch target:** v0.1 ships **week 9** (was week 7; slipped two weeks after Q6). Pre-write the slip-announcement post in week 6.
 
 **v0.1 wedge sentence (sacred):** *"AGENTS.md is what you wrote down. dreamd is what your agent learned."* Recommendations that weaken this are higher-bar; recommendations that strengthen it can be made aggressively. The post-Q6 v0.1 wedge framing is *"salience-scored cross-harness episodic recall + on-demand deterministic consolidation"* — LLM-assisted lessons land at v0.1.1, do NOT lead the README or HN draft with them.
+
+**2026-05-12 Framing A adoption (founder override, WEG-183 / DR-925):** Public v0.1 lead becomes *"dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo. Every coding agent you use reads and writes to it."* Sacred sentence stays, with optional `, across every tool` tail. The post-Q6 engineering wedge stays in `context/PRD.md` Part IV §6 and `context/AGILE/plan1.md` round-7 revision section — **internal only, NOT in README / X bio / HN draft / spec / any public artifact**. Adoption cascade tracked by WEG-107 (DR-914 comms reset) which now also sweeps the new `docs/competitor-comparison.md` (WEG-174 / DR-926). Source of truth for new wedge text: `context/framing-a-rewrite.md`. The 1:1.5 scope-discipline rule was explicitly overridden by the founder for the 2026-05-12 batch; the rule remains in force for any future grilling-round additions.
+
+## 2026-05-12 strategic additions (founder override, competitor research synthesis)
+
+A 2026-05-12 competitor-research review (Cognee, Memvid, Mem0, Letta, Zep/Graphiti) identified 8 differentiator angles. Founder direction: **"only additions, no cuts"** — explicit override of the Q6/Q7 1:1.5 scope-discipline rule for this batch. The rule remains in force for any future grilling-round additions; this is a one-time override, not a precedent.
+
+**Batch:** 23 new Linear tickets (WEG-174 through WEG-196) + 2 description updates (WEG-89, WEG-107).
+
+| Bucket | Tickets | Points | Sprint | Status |
+|---|---|---|---|---|
+| Framing A wedge adoption | WEG-174, WEG-183 | 4 | sprint-3 (v0.1) | Doc/text only; existing WEG-89 + WEG-107 absorb the actual rewrite via description amendments. |
+| Memory observability (angle #3) | WEG-175, WEG-176, WEG-184, WEG-185, WEG-194 | 18 | sprint-6 (v0.1.1) | Citation graph + `dreamd blame` + counterfactual recall + salience drift dashboard + docs. |
+| Branchable memory (angle #1) | WEG-177, WEG-186, WEG-187, WEG-189, WEG-190, WEG-195 | 29 | v0.2 backlog (no sprint) | Snapshot model + `dreamd memory branch/checkout/diff/bisect` + spec + demo. Slot at week 9–10 v0.1.1 grill round. |
+| Cryptographic forgetting (angle #2) | WEG-178, WEG-188, WEG-191, WEG-192, WEG-193, WEG-196 | 32 | v0.2 backlog (no sprint) | Merkle-ledger schema + provenance recording + `dreamd forget --proof` + cascade + doctor verification + GDPR/CCPA/HIPAA docs. |
+| Research backlog (angles #4, #5, #6, #8) | WEG-179, WEG-180, WEG-181, WEG-182 | 14 (research) | (no sprint) | MCP-for-memory protocol formalization, CRDT multi-agent, compression-unified memory, hyperagent meta-memory. P2 priority, research-grade ACs only. |
+
+**Capacity overflow at v0.1.1 / Sprint 6 (explicit):** Sprint 6 now sits at ~68 pts (was ~50) against 18–22 pts velocity floor. The week 9–10 v0.1.1 grill round (already committed by Q7) is the recalibration point; founder owns the trade. Existing kill criterion stands — OpenCode adapter drops to v0.1.2 if Sprint 5 over capacity.
+
+**Sacred sentence stays.** Public wedge becomes Framing A. Engineering wedge stays in PRD + plan1.md (internal only).
+
+**Source-of-truth files** (gitignored, local-only):
+- `context/framing-a-rewrite.md` — wedge revision text + adoption checklist
+- `context/competitor-comparison.md` — Cognee/Memvid/Mem0/Letta/Zep FAQ (lifted into `docs/competitor-comparison.md` by WEG-174 / DR-926 at execution time)
+- `context/linear-batch-2026-05-12.md` — full ticket batch with ACs and dependency graph
+
+**Angle that did NOT make this batch:** L8 "agent self / continuity layer" reframe (memory module first). Held for v0.2/v0.3 grill rounds. v0.1 ships as memory layer with cross-harness portability; the broader continuity-layer story matures by accretion (formalize `.agent/manifest.json`, elevate `personal/` slot, etc.) once v0.1 has traction.
 
 ## Paired-dev-loop conventions
 
