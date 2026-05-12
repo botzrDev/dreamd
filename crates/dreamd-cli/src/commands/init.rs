@@ -69,40 +69,34 @@ pub fn run(
 
     let agent = AgentRoot::new(&project_root);
 
+    // Idempotency guard: only the committed path counts.
     if agent.agent_dir().exists() {
         writeln!(out, "{RERUN_MSG}")?;
         return Ok(());
     }
 
-    fs::create_dir_all(agent.working_dir())?;
-    writeln!(out, "created .agent/working/")?;
-    fs::create_dir_all(agent.episodic_dir())?;
-    writeln!(out, "created .agent/episodic/")?;
-    fs::create_dir_all(agent.semantic_dir())?;
-    writeln!(out, "created .agent/semantic/")?;
-    fs::create_dir_all(agent.personal_dir())?;
-    writeln!(out, "created .agent/personal/")?;
+    // Stage the entire scaffold inside a tmp directory so that any failure
+    // before the rename leaves .agent/ untouched.  Rename is atomic within a
+    // single filesystem, which is the only case we need to handle (project
+    // root and its parent share a mount in all realistic scenarios).
+    let tmp_dir = project_root.join(format!(".agent.tmp-{}", std::process::id()));
 
-    fs::create_dir_all(agent.skills_dir())?;
-    fs::create_dir_all(agent.protocols_dir())?;
+    // Clean up the tmp dir on any error so repeated failed runs don't
+    // accumulate stale staging dirs.
+    let result = scaffold_into(&tmp_dir, out);
 
-    fs::File::create(agent.episodic_jsonl())?;
-    fs::write(agent.working_dir().join("WORKSPACE.md"), WORKSPACE_MD)?;
+    if let Err(e) = result {
+        // Best-effort removal -- if this also fails, the caller still sees the
+        // original error.
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
 
-    fs::create_dir_all(agent.dreamd_dir())?;
-    let state = State {
-        schema_version: "1.0",
-        daemon_version: env!("CARGO_PKG_VERSION"),
-        last_dream_cycle_at: None,
-        last_dream_cycle_status: "idle",
-    };
-    let json = serde_json::to_string_pretty(&state).expect("state serializes");
-    let state_path = agent.state_json();
-    let tmp_path = state_path.with_extension("json.tmp");
-    fs::write(&tmp_path, json.as_bytes())?;
-    fs::rename(&tmp_path, &state_path)?;
-    writeln!(out, "initialized .agent/.dreamd/state.json")?;
+    // Atomic commit: move the staging tree into the final position.
+    fs::rename(&tmp_dir, agent.agent_dir())?;
 
+    // .gitignore and registry are append-style side-effects that live outside
+    // the rename window.  They are safe to retry on rerun.
     append_gitignore(&project_root.join(".gitignore"))?;
     writeln!(out, "appended .gitignore (1 entry: .agent/.dreamd/)")?;
 
@@ -112,6 +106,37 @@ pub fn run(
 
     writeln!(out)?;
     writeln!(out, "{DR413_DISCLOSURE}")?;
+
+    Ok(())
+}
+
+fn scaffold_into(tmp: &Path, out: &mut dyn Write) -> Result<(), InitError> {
+    fs::create_dir_all(tmp.join("working"))?;
+    writeln!(out, "created .agent/working/")?;
+    fs::create_dir_all(tmp.join("episodic"))?;
+    writeln!(out, "created .agent/episodic/")?;
+    fs::create_dir_all(tmp.join("semantic"))?;
+    writeln!(out, "created .agent/semantic/")?;
+    fs::create_dir_all(tmp.join("personal"))?;
+    writeln!(out, "created .agent/personal/")?;
+
+    fs::create_dir_all(tmp.join("skills"))?;
+    fs::create_dir_all(tmp.join("protocols"))?;
+
+    fs::File::create(tmp.join("episodic/AGENT_LEARNINGS.jsonl"))?;
+    fs::write(tmp.join("working/WORKSPACE.md"), WORKSPACE_MD)?;
+
+    let dreamd_dir = tmp.join(".dreamd");
+    fs::create_dir_all(&dreamd_dir)?;
+    let state = State {
+        schema_version: "1.0",
+        daemon_version: env!("CARGO_PKG_VERSION"),
+        last_dream_cycle_at: None,
+        last_dream_cycle_status: "idle",
+    };
+    let json = serde_json::to_string_pretty(&state).expect("state serializes");
+    fs::write(dreamd_dir.join("state.json"), json.as_bytes())?;
+    writeln!(out, "initialized .agent/.dreamd/state.json")?;
 
     Ok(())
 }
