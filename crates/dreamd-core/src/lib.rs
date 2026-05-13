@@ -6,6 +6,7 @@
 //! `.agent/` and `~/.agent/` paths via [`AgentRoot`] / [`DaemonHome`] rather
 //! than building strings.
 
+pub mod io;
 pub mod layout;
 pub mod privacy;
 

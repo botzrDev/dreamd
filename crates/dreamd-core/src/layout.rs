@@ -90,6 +90,26 @@ impl AgentRoot {
         self.semantic_dir().join("LESSONS.md")
     }
 
+    /// `<project>/.agent/working/WORKSPACE.md` — short-lived plan + in-flight
+    /// task context the agent edits during a session. Replaced atomically.
+    pub fn workspace_md(&self) -> PathBuf {
+        self.working_dir().join("WORKSPACE.md")
+    }
+
+    /// `<project>/.agent/personal/PREFERENCES.md` — user-private preferences.
+    /// Excluded from LLM dream-cycle calls unless `--share-personal` is set.
+    /// Replaced atomically (DR-104).
+    pub fn preferences_md(&self) -> PathBuf {
+        self.personal_dir().join("PREFERENCES.md")
+    }
+
+    /// `<project>/.agent/personal/DECISIONS.md` — user-private decision log.
+    /// Excluded from LLM dream-cycle calls unless `--share-personal` is set.
+    /// Replaced atomically (DR-104).
+    pub fn decisions_md(&self) -> PathBuf {
+        self.personal_dir().join("DECISIONS.md")
+    }
+
     /// `<project>/.agent/.dreamd/state.json` — per-project daemon state.
     ///
     /// Schema lives with DR-106 / WEG-10; the writer is `dreamd init`
@@ -211,6 +231,30 @@ mod tests {
         assert_eq!(
             r.state_json(),
             PathBuf::from("/tmp/proj/.agent/.dreamd/state.json"),
+        );
+    }
+
+    #[test]
+    fn workspace_md_is_under_working_dir() {
+        assert_eq!(
+            root().workspace_md(),
+            PathBuf::from("/tmp/proj/.agent/working/WORKSPACE.md"),
+        );
+    }
+
+    #[test]
+    fn preferences_md_is_under_personal_dir() {
+        assert_eq!(
+            root().preferences_md(),
+            PathBuf::from("/tmp/proj/.agent/personal/PREFERENCES.md"),
+        );
+    }
+
+    #[test]
+    fn decisions_md_is_under_personal_dir() {
+        assert_eq!(
+            root().decisions_md(),
+            PathBuf::from("/tmp/proj/.agent/personal/DECISIONS.md"),
         );
     }
 
