@@ -11,3 +11,4 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }

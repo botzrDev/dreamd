@@ -333,6 +333,9 @@ dependencies = [
 [[package]]
 name = "dreamd-core"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "dreamd-protocol"
