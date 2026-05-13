@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dreamd-core",
     "crates/dreamd-cli",
+    "crates/dreamd-protocol",
 ]
 
 [workspace.package]
