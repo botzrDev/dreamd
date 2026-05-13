@@ -1,0 +1,18 @@
+[package]
+name = "dreamd-protocol"
+description = "Shared serde types for the dreamd HTTP API and on-disk JSONL records."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+serde_json = "1"
