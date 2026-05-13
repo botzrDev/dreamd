@@ -120,10 +120,9 @@ mod tests {
         let target = dir.join("LESSONS.md");
         fs::write(&target, b"original\n").unwrap();
 
-        let err = write_atomic_with_hook(&target, b"unfinished\n", || {
-            Err(io::Error::other("boom"))
-        })
-        .expect_err("hook failure must surface");
+        let err =
+            write_atomic_with_hook(&target, b"unfinished\n", || Err(io::Error::other("boom")))
+                .expect_err("hook failure must surface");
         assert_eq!(err.kind(), io::ErrorKind::Other);
 
         // Destination is byte-identical to its pre-call state.

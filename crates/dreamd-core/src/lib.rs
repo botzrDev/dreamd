@@ -8,6 +8,7 @@
 
 pub mod io;
 pub mod layout;
+pub mod lessons;
 pub mod privacy;
 
 pub use layout::{AgentRoot, DaemonHome, GITIGNORE_SNIPPET};
