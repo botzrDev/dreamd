@@ -39,7 +39,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 ```json
 {
   "schema_version": "1.0.0",
-  "id": "01HZ8K2X9P3M7Q5R4S6T8V0W2Y",
+  "id": "evt_01hz8k2x",
   "timestamp": "2026-05-08T10:55:00Z",
   "source_harness": "claude-code",
   "skill_action": "rust::error_handling::axum_rejection",
