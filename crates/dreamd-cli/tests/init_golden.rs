@@ -74,6 +74,19 @@ fn first_run_matches_golden() {
 
     let workspace = tmp.path().join(".agent/working/WORKSPACE.md");
     assert!(workspace.exists());
+
+    let reg_path = tmp.path().join(".agent/registry.toml");
+    assert!(reg_path.exists(), "registry.toml must be created");
+    let reg: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
+    let projects = reg["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert!(
+        projects[0]["root"]
+            .as_str()
+            .unwrap()
+            .contains(tmp.path().to_str().unwrap())
+    );
 }
 
 #[test]
@@ -103,6 +116,16 @@ fn rerun_matches_golden() {
         "stdout does not match init.rerun.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(RERUN_FIXTURE)
+    );
+
+    let reg_path = tmp.path().join(".agent/registry.toml");
+    let reg: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
+    let projects = reg["projects"].as_array().unwrap();
+    assert_eq!(
+        projects.len(),
+        1,
+        "registry must remain idempotent across reruns"
     );
 }
 
