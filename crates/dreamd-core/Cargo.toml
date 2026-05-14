@@ -30,6 +30,11 @@ serde_json = "1"
 thiserror = "1"
 ulid = "1"
 lru = "0.12"
+# WEG-24 spike-only. Reached by `tests/bin/tantivy_spike.rs` (a `[[bin]]`
+# target with `test = false, bench = false, doc = false`). Library code does
+# NOT use tantivy yet — that's WEG-41. Living here is a cargo-mechanics
+# necessity: `[[bin]]` targets don't see `[dev-dependencies]`.
+tantivy = "0.26"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
@@ -41,6 +46,15 @@ nix = { version = "0.29", default-features = false, features = ["process", "fs",
 # that production code intentionally excludes.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 tempfile = "3"
+# WEG-24 measurement spike: tantivy IndexWriter open-cost / multi-process
+# reload / lock-cleanup-under-SIGKILL benchmark. Forced into the main
+# [dependencies] table below because `[[bin]]` targets in a library crate do
+# NOT inherit `[dev-dependencies]` (see drift catalog
+# `tokio-feature-split-bin-target-exception` and `test-helper-bin-pattern`).
+# This does NOT mean tantivy ships in the library — the `tantivy_spike`
+# binary is flagged `test = false, bench = false, doc = false` and never
+# linked into any release artifact. WEG-41 will properly integrate tantivy
+# (likely behind a feature) once the indexing module lands.
 
 # WEG-21 integration test spawns two helper processes and asserts the first
 # binds the socket as writer-process while the second connects as client. The
@@ -48,6 +62,15 @@ tempfile = "3"
 [[bin]]
 name = "weg21_uds_helper"
 path = "tests/bin/weg21_uds_helper.rs"
+test = false
+bench = false
+doc = false
+
+# WEG-24 measurement spike binary. Re-execs itself for cold-open and
+# multi-process reader / writer-stall measurements. Dev-only, never shipped.
+[[bin]]
+name = "tantivy_spike"
+path = "tests/bin/tantivy_spike.rs"
 test = false
 bench = false
 doc = false
