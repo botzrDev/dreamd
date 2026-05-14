@@ -11,6 +11,7 @@ pub mod io;
 pub mod layout;
 pub mod lessons;
 pub mod privacy;
+pub mod salience;
 
 // WEG-21 / DR-118: per-user UDS writer-process lifecycle. Unix-only; the
 // `server` submodules guard themselves with `#![cfg(unix)]` where they touch
