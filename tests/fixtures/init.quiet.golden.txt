@@ -1,0 +1,4 @@
+created .agent/working/
+created .agent/episodic/
+created .agent/semantic/
+created .agent/personal/

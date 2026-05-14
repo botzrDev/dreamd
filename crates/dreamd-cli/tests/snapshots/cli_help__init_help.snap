@@ -5,8 +5,11 @@ expression: "subcommand_help(\"init\")"
 ---
 Scaffold per-project .agent/ store and register it with the daemon
 
-Usage: init
+Usage: init [OPTIONS]
 
 Options:
+      --quiet
+          Suppress non-essential output (state.json, .gitignore, registry, disclosure)
+
   -h, --help
           Print help
