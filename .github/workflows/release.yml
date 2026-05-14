@@ -160,7 +160,11 @@ jobs:
             ```
             ${{ steps.checksums.outputs.content }}
             ```
+          # Draft ensures we can review release notes and binaries before
+          # making them public.
           draft: true
+          # Tags containing a hyphen (e.g. v0.1.0-rc1) are automatically
+          # marked as prereleases to avoid breaking stable downstreams.
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/**/*

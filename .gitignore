@@ -1,8 +1,13 @@
+# Local-only working notes and PM-side spec docs, not repo artifacts.
+# See CLAUDE.md "Repo conventions" for rationale.
 context/
 .claude/
+
+# Docs are deployed/tracked separately; canonical source lives in-crate
+# or as standalone markdown committed elsewhere. Gitignored to keep the
+# repo root focused on source and spec.
 docs/
 
 # Added by cargo
-
 /target
 /assignments

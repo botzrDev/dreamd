@@ -77,17 +77,41 @@ impl<'de> Deserialize<'de> for EventId {
     }
 }
 
+/// Central episodic event record written to `AGENT_LEARNINGS.jsonl`.
+///
+/// Serialized as one JSON line per entry. The coordinator mints the [`EventId`]
+/// at write time; any `id` on an inbound learning is overwritten (CLAUDE.md
+/// "Load-bearing engineering decisions" section 1).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentLearning {
+    /// Forward-compatible schema tag. Always `"1.0"` in v0.1; bump requires
+    /// a `dreamd migrate` path (DR-009).
     pub schema_version: String,
+    /// Daemon-assigned event identifier (`evt_` + 26-char ULID). Overwritten
+    /// by the coordinator on every append; callers may pass a placeholder.
     pub id: EventId,
+    /// ISO 8601 / RFC 3339 timestamp of when the learning was captured.
     pub timestamp: DateTime<Utc>,
+    /// 0.0..=10.0 subjective friction score from the agent's perspective.
+    /// Higher values surface the learning more aggressively in recall.
     pub pain: f32,
+    /// 0.0..=10.0 estimated long-term relevance. Feeds the salience formula
+    /// together with `pain` and age decay (SPEC.md section 4).
     pub importance: f32,
+    /// Sticky flag: pinned learnings survive dream-cycle pruning. Reserved;
+    /// always `false` in v0.1. Forward-compat slot for v0.2.
     #[serde(default)]
     pub pinned: bool,
+    /// Dotted skill path used as the clustering key (e.g., `"rust.cargo.test"`).
+    /// The dream cycle groups learnings by this prefix when consolidating into
+    /// `LESSONS.md`.
     pub skill_action: String,
+    /// Which AI harness produced this learning (e.g., `"claude-code"`,
+    /// `"cursor"`, `"opencode"`). Used for provenance tracking and
+    /// cross-harness dedup.
     pub source_harness: String,
+    /// Free-text body of the learning. Subject to the 4 KiB per-line hard cap
+    /// enforced by the coordinator (`MAX_LEARNING_LINE_BYTES`).
     pub content: String,
 }
 

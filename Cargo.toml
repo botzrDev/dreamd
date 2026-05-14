@@ -7,6 +7,7 @@ members = [
 ]
 
 [workspace.package]
+# Stays at 0.0.0 through development; bumped to 0.1.0 at release (DR-009).
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0"
@@ -15,7 +16,12 @@ authors = ["Austin Green <austin@botzr.com>"]
 readme = "README.md"
 
 [workspace.lints.rust]
+# dreamd handles user data and secrets (auth.json, AGENT_LEARNINGS.jsonl);
+# unsafe code is forbidden project-wide to eliminate an entire class of
+# memory-safety bugs from the codebase.
 unsafe_code = "forbid"
 
 [workspace.dependencies]
+# Shared across crates for snapshot testing (WEG-20). The "filters" feature
+# enables redaction of build-specific values (SHA, date, target triple).
 insta = { version = "1", features = ["filters"] }
