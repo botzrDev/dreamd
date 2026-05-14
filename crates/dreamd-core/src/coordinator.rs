@@ -5,19 +5,37 @@
 //! [`MemoryCoordinator::run`] is the exclusivity guarantee — we do NOT wrap
 //! the file in a `Mutex`, because there is no other handle to it.
 //!
-//! WEG-16 lands the skeleton (channel topology + `AppendLearning` durability
-//! path). WEG-7 will add the sidecar idempotency cache, ULID generation, and
-//! the 4 KiB envelope cap on top of this actor.
+//! WEG-7 layers the durability protocol on the WEG-16 skeleton:
+//!   - daemon-minted `EventId` (ULID, `evt_` + 26 Crockford chars),
+//!   - 4 KiB hard reject for serialized lines (no sidecar in v0.1),
+//!   - idempotency LRU keyed by (canonical AgentRoot path, client_dedup_key),
+//!   - malformed-tail-skip startup recovery so a torn final line does not
+//!     poison subsequent appends.
 //!
 //! The file writes are blocking `std::io` calls; that's intentional for v0.1.
 //! The actor model already serializes mutations, so blocking the runtime task
 //! is acceptable until benchmarks demand otherwise. Do NOT swap in `tokio::fs`
-//! or `spawn_blocking` without re-reading the durability ADR.
+//! or `spawn_blocking` without re-reading `docs/architecture/durability.md`.
 
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, EventId};
+use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
+use ulid::Ulid;
+
+use crate::layout::AgentRoot;
+
+/// Hard cap on a single serialized JSONL line (including the trailing `\n`).
+/// Anything larger is rejected at the coordinator boundary; the HTTP handler
+/// maps the error to 413 Payload Too Large. Sidecar storage is deferred to
+/// v0.1.1.
+pub const MAX_LEARNING_LINE_BYTES: usize = 4096;
+
+const IDEMPOTENCY_CAPACITY: usize = 1024;
 
 /// Errors surfaced by the coordinator back to API handlers.
 #[derive(Debug, thiserror::Error)]
@@ -26,21 +44,32 @@ pub enum CoordinatorError {
     Io(#[from] std::io::Error),
     #[error("Serialize error: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// Serialized line exceeds [`MAX_LEARNING_LINE_BYTES`] — caller should
+    /// map to HTTP 413.
+    #[error("payload too large: {size} bytes exceeds {max} byte limit")]
+    PayloadTooLarge { size: usize, max: usize },
 }
 
 /// Messages accepted by the coordinator actor.
 ///
-/// `#[non_exhaustive]` keeps the enum forward-compatible: WEG-7 / WEG-50 /
-/// later tickets will add `Query`, `RunDreamCycle`, etc. without breaking
+/// `#[non_exhaustive]` keeps the enum forward-compatible: WEG-50 / later
+/// tickets will add `Query`, `RunDreamCycle`, etc. without breaking
 /// downstream `match` arms.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum MemoryCoordinatorMsg {
-    /// Append a learning to the JSONL. The response fires after `sync_data`
-    /// returns — i.e., the bytes are durable on disk.
+    /// Append a learning to the JSONL. The coordinator mints the `EventId`
+    /// (any `id` on the inbound `learning` is overwritten) and the response
+    /// fires after `sync_data` returns — i.e., the bytes are durable on
+    /// disk. The returned `EventId` is the daemon-assigned id.
+    ///
+    /// `client_dedup_key` enables idempotent retries: if a previous request
+    /// with the same key (under the same AgentRoot) succeeded, the cached
+    /// `EventId` is returned without performing a second write.
     AppendLearning {
         learning: AgentLearning,
-        response_tx: oneshot::Sender<Result<(), CoordinatorError>>,
+        client_dedup_key: Option<String>,
+        response_tx: oneshot::Sender<Result<EventId, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
     Shutdown { response_tx: oneshot::Sender<()> },
@@ -48,37 +77,79 @@ pub enum MemoryCoordinatorMsg {
 
 /// Single mutable owner of `AGENT_LEARNINGS.jsonl`.
 pub struct MemoryCoordinator {
-    file: std::fs::File,
+    file: File,
     rx: mpsc::Receiver<MemoryCoordinatorMsg>,
+    /// Canonicalized AgentRoot path — half of the idempotency LRU key.
+    /// Falls back to the un-canonicalized path if canonicalization fails
+    /// (e.g., in tests against not-yet-created scratch dirs).
+    agent_root_key: PathBuf,
+    idempotency: LruCache<(PathBuf, String), EventId>,
 }
 
 impl MemoryCoordinator {
-    /// Construct a coordinator. The caller is responsible for opening `file`
-    /// in append mode against the right path (see `dreamd-core::layout`).
-    pub fn new(file: std::fs::File, rx: mpsc::Receiver<MemoryCoordinatorMsg>) -> Self {
-        Self { file, rx }
+    /// Open the JSONL at the given path, run malformed-tail-skip recovery,
+    /// and return a coordinator ready to receive on `rx`.
+    ///
+    /// Recovery: any trailing bytes that do not deserialize as a complete
+    /// `AgentLearning` are truncated. The last fully parseable line is the
+    /// recovery point. Subsequent appends start from there.
+    pub fn open(
+        agent_root: &AgentRoot,
+        rx: mpsc::Receiver<MemoryCoordinatorMsg>,
+    ) -> std::io::Result<Self> {
+        let path = agent_root.episodic_jsonl();
+        Self::open_at(&path, agent_root.project_root(), rx)
     }
 
-    /// Run the coordinator loop until `Shutdown` is received (or the channel
-    /// closes). `&mut self` is the exclusivity guarantee — there is no other
-    /// handle to the file, so no `Mutex` is required.
+    /// Lower-level constructor used by tests that need to point at a
+    /// scratch path independent of the layout module.
+    pub fn open_at(
+        jsonl_path: &Path,
+        agent_root: &Path,
+        rx: mpsc::Receiver<MemoryCoordinatorMsg>,
+    ) -> std::io::Result<Self> {
+        if let Some(parent) = jsonl_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(jsonl_path)?;
+
+        truncate_malformed_tail(&mut file)?;
+        // Seek to end for subsequent appends. We deliberately do NOT open
+        // with `.append(true)` because the recovery path needs `set_len`
+        // and explicit positioning.
+        file.seek(SeekFrom::End(0))?;
+
+        let agent_root_key =
+            std::fs::canonicalize(agent_root).unwrap_or_else(|_| agent_root.to_path_buf());
+        let cap = NonZeroUsize::new(IDEMPOTENCY_CAPACITY).expect("non-zero capacity");
+
+        Ok(Self {
+            file,
+            rx,
+            agent_root_key,
+            idempotency: LruCache::new(cap),
+        })
+    }
+
+    /// Run the coordinator loop until `Shutdown` is received (or the
+    /// channel closes).
     pub async fn run(mut self) {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 MemoryCoordinatorMsg::AppendLearning {
                     learning,
+                    client_dedup_key,
                     response_tx,
                 } => {
-                    let result = self.append_learning(&learning);
-                    // Receiver may have been dropped; that's fine, we still
-                    // performed the durable write.
+                    let result = self.handle_append(learning, client_dedup_key);
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
-                    // Drain any remaining messages without acting on them.
-                    // The channel close ensures no new senders can enqueue
-                    // after this point only if all senders are dropped, but
-                    // the explicit drain matches the spec.
                     self.rx.close();
                     while self.rx.recv().await.is_some() {}
                     let _ = response_tx.send(());
@@ -88,25 +159,112 @@ impl MemoryCoordinator {
         }
     }
 
-    fn append_learning(&mut self, learning: &AgentLearning) -> Result<(), CoordinatorError> {
-        let mut line = serde_json::to_string(learning)?;
+    fn handle_append(
+        &mut self,
+        mut learning: AgentLearning,
+        client_dedup_key: Option<String>,
+    ) -> Result<EventId, CoordinatorError> {
+        // Idempotency lookup BEFORE any write. A hit short-circuits to the
+        // cached EventId — no second line on disk.
+        if let Some(key) = client_dedup_key.as_deref() {
+            let full_key = (self.agent_root_key.clone(), key.to_owned());
+            if let Some(cached) = self.idempotency.get(&full_key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Daemon-mint the EventId. The `ulid` crate emits canonical 26-char
+        // uppercase Crockford base32, so `EventId::parse` always succeeds.
+        let minted_raw = format!("evt_{}", Ulid::new());
+        let event_id =
+            EventId::parse(&minted_raw).expect("freshly minted ULID always parses as EventId");
+        learning.id = event_id.clone();
+
+        // Write protocol (WEG-7 AC): serialize → ensure trailing \n →
+        // 4 KiB check → write_all → sync_data → LRU insert.
+        let mut line = serde_json::to_string(&learning)?;
         if !line.ends_with('\n') {
             line.push('\n');
         }
+        let size = line.len();
+        if size > MAX_LEARNING_LINE_BYTES {
+            return Err(CoordinatorError::PayloadTooLarge {
+                size,
+                max: MAX_LEARNING_LINE_BYTES,
+            });
+        }
         self.file.write_all(line.as_bytes())?;
         self.file.sync_data()?;
-        Ok(())
+
+        // Cache insert ONLY after durable write succeeds. Insert-before
+        // would poison the cache on write failure.
+        if let Some(key) = client_dedup_key {
+            let full_key = (self.agent_root_key.clone(), key);
+            self.idempotency.put(full_key, event_id.clone());
+        }
+
+        Ok(event_id)
     }
+}
+
+/// Walk the JSONL file from the end, find the last byte offset such that
+/// every preceding line deserializes cleanly to `AgentLearning`, and
+/// truncate any malformed-tail bytes past that point.
+///
+/// Strategy: read the whole file (JSONL files in v0.1 stay small; a
+/// streaming reverse-scan can come later), iterate line-by-line forward,
+/// and keep the byte offset just after the last complete-and-parseable
+/// line. Truncate to that offset.
+///
+/// "Complete" means terminated by `\n`. A final partial line without a
+/// trailing newline is automatically dropped because the iterator below
+/// only yields complete `\n`-terminated segments.
+fn truncate_malformed_tail(file: &mut File) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+
+    let mut last_good_offset: u64 = 0;
+    let mut cursor: usize = 0;
+    while cursor < buf.len() {
+        // Find next newline.
+        let Some(rel_nl) = buf[cursor..].iter().position(|b| *b == b'\n') else {
+            // Trailing bytes without a newline — torn write. Drop them.
+            break;
+        };
+        let line_end_exclusive = cursor + rel_nl; // position of '\n'
+        let line_slice = &buf[cursor..line_end_exclusive];
+        // An empty line (two consecutive newlines) is treated as malformed
+        // and stops the scan — torn writes can leave such a gap.
+        if line_slice.is_empty() {
+            break;
+        }
+        match serde_json::from_slice::<AgentLearning>(line_slice) {
+            Ok(_) => {
+                last_good_offset = (line_end_exclusive + 1) as u64; // include \n
+                cursor = line_end_exclusive + 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    if (last_good_offset as usize) < buf.len() {
+        file.set_len(last_good_offset)?;
+        file.sync_data()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use std::fs::OpenOptions;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+    const SAMPLE_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -116,10 +274,14 @@ mod tests {
         dir
     }
 
+    fn placeholder_id() -> EventId {
+        EventId::parse(&format!("evt_{SAMPLE_ULID}")).unwrap()
+    }
+
     fn sample_learning() -> AgentLearning {
         AgentLearning {
             schema_version: "1.0.0".to_string(),
-            id: "evt_test_0001".to_string(),
+            id: placeholder_id(),
             timestamp: DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -132,47 +294,189 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn append_learning_round_trip_then_shutdown() {
-        let dir = unique_tmp_dir("append");
-        let path = dir.join("AGENT_LEARNINGS.jsonl");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .expect("open jsonl");
-
+    async fn spawn_coordinator(
+        root: &Path,
+        jsonl: &Path,
+    ) -> (
+        mpsc::Sender<MemoryCoordinatorMsg>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let coordinator = MemoryCoordinator::new(file, rx);
+        let coordinator = MemoryCoordinator::open_at(jsonl, root, rx).expect("open coord");
         let handle = tokio::spawn(coordinator.run());
+        (tx, handle)
+    }
 
-        let learning = sample_learning();
-        let (resp_tx, resp_rx) = oneshot::channel();
-        tx.send(MemoryCoordinatorMsg::AppendLearning {
-            learning: learning.clone(),
-            response_tx: resp_tx,
-        })
-        .await
-        .expect("send append");
-
-        let append_result = resp_rx.await.expect("oneshot recv");
-        assert!(append_result.is_ok(), "append failed: {append_result:?}");
-
-        // Read the JSONL and assert the round-trip.
-        let raw = std::fs::read_to_string(&path).expect("read jsonl");
-        let line = raw.lines().next().expect("at least one line");
-        let decoded: AgentLearning = serde_json::from_str(line).expect("deserialize");
-        assert_eq!(decoded, learning);
-
-        // Shutdown
+    async fn shutdown(tx: mpsc::Sender<MemoryCoordinatorMsg>, h: tokio::task::JoinHandle<()>) {
         let (sh_tx, sh_rx) = oneshot::channel();
         tx.send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
             .await
             .expect("send shutdown");
         sh_rx.await.expect("shutdown ack");
-        handle.await.expect("coordinator joined");
+        h.await.expect("coordinator joined");
+    }
 
-        // Cleanup
+    #[tokio::test]
+    async fn append_learning_mints_id_and_persists_durably() {
+        let dir = unique_tmp_dir("append");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let learning = sample_learning();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: learning.clone(),
+            client_dedup_key: None,
+            response_tx: resp_tx,
+        })
+        .await
+        .expect("send append");
+
+        let minted = resp_rx.await.expect("oneshot recv").expect("append ok");
+        // Coordinator overwrote the placeholder id with a freshly minted one.
+        assert_ne!(minted, learning.id);
+        assert!(minted.as_str().starts_with("evt_"));
+        assert_eq!(minted.as_str().len(), "evt_".len() + 26);
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let line = raw.lines().next().expect("at least one line");
+        let decoded: AgentLearning = serde_json::from_str(line).expect("deserialize");
+        assert_eq!(decoded.id, minted);
+        assert_eq!(decoded.content, learning.content);
+
+        shutdown(tx, handle).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn idempotency_lru_short_circuits_on_dedup_key_hit() {
+        let dir = unique_tmp_dir("lru");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let dedup = Some("client-req-42".to_string());
+
+        // First call: writes one line.
+        let (r1_tx, r1_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: sample_learning(),
+            client_dedup_key: dedup.clone(),
+            response_tx: r1_tx,
+        })
+        .await
+        .unwrap();
+        let id1 = r1_rx.await.unwrap().unwrap();
+
+        // Second call with same dedup key: must return same id, no new line.
+        let (r2_tx, r2_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: sample_learning(),
+            client_dedup_key: dedup,
+            response_tx: r2_tx,
+        })
+        .await
+        .unwrap();
+        let id2 = r2_rx.await.unwrap().unwrap();
+        assert_eq!(id1, id2, "dedup hit must return cached EventId");
+
+        shutdown(tx, handle).await;
+
+        // Exactly one line on disk.
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "second call must not produce a second line");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn payload_over_4kib_rejected_with_payload_too_large() {
+        let dir = unique_tmp_dir("toobig");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let mut huge = sample_learning();
+        // 5 KiB of content guarantees > 4096 byte serialized line.
+        huge.content = "x".repeat(5 * 1024);
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: huge,
+            client_dedup_key: None,
+            response_tx: resp_tx,
+        })
+        .await
+        .unwrap();
+        let err = resp_rx
+            .await
+            .unwrap()
+            .expect_err("oversized payload must be rejected");
+        match err {
+            CoordinatorError::PayloadTooLarge { size, max } => {
+                assert!(size > max);
+                assert_eq!(max, MAX_LEARNING_LINE_BYTES);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+
+        shutdown(tx, handle).await;
+
+        // Nothing was written to disk.
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        assert!(raw.is_empty(), "rejected payload must leave file untouched");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn malformed_tail_skipped_on_startup() {
+        let dir = unique_tmp_dir("recover");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        // Prime the file with one good line plus a torn partial line.
+        let good = sample_learning();
+        let mut good_line = serde_json::to_string(&good).unwrap();
+        good_line.push('\n');
+        let partial = "{\"schema_version\":\"1.0.0\",\"id\":\"evt_TRUNCAT"; // no \n
+        let mut primed = good_line.as_bytes().to_vec();
+        primed.extend_from_slice(partial.as_bytes());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, &primed).unwrap();
+
+        // Construct the coordinator — recovery should truncate the torn tail.
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        // File on disk now contains only the one good line.
+        let after = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = after.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "torn tail must be truncated");
+        let decoded: AgentLearning = serde_json::from_str(lines[0]).expect("recovered line parses");
+        assert_eq!(decoded.content, good.content);
+
+        // Subsequent append lands on a clean boundary.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: sample_learning(),
+            client_dedup_key: None,
+            response_tx: resp_tx,
+        })
+        .await
+        .unwrap();
+        let _new_id = resp_rx.await.unwrap().expect("append after recovery");
+
+        shutdown(tx, handle).await;
+
+        let after2 = std::fs::read_to_string(&path).expect("re-read jsonl");
+        let lines2: Vec<&str> = after2.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines2.len(),
+            2,
+            "one recovered + one new = two complete lines"
+        );
+        for line in &lines2 {
+            let _: AgentLearning = serde_json::from_str(line).expect("each line parses cleanly");
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
