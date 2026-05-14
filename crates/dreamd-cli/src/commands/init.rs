@@ -9,9 +9,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use dreamd_core::io::write_atomic;
 use dreamd_core::privacy::DR413_DISCLOSURE;
-use dreamd_core::{AgentRoot, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
-use serde::Serialize;
+use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
+use serde::{Deserialize, Serialize};
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
 const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
@@ -49,9 +50,20 @@ struct State {
     last_dream_cycle_status: &'static str,
 }
 
+#[derive(Serialize, Deserialize, Default)]
+struct Registry {
+    #[serde(default)]
+    projects: Vec<ProjectEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectEntry {
+    root: String,
+}
+
 pub fn run(
     cwd: &Path,
-    _daemon_home: &Path,
+    daemon_home: &Path,
     quiet: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -95,18 +107,49 @@ pub fn run(
     // Atomic commit: move the staging tree into the final position.
     fs::rename(&tmp_dir, agent.agent_dir())?;
 
-    // .gitignore and registry are append-style side-effects that live outside
-    // the rename window.  They are safe to retry on rerun.
+    // Register this project's `.agent/` root with the daemon home (DR-412).
+    // Side-effect runs regardless of --quiet; only the stdout line is gated.
+    register_project(daemon_home, &project_root)?;
+
+    // .gitignore is an append-style side-effect that lives outside the rename
+    // window.  Safe to retry on rerun.
     append_gitignore(&project_root.join(".gitignore"))?;
     if !quiet {
         writeln!(out, "appended .gitignore (1 entry: .agent/.dreamd/)")?;
-        // Sprint 1: emit the line; real registry write lands with DR-412.
-        // Stdout always shows tilde-form regardless of the resolved daemon home.
+        // Tilde form is intentional (human-readable; resolved path may differ).
         writeln!(out, "registered .agent/ in ~/.agent/registry.toml")?;
         writeln!(out)?;
         writeln!(out, "{DR413_DISCLOSURE}")?;
     }
 
+    Ok(())
+}
+
+fn register_project(daemon_home: &Path, project_root: &Path) -> Result<(), InitError> {
+    fs::create_dir_all(daemon_home)?;
+    let registry_path = DaemonHome::new(daemon_home).registry_toml();
+
+    let mut registry: Registry = if registry_path.exists() {
+        let raw = fs::read_to_string(&registry_path)?;
+        toml::from_str(&raw).map_err(|e| InitError::Io(std::io::Error::other(e)))?
+    } else {
+        Registry::default()
+    };
+
+    let canonical =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_str = canonical.to_string_lossy().into_owned();
+
+    if registry.projects.iter().any(|p| p.root == canonical_str) {
+        return Ok(());
+    }
+
+    registry.projects.push(ProjectEntry {
+        root: canonical_str,
+    });
+    let serialized =
+        toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
+    write_atomic(&registry_path, serialized.as_bytes())?;
     Ok(())
 }
 

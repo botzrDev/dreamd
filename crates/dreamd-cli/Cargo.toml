@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 # The CLI crate provides the binary entry point and needs the full multi-threaded
 # runtime to power the axum server and concurrent memory coordinator tasks.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
