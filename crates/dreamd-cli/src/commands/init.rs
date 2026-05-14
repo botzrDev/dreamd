@@ -14,6 +14,7 @@ use dreamd_core::{AgentRoot, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
 use serde::Serialize;
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
+const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
 
 const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
 
@@ -51,6 +52,7 @@ struct State {
 pub fn run(
     cwd: &Path,
     _daemon_home: &Path,
+    quiet: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), InitError> {
@@ -69,7 +71,7 @@ pub fn run(
 
     // Idempotency guard: only the committed path counts.
     if agent.agent_dir().exists() {
-        writeln!(out, "{RERUN_MSG}")?;
+        writeln!(out, "{}", if quiet { RERUN_MSG_QUIET } else { RERUN_MSG })?;
         return Ok(());
     }
 
@@ -81,7 +83,7 @@ pub fn run(
 
     // Clean up the tmp dir on any error so repeated failed runs don't
     // accumulate stale staging dirs.
-    let result = scaffold_into(&tmp_dir, out);
+    let result = scaffold_into(&tmp_dir, quiet, out);
 
     if let Err(e) = result {
         // Best-effort removal -- if this also fails, the caller still sees the
@@ -96,19 +98,19 @@ pub fn run(
     // .gitignore and registry are append-style side-effects that live outside
     // the rename window.  They are safe to retry on rerun.
     append_gitignore(&project_root.join(".gitignore"))?;
-    writeln!(out, "appended .gitignore (1 entry: .agent/.dreamd/)")?;
-
-    // Sprint 1: emit the line; real registry write lands with DR-412.
-    // Stdout always shows tilde-form regardless of the resolved daemon home.
-    writeln!(out, "registered .agent/ in ~/.agent/registry.toml")?;
-
-    writeln!(out)?;
-    writeln!(out, "{DR413_DISCLOSURE}")?;
+    if !quiet {
+        writeln!(out, "appended .gitignore (1 entry: .agent/.dreamd/)")?;
+        // Sprint 1: emit the line; real registry write lands with DR-412.
+        // Stdout always shows tilde-form regardless of the resolved daemon home.
+        writeln!(out, "registered .agent/ in ~/.agent/registry.toml")?;
+        writeln!(out)?;
+        writeln!(out, "{DR413_DISCLOSURE}")?;
+    }
 
     Ok(())
 }
 
-fn scaffold_into(tmp: &Path, out: &mut dyn Write) -> Result<(), InitError> {
+fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), InitError> {
     fs::create_dir_all(tmp.join("working"))?;
     writeln!(out, "created .agent/working/")?;
     fs::create_dir_all(tmp.join("episodic"))?;
@@ -131,7 +133,9 @@ fn scaffold_into(tmp: &Path, out: &mut dyn Write) -> Result<(), InitError> {
     };
     let json = serde_json::to_string_pretty(&state).expect("state serializes");
     fs::write(dreamd_dir.join("state.json"), json.as_bytes())?;
-    writeln!(out, "initialized .agent/.dreamd/state.json")?;
+    if !quiet {
+        writeln!(out, "initialized .agent/.dreamd/state.json")?;
+    }
 
     Ok(())
 }

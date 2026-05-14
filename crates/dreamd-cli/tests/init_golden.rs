@@ -17,6 +17,10 @@ use std::process::Command;
 
 const FIRST_RUN_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/init.golden.txt");
 const RERUN_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/init.rerun.golden.txt");
+const QUIET_FIRST_RUN_FIXTURE: &[u8] =
+    include_bytes!("../../../tests/fixtures/init.quiet.golden.txt");
+const QUIET_RERUN_FIXTURE: &[u8] =
+    include_bytes!("../../../tests/fixtures/init.quiet.rerun.golden.txt");
 
 fn dreamd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_dreamd")
@@ -99,6 +103,71 @@ fn rerun_matches_golden() {
         "stdout does not match init.rerun.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(RERUN_FIXTURE)
+    );
+}
+
+#[test]
+fn quiet_first_run_matches_golden() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+    let out = Command::new(dreamd_bin())
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("run dreamd init --quiet");
+
+    assert!(
+        out.status.success(),
+        "exit={:?}\nstderr={}\nstdout={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        out.stdout.as_slice(),
+        QUIET_FIRST_RUN_FIXTURE,
+        "stdout does not match init.quiet.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(QUIET_FIRST_RUN_FIXTURE)
+    );
+
+    // Side effects must still occur even when output is suppressed.
+    assert!(tmp.path().join(".agent/.dreamd/state.json").exists());
+    let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("/.agent/.dreamd/"));
+}
+
+#[test]
+fn quiet_rerun_matches_golden() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+    let first = Command::new(dreamd_bin())
+        .arg("init")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("first init");
+    assert!(first.status.success());
+
+    let out = Command::new(dreamd_bin())
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("rerun init --quiet");
+
+    assert!(out.status.success(), "rerun must exit 0");
+    assert_eq!(
+        out.stdout.as_slice(),
+        QUIET_RERUN_FIXTURE,
+        "stdout does not match init.quiet.rerun.golden.txt\n--- actual ---\n{}\n--- expected ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(QUIET_RERUN_FIXTURE)
     );
 }
 

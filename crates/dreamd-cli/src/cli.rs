@@ -32,11 +32,18 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Scaffold per-project .agent/ store and register it with the daemon.
-    Init,
+    Init(InitArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
     Version,
+}
+
+#[derive(Args)]
+pub struct InitArgs {
+    /// Suppress non-essential output (state.json, .gitignore, registry, disclosure).
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -76,7 +83,7 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Init => {
+        Command::Init(args) => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
                 Err(e) => {
@@ -95,7 +102,7 @@ pub fn run() -> ExitCode {
             let stderr = std::io::stderr();
             let mut out = stdout.lock();
             let mut err = stderr.lock();
-            match commands::init::run(&cwd, &daemon_home, &mut out, &mut err) {
+            match commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
                 Err(commands::init::InitError::Io(e)) => {
