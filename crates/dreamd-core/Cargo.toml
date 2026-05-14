@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+# Minimal tokio surface: only sync primitives (mpsc, oneshot) needed for the
+# coordinator actor channel. Full runtime features live in [dev-dependencies].
 tokio = { version = "1", default-features = false, features = ["sync"] }
 dreamd-protocol = { path = "../dreamd-protocol" }
 serde_json = "1"
@@ -20,4 +22,6 @@ ulid = "1"
 lru = "0.12"
 
 [dev-dependencies]
+# Tests need the async runtime (rt), test macro, and time facilities
+# that production code intentionally excludes.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }

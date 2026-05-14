@@ -1,3 +1,18 @@
+//! Byte-exact golden-file tests for `dreamd init` (DR-105 / WEG-9).
+//!
+//! Three scenarios via subprocess:
+//!   1. **First run** -- stdout must match `tests/fixtures/init.golden.txt`
+//!      verbatim (16 lines / 651 bytes). Validates directory scaffold, state.json
+//!      schema, gitignore append, WORKSPACE.md, and privacy disclosure.
+//!   2. **Re-run** -- stdout must match `tests/fixtures/init.rerun.golden.txt`
+//!      (1 line / 63 bytes). Validates the idempotency guard.
+//!   3. **No project root** -- exit non-zero, empty stdout, stderr explains
+//!      the failure. Validates that `.agent/` is never partially created.
+//!
+//! Any change to `init.rs` stdout text, ordering, or whitespace must update the
+//! golden fixtures AND coordinate with the Clip A beat-sheet
+//! (`context/video-scripts/clip-a/`).
+
 use std::process::Command;
 
 const FIRST_RUN_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/init.golden.txt");

@@ -1,3 +1,11 @@
+//! Top-level CLI dispatch for the `dreamd` binary.
+//!
+//! Parses args via clap, routes to subcommand handlers, and maps errors to
+//! exit codes. Exit code contract:
+//!   - `0` -- success
+//!   - `1` -- runtime / I/O error
+//!   - `2` -- usage error (missing subcommand, no project root)
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,6 +37,10 @@ pub enum Command {
     Version,
 }
 
+/// Parse CLI args and dispatch to the matching subcommand handler.
+///
+/// Returns [`ExitCode`] directly so `main` stays a one-liner.
+/// Exit `2` for usage errors; exit `1` for I/O / runtime errors.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
 
@@ -51,6 +63,9 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            // Resolve daemon home to ~/.agent/. Falls back to a relative
+            // ".agent" if $HOME is unset (e.g., containerized CI); real
+            // registry writes are deferred to DR-412.
             let daemon_home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|h| h.join(".agent"))

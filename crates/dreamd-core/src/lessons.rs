@@ -39,6 +39,12 @@ const OPEN_MIDDLE: &str = "\" cluster=\"";
 const OPEN_SUFFIX: &str = "\" -->";
 const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 
+/// Serialize `file` to the structured `LESSONS.md` format and write it
+/// atomically to `path` (via [`crate::io::write_atomic`]).
+///
+/// Output: YAML-style frontmatter (`last_updated`, `prompt_version`,
+/// `cluster_key`) followed by HTML-comment-delimited lesson blocks.
+/// Round-trips cleanly through [`read_lessons_file`].
 pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     let mut s = String::new();
     s.push_str("---\n");
@@ -65,6 +71,11 @@ pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     write_atomic(path, s.as_bytes())
 }
 
+/// Parse a `LESSONS.md` file written by [`write_lessons_file`].
+///
+/// Returns [`io::ErrorKind::InvalidData`] if the frontmatter is missing or
+/// malformed, a lesson's `cluster` attribute does not match the file-level
+/// `cluster_key`, or a close marker is absent.
 pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
     let raw = fs::read_to_string(path)?;
     // `split('\n')` over a trailing-newline file yields a final empty element;
