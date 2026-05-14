@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Pre-release. Sprint 1 of 6, near-end. Eight of nine originally-queued Sprint-1 tickets shipped (WEG-5, 9, 10, 17, 26, 28, 18, 20 as of 2026-05-11); WEG-21 (UDS writer-process lifecycle) remains. Workspace version stays at `0.0.0` through v0.1 release-bump.
+Pre-release. Sprint 1 of 6, near-end. Eight of nine originally-queued Sprint-1 tickets shipped (WEG-5, 9, 10, 17, 26, 28, 18, 20 as of 2026-05-11), plus WEG-7 (DR-103 JSONL append durability) shipped 2026-05-14; WEG-21 (UDS writer-process lifecycle) remains. Workspace version stays at `0.0.0` through v0.1 release-bump.
 
 **2026-05-12 strategic additions (founder override).** Competitor-research synthesis drove 23 new Linear tickets (WEG-174–WEG-196, ~97 pts) plus description updates to WEG-89 + WEG-107. Public v0.1 wedge becomes Framing A (cross-harness memory portability); post-Q6 engineering wedge stays internal only. New differentiator angles slotted across v0.1.1 (memory observability), v0.2 backlog (branchable memory, cryptographic forgetting), and research backlog (MCP-for-memory spec, CRDT, compression-unified, hyperagent meta-memory). See "## 2026-05-12 strategic additions" section below; full ticket batch in `context/linear-batch-2026-05-12.md`; wedge text in `context/framing-a-rewrite.md`; comparison FAQ in `context/competitor-comparison.md`. Founder explicitly overrode the Q6/Q7 1:1.5 scope-discipline rule for this batch.
 
@@ -18,14 +18,15 @@ The intended end-state architecture (below) lives in `context/PRD.md` and `conte
 - **`docs/security.md`** — threat model + privacy disclosure with `#privacy-disclosure` anchor. Single canonical doc; absorbed the former `docs/privacy.md` per round-7 fold.
 - **`docs/demo-corpus.md`** — DR-920 corpus-selection decision rule (≥30 events / ≥2 cluster-prefixes by end of Sprint 2 → dogfood corpus; else hand-authored per WEG-57), reserved provenance section, Sprint 2 retro check.
 - **`crates/dreamd-core::privacy`** — `pub const DR413_DISCLOSURE` + `pub const PRIVACY_DISCLOSURE_LINK` with inline `#[cfg(test)]` invariant test (`disclosure_contains_link`).
+- **`dreamd-protocol::EventId`** (WEG-7) — newtype around `String` with a private inner field; `parse(&str) -> Result<EventId, EventIdParseError>` validates `evt_` prefix + exactly 26 chars + uppercase Crockford base32 (excludes I/L/O/U). Custom `Serialize`/`Deserialize` re-run validation on the wire and on disk. `AgentLearning.id` is now `EventId`, not `String`. `dreamd-protocol` deps stay locked to `serde + chrono + serde_json` — ULID minting lives in `dreamd-core`, not protocol.
+- **`MemoryCoordinator` full WEG-7 protocol** (`crates/dreamd-core/src/coordinator.rs`) — `open(&AgentRoot, rx)` / `open_at(jsonl_path, agent_root, rx)` constructors run malformed-tail-skip recovery, then seek to EOF for appends. `AppendLearning` message carries `client_dedup_key: Option<String>` and returns `Result<EventId, CoordinatorError>`. Write order: LRU lookup → mint ULID + overwrite `learning.id` → serialize → ensure `\n` → 4 KiB check → `write_all` → `sync_data` → LRU `put` (insert-after-sync, no cache poisoning). `pub const MAX_LEARNING_LINE_BYTES: usize = 4096`; oversized lines return `CoordinatorError::PayloadTooLarge { size, max }` (HTTP 413 mapping ready). Idempotency LRU is `LruCache<(PathBuf, String), EventId>` cap 1024, keyed by canonicalized AgentRoot path × dedup key, in-memory only (cleared on restart). `truncate_malformed_tail` walks forward, tracks last-good offset, `set_len + sync_data` on torn tails. 4 new tests in `coordinator::tests`; total core test count 23.
+- **`docs/architecture/durability.md`** (WEG-7) — durability protocol document; gitignored on disk like the other `docs/` files.
 
 ### What's not yet built (the rest of v0.1)
 
-- `dreamd-protocol` crate (DR-102, queued WEG-6) — will hold shared serde types limited to `serde` + `chrono` deps.
-- HTTP API surfaces (`POST /learn`, `GET /recall`, `POST /dream`, `POST /migrate`) and the axum server.
+- HTTP API surfaces (`POST /learn`, `GET /recall`, `POST /dream`, `POST /migrate`) and the axum server. `POST /learn` will wire `client_dedup_key` from `Idempotency-Key` (or similar) header into the coordinator message and map `CoordinatorError::PayloadTooLarge` to HTTP 413 (WEG-68).
 - Tantivy indexing + custom salience `Collector`/`Scorer`.
 - Dream-cycle pipeline (WAL, consolidation, LLM gate, `--no-llm` mode).
-- `MemoryCoordinator` actor + `tokio::sync::mpsc` topology (DR-114, WEG-16).
 - MCP server / `npx dreamd-mcp` distribution (WEG-81 blocked by WEG-17, now unblocked).
 - UDS socket binding + `SO_PEERCRED` middleware (DR-118, WEG-21).
 - `dreamd doctor --cluster-health` (DR-107, WEG-50).
@@ -67,7 +68,7 @@ State management is an actor model: a single `MemoryCoordinator` task owns mutab
 
 These are the decisions whose violation would silently break the system. They came out of an explicit pressure-test pass. Most are aspirational — they govern code that isn't written yet — but they're binding when that code lands.
 
-1. **JSONL append durability.** All appends to `AGENT_LEARNINGS.jsonl` go through one `tokio::sync::Mutex<File>` owned by the coordinator. Each write: serialize → ensure trailing `\n` → single `write_all` → `sync_data`. The `POST /api/v1/learn` 201 response must not return until `sync_data` completes. Concurrent third-party writers to the JSONL are **not** supported in v0.1 despite PRD FR-1.2 — this is a deliberate scope cut. (DR-103, WEG-7.)
+1. **JSONL append durability.** All appends to `AGENT_LEARNINGS.jsonl` flow through one `MemoryCoordinator` actor; `&mut self` on the run loop is the exclusivity guarantee, not a `Mutex<File>` (there is no second handle to the file). Each write: idempotency-LRU lookup → mint `EventId` (`evt_` + 26-char Crockford ULID via the `ulid` crate in `dreamd-core` — `dreamd-protocol` stays free of the `ulid` dep and only owns the parse/validate boundary) → overwrite inbound `learning.id` → serialize → ensure trailing `\n` → 4 KiB hard reject (`MAX_LEARNING_LINE_BYTES = 4096`, returns `PayloadTooLarge`, maps to HTTP 413) → single `write_all` → `sync_data` → LRU `put` only on Ok (insert-after-sync, never before — pre-sync insert would poison the cache on write failure). The `POST /api/v1/learn` 201 response must not return until `sync_data` completes. Idempotency LRU is in-memory only, capacity 1024, keyed by `(canonicalized AgentRoot path, client_dedup_key)`; restart clears it (durable replay-protection is not v0.1 scope). On startup, the coordinator runs `truncate_malformed_tail`: walks forward, retains lines up to the last cleanly-parseable `\n`-terminated record, and `set_len + sync_data`s torn tails. **Writers must never emit blank lines** — `\n\n` is treated as a torn-write signal and halts recovery there. Sidecar storage for >4 KiB payloads is deferred to v0.1.1. Concurrent third-party writers to the JSONL are **not** supported in v0.1 despite PRD FR-1.2 — this is a deliberate scope cut. (DR-103, WEG-7.)
 
 2. **Tantivy salience scoring is computed at query time, not indexed.** Storing the score would force daily re-indexing as `age_days` drifts. Schema fields: `content` (TEXT), `timestamp_sec` (u64 fastfield), `pain` (f64 fastfield), `importance` (f64 fastfield), `recurrence` (u64 fastfield). Implement a custom `Collector` + `Scorer` that fetches FastFields and computes:
 
@@ -273,3 +274,21 @@ For CLI strings that must be `&'static str` (clap's `version = ...` attribute, e
 Use `LazyLock<String>` only if you genuinely need allocation-backed assembly (format args that const_format can't express, runtime env reads).
 
 Source: WEG-18 dev report, 2026-05-13.
+
+### `dreamd-protocol` deps stay locked to `serde + chrono + serde_json` — ULID minting lives in `dreamd-core`
+
+`dreamd-protocol` is the parse/validate boundary for wire and on-disk types; it must not pull in id-generation, time-source, or other side-effectful crates. `EventId(String)` lives in protocol with a `parse(&str) -> Result<EventId, _>` constructor and custom `Serialize`/`Deserialize` that re-run validation. The actual ULID minting (`Ulid::new()` from the `ulid` crate) lives in `dreamd-core::coordinator` and rides into protocol via `EventId::parse(&format!("evt_{}", Ulid::new())).expect(...)`. The `expect` is sound because a freshly minted ULID is always canonical uppercase Crockford.
+
+Adding `ulid` to `dreamd-protocol/Cargo.toml` would silently break the load-bearing dep-discipline policy (CLAUDE.md target architecture). If you find yourself reaching for it in protocol, add the generator to core and pass the validated string through `parse` instead.
+
+Same rule applies to future newtype additions (e.g., agent-root paths, dedup keys promoted to types): protocol owns the *shape*, core owns the *minting*.
+
+Source: WEG-7 dev report, 2026-05-14.
+
+### `truncate_malformed_tail` treats `\n\n` as a torn-write signal
+
+Startup recovery in `MemoryCoordinator::open` walks the JSONL forward and stops at the first unparseable line OR the first empty line (`\n\n`). The empty-line guard is intentional — torn writes can leave a blank gap between records — but it means any future writer that ever emits a blank line will silently halt recovery there, leaving the file half-scanned and subsequent appends landing past a malformed region.
+
+**Rule:** writers must never emit blank lines into `AGENT_LEARNINGS.jsonl`. If a future feature wants empty-line semantics (e.g., record separators), the recovery convention has to change first — not the writer.
+
+Source: WEG-7 dev report, 2026-05-14.
