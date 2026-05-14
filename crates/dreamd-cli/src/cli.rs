@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 use crate::commands;
 use crate::commands::version::VERSION_SHORT;
@@ -33,8 +33,29 @@ pub struct Cli {
 pub enum Command {
     /// Scaffold per-project .agent/ store and register it with the daemon.
     Init,
+    /// Reset scratch state (DR-113). Today only `workspace` is supported.
+    Reset(ResetArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
     Version,
+}
+
+/// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
+/// scales when more reset targets land (e.g., personal, episodic) without
+/// reshuffling top-level command parsing.
+#[derive(Args)]
+pub struct ResetArgs {
+    #[command(subcommand)]
+    pub command: ResetCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ResetCommand {
+    /// Clear working/WORKSPACE.md back to its initial scaffold contents.
+    Workspace {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Parse CLI args and dispatch to the matching subcommand handler.
@@ -83,6 +104,31 @@ pub fn run() -> ExitCode {
                 }
             }
         }
+        Command::Reset(args) => match args.command {
+            ResetCommand::Workspace { yes } => {
+                let cwd = match std::env::current_dir() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("dreamd: error — could not read current directory: {e}");
+                        return ExitCode::from(1);
+                    }
+                };
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut out = stdout.lock();
+                let mut err = stderr.lock();
+                match commands::reset::run_workspace(&cwd, yes, &mut out, &mut err) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(commands::reset::ResetError::NotFound)
+                    | Err(commands::reset::ResetError::NotATty)
+                    | Err(commands::reset::ResetError::Declined) => ExitCode::from(2),
+                    Err(commands::reset::ResetError::Io(e)) => {
+                        eprintln!("dreamd: error — {e}");
+                        ExitCode::from(1)
+                    }
+                }
+            }
+        },
         Command::Version => {
             let stdout = std::io::stdout();
             let mut out = stdout.lock();

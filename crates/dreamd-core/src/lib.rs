@@ -18,4 +18,4 @@ pub mod privacy;
 #[cfg(unix)]
 pub mod server;
 
-pub use layout::{AgentRoot, DaemonHome, GITIGNORE_SNIPPET};
+pub use layout::{AgentRoot, DaemonHome, LayoutError, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};

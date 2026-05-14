@@ -10,12 +10,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use dreamd_core::privacy::DR413_DISCLOSURE;
-use dreamd_core::{AgentRoot, GITIGNORE_SNIPPET};
+use dreamd_core::{AgentRoot, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
 use serde::Serialize;
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
-
-const WORKSPACE_MD: &str = "Reserved for agent scratch state. The dream cycle does not currently read or write this file. See ROADMAP.md for v0.2 plans.\n";
 
 const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
 
@@ -124,7 +122,7 @@ fn scaffold_into(tmp: &Path, out: &mut dyn Write) -> Result<(), InitError> {
     fs::create_dir_all(tmp.join("protocols"))?;
 
     fs::File::create(tmp.join("episodic/AGENT_LEARNINGS.jsonl"))?;
-    fs::write(tmp.join("working/WORKSPACE.md"), WORKSPACE_MD)?;
+    fs::write(tmp.join("working/WORKSPACE.md"), DEFAULT_WORKSPACE_MD)?;
 
     let dreamd_dir = tmp.join(".dreamd");
     fs::create_dir_all(&dreamd_dir)?;
