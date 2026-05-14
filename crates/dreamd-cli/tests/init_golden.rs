@@ -70,13 +70,6 @@ fn first_run_matches_golden() {
 
     let workspace = tmp.path().join(".agent/working/WORKSPACE.md");
     assert!(workspace.exists());
-
-    for sub in ["skills", "protocols"] {
-        assert!(
-            tmp.path().join(".agent").join(sub).is_dir(),
-            "{sub}/ silently created"
-        );
-    }
 }
 
 #[test]

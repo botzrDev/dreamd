@@ -118,9 +118,6 @@ fn scaffold_into(tmp: &Path, out: &mut dyn Write) -> Result<(), InitError> {
     fs::create_dir_all(tmp.join("personal"))?;
     writeln!(out, "created .agent/personal/")?;
 
-    fs::create_dir_all(tmp.join("skills"))?;
-    fs::create_dir_all(tmp.join("protocols"))?;
-
     fs::File::create(tmp.join("episodic/AGENT_LEARNINGS.jsonl"))?;
     fs::write(tmp.join("working/WORKSPACE.md"), DEFAULT_WORKSPACE_MD)?;
 
