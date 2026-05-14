@@ -4,12 +4,12 @@ Guidance for Claude Code in this repo. **Most context lives in memory** — this
 
 ## Project status
 
-Pre-release. Sprint 1 of 6, near-end. Nine Sprint-1 tickets shipped (WEG-5, 7, 9, 10, 17, 18, 20, 26, 28); WEG-21 (UDS writer-process lifecycle) remains. Workspace version stays at `0.0.0` through v0.1 release-bump. Launch target: week 9. v0.1 wedge framing: see [[framing-a-wedge-competitor-research-additions-2026-05-12-founder-override]] (public) and [[grill-locked-decisions-2026-05-09]] (engineering, internal-only).
+Pre-release. Sprint 1 of 6, complete. Fifteen Sprint-1 tickets shipped (WEG-5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 20, 21, 26, 28, 173); WEG-15 (reset workspace CLI) is the lone outstanding Sprint-1 item, queued for next session. Workspace version stays at `0.0.0` through v0.1 release-bump. Launch target: week 9. v0.1 wedge framing: see [[framing-a-wedge-competitor-research-additions-2026-05-12-founder-override]] (public) and [[grill-locked-decisions-2026-05-09]] (engineering, internal-only).
 
-The intended end-state architecture lives in `context/PRD.md` and `context/AGILE/plan1.md` — both gitignored and local-only. Treat those as engineering ground truth; on-disk code is partial. Latest dev-session detail in [[dreamd-pm-session-memory-2026-05-14]].
+The intended end-state architecture lives in `context/PRD.md` and `context/AGILE/plan1.md` — both gitignored and local-only. Treat those as engineering ground truth; on-disk code is partial. Latest dev-session detail in [[dreamd-pm-session-memory-2026-05-14b]].
 
 **Story → DR map for pending v0.1 work:**
-- `WEG-21 ↔ DR-118` — UDS + `SO_PEERCRED` writer-process lifecycle (last Sprint-1 ticket)
+- `WEG-15 ↔ DR-113` — `dreamd reset workspace` CLI subcommand (last Sprint-1 ticket)
 - `WEG-50 ↔ DR-107` — `dreamd doctor --cluster-health` (Sprint 2)
 - `WEG-68` — `POST /api/v1/learn`: wire `Idempotency-Key` → `client_dedup_key` + `PayloadTooLarge` → HTTP 413
 - `WEG-81` — `npx dreamd-mcp` distribution (was blocked by WEG-17, now unblocked)
@@ -41,10 +41,10 @@ CLI package name is `dreamd`, not `dreamd-cli` — see [[cargo-package-name-is-d
 Cargo workspace per DR-002:
 
 - **`dreamd-protocol`** — shared serde types only. Deps **locked** to `serde + chrono + serde_json`. Owns parse/validate boundary (e.g., `EventId`). See [[protocol-deps-minting-in-core]].
-- **`dreamd-core`** — modules: `api` (axum), `io` (FS/WAL), `index` (tantivy), `dream` (consolidation pipeline), `vcs` (git2), `coordinator` (actor). Currently has `layout` + `privacy` + `coordinator`; rest queued.
-- **`dreamd-cli`** — exists; package name `dreamd`. Future `dreamd-store` / `dreamd-server` splits may collapse into `dreamd-core` (DR-114); defer until actor topology ships.
+- **`dreamd-core`** — modules: `api` (axum), `io` (FS/WAL), `index` (tantivy), `dream` (consolidation pipeline), `vcs` (git2), `coordinator` (actor). Currently has `layout` + `privacy` + `coordinator` + `lessons` + `server`; rest queued.
+- **`dreamd-cli`** — exists; package name `dreamd`. Future `dreamd-store` / `dreamd-server` splits may collapse into `dreamd-core` (DR-114); defer until actor topology ships. **No `dreamd-server` crate** — WEG-21 was the tripwire; decision: stay in `dreamd-core::server` until a second Rust binary consumer exists. See [[no-dreamd-server-crate-until-second-consumer]].
 
-State management is an actor model: a single `MemoryCoordinator` task owns mutable state. **Do not introduce parallel writers** to JSONL or index — every mutation goes through the coordinator. `&mut self` on the run loop is the exclusivity guarantee (no `Mutex<File>` needed).
+State management is an actor model: a single `MemoryCoordinator` task owns mutable state. **Do not introduce parallel writers** to JSONL or index — every mutation goes through the coordinator. `&mut self` on the run loop is the exclusivity guarantee (no `Mutex<File>` needed). See [[actor-mut-self-is-the-lock]].
 
 ## Load-bearing engineering decisions
 
@@ -73,6 +73,8 @@ Binding when the relevant code lands. Don't change without re-reading PRD.
 6. **MCP tool names.** The MCP server exposes `search_nodes` (→ `/api/v1/recall`) and `append_node` (→ `/api/v1/learn`). Names match the Anthropic reference memory server intentionally; do not rename. **MCP server is the primary v0.1 distribution surface** — `npx dreamd-mcp` is the install path the README leads with, not `dreamd service install` (WEG-81).
 
 7. **Schema versioning is mandatory.** Every persisted record carries `schema_version: "1.0"`. Current version output exposes this field. Add a `dreamd migrate` path before changing it.
+
+8. **`unsafe_code` policy.** Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` carries a scoped `unsafe_code = "deny"` override — the sole exception is `detach_double_fork`, which carries `#[allow(unsafe_code)]` with a SAFETY contract. Do not widen the downgrade to other crates. See [[dreamd-core-unsafe-deny-override]].
 
 ## API contract (when built)
 
@@ -115,12 +117,30 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 
 ### Drift catalog (empirical surprises — read before touching the area)
 
+**Build / CLI**
 - **Cargo package name is `dreamd`** (not `dreamd-cli`) → [[cargo-package-name-is-dreamd]]
 - **stderr/stdout verification pattern** → [[stderr-stdout-verification-pattern-for-cli-error-output]]
 - **cargo test filter form** (`--test <binary>` vs positional) → [[cargo-test-filter-form]]
-- **`dreamd-protocol` deps locked; minting in core** → [[protocol-deps-minting-in-core]]
-- **Torn-write blank-line halt signal in JSONL recovery** → [[torn-write-blank-line-signal]]
+- **`clap` auto-`--version` prepends bin name** → [[clap-auto-version-prepends-bin-name]]
+- **`const_format` over `LazyLock` for `&'static str` assembly** → [[const-format-over-lazylock]]
 - **vergen `fail_on_error(false)` emits `"VERGEN_IDEMPOTENT_OUTPUT"` sentinel** → [[vergen-fail-on-error-emits-sentinel]]
 - **`vergen = "=9.0.6"` pin alongside vergen-gitcl 1.0.8** → [[vergen-gitcl-pin-vergen-9-0-6]]
-- **clap auto-`--version` prepends bin name** → [[clap-auto-version-prepends-bin-name]]
-- **`const_format` over `LazyLock` for `&'static str` assembly** → [[const-format-over-lazylock]]
+
+**Testing / visibility**
+- **Integration tests at `<crate>/tests/*.rs` cannot reach `pub(crate)` symbols from a bin-only crate** (no `lib.rs` = no reachable surface). If a test needs internal symbols, either expose them behind `#[cfg(test)]` + `pub` in a `lib.rs`, or restructure. → [[integration-test-pub-crate-visibility]]
+- **PM-side AC pre-flight: grep cited symbols for `pub(crate)` and verify `lib.rs` exists before queue.** If the symbol is `pub(crate)` and there is no `lib.rs`, the integration-test AC is un-implementable as written — amend before handoff. → [[pm-preflight-pub-crate-grep]]
+
+**I/O / durability**
+- **`dreamd-protocol` deps locked; minting in core** → [[protocol-deps-minting-in-core]]
+- **`.tmp` file is preserved on `write_atomic` failure — deliberate recovery signal.** Never add cleanup code in the write path. The presence of a `.tmp` is the signal that the previous write was interrupted. → [[write-atomic-tmp-preserved-on-failure]]
+- **Parent-dir fsync after rename requires `File::open(parent)?.sync_all()`.** You cannot call `sync_data()` on a `PathBuf`. Open the directory as a `File`, then call `sync_all`. → [[parent-dir-fsync-file-open-sync-all]]
+- **Torn-write blank-line halt signal in JSONL recovery** → [[torn-write-blank-line-signal]]
+- **Timestamps are always caller-provided.** Writer functions (e.g., `LessonsFile`) must never call `Utc::now()` internally. Timestamps belong to the caller — deterministic tests depend on this. → [[timestamps-caller-provided-no-utc-now]]
+
+**Actor / concurrency**
+- **`&mut self` in the coordinator run loop IS the exclusivity guarantee.** No `Mutex<File>` inside the actor. "Mutex" in DR-103 means the coordinator is the serialization point, not that a `Mutex` type is used. → [[actor-mut-self-is-the-lock]]
+- **`#[non_exhaustive]` on actor message enums.** Define only variants with complete handlers. Adding a Sprint-N variant without a handler produces a compile error — that's the signal, not a stub. → [[non-exhaustive-actor-message-enums]]
+- **tokio feature split: library crates declare `features = ["sync"]` only; binary (`dreamd-cli`) owns `["rt-multi-thread", "macros"]`; dev-deps use `["rt", "macros", "sync", "time"]` for `#[tokio::test]`. Exception: `[[bin]]` targets inside a library crate (e.g., `dreamd-core` post-WEG-21) force `rt` + `macros` into `[dependencies]`, not `[dev-dependencies]` — `[[bin]]` targets do not inherit `[dev-dependencies]`. `dreamd-core` features are therefore `["sync", "rt", "macros"]`.** → [[tokio-feature-split-bin-target-exception]]
+
+**Safety**
+- **`unsafe_code = "forbid"` is workspace-level; `dreamd-core` carries a scoped `"deny"` override.** The sole exception is `detach_double_fork` (`#[allow(unsafe_code)]` + SAFETY contract). Do not widen the downgrade. Documented in `docs/architecture.md` (untracked). → [[dreamd-core-unsafe-deny-override]]
