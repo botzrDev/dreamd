@@ -14,6 +14,20 @@
 
 use std::path::{Path, PathBuf};
 
+use thiserror::Error;
+
+/// Errors returned by [`AgentRoot::discover`].
+///
+/// Kept deliberately small — `NotFound` is the only failure mode the ancestor
+/// walk surfaces today. Add variants as new resolver callers land (DR-113 /
+/// WEG-15).
+#[derive(Debug, Error)]
+pub enum LayoutError {
+    /// No `.agent/` directory was found in `start` or any of its ancestors.
+    #[error("no .agent/ directory found in start path or any ancestor")]
+    NotFound,
+}
+
 /// Per-project memory store rooted at `<project_root>/.agent/`.
 ///
 /// Cheap to clone; holds only the project root path.
@@ -28,6 +42,22 @@ impl AgentRoot {
         Self {
             project_root: project_root.into(),
         }
+    }
+
+    /// Walk ancestors of `start` looking for a directory that contains
+    /// `.agent/`, and bind to the first one found.
+    ///
+    /// Used by post-init commands (e.g. `dreamd reset workspace`, DR-113) that
+    /// must operate against the *existing* store rather than the project-root
+    /// sentinel set `dreamd init` uses. Symlinks in the walk are followed via
+    /// `Path::exists`.
+    pub fn discover(start: &Path) -> Result<Self, LayoutError> {
+        for dir in start.ancestors() {
+            if dir.join(".agent").exists() {
+                return Ok(Self::new(dir));
+            }
+        }
+        Err(LayoutError::NotFound)
     }
 
     /// The project root this store is bound to (the parent of `.agent/`).
@@ -187,6 +217,11 @@ impl DaemonHome {
 /// `something/.agent/.dreamd/` the user might create elsewhere in the tree.
 pub const GITIGNORE_SNIPPET: &str = "/.agent/.dreamd/\n";
 
+/// Byte-exact contents of `working/WORKSPACE.md` as scaffolded by `dreamd init`
+/// and re-written by `dreamd reset workspace` (DR-105 / DR-113). One definition
+/// of "fresh workspace" — reset equals init for this file.
+pub const DEFAULT_WORKSPACE_MD: &str = "Reserved for agent scratch state. The dream cycle does not currently read or write this file. See ROADMAP.md for v0.2 plans.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +335,35 @@ mod tests {
         let daemon = DaemonHome::new("/home/u/.agent");
         assert!(!daemon.root().starts_with(proj.agent_dir()));
         assert!(!daemon.root().starts_with(proj.project_root()));
+    }
+
+    #[test]
+    fn discover_finds_agent_dir_at_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".agent")).unwrap();
+        let root = AgentRoot::discover(tmp.path()).expect("discover");
+        assert_eq!(root.project_root(), tmp.path());
+    }
+
+    #[test]
+    fn discover_walks_ancestors_until_agent_dir_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".agent")).unwrap();
+        let nested = tmp.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let root = AgentRoot::discover(&nested).expect("discover");
+        assert_eq!(root.project_root(), tmp.path());
+    }
+
+    #[test]
+    fn discover_returns_not_found_when_no_ancestor_has_agent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(matches!(
+            AgentRoot::discover(&nested),
+            Err(LayoutError::NotFound)
+        ));
     }
 
     #[test]
