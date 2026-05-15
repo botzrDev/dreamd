@@ -125,6 +125,7 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 - **`const_format` over `LazyLock` for `&'static str` assembly** → [[const-format-over-lazylock]]
 - **vergen `fail_on_error(false)` emits `"VERGEN_IDEMPOTENT_OUTPUT"` sentinel** → [[vergen-fail-on-error-emits-sentinel]]
 - **`vergen = "=9.0.6"` pin alongside vergen-gitcl 1.0.8** → [[vergen-gitcl-pin-vergen-9-0-6]]
+- **Verify a dep's workspace promotion before claiming it in an AC.** `grep -A 30 '\[workspace.dependencies\]' Cargo.toml` — if the section is absent or the dep isn't listed, write the AC as "add to crate `[dependencies]`", not "use workspace dep". As of WEG-41, the workspace `Cargo.toml` has **no** `[workspace.dependencies]` section (only `insta` as a workspace dev-dep from WEG-20). → [[workspace-dep-preflight]]
 
 **Testing / visibility**
 - **Integration tests at `<crate>/tests/*.rs` cannot reach `pub(crate)` symbols from a bin-only crate** (no `lib.rs` = no reachable surface). If a test needs internal symbols, either expose them behind `#[cfg(test)]` + `pub` in a `lib.rs`, or restructure. → [[integration-test-pub-crate-visibility]]

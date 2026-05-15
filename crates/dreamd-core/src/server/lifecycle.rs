@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
+use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::{AgentRoot, DaemonHome};
 
 /// Failure modes surfaced by the `server::run` entry point.
@@ -37,6 +38,8 @@ pub enum ServerError {
     Fork(String),
     #[error("other I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("index manifest check failed: {0}")]
+    ManifestCheck(#[from] crate::index::ManifestVersionError),
 }
 
 /// Wiring config for the writer-process. `agent_root` selects the per-project
@@ -85,9 +88,33 @@ pub struct Supervisor {
 impl Supervisor {
     /// Boot a coordinator under `agent_root`, return a supervisor that owns
     /// the sole sender. The coordinator runs on the current tokio runtime.
-    pub fn start(agent_root: &AgentRoot, channel_capacity: usize) -> Result<Self, std::io::Error> {
+    ///
+    /// WEG-49 (DR-210): before any coordinator state is opened, read the
+    /// per-project index manifest and compare its `schema_version` to the
+    /// binary's [`crate::index::SCHEMA_VERSION`]. A manifest newer than the
+    /// binary aborts startup via [`ServerError::ManifestCheck`]; older or
+    /// absent manifests log a `tracing::warn!` and proceed.
+    pub fn start(agent_root: &AgentRoot, channel_capacity: usize) -> Result<Self, ServerError> {
+        let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
+        match check_manifest_version(&manifest_path)? {
+            ManifestCheckOutcome::Absent => {
+                tracing::warn!(
+                    path = ?manifest_path,
+                    "no index manifest found; treating project as unindexed"
+                );
+            }
+            ManifestCheckOutcome::Current => {}
+            ManifestCheckOutcome::NeedsMigration { from } => {
+                tracing::warn!(
+                    from,
+                    binary = crate::index::SCHEMA_VERSION,
+                    "index schema predates binary; run `dreamd migrate` to upgrade"
+                );
+            }
+        }
+
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(channel_capacity);
-        let coordinator = MemoryCoordinator::open(agent_root, rx)?;
+        let coordinator = MemoryCoordinator::open(agent_root, rx).map_err(ServerError::Coordinator)?;
         let handle = tokio::spawn(coordinator.run());
         Ok(Self { tx, handle })
     }
