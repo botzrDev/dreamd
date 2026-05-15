@@ -72,7 +72,10 @@ struct Lcg(u64);
 impl Lcg {
     fn next_u64(&mut self) -> u64 {
         // Numerical Recipes constants.
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn next_f32(&mut self, lo: f32, hi: f32) -> f32 {
@@ -114,7 +117,10 @@ fn synth_learning(i: u64, rng: &mut Lcg) -> AgentLearning {
     let harness = HARNESSES[(i as usize) % HARNESSES.len()];
     let snippet = SNIPPETS[(i as usize) % SNIPPETS.len()];
     // Spread timestamps over the last ~60 days.
-    let base_sec = Utc.with_ymd_and_hms(2026, 3, 14, 0, 0, 0).unwrap().timestamp();
+    let base_sec = Utc
+        .with_ymd_and_hms(2026, 3, 14, 0, 0, 0)
+        .unwrap()
+        .timestamp();
     let offset_sec = (rng.next_u64() % (60 * 24 * 60 * 60)) as i64;
     let ts = Utc.timestamp_opt(base_sec + offset_sec, 0).unwrap();
     AgentLearning {
@@ -172,7 +178,11 @@ fn stats_of(samples: &[Duration]) -> Stats {
     let min_ms = ms.first().copied().unwrap_or(0.0);
     let max_ms = ms.last().copied().unwrap_or(0.0);
     let mean_ms = ms.iter().sum::<f64>() / ms.len() as f64;
-    Stats { min_ms, mean_ms, max_ms }
+    Stats {
+        min_ms,
+        mean_ms,
+        max_ms,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +216,10 @@ fn measure_cold_open(index_path: &Path, samples: usize) -> Vec<Duration> {
             .expect("spawn cold-open child");
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            panic!("cold-open child failed: status={:?} stderr={err}", output.status);
+            panic!(
+                "cold-open child failed: status={:?} stderr={err}",
+                output.status
+            );
         }
         let s = String::from_utf8_lossy(&output.stdout);
         let ms: f64 = s.trim().parse().unwrap_or_else(|_| {
@@ -295,9 +308,7 @@ fn run_reader_reload_child(index_path: &Path) -> ExitCode {
     }
     let elapsed = t0.elapsed();
     let searcher = reader.searcher();
-    let count = searcher
-        .search(&AllQuery, &Count)
-        .unwrap_or(usize::MAX);
+    let count = searcher.search(&AllQuery, &Count).unwrap_or(usize::MAX);
     println!("{} {}", elapsed.as_secs_f64() * 1000.0, count);
     ExitCode::SUCCESS
 }
@@ -306,7 +317,9 @@ fn run_reader_reload_child(index_path: &Path) -> ExitCode {
 // Measurement #3 — multi-process reader reload
 // ---------------------------------------------------------------------------
 
-fn measure_reader_reload(index_path: &Path) -> Result<(f64, usize, usize), Box<dyn std::error::Error>> {
+fn measure_reader_reload(
+    index_path: &Path,
+) -> Result<(f64, usize, usize), Box<dyn std::error::Error>> {
     // Parent opens writer, adds N new docs, commits. Child re-execs and reloads.
     let bundle = build_schema();
     let index = Index::open_in_dir(index_path)?;
@@ -394,7 +407,9 @@ fn list_lock_files(dir: &Path) -> Vec<String> {
     out
 }
 
-fn measure_sigkill_lock_cleanup(index_path: &Path) -> Result<LockObservation, Box<dyn std::error::Error>> {
+fn measure_sigkill_lock_cleanup(
+    index_path: &Path,
+) -> Result<LockObservation, Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
     let mut child = Command::new(&exe)
         .arg("child-writer-stall")
@@ -504,8 +519,14 @@ fn run_suite() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(_, p, _, _)| p.clone())
         .expect("10k corpus");
     let lock_obs = measure_sigkill_lock_cleanup(&lock_target)?;
-    println!("[sigkill] lock_files_before_kill={:?}", lock_obs.lock_files_before_kill);
-    println!("[sigkill] lock_files_after_kill={:?}", lock_obs.lock_files_after_kill);
+    println!(
+        "[sigkill] lock_files_before_kill={:?}",
+        lock_obs.lock_files_before_kill
+    );
+    println!(
+        "[sigkill] lock_files_after_kill={:?}",
+        lock_obs.lock_files_after_kill
+    );
     println!("[sigkill] fresh_writer_ok={}", lock_obs.fresh_writer_ok);
     if let Some(e) = &lock_obs.fresh_writer_error {
         println!("[sigkill] fresh_writer_error={e}");
