@@ -144,3 +144,6 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 
 **Safety**
 - **`unsafe_code = "forbid"` is workspace-level; `dreamd-core` carries a scoped `"deny"` override.** The sole exception is `detach_double_fork` (`#[allow(unsafe_code)]` + SAFETY contract). Do not widen the downgrade. Documented in `docs/architecture.md` (untracked). → [[dreamd-core-unsafe-deny-override]]
+
+**Index / Tantivy**
+- **Never unlink `.tantivy-writer.lock` or `.tantivy-meta.lock` on startup or recovery.** Tantivy 0.26 uses advisory `fs4` flock — the kernel releases the lock when the holder dies; the on-disk file is a marker, not the gate. `IndexWriter::new()` opens cleanly after SIGKILL. Removing a still-held lock file would break a live writer. Lock-file cleanup, if ever needed, belongs behind a manual repair flag. → [[tantivy-lock-file-no-rm-on-startup]]
