@@ -131,6 +131,82 @@ impl IndexManifest {
 /// `.dreamd/` directory. Used by WEG-42 to write and WEG-49 to read.
 pub const INDEX_MANIFEST_FILENAME: &str = "index_manifest.json";
 
+/// Result of a startup manifest version check.
+///
+/// All three outcomes mean "daemon may proceed." The hard-fail case
+/// (manifest newer than binary) is reported via [`ManifestVersionError::TooNew`]
+/// rather than a variant on this enum, so callers can `?`-propagate the
+/// abort cleanly while pattern-matching only the proceed cases.
+#[derive(Debug, PartialEq)]
+pub enum ManifestCheckOutcome {
+    /// Manifest file absent — project not yet indexed. Caller: log warn + continue.
+    Absent,
+    /// Schema version matches binary. Caller: proceed.
+    Current,
+    /// Binary is newer than manifest — migration pending. Caller: log warn + continue.
+    NeedsMigration { from: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestVersionError {
+    #[error(
+        "index schema {manifest:?} is newer than binary {binary:?}; \
+         downgrade dreamd or run `dreamd migrate`"
+    )]
+    TooNew { manifest: String, binary: String },
+    #[error("index manifest is corrupt: {0}")]
+    Corrupt(#[from] serde_json::Error),
+    #[error("reading index manifest: {0}")]
+    Io(std::io::Error),
+}
+
+/// Read `<agent_root>/.dreamd/index_manifest.json` and compare its
+/// `schema_version` against [`SCHEMA_VERSION`].
+///
+/// Returns [`ManifestVersionError::TooNew`] when the on-disk index was
+/// written by a newer binary — the only case that must abort startup.
+/// Missing-manifest is reported as [`ManifestCheckOutcome::Absent`] (not
+/// an error) so cold starts on a fresh `agent_root` succeed before
+/// WEG-42 has written the first manifest.
+pub fn check_manifest_version(
+    manifest_path: &std::path::Path,
+) -> Result<ManifestCheckOutcome, ManifestVersionError> {
+    let text = match std::fs::read_to_string(manifest_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManifestCheckOutcome::Absent);
+        }
+        Err(e) => return Err(ManifestVersionError::Io(e)),
+    };
+
+    let manifest: IndexManifest = serde_json::from_str(&text)?;
+    if manifest.schema_version == SCHEMA_VERSION {
+        return Ok(ManifestCheckOutcome::Current);
+    }
+
+    match (
+        parse_index_version(&manifest.schema_version),
+        parse_index_version(SCHEMA_VERSION),
+    ) {
+        (Some(mv), Some(bv)) if mv > bv => Err(ManifestVersionError::TooNew {
+            manifest: manifest.schema_version,
+            binary: SCHEMA_VERSION.to_owned(),
+        }),
+        _ => Ok(ManifestCheckOutcome::NeedsMigration {
+            from: manifest.schema_version,
+        }),
+    }
+}
+
+/// Parse `"index/MAJOR.MINOR"` → `(MAJOR, MINOR)`. Returns `None` on any
+/// parse failure — callers treat unparseable versions as "needs migration"
+/// (the fallback in `check_manifest_version`).
+fn parse_index_version(s: &str) -> Option<(u32, u32)> {
+    let ver = s.strip_prefix("index/")?;
+    let (major, minor) = ver.split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +324,78 @@ mod tests {
     #[test]
     fn schema_version_constant_value() {
         assert_eq!(SCHEMA_VERSION, "index/1.0");
+    }
+
+    #[test]
+    fn manifest_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        let outcome = check_manifest_version(&path).unwrap();
+        assert_eq!(outcome, ManifestCheckOutcome::Absent);
+    }
+
+    #[test]
+    fn manifest_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        std::fs::write(&path, r#"{"schema_version":"index/1.0"}"#).unwrap();
+        let outcome = check_manifest_version(&path).unwrap();
+        assert_eq!(outcome, ManifestCheckOutcome::Current);
+    }
+
+    #[test]
+    fn manifest_needs_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        std::fs::write(&path, r#"{"schema_version":"index/0.9"}"#).unwrap();
+        let outcome = check_manifest_version(&path).unwrap();
+        assert_eq!(
+            outcome,
+            ManifestCheckOutcome::NeedsMigration {
+                from: "index/0.9".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn manifest_too_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        std::fs::write(&path, r#"{"schema_version":"index/2.0"}"#).unwrap();
+        let err = check_manifest_version(&path).unwrap_err();
+        match err {
+            ManifestVersionError::TooNew { manifest, binary } => {
+                assert_eq!(manifest, "index/2.0");
+                assert_eq!(binary, "index/1.0");
+            }
+            other => panic!("expected TooNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        std::fs::write(&path, "not json").unwrap();
+        let result = check_manifest_version(&path);
+        assert!(matches!(
+            result,
+            Err(ManifestVersionError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn parse_index_version_valid() {
+        assert_eq!(parse_index_version("index/1.0"), Some((1, 0)));
+    }
+
+    #[test]
+    fn parse_index_version_no_prefix() {
+        assert_eq!(parse_index_version("1.0"), None);
+    }
+
+    #[test]
+    fn parse_index_version_bad_semver() {
+        assert_eq!(parse_index_version("index/x.y"), None);
     }
 }
