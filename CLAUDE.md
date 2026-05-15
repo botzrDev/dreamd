@@ -32,6 +32,9 @@ cargo test -p dreamd --test init_golden  # 3 tests (init stdout golden fixtures)
 cargo check --workspace
 cargo clippy --workspace
 cargo fmt --all
+
+scripts/coverage.sh                      # workspace coverage (html + lcov) → target/coverage/
+scripts/coverage.sh --open               # same, open HTML in browser
 ```
 
 CLI package name is `dreamd`, not `dreamd-cli` — see [[cargo-package-name-is-dreamd]]. Cargo test filter form — see [[cargo-test-filter-form]]. `Justfile` / `cargo xtask` (DR-005) and CI matrix (DR-003) are queued, not present.
@@ -126,6 +129,7 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 - **vergen `fail_on_error(false)` emits `"VERGEN_IDEMPOTENT_OUTPUT"` sentinel** → [[vergen-fail-on-error-emits-sentinel]]
 - **`vergen = "=9.0.6"` pin alongside vergen-gitcl 1.0.8** → [[vergen-gitcl-pin-vergen-9-0-6]]
 - **Verify a dep's workspace promotion before claiming it in an AC.** `grep -A 30 '\[workspace.dependencies\]' Cargo.toml` — if the section is absent or the dep isn't listed, write the AC as "add to crate `[dependencies]`", not "use workspace dep". As of WEG-41, the workspace `Cargo.toml` has **no** `[workspace.dependencies]` section (only `insta` as a workspace dev-dep from WEG-20). → [[workspace-dep-preflight]]
+- **Per-crate dep preflight: grep `crates/<crate>/Cargo.toml` directly before claiming dep X is available in crate Y.** Other crates' usage of X, `use` paths elsewhere, and architect pattern-match ("daemons need tracing") are **not** evidence. WEG-49 tripwire: pre-flight asserted `tracing` was already a dep in `dreamd-core`; it wasn't. Orthogonal to workspace-dep-preflight — a dep may exist at neither, one, or both levels. → [[per-crate-dep-preflight]]
 
 **Testing / visibility**
 - **Integration tests at `<crate>/tests/*.rs` cannot reach `pub(crate)` symbols from a bin-only crate** (no `lib.rs` = no reachable surface). If a test needs internal symbols, either expose them behind `#[cfg(test)]` + `pub` in a `lib.rs`, or restructure. → [[integration-test-pub-crate-visibility]]
