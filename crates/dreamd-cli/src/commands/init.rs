@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use dreamd_core::config::CONFIG_TEMPLATE;
 use dreamd_core::io::write_atomic;
 use dreamd_core::privacy::DR413_DISCLOSURE;
 use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
@@ -179,6 +180,10 @@ fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), Ini
     if !quiet {
         writeln!(out, "initialized .agent/.dreamd/state.json")?;
     }
+    // WEG-14 / DR-112 — silent config template write. No stdout line; the
+    // init.golden.txt byte-lock (651 B) forbids adding a line here (D1).
+    // Idempotency is enforced by the top-level `.agent/` existence guard.
+    fs::write(dreamd_dir.join("config.toml"), CONFIG_TEMPLATE.as_bytes())?;
 
     Ok(())
 }

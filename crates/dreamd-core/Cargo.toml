@@ -51,6 +51,14 @@ tantivy = "0.26"
 # version already resolved transitively via tantivy (5.3.0 in Cargo.lock),
 # avoiding a duplicate compilation of the 4.x line.
 ordered-float = "5"
+# WEG-14 / DR-112 config loader. figment with the `toml` feature owns the
+# layered precedence (defaults → user → project, later merge wins). `dirs`
+# resolves the platform user-config dir (XDG `~/.config/` on Linux). Both
+# are new direct deps in this crate (workspace has no
+# `[workspace.dependencies]` for them; lockfile had no prior resolution),
+# greenlit before add.
+figment = { version = "0.10", features = ["toml"] }
+dirs = "5"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
