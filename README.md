@@ -63,6 +63,14 @@ When LLM mode is enabled in v0.1.1, episodic content meeting the salience thresh
 
 v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
 
+## Performance
+
+Recall latency (warm index, 10k entries): **<5ms P50 / <50ms P99 cold-start.** These numbers reflect the query operation itself and will be confirmed by criterion benchmarks in v0.1.
+
+> **Read-after-write visibility:** up to `commit_cadence_seconds` (default 5s). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
+
+Users who need tighter freshness can lower the commit cadence at the cost of higher index churn. User-facing config lands in v0.1.1; the cadence is a constructor argument today.
+
 ## Spec
 
 The on-disk layout, JSON schema, salience formula, and dream-cycle contract are defined in [`SPEC.md`](./SPEC.md). The spec is implementation-agnostic — `dreamd` is one implementation, not the only one.
