@@ -35,6 +35,9 @@ const PLACEHOLDER_EVENT_ID: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 // Schema (matches CLAUDE.md "Load-bearing engineering decisions" §2)
 // ---------------------------------------------------------------------------
 
+/// Local schema field cache matching the production `SchemaFields` layout in
+/// `dreamd-core::index`. Duplicated here so the spike carries no dependency
+/// on production-crate internals.
 struct SchemaBundle {
     schema: Schema,
     content: tantivy::schema::Field,
@@ -76,6 +79,7 @@ impl Lcg {
             .wrapping_add(1442695040888963407);
         self.0
     }
+    /// Next float in `[lo, hi)` using the current state.
     fn next_f32(&mut self, lo: f32, hi: f32) -> f32 {
         let r = (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
         lo + r * (hi - lo)
@@ -428,14 +432,17 @@ fn measure_sigkill_lock_cleanup(
         return Err(format!("child did not print LOCK_HELD, got: {line:?}").into());
     }
 
-    // Tiny extra pause to be safe.
+    // 200 ms: enough for the child's IndexWriter thread to acquire flock
+    // before we SIGKILL. Raise this if the test becomes flaky on slow CI
+    // (flock acquisition exceeded budget).
     std::thread::sleep(Duration::from_millis(200));
     let lock_files_before_kill = list_lock_files(index_path);
 
     // SIGKILL: on Unix, std's Child::kill sends SIGKILL.
     child.kill()?;
     let _ = child.wait()?;
-    // Give the OS a moment to reap.
+    // 200 ms: give the kernel time to release advisory flocks so the
+    // subsequent writer open does not race the OS reap.
     std::thread::sleep(Duration::from_millis(200));
 
     let lock_files_after_kill = list_lock_files(index_path);

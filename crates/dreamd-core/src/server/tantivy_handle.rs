@@ -85,6 +85,8 @@ pub(crate) const INDEX_DIR_NAME: &str = "index";
 /// writes after each successful Tantivy commit, never before.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexProgress {
+    /// `evt_`-prefixed ULID string of the most recently committed document,
+    /// or `None` if no commit has succeeded yet (cold start / empty JSONL).
     pub(crate) last_indexed_id: Option<String>,
 }
 
@@ -114,9 +116,9 @@ pub enum IndexerMsg {
     },
 }
 
-/// Owning handle for a single per-project indexer task. Constructed inside
-/// [`TantivyIndexHandle::open`] and held privately. Not part of the public
-/// surface; in-module tests reach it directly.
+/// Owning handle for the spawned indexer task. Constructed inside
+/// [`TantivyIndexHandle::open`] and held privately. Dropped (and task
+/// aborted or drained) when [`TantivyIndexHandle`] is closed or shut down.
 pub(crate) struct IndexerHandle {
     tx: mpsc::Sender<IndexerMsg>,
     join: JoinHandle<()>,
@@ -353,6 +355,11 @@ fn commit_and_persist(
     let Some(new_last) = batch_last_id.take() else {
         return Ok(());
     };
+    // Write protocol (WEG-42): Tantivy commit first, then watermark on disk.
+    // If we crash after commit but before write_progress, the next startup
+    // replay re-indexes at most one 5-second window (idempotent). If we wrote
+    // the watermark first and then crashed, those events would be silently
+    // skipped on recovery -- silent data loss.
     writer.commit().map_err(tantivy_to_index)?;
     *last_committed_id = Some(new_last);
     write_progress(
@@ -364,6 +371,8 @@ fn commit_and_persist(
     Ok(())
 }
 
+/// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
+/// `layer` is always [`Layer::Episodic`] in v0.1; semantic indexing is WEG-136.
 fn add_document(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
@@ -409,10 +418,11 @@ fn replay_two_pass(
         *clusters.entry(ev.skill_action.clone()).or_insert(0) += 1;
     }
 
-    // Pass 2: filter to events whose id is strictly greater than the
-    // watermark. EventId does not implement `Ord`; compare via `as_str()`
-    // (ULIDs are lexicographically sortable in their canonical Crockford
-    // base32 form).
+    // Pass 2: filter to events whose id is strictly greater than the watermark.
+    // EventId does not implement `Ord`; compare via `as_str()` (ULIDs are
+    // lexicographically sortable in their canonical Crockford base32 form).
+    // Separate `parse_jsonl_until_torn` call rather than re-filtering pass-1's
+    // Vec so we get an owned iterator without cloning the full collection.
     let to_index: Vec<AgentLearning> = parse_jsonl_until_torn(&bytes)
         .into_iter()
         .filter(|ev| match last_indexed_id {
@@ -533,6 +543,10 @@ mod tests {
         dir
     }
 
+    /// RAII cleanup guard: removes the temp dir on drop so tests leave no
+    /// scratch behind even when they panic. Preferred over manual cleanup at
+    /// the end of each test because cleanup still runs on panic / assertion
+    /// failure.
     struct DirGuard(PathBuf);
     impl Drop for DirGuard {
         fn drop(&mut self) {
@@ -546,6 +560,9 @@ mod tests {
         EventId::parse(&raw).expect("synthesize EventId")
     }
 
+    /// Build a minimal `AgentLearning` with `pain=5, importance=6, pinned=false`.
+    /// Fixed neutral values make test score assertions predictable without
+    /// coupling tests to the salience formula constants.
     fn sample_learning(id: EventId, skill: &str, content: &str) -> AgentLearning {
         AgentLearning {
             schema_version: "1.0".to_string(),

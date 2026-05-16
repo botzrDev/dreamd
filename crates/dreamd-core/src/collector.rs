@@ -32,12 +32,19 @@ use crate::salience::salience;
 /// the salience multiply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallResult {
+    /// BM25 x salience product, widened to `f64` for the `--explain` formatter (DR-703).
     pub score: f64,
+    /// Full text of the learning, hydrated from Tantivy's `STORED` content field (WEG-43).
     pub content: String,
+    /// Unix seconds matching `AgentLearning::timestamp` at index time.
     pub timestamp_sec: u64,
+    /// 0.0..=10.0 subjective friction score as stored at index time.
     pub pain: f64,
+    /// 0.0..=10.0 long-term relevance score as stored at index time.
     pub importance: f64,
+    /// Cluster occurrence count as stored at index time (bounded-staleness; see WEG-42).
     pub recurrence: u64,
+    /// Memory layer the document was indexed under.
     pub layer: Layer,
 }
 
@@ -46,7 +53,9 @@ pub struct RecallResult {
 /// [`recall`] never need to re-open columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredDoc {
+    /// BM25 x salience product, stored as `OrderedFloat` for heap comparison.
     score: OrderedFloat<f64>,
+    /// Tantivy address used to retrieve the stored document in [`recall`].
     doc_address: DocAddress,
     timestamp_sec: u64,
     pain: f64,
@@ -91,6 +100,8 @@ impl SegmentCollector for SalienceSegmentCollector {
         let rec = self.recurrence_col.first(doc).unwrap_or(0);
 
         let s = salience(self.now_sec, ts, p, imp, rec);
+        // Widen Tantivy's Score (f32) to f64 before multiplying to preserve
+        // sub-ULP precision in the salience product (relevant for --explain, DR-703).
         let final_score = (score as f64) * s;
 
         let entry = Reverse(ScoredDoc {
@@ -384,6 +395,10 @@ mod tests {
         assert!(results[0].pain > results[1].pain);
     }
 
+    /// Defends absolute score ordering on a deterministic 5-event corpus.
+    /// The insta snapshot pins the formula output so any drift in `salience()`
+    /// or the BM25 weighting is caught immediately rather than silently
+    /// changing recall rankings.
     #[test]
     fn test_recall_snapshot() {
         // Hand-authored 5-event corpus, two skill_action clusters. NOW_SEC
