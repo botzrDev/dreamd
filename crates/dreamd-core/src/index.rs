@@ -1,9 +1,14 @@
-//! Tantivy schema, layer enum, and index manifest for dreamd.
+//! Tantivy schema, layer enum, and index manifest for dreamd (WEG-41 / DR-202).
 //!
-//! This module defines the index schema only. It does not open a
-//! Tantivy index, write to disk, or implement `IndexHandle`. Those
-//! responsibilities belong to WEG-42 (`TantivyIndexHandle`) and the
-//! indexer entry point that will live in `dreamd-core::server`.
+//! Defines the index schema only; it does not open a Tantivy index, write to
+//! disk, or implement `IndexHandle`. Those responsibilities belong to WEG-42
+//! (`TantivyIndexHandle`) and the indexer that lives in `dreamd-core::server`.
+//!
+//! Key invariant (CLAUDE.md decision #2): **no indexed score field.** All four
+//! salience inputs (`pain`, `importance`, `recurrence`, `timestamp_sec`) are
+//! stored as FastFields and reweighted at query time by `collector::recall`.
+//! Do NOT add an indexed `score` field without re-reading DR-202 §4.2 and
+//! updating `crate::collector::SalienceCollector`.
 
 use serde::{Deserialize, Serialize};
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
@@ -78,13 +83,22 @@ impl std::str::FromStr for Layer {
 /// document write.
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaFields {
+    /// `TEXT | STORED` -- BM25 source and hydration target (WEG-43 promoted to STORED).
     pub content: Field,
+    /// `INDEXED | FAST` -- range queries and salience decay input.
     pub timestamp_sec: Field,
+    /// `FAST` only -- 0.0..=10.0 subjective friction score; salience input.
     pub pain: Field,
+    /// `FAST` only -- 0.0..=10.0 long-term relevance score; salience input.
     pub importance: Field,
+    /// `FAST` only -- cluster occurrence count at index time; salience input.
     pub recurrence: Field,
+    /// `STRING | STORED` -- raw-tokenized layer tag, e.g. `"episodic"`. Used
+    /// by `collector::recall` to filter results by [`Layer`].
     pub layer: Field,
+    /// `FAST` only -- Unix seconds of last cluster reconciliation (future use).
     pub last_updated_sec: Field,
+    /// `FAST` only -- number of times this event has been cited (future use).
     pub cited_event_count: Field,
 }
 
@@ -333,6 +347,8 @@ mod tests {
         );
     }
 
+    /// Round-trip `IndexManifest::current()` through JSON and verify the
+    /// hardcoded version survives serde without truncation or mutation.
     #[test]
     fn manifest_roundtrip() {
         let original = IndexManifest::current();
@@ -342,6 +358,8 @@ mod tests {
         assert_eq!(deserialized.schema_version, "index/1.1");
     }
 
+    /// `SCHEMA_VERSION` must equal the hardcoded string so accidental bumps
+    /// (e.g. whitespace, prefix change) are caught before they reach CI.
     #[test]
     fn schema_version_constant_value() {
         assert_eq!(SCHEMA_VERSION, "index/1.1");
