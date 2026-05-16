@@ -486,8 +486,10 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "dreamd-protocol",
+ "insta",
  "lru 0.12.5",
  "nix",
+ "ordered-float",
  "serde",
  "serde_json",
  "tantivy",

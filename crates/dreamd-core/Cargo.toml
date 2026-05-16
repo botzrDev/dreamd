@@ -46,6 +46,11 @@ tracing = "0.1"
 # because `[[bin]]` targets in a library crate do not inherit dev-deps.
 # Version pin stays at "0.26" (resolved 0.26.1 in Cargo.lock); no bump.
 tantivy = "0.26"
+# WEG-43 salience collector — `OrderedFloat<f64>` for the BinaryHeap
+# `Ord` impl (f64 alone is only `PartialOrd`). Pin at "5" to match the
+# version already resolved transitively via tantivy (5.3.0 in Cargo.lock),
+# avoiding a duplicate compilation of the 4.x line.
+ordered-float = "5"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
@@ -57,6 +62,10 @@ nix = { version = "0.29", default-features = false, features = ["process", "fs",
 # that production code intentionally excludes.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 tempfile = "3"
+# WEG-43 snapshot test for the salience collector. Uses the workspace pin
+# (`insta = { version = "1", features = ["filters"] }`) so all snapshot
+# tests across the workspace share one major-version line.
+insta = { workspace = true }
 # WEG-24 measurement spike: tantivy IndexWriter open-cost / multi-process
 # reload / lock-cleanup-under-SIGKILL benchmark. Forced into the main
 # [dependencies] table below because `[[bin]]` targets in a library crate do

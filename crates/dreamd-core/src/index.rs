@@ -14,7 +14,24 @@ use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 /// WEG-49 (DR-210) is the startup gate that compares this constant to
 /// the value carried on the per-project index manifest and refuses to
 /// start on mismatch.
-pub const SCHEMA_VERSION: &str = "index/1.0";
+// bumped in WEG-43 when content gained STORED
+pub const SCHEMA_VERSION: &str = "index/1.1";
+
+/// Canonical field-name strings for the dreamd Tantivy schema.
+///
+/// Tantivy 0.26 `FastFieldReader::u64` / `::f64` take `&str` field names
+/// — not `Field` IDs from [`SchemaFields`]. These constants are the
+/// single source of truth used in both `build_schema()` and the
+/// salience collector (WEG-43), so a typo cannot drift across the two
+/// call sites.
+pub const CONTENT_FIELD: &str = "content";
+pub const TIMESTAMP_SEC_FIELD: &str = "timestamp_sec";
+pub const PAIN_FIELD: &str = "pain";
+pub const IMPORTANCE_FIELD: &str = "importance";
+pub const RECURRENCE_FIELD: &str = "recurrence";
+pub const LAYER_FIELD: &str = "layer";
+pub const LAST_UPDATED_SEC_FIELD: &str = "last_updated_sec";
+pub const CITED_EVENT_COUNT_FIELD: &str = "cited_event_count";
 
 /// Memory layer for an indexed document.
 ///
@@ -79,14 +96,16 @@ pub struct SchemaFields {
 /// reads at query time.
 pub fn build_schema() -> (Schema, SchemaFields) {
     let mut b = Schema::builder();
-    let content           = b.add_text_field("content", TEXT);
-    let timestamp_sec     = b.add_u64_field("timestamp_sec", INDEXED | FAST);
-    let pain              = b.add_f64_field("pain", FAST);
-    let importance        = b.add_f64_field("importance", FAST);
-    let recurrence        = b.add_u64_field("recurrence", FAST);
-    let layer             = b.add_text_field("layer", STRING | STORED);
-    let last_updated_sec  = b.add_u64_field("last_updated_sec", FAST);
-    let cited_event_count = b.add_u64_field("cited_event_count", FAST);
+    // content gains STORED in WEG-43 so recall results can be hydrated
+    // back to the original text without a separate JSONL lookup.
+    let content           = b.add_text_field(CONTENT_FIELD, TEXT | STORED);
+    let timestamp_sec     = b.add_u64_field(TIMESTAMP_SEC_FIELD, INDEXED | FAST);
+    let pain              = b.add_f64_field(PAIN_FIELD, FAST);
+    let importance        = b.add_f64_field(IMPORTANCE_FIELD, FAST);
+    let recurrence        = b.add_u64_field(RECURRENCE_FIELD, FAST);
+    let layer             = b.add_text_field(LAYER_FIELD, STRING | STORED);
+    let last_updated_sec  = b.add_u64_field(LAST_UPDATED_SEC_FIELD, FAST);
+    let cited_event_count = b.add_u64_field(CITED_EVENT_COUNT_FIELD, FAST);
 
     let schema = b.build();
     (
@@ -256,12 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn content_is_indexed_not_stored() {
+    fn content_is_indexed_and_stored() {
+        // WEG-43 promoted `content` from TEXT to TEXT | STORED so recall
+        // results can hydrate the document text without a JSONL lookup.
         let (schema, fields) = build_schema();
         let entry = schema.get_field_entry(fields.content);
         match entry.field_type() {
             FieldType::Str(opts) => {
-                assert!(!opts.is_stored(), "content should not be stored");
+                assert!(opts.is_stored(), "content should be stored (WEG-43)");
                 assert!(
                     opts.get_indexing_options().is_some(),
                     "content should be indexed (BM25-scorable)"
@@ -318,12 +339,12 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: IndexManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
-        assert_eq!(deserialized.schema_version, "index/1.0");
+        assert_eq!(deserialized.schema_version, "index/1.1");
     }
 
     #[test]
     fn schema_version_constant_value() {
-        assert_eq!(SCHEMA_VERSION, "index/1.0");
+        assert_eq!(SCHEMA_VERSION, "index/1.1");
     }
 
     #[test]
@@ -338,21 +359,23 @@ mod tests {
     fn manifest_current() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index_manifest.json");
-        std::fs::write(&path, r#"{"schema_version":"index/1.0"}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":"index/1.1"}"#).unwrap();
         let outcome = check_manifest_version(&path).unwrap();
         assert_eq!(outcome, ManifestCheckOutcome::Current);
     }
 
     #[test]
     fn manifest_needs_migration() {
+        // index/1.0 was the pre-WEG-43 schema (content was TEXT only); any
+        // on-disk index at 1.0 must be rebuilt before recall hydrates docs.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index_manifest.json");
-        std::fs::write(&path, r#"{"schema_version":"index/0.9"}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":"index/1.0"}"#).unwrap();
         let outcome = check_manifest_version(&path).unwrap();
         assert_eq!(
             outcome,
             ManifestCheckOutcome::NeedsMigration {
-                from: "index/0.9".to_owned(),
+                from: "index/1.0".to_owned(),
             }
         );
     }
@@ -366,7 +389,7 @@ mod tests {
         match err {
             ManifestVersionError::TooNew { manifest, binary } => {
                 assert_eq!(manifest, "index/2.0");
-                assert_eq!(binary, "index/1.0");
+                assert_eq!(binary, "index/1.1");
             }
             other => panic!("expected TooNew, got {other:?}"),
         }
