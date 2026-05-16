@@ -23,8 +23,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # `sync` for mpsc/oneshot (coordinator actor channel), `rt` + `macros` for
 # the WEG-21 test helper binary's `tokio::runtime::Builder::new_current_thread`
 # entry point and any future caller of `server::run` that constructs its own
-# runtime. Multi-threaded runtime still lives in the consuming CLI crate.
-tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros"] }
+# runtime, `time` for the WEG-42 indexer's commit-cadence ticker
+# (`tokio::time::interval` + `MissedTickBehavior::Skip`). Multi-threaded
+# runtime still lives in the consuming CLI crate.
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros", "time"] }
 dreamd-protocol = { path = "../dreamd-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,10 +37,14 @@ lru = "0.12"
 # Absent / NeedsMigration outcomes. Per-crate only — no workspace promotion
 # until a second consumer appears (WEG-41-A drift catalog entry).
 tracing = "0.1"
-# WEG-24 spike-only. Reached by `tests/bin/tantivy_spike.rs` (a `[[bin]]`
-# target with `test = false, bench = false, doc = false`). Library code does
-# NOT use tantivy yet — that's WEG-41. Living here is a cargo-mechanics
-# necessity: `[[bin]]` targets don't see `[dev-dependencies]`.
+# Tantivy 0.26 — promoted to a real library dependency by WEG-42 (DR-202).
+# `server::tantivy_handle::TantivyIndexHandle` opens the per-project index,
+# runs startup replay, and drives the 5-second commit cadence. The WEG-24
+# spike binary (`tests/bin/tantivy_spike.rs`, `test = false, bench = false,
+# doc = false`) continues to reach this dep; living in `[dependencies]`
+# (not `[dev-dependencies]`) is also the WEG-24 cargo-mechanics necessity
+# because `[[bin]]` targets in a library crate do not inherit dev-deps.
+# Version pin stays at "0.26" (resolved 0.26.1 in Cargo.lock); no bump.
 tantivy = "0.26"
 
 [target.'cfg(unix)'.dependencies]

@@ -67,7 +67,7 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     println!("BIND_OK");
     let _ = std::io::stdout().flush();
 
-    let supervisor = match Supervisor::start(&agent_root, 8) {
+    let supervisor = match Supervisor::start(&agent_root, 8, None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("writer: supervisor start failed: {e}");

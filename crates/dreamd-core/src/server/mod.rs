@@ -23,8 +23,10 @@
 
 pub mod index_map;
 pub mod lifecycle;
+pub mod tantivy_handle;
 pub mod uds;
 
 pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{ServerConfig, ServerError, Supervisor};
+pub use tantivy_handle::{IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 pub use uds::{bind_writer_socket, try_connect_existing, SocketGuard, UdsBindError};

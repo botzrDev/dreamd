@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::{AgentRoot, DaemonHome};
+use crate::server::tantivy_handle::IndexerMsg;
 
 /// Failure modes surfaced by the `server::run` entry point.
 #[derive(Debug, thiserror::Error)]
@@ -45,13 +46,19 @@ pub enum ServerError {
 /// Wiring config for the writer-process. `agent_root` selects the per-project
 /// JSONL; `daemon_home` selects the per-user UDS path. The pair lets
 /// `npx dreamd-mcp` resolve both without a separate config file.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub agent_root: AgentRoot,
     pub daemon_home: DaemonHome,
     /// Channel buffer between the UDS accept loop and the coordinator. A
     /// small bound is enough — a single client RTT writes one message.
     pub coordinator_channel_capacity: usize,
+    /// WEG-42 indexer hand-off. When `Some`, every successful coordinator
+    /// append `try_send`s an [`IndexerMsg::Append`] on this channel. The
+    /// caller (`server::run` entry point) constructs a `TantivyIndexHandle`,
+    /// extracts its sender via [`crate::server::TantivyIndexHandle::sender`],
+    /// and threads it here.
+    pub indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
 }
 
 impl ServerConfig {
@@ -60,6 +67,7 @@ impl ServerConfig {
             agent_root,
             daemon_home,
             coordinator_channel_capacity: 32,
+            indexer_tx: None,
         }
     }
 
@@ -94,7 +102,11 @@ impl Supervisor {
     /// binary's [`crate::index::SCHEMA_VERSION`]. A manifest newer than the
     /// binary aborts startup via [`ServerError::ManifestCheck`]; older or
     /// absent manifests log a `tracing::warn!` and proceed.
-    pub fn start(agent_root: &AgentRoot, channel_capacity: usize) -> Result<Self, ServerError> {
+    pub fn start(
+        agent_root: &AgentRoot,
+        channel_capacity: usize,
+        indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
+    ) -> Result<Self, ServerError> {
         let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
         match check_manifest_version(&manifest_path)? {
             ManifestCheckOutcome::Absent => {
@@ -114,7 +126,8 @@ impl Supervisor {
         }
 
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(channel_capacity);
-        let coordinator = MemoryCoordinator::open(agent_root, rx).map_err(ServerError::Coordinator)?;
+        let coordinator = MemoryCoordinator::open(agent_root, rx, indexer_tx)
+            .map_err(ServerError::Coordinator)?;
         let handle = tokio::spawn(coordinator.run());
         Ok(Self { tx, handle })
     }
@@ -286,7 +299,7 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor = Supervisor::start(&agent_root, 8).expect("start supervisor");
+        let supervisor = Supervisor::start(&agent_root, 8, None).expect("start supervisor");
         let client_tx = supervisor.sender();
 
         // Queue an append from a "client" sender, then drop it so the
@@ -338,7 +351,7 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor = Supervisor::start(&agent_root, 4).expect("start supervisor");
+        let supervisor = Supervisor::start(&agent_root, 4, None).expect("start supervisor");
         let stale_tx = supervisor.sender();
         supervisor.shutdown().await;
 
