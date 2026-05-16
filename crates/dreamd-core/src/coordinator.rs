@@ -84,6 +84,12 @@ pub struct MemoryCoordinator {
     /// (e.g., in tests against not-yet-created scratch dirs).
     agent_root_key: PathBuf,
     idempotency: LruCache<(PathBuf, String), EventId>,
+    /// WEG-42: optional hand-off to the per-project Tantivy indexer task.
+    /// `None` means "no indexer wired, append only" (existing tests). On
+    /// `TrySendError::Full` we log `warn!` and drop the update; on
+    /// `TrySendError::Closed` we log `warn!` once and drop the sender.
+    #[cfg(unix)]
+    indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
 }
 
 impl MemoryCoordinator {
@@ -96,9 +102,16 @@ impl MemoryCoordinator {
     pub fn open(
         agent_root: &AgentRoot,
         rx: mpsc::Receiver<MemoryCoordinatorMsg>,
+        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     ) -> std::io::Result<Self> {
         let path = agent_root.episodic_jsonl();
-        Self::open_at(&path, agent_root.project_root(), rx)
+        Self::open_at(
+            &path,
+            agent_root.project_root(),
+            rx,
+            #[cfg(unix)]
+            indexer_tx,
+        )
     }
 
     /// Lower-level constructor used by tests that need to point at a
@@ -107,6 +120,7 @@ impl MemoryCoordinator {
         jsonl_path: &Path,
         agent_root: &Path,
         rx: mpsc::Receiver<MemoryCoordinatorMsg>,
+        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     ) -> std::io::Result<Self> {
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -133,6 +147,8 @@ impl MemoryCoordinator {
             rx,
             agent_root_key,
             idempotency: LruCache::new(cap),
+            #[cfg(unix)]
+            indexer_tx,
         })
     }
 
@@ -203,7 +219,40 @@ impl MemoryCoordinator {
             self.idempotency.put(full_key, event_id.clone());
         }
 
+        // WEG-42 hand-off to the indexer task. Best-effort non-blocking
+        // try_send: `Full` is logged and dropped (next-startup replay
+        // covers the loss); `Closed` is logged once and the sender is
+        // dropped so we stop retrying.
+        #[cfg(unix)]
+        self.try_route_to_indexer(&event_id, &learning);
+
         Ok(event_id)
+    }
+
+    #[cfg(unix)]
+    fn try_route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
+        use tokio::sync::mpsc::error::TrySendError;
+        let Some(tx) = self.indexer_tx.as_ref() else {
+            return;
+        };
+        let msg = crate::server::tantivy_handle::IndexerMsg::Append {
+            event_id: event_id.clone(),
+            learning: learning.clone(),
+        };
+        match tx.try_send(msg) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "indexer channel full; dropping IndexerMsg::Append (recoverable via next-startup replay)"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
+                );
+                self.indexer_tx = None;
+            }
+        }
     }
 }
 
@@ -302,7 +351,14 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let coordinator = MemoryCoordinator::open_at(jsonl, root, rx).expect("open coord");
+        let coordinator = MemoryCoordinator::open_at(
+            jsonl,
+            root,
+            rx,
+            #[cfg(unix)]
+            None,
+        )
+        .expect("open coord");
         let handle = tokio::spawn(coordinator.run());
         (tx, handle)
     }
