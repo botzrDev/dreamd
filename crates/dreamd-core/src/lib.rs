@@ -6,6 +6,7 @@
 //! `.agent/` and `~/.agent/` paths via [`AgentRoot`] / [`DaemonHome`] rather
 //! than building strings.
 
+pub mod collector;
 pub mod coordinator;
 pub mod index;
 pub mod io;
@@ -13,6 +14,8 @@ pub mod layout;
 pub mod lessons;
 pub mod privacy;
 pub mod salience;
+
+pub use collector::{recall, RecallResult, SalienceCollector};
 
 // WEG-21 / DR-118: per-user UDS writer-process lifecycle. Unix-only; the
 // `server` submodules guard themselves with `#![cfg(unix)]` where they touch

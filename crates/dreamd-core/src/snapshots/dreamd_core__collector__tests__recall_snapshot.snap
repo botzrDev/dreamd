@@ -1,0 +1,34 @@
+---
+source: crates/dreamd-core/src/collector.rs
+assertion_line: 448
+expression: results
+---
+[
+    RecallResult {
+        score: <f64>,
+        content: "axum requires IntoResponse on error types",
+        timestamp_sec: 1749913600,
+        pain: 8.0,
+        importance: 9.0,
+        recurrence: 3,
+        layer: Episodic,
+    },
+    RecallResult {
+        score: <f64>,
+        content: "use ? not unwrap in axum handlers",
+        timestamp_sec: 1749395200,
+        pain: 6.0,
+        importance: 7.0,
+        recurrence: 3,
+        layer: Episodic,
+    },
+    RecallResult {
+        score: <f64>,
+        content: "axum extractor rejection pattern",
+        timestamp_sec: 1747408000,
+        pain: 5.0,
+        importance: 5.0,
+        recurrence: 3,
+        layer: Episodic,
+    },
+]
