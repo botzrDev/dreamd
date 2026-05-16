@@ -8,15 +8,13 @@
 //!
 //! Modes (selected by argv[1]):
 //!
-//!   * (no arg)                          — run full suite, print report-shaped
-//!                                         output on stdout, exit 0.
-//!   * `cold-open <index-path>`          — open IndexWriter once, print elapsed
-//!                                         ms on stdout, exit 0. Re-execed from
-//!                                         the parent for cold-open samples.
-//!   * `child-writer-stall <index-path>` — acquire writer lock, hold forever
-//!                                         (parent SIGKILLs us).
-//!   * `child-reader-reload <index-path>`— open reader, reload, print elapsed
-//!                                         ms and doc count, exit 0.
+//! - (no arg) — run full suite, print report-shaped output on stdout, exit 0.
+//! - `cold-open <index-path>` — open IndexWriter once, print elapsed ms on
+//!   stdout, exit 0. Re-execed from the parent for cold-open samples.
+//! - `child-writer-stall <index-path>` — acquire writer lock, hold forever
+//!   (parent SIGKILLs us).
+//! - `child-reader-reload <index-path>` — open reader, reload, print elapsed
+//!   ms and doc count, exit 0.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -340,7 +338,7 @@ fn measure_reader_reload(
             .into());
         }
         let s = String::from_utf8_lossy(&out.stdout);
-        let count_str = s.trim().split_whitespace().nth(1).unwrap_or("0");
+        let count_str = s.split_whitespace().nth(1).unwrap_or("0");
         count_str.parse::<usize>().unwrap_or(0)
     };
 
@@ -376,7 +374,7 @@ fn measure_reader_reload(
         .into());
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    let parts: Vec<&str> = s.trim().split_whitespace().collect();
+    let parts: Vec<&str> = s.split_whitespace().collect();
     let elapsed_ms: f64 = parts[0].parse()?;
     let visible_count: usize = parts.get(1).map(|p| p.parse().unwrap_or(0)).unwrap_or(0);
     Ok((elapsed_ms, baseline_count, visible_count))
