@@ -4,15 +4,17 @@ Guidance for Claude Code in this repo. **Most context lives in memory** — this
 
 ## Project status
 
-Pre-release. Sprint 1 of 6, complete. Fifteen Sprint-1 tickets shipped (WEG-5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 20, 21, 26, 28, 173); WEG-15 (reset workspace CLI) is the lone outstanding Sprint-1 item, queued for next session. Workspace version stays at `0.0.0` through v0.1 release-bump. Launch target: week 9. v0.1 wedge framing: see [[framing-a-wedge-competitor-research-additions-2026-05-12-founder-override]] (public) and [[grill-locked-decisions-2026-05-09]] (engineering, internal-only).
+Pre-release. Sprint 1 of 6, complete (16/16). Sprint-1 tickets shipped: WEG-5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 20, 21, 26, 28, 173. WEG-15 (reset workspace CLI / DR-113) closed in Linear 2026-05-14; post-ship verification on 2026-05-18 (HEAD 41aacb1) confirms `dreamd reset workspace --yes` ships and tests are green. Workspace version stays at `0.0.0` through v0.1 release-bump. Launch target: week 9. v0.1 wedge framing: see [[framing-a-wedge-competitor-research-additions-2026-05-12-founder-override]] (public) and [[grill-locked-decisions-2026-05-09]] (engineering, internal-only).
 
 The intended end-state architecture lives in `context/PRD.md` and `context/AGILE/plan1.md` — both gitignored and local-only. Treat those as engineering ground truth; on-disk code is partial. Latest dev-session detail in [[dreamd-pm-session-memory-2026-05-14b]].
 
 **Story → DR map for pending v0.1 work:**
-- `WEG-15 ↔ DR-113` — `dreamd reset workspace` CLI subcommand (last Sprint-1 ticket)
 - `WEG-50 ↔ DR-107` — `dreamd doctor --cluster-health` (Sprint 2)
 - `WEG-68` — `POST /api/v1/learn`: wire `Idempotency-Key` → `client_dedup_key` + `PayloadTooLarge` → HTTP 413
 - `WEG-81` — `npx dreamd-mcp` distribution (was blocked by WEG-17, now unblocked)
+
+**Backlog (post-v0.1, surfaced by recording-prep dry run 2026-05-18):**
+- `WEG-204` — `dreamd init`: surface project-root sentinel requirement in user-facing copy (Low / `epic-8-cli-lifecycle`)
 
 ## What dreamd is
 
