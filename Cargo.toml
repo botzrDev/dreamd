@@ -25,3 +25,7 @@ unsafe_code = "forbid"
 # Shared across crates for snapshot testing (WEG-20). The "filters" feature
 # enables redaction of build-specific values (SHA, date, target triple).
 insta = { version = "1", features = ["filters"] }
+# MCP SDK — server-side tooling + stdin/stdout transport for `dreamd mcp` (WEG-77).
+# Implements MCP spec 2025-11-25. Pinned to exact version; no crate adds this
+# directly until the mcp subcommand is wired.
+rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
