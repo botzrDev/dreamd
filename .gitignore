@@ -10,5 +10,7 @@ docs/
 
 # Added by cargo
 /target
+# Local task/spec assignment files, not repo artifacts
 /assignments
+# Per-project daemon state (config.toml, state.json); local-only
 /.agent/.dreamd/

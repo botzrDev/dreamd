@@ -21,6 +21,7 @@ const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
 
 const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
 
+/// Failure modes for init scaffolding and registry operations.
 #[derive(Debug)]
 pub enum InitError {
     NoProjectRoot,
@@ -52,6 +53,15 @@ struct State {
     last_dream_cycle_status: &'static str,
 }
 
+/// Scaffold the per-project `.agent/` directory tree and register it with
+/// the daemon home registry (`~/.agent/registry.toml`).
+///
+/// Idempotent: if `.agent/` already exists, prints a rerun message and
+/// returns `Ok(())`. Staging is done in a temp dir; the final rename is
+/// atomic within a single filesystem.
+///
+/// Returns [`InitError::NoProjectRoot`] if no sentinel (`.git/`,
+/// `Cargo.toml`, etc.) is found walking up from `cwd`.
 pub fn run(
     cwd: &Path,
     daemon_home: &Path,
@@ -116,6 +126,11 @@ pub fn run(
     Ok(())
 }
 
+/// Remove the current project's entry from `~/.agent/registry.toml`.
+///
+/// Does NOT delete the project's `.agent/` store. Idempotent: returns
+/// `Ok(())` with a benign "nothing to do" message if the project is not
+/// registered or the registry file is absent.
 pub fn uninstall_project(
     cwd: &Path,
     daemon_home: &Path,

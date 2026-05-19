@@ -2,20 +2,35 @@
 //!
 //! The write path lives in `dreamd-cli::commands::init::register_project`.
 //! This module is the read side: pure, no side effects.
+//!
+//! Key invariant: stored `ProjectEntry::root` values are canonicalized at
+//! write time. Reads canonicalize the query path the same way so that
+//! symlink-aliased directories resolve correctly.
+//!
+//! Do NOT add write logic here. Registry mutations belong in `dreamd-cli`
+//! because they require atomic-write coordination (`write_atomic`) that
+//! this crate intentionally does not own.
 
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// Top-level shape of `~/.agent/registry.toml`. The daemon iterates
+/// `projects` at startup to discover which project stores to serve.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
+    /// Known project roots, each added by `dreamd init`.
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
 }
 
+/// Single project registration. Currently only carries the root path;
+/// future fields (e.g., last-seen timestamp) will land here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEntry {
+    /// Canonicalized absolute path to the project root (written by
+    /// `dreamd init`, resolved via `std::fs::canonicalize`).
     pub root: String,
 }
 
@@ -64,7 +79,7 @@ mod tests {
     fn absent_registry_returns_none() {
         let path = std::path::PathBuf::from("/tmp/does_not_exist_weg75.toml");
         let result = resolve_project(&path, std::path::Path::new("/some/project")).unwrap();
-        assert!(result.is_none());
+        assert!(result.is_none(), "absent registry must yield None, not Err");
     }
 
     #[test]
@@ -86,7 +101,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = write_registry(&["/some/other/project"]);
         let result = resolve_project(f.path(), dir.path()).unwrap();
-        assert!(result.is_none());
+        assert!(result.is_none(), "unregistered path must yield None");
     }
 
     #[test]
@@ -94,7 +109,7 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         write!(f, "this is not valid toml ][[\n").unwrap();
         let result = resolve_project(f.path(), std::path::Path::new("/any"));
-        assert!(result.is_err());
+        assert!(result.is_err(), "malformed TOML must produce Err, not panic");
     }
 
     #[test]
