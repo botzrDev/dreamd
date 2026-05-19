@@ -121,11 +121,17 @@ pub fn uninstall_project(
     daemon_home: &Path,
     quiet: bool,
     out: &mut dyn Write,
-    _err: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), InitError> {
     let project_root = match find_project_root(cwd) {
         Some(r) => r,
-        None => return Err(InitError::NoProjectRoot),
+        None => {
+            writeln!(
+                err,
+                "dreamd: error \u{2014} no project root found. Run from inside a project directory (must contain .git/, Cargo.toml, package.json, or pyproject.toml)."
+            )?;
+            return Err(InitError::NoProjectRoot);
+        }
     };
 
     let daemon = DaemonHome::new(daemon_home);
