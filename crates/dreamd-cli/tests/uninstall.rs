@@ -1,4 +1,14 @@
 //! Integration tests for `dreamd init --uninstall-project`.
+//!
+//! Defends three invariant classes:
+//!   1. Registry mutation correctness: a registered project is cleanly removed.
+//!   2. Idempotency: double-uninstall and uninstall-when-absent are both Ok.
+//!   3. Quiet-mode output suppression (golden-file byte-lock contract).
+//!
+//! These tests exercise the public `init::uninstall_project` function
+//! directly (in-process), not via subprocess. Subprocess-level testing
+//! of the `--uninstall-project` flag is covered by the CLI help snapshot
+//! tests in `tests/snapshots/`.
 
 use std::io::Cursor;
 
@@ -32,6 +42,8 @@ fn register_project() -> (tempfile::TempDir, tempfile::TempDir) {
     (daemon_home, project)
 }
 
+/// Happy-path contract: a registered project is removed from the TOML
+/// and the success message appears on stdout.
 #[test]
 fn uninstall_removes_registry_entry() {
     let (daemon_home, project) = register_project();
@@ -65,6 +77,7 @@ fn uninstall_removes_registry_entry() {
     );
 }
 
+/// Registry-absent case must return Ok, not panic or Err.
 #[test]
 fn uninstall_when_not_registered_exits_ok() {
     let daemon_home = fake_daemon_home();
@@ -88,6 +101,7 @@ fn uninstall_when_not_registered_exits_ok() {
     );
 }
 
+/// Double-uninstall must not panic, error, or corrupt the registry.
 #[test]
 fn uninstall_is_idempotent() {
     let (daemon_home, project) = register_project();
@@ -110,6 +124,8 @@ fn uninstall_is_idempotent() {
     );
 }
 
+/// Quiet mode must suppress all stdout, defending the golden-file
+/// byte-lock contract.
 #[test]
 fn quiet_uninstall_produces_no_output() {
     let (daemon_home, project) = register_project();

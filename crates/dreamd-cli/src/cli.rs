@@ -14,6 +14,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use crate::commands;
 use crate::commands::version::VERSION_SHORT;
 
+/// Root CLI parser. Routes to subcommands or handles `--version`.
 #[derive(Parser)]
 #[command(
     name = "dreamd",
@@ -29,6 +30,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
     /// Scaffold per-project .agent/ store and register it with the daemon.
@@ -39,6 +41,7 @@ pub enum Command {
     Version,
 }
 
+/// Arguments for the `dreamd init` subcommand.
 #[derive(Args)]
 pub struct InitArgs {
     /// Suppress non-essential output (state.json, .gitignore, registry, disclosure).
