@@ -78,6 +78,46 @@ impl Drop for SocketGuard {
     }
 }
 
+/// Core bind logic: attempt to bind `path` as a `UnixListener`, handling
+/// `AddrInUse` by probing the existing socket for liveness.
+///
+/// * Success → returns the bound `UnixListener` (already chmod'd `0600`).
+/// * Live competitor → returns [`UdsBindError::AlreadyBound`] with a
+///   connected stream.
+/// * Stale/orphaned file → unlinks and re-binds transparently.
+///
+/// Exposed as `pub(crate)` so `uds_server` can call it directly without
+/// duplicating the bind-and-recover logic.
+pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError> {
+    match UnixListener::bind(path) {
+        Ok(l) => {
+            chmod_0600(path)?;
+            Ok(l)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            match try_connect_existing(path) {
+                Ok(stream) => Err(UdsBindError::AlreadyBound(stream)),
+                Err(e) if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) => {
+                    // Orphaned socket file: previous writer-process exited
+                    // without cleanup. Unlink and re-bind. We treat NotFound
+                    // as orphaned too — a race where the file vanished
+                    // between the AddrInUse bind and the connect attempt is
+                    // safe to retry as a fresh bind.
+                    std::fs::remove_file(path)?;
+                    let l = UnixListener::bind(path)?;
+                    chmod_0600(path)?;
+                    Ok(l)
+                }
+                Err(e) => Err(UdsBindError::Io(e)),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Try to claim the writer-process socket at `path`.
 ///
 /// On success, returns a [`SocketGuard`] owning the bound listener and
@@ -91,42 +131,12 @@ pub fn bind_writer_socket(path: &Path) -> Result<SocketGuard, UdsBindError> {
         std::fs::create_dir_all(parent)?;
     }
 
-    match UnixListener::bind(path) {
-        Ok(listener) => {
-            chmod_0600(path)?;
-            Ok(SocketGuard {
-                listener,
-                path: path.to_path_buf(),
-                unlink_on_drop: true,
-            })
-        }
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse => match UnixStream::connect(path) {
-            Ok(stream) => Err(UdsBindError::AlreadyBound(stream)),
-            Err(connect_err) => {
-                if matches!(
-                    connect_err.kind(),
-                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                ) {
-                    // Orphaned socket file: previous writer-process exited
-                    // without cleanup. Unlink and re-bind. We treat NotFound
-                    // as orphaned too — a race where the file vanished
-                    // between the AddrInUse bind and the connect attempt is
-                    // safe to retry as a fresh bind.
-                    let _ = std::fs::remove_file(path);
-                    let listener = UnixListener::bind(path)?;
-                    chmod_0600(path)?;
-                    Ok(SocketGuard {
-                        listener,
-                        path: path.to_path_buf(),
-                        unlink_on_drop: true,
-                    })
-                } else {
-                    Err(UdsBindError::Io(connect_err))
-                }
-            }
-        },
-        Err(e) => Err(UdsBindError::Io(e)),
-    }
+    let listener = bind_socket_raw(path)?;
+    Ok(SocketGuard {
+        listener,
+        path: path.to_path_buf(),
+        unlink_on_drop: true,
+    })
 }
 
 /// Open a client connection to the writer-process at `path`. Used by the
