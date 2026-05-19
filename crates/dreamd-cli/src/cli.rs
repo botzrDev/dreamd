@@ -35,6 +35,8 @@ pub struct Cli {
 pub enum Command {
     /// Scaffold per-project .agent/ store and register it with the daemon.
     Init(InitArgs),
+    /// Start the MCP server (bridges to daemon if running, otherwise in-process).
+    Mcp,
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
@@ -119,6 +121,16 @@ pub fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             }
+        }
+        Command::Mcp => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            commands::mcp::run(&cwd)
         }
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => {

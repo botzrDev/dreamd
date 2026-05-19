@@ -13,6 +13,7 @@ pub mod index;
 pub mod io;
 pub mod layout;
 pub mod lessons;
+pub mod mcp;
 pub mod privacy;
 pub mod registry;
 pub mod salience;
