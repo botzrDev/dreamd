@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use dreamd_core::config::CONFIG_TEMPLATE;
 use dreamd_core::io::write_atomic;
 use dreamd_core::privacy::DR413_DISCLOSURE;
+use dreamd_core::registry::{ProjectEntry, Registry};
 use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
 const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
@@ -49,17 +50,6 @@ struct State {
     daemon_version: &'static str,
     last_dream_cycle_at: Option<String>,
     last_dream_cycle_status: &'static str,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct Registry {
-    #[serde(default)]
-    projects: Vec<ProjectEntry>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ProjectEntry {
-    root: String,
 }
 
 pub fn run(
@@ -123,6 +113,56 @@ pub fn run(
         writeln!(out, "{DR413_DISCLOSURE}")?;
     }
 
+    Ok(())
+}
+
+pub fn uninstall_project(
+    cwd: &Path,
+    daemon_home: &Path,
+    quiet: bool,
+    out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> Result<(), InitError> {
+    let project_root = match find_project_root(cwd) {
+        Some(r) => r,
+        None => return Err(InitError::NoProjectRoot),
+    };
+
+    let daemon = DaemonHome::new(daemon_home);
+    let registry_path = daemon.registry_toml();
+
+    if !registry_path.exists() {
+        if !quiet {
+            writeln!(out, "dreamd: project not registered \u{2014} nothing to do.")?;
+        }
+        return Ok(());
+    }
+
+    let raw = fs::read_to_string(&registry_path)?;
+    let mut registry: Registry =
+        toml::from_str(&raw).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
+
+    let canonical =
+        fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_str = canonical.to_string_lossy().into_owned();
+
+    let before = registry.projects.len();
+    registry.projects.retain(|p| p.root != canonical_str);
+
+    if registry.projects.len() == before {
+        if !quiet {
+            writeln!(out, "dreamd: project not registered \u{2014} nothing to do.")?;
+        }
+        return Ok(());
+    }
+
+    let serialized =
+        toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
+    write_atomic(&registry_path, serialized.as_bytes())?;
+
+    if !quiet {
+        writeln!(out, "unregistered .agent/ from ~/.agent/registry.toml")?;
+    }
     Ok(())
 }
 

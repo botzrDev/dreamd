@@ -59,6 +59,7 @@ ordered-float = "5"
 # greenlit before add.
 figment = { version = "0.10", features = ["toml"] }
 dirs = "5"
+toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

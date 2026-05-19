@@ -44,6 +44,10 @@ pub struct InitArgs {
     /// Suppress non-essential output (state.json, .gitignore, registry, disclosure).
     #[arg(long)]
     pub quiet: bool,
+    /// Remove this project's entry from ~/.agent/registry.toml and exit.
+    /// Does not delete the project's .agent/ store.
+    #[arg(long)]
+    pub uninstall_project: bool,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -91,9 +95,6 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            // Resolve daemon home to ~/.agent/. Falls back to a relative
-            // ".agent" if $HOME is unset (e.g., containerized CI); real
-            // registry writes are deferred to DR-412.
             let daemon_home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|h| h.join(".agent"))
@@ -102,7 +103,12 @@ pub fn run() -> ExitCode {
             let stderr = std::io::stderr();
             let mut out = stdout.lock();
             let mut err = stderr.lock();
-            match commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err) {
+            let result = if args.uninstall_project {
+                commands::init::uninstall_project(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+            } else {
+                commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+            };
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
                 Err(commands::init::InitError::Io(e)) => {
