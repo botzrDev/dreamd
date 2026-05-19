@@ -14,6 +14,7 @@ pub mod io;
 pub mod layout;
 pub mod lessons;
 pub mod privacy;
+pub mod registry;
 pub mod salience;
 
 pub use collector::{recall, RecallResult, SalienceCollector};

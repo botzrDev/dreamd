@@ -11,5 +11,8 @@ Options:
       --quiet
           Suppress non-essential output (state.json, .gitignore, registry, disclosure)
 
+      --uninstall-project
+          Remove this project's entry from ~/.agent/registry.toml and exit. Does not delete the project's .agent/ store
+
   -h, --help
           Print help
