@@ -26,7 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # runtime, `time` for the WEG-42 indexer's commit-cadence ticker
 # (`tokio::time::interval` + `MissedTickBehavior::Skip`). Multi-threaded
 # runtime still lives in the consuming CLI crate.
-tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros", "time", "net", "io-util"] }
 dreamd-protocol = { path = "../dreamd-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -60,6 +60,15 @@ ordered-float = "5"
 figment = { version = "0.10", features = ["toml"] }
 dirs = "5"
 toml = "0.8"
+# MCP server for `dreamd mcp` (WEG-77). Workspace dep — features ["server",
+# "transport-io"] pull in schemars; `macros` feature is on by default so
+# #[tool] / #[tool_router] / #[tool_handler] are available without an explicit
+# feature flag.
+rmcp = { workspace = true }
+# schemars is pulled transitively by rmcp (1.2.1 in Cargo.lock); listed as a
+# direct dep so #[derive(JsonSchema)] proc-macro can resolve the crate name.
+# Pin to "1" to match the resolved major already in the lockfile.
+schemars = "1"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
