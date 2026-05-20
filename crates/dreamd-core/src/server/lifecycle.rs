@@ -20,6 +20,7 @@
 //!    supervisor.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -27,6 +28,25 @@ use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::tantivy_handle::IndexerMsg;
+
+/// Default bound for the coordinator mpsc channel (architecture decision C14).
+/// Revisit after load-testing in DR-208 / DR-808.
+pub const COORDINATOR_CHANNEL_CAPACITY: usize = 256;
+
+/// Timeout for non-blocking coordinator sends from API handlers.
+/// On expiry the caller returns 503 Service Unavailable + Retry-After: 1.
+pub const COORDINATOR_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Error returned by [`Supervisor::try_send`] when the coordinator channel
+/// is full or has closed. Pattern-matched by Axum handlers (WEG-67+) to
+/// produce the correct HTTP response.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CoordinatorSendError {
+    /// Channel buffer was full when the timeout expired. → 503 Retry-After:1
+    Full,
+    /// Coordinator task has exited; daemon is shutting down. → 503 no retry
+    Closed,
+}
 
 /// Failure modes surfaced by the `server::run` entry point.
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +86,7 @@ impl ServerConfig {
         Self {
             agent_root,
             daemon_home,
-            coordinator_channel_capacity: 32,
+            coordinator_channel_capacity: COORDINATOR_CHANNEL_CAPACITY,
             indexer_tx: None,
         }
     }
@@ -136,6 +156,36 @@ impl Supervisor {
     /// own copy on `self.tx`; the shutdown drain depends on that retention.
     pub fn sender(&self) -> mpsc::Sender<MemoryCoordinatorMsg> {
         self.tx.clone()
+    }
+
+    /// Non-blocking coordinator send with a [`COORDINATOR_SEND_TIMEOUT`] timeout.
+    ///
+    /// Returns `Ok(())` on success. Returns `Err(CoordinatorSendError::Full)` if
+    /// the channel buffer is still full after the timeout; returns
+    /// `Err(CoordinatorSendError::Closed)` if the coordinator has exited.
+    ///
+    /// Axum handlers (WEG-67+) call this instead of cloning `tx` directly —
+    /// the method is the single enforcement point for the backpressure contract.
+    pub async fn try_send(
+        &self,
+        msg: MemoryCoordinatorMsg,
+    ) -> Result<(), CoordinatorSendError> {
+        match tokio::time::timeout(COORDINATOR_SEND_TIMEOUT, self.tx.send(msg)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(CoordinatorSendError::Closed),
+            Err(_elapsed) => Err(CoordinatorSendError::Full),
+        }
+    }
+
+    /// Test-only constructor: returns a `Supervisor` whose channel has capacity 1
+    /// and whose receiver is handed back to the caller. The coordinator task is
+    /// replaced with a no-op handle. Use this to test `try_send` behaviour
+    /// without starting a real `MemoryCoordinator`.
+    #[cfg(test)]
+    pub fn for_backpressure_test() -> (Self, mpsc::Receiver<MemoryCoordinatorMsg>) {
+        let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
+        let handle = tokio::spawn(async {});
+        (Self { tx, handle }, rx)
     }
 
     /// Drain and shut down the coordinator cleanly.
@@ -374,5 +424,54 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn try_send_full_channel_returns_full() {
+        // Capacity-1 channel, receiver held but never polled → sends block.
+        let (supervisor, _rx) = Supervisor::for_backpressure_test();
+        // Pre-fill synchronously (no scheduler yield) so the channel is at
+        // capacity before try_send is called.
+        let (resp_tx, _) = oneshot::channel();
+        supervisor
+            .sender()
+            .try_send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: None,
+                response_tx: resp_tx,
+            })
+            .expect("pre-fill must succeed on empty channel");
+        // Channel is now full; _rx is never polled, so the 100ms timeout fires.
+        let (resp_tx2, _) = oneshot::channel();
+        let result = supervisor
+            .try_send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: None,
+                response_tx: resp_tx2,
+            })
+            .await;
+        assert_eq!(result, Err(CoordinatorSendError::Full));
+    }
+
+    #[tokio::test]
+    async fn try_send_closed_channel_returns_closed() {
+        // Drop the receiver to simulate coordinator exit; send must return
+        // immediately with Closed (no timeout needed).
+        let (supervisor, rx) = Supervisor::for_backpressure_test();
+        drop(rx);
+        let (resp_tx, _) = oneshot::channel();
+        let result = supervisor
+            .try_send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: None,
+                response_tx: resp_tx,
+            })
+            .await;
+        assert_eq!(result, Err(CoordinatorSendError::Closed));
+    }
+
+    #[test]
+    fn coordinator_channel_capacity_constant_is_256() {
+        assert_eq!(COORDINATOR_CHANNEL_CAPACITY, 256);
     }
 }
