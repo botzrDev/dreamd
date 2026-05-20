@@ -21,6 +21,7 @@
 //!   * [`lifecycle`] — supervisor (owns `MemoryCoordinator` senders + handle)
 //!     and the Unix double-fork helper.
 
+pub mod http;
 pub mod index_map;
 pub mod lifecycle;
 pub mod tantivy_handle;
@@ -33,3 +34,4 @@ pub use lifecycle::{
 };
 pub use tantivy_handle::{IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 pub use uds::{bind_writer_socket, try_connect_existing, SocketGuard, UdsBindError};
+pub use http::{AppState, build_router};
