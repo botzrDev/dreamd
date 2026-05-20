@@ -58,6 +58,7 @@ function downloadFile(url, destPath) {
     const file = fs.createWriteStream(destPath);
     function get(u) {
       https.get(u, (res) => {
+        // GitHub Releases redirects the download to S3; follow one hop.
         if (res.statusCode === 301 || res.statusCode === 302) {
           return get(res.headers.location);
         }

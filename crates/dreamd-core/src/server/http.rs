@@ -191,7 +191,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry_path = dir.path().join("registry.toml");
 
-        // Write a registry TOML with the temp dir as a registered project.
         let root_str = dir.path().to_str().unwrap();
         let toml_content = format!(
             "[[projects]]\nroot = \"{}\"\nregistered_at = \"2026-05-20T00:00:00Z\"\n",
