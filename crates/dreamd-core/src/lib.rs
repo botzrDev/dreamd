@@ -15,6 +15,7 @@ pub mod layout;
 pub mod lessons;
 pub mod mcp;
 pub mod privacy;
+pub mod redaction;
 pub mod registry;
 pub mod salience;
 

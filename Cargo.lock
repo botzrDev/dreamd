@@ -627,6 +627,7 @@ dependencies = [
  "lru 0.12.5",
  "nix",
  "ordered-float",
+ "regex",
  "rmcp",
  "schemars",
  "serde",
