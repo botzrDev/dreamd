@@ -19,6 +19,10 @@ use crate::server::uds::bind_socket_raw;
 /// Creates the parent directory (mode `0700`) if it does not yet exist, then
 /// delegates to [`bind_socket_raw`] for the bind-and-recover logic and `0600`
 /// permissions. Returns a `UnixListener` ready for `accept` calls.
+///
+/// The directory is `0700` (not `0755`) so other users cannot stat the socket
+/// path at all — the socket `0600` alone would block connects but still expose
+/// the socket's existence. Defense-in-depth per DR-101 §Security.
 pub fn bind_api_socket(
     path: &Path,
 ) -> Result<std::os::unix::net::UnixListener, ServerError> {
