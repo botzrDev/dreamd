@@ -72,6 +72,9 @@ rmcp = { workspace = true }
 # direct dep so #[derive(JsonSchema)] proc-macro can resolve the crate name.
 # Pin to "1" to match the resolved major already in the lockfile.
 schemars = "1"
+# WEG-XX redaction module — already resolved transitively via tantivy (1.12.3
+# in Cargo.lock), so adding as a direct dep causes no resolution churn.
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
