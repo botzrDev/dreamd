@@ -101,7 +101,7 @@ impl MemoryMcpServer {
     /// Search episodic memory using BM25 × salience scoring.
     ///
     /// Returns a ranked list of matching learning entries.
-    #[tool(description = "Search episodic memory for relevant past learnings using BM25 × salience scoring. Returns a ranked list of matching entries.")]
+    #[tool(description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided.")]
     async fn search_nodes(
         &self,
         Parameters(p): Parameters<SearchNodesParams>,
@@ -116,7 +116,7 @@ impl MemoryMcpServer {
     /// Append a new learning node to episodic memory.
     ///
     /// The entry is durably fsynced before this call returns (DR-103).
-    #[tool(description = "Append a new learning to episodic memory. The entry is durably persisted (fdatasync) before this call returns.")]
+    #[tool(description = "Append a new learning to episodic memory -- use when: note that, remember, log this, save this lesson.")]
     async fn append_node(
         &self,
         Parameters(p): Parameters<AppendNodeParams>,
