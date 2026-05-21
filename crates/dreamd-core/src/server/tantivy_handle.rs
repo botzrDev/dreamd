@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use dreamd_protocol::{AgentLearning, EventId};
 use serde::{Deserialize, Serialize};
 use tantivy::directory::MmapDirectory;
-use tantivy::{doc, Index, IndexWriter, TantivyDocument};
+use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -134,6 +134,7 @@ impl IndexerHandle {
 pub struct TantivyIndexHandle {
     last_used: Mutex<Instant>,
     indexer: IndexerHandle,
+    reader: IndexReader,
 }
 
 impl TantivyIndexHandle {
@@ -158,6 +159,7 @@ impl TantivyIndexHandle {
         let (schema, fields) = build_schema();
         let mmap_dir = MmapDirectory::open(&index_dir).map_err(tantivy_io_to_index)?;
         let index = Index::open_or_create(mmap_dir, schema).map_err(tantivy_to_index)?;
+        let reader = index.reader().map_err(tantivy_to_index)?;
         let mut writer: IndexWriter<TantivyDocument> =
             index.writer(WRITER_HEAP_BYTES).map_err(tantivy_to_index)?;
 
@@ -204,6 +206,7 @@ impl TantivyIndexHandle {
         Ok(Self {
             last_used: Mutex::new(Instant::now()),
             indexer: IndexerHandle { tx, join },
+            reader,
         })
     }
 
@@ -211,6 +214,12 @@ impl TantivyIndexHandle {
     /// `MemoryCoordinator::open` so coordinator appends route to this index.
     pub fn sender(&self) -> mpsc::Sender<IndexerMsg> {
         self.indexer.sender()
+    }
+
+    /// Returns a reference to the Tantivy `IndexReader` for this project.
+    /// Used by HTTP handlers to execute recall queries (WEG-69).
+    pub fn reader(&self) -> &IndexReader {
+        &self.reader
     }
 
     /// Update `last_used` to `Instant::now()`. Called by the supervisor on
@@ -1217,6 +1226,24 @@ mod tests {
             3,
             "drained appends must land on disk before indexer task exits"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-69 — reader() accessor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tantivy_handle_reader_is_accessible() {
+        let dir = unique_tmpdir("reader-access");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
+            .expect("open handle");
+        // Confirm reader() returns without panic and produces a usable searcher.
+        let _searcher = handle.reader().searcher();
+        handle.shutdown().await.expect("shutdown");
     }
 
     // -----------------------------------------------------------------------
