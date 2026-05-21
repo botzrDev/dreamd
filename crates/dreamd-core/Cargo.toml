@@ -75,6 +75,11 @@ schemars = "1"
 # WEG-XX redaction module — already resolved transitively via tantivy (1.12.3
 # in Cargo.lock), so adding as a direct dep causes no resolution churn.
 regex = "1"
+# WEG-72 / DR-407 — SO_PEERCRED middleware. `serve_uds` drives hyper-util's
+# auto-HTTP connection builder so each accepted UDS stream is served via
+# HTTP/1.1 or HTTP/2. Pin to "0.1" to match the 0.1.20 already resolved
+# transitively via axum.
+hyper-util = { version = "0.1", features = ["server", "http1", "http2"] }
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,
