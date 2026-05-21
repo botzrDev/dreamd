@@ -37,6 +37,16 @@ pub const MAX_LEARNING_LINE_BYTES: usize = 4096;
 
 const IDEMPOTENCY_CAPACITY: usize = 1024;
 
+/// The outcome of a successful coordinator append. Returned via the oneshot
+/// channel so the HTTP handler can include `deduplicated` in the response body.
+#[derive(Debug, PartialEq)]
+pub struct AppendOutcome {
+    pub id: EventId,
+    /// `true` when the idempotency LRU returned a cached `EventId` instead of
+    /// performing a new write.
+    pub deduplicated: bool,
+}
+
 /// Errors surfaced by the coordinator back to API handlers.
 #[derive(Debug, thiserror::Error)]
 pub enum CoordinatorError {
@@ -69,7 +79,7 @@ pub enum MemoryCoordinatorMsg {
     AppendLearning {
         learning: AgentLearning,
         client_dedup_key: Option<String>,
-        response_tx: oneshot::Sender<Result<EventId, CoordinatorError>>,
+        response_tx: oneshot::Sender<Result<AppendOutcome, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
     Shutdown { response_tx: oneshot::Sender<()> },
@@ -179,13 +189,16 @@ impl MemoryCoordinator {
         &mut self,
         mut learning: AgentLearning,
         client_dedup_key: Option<String>,
-    ) -> Result<EventId, CoordinatorError> {
+    ) -> Result<AppendOutcome, CoordinatorError> {
         // Idempotency lookup BEFORE any write. A hit short-circuits to the
         // cached EventId — no second line on disk.
         if let Some(key) = client_dedup_key.as_deref() {
             let full_key = (self.agent_root_key.clone(), key.to_owned());
             if let Some(cached) = self.idempotency.get(&full_key) {
-                return Ok(cached.clone());
+                return Ok(AppendOutcome {
+                    id: cached.clone(),
+                    deduplicated: true,
+                });
             }
         }
 
@@ -226,7 +239,10 @@ impl MemoryCoordinator {
         #[cfg(unix)]
         self.try_route_to_indexer(&event_id, &learning);
 
-        Ok(event_id)
+        Ok(AppendOutcome {
+            id: event_id,
+            deduplicated: false,
+        })
     }
 
     #[cfg(unix)]
@@ -388,7 +404,7 @@ mod tests {
         .await
         .expect("send append");
 
-        let minted = resp_rx.await.expect("oneshot recv").expect("append ok");
+        let minted = resp_rx.await.expect("oneshot recv").expect("append ok").id;
         // Coordinator overwrote the placeholder id with a freshly minted one.
         assert_ne!(minted, learning.id);
         assert!(minted.as_str().starts_with("evt_"));
@@ -421,7 +437,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let id1 = r1_rx.await.unwrap().unwrap();
+        let id1 = r1_rx.await.unwrap().unwrap().id;
 
         // Second call with same dedup key: must return same id, no new line.
         let (r2_tx, r2_rx) = oneshot::channel();
@@ -432,7 +448,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let id2 = r2_rx.await.unwrap().unwrap();
+        let id2 = r2_rx.await.unwrap().unwrap().id;
         assert_eq!(id1, id2, "dedup hit must return cached EventId");
 
         shutdown(tx, handle).await;
@@ -518,7 +534,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let _new_id = resp_rx.await.unwrap().expect("append after recovery");
+        let _new_id = resp_rx.await.unwrap().expect("append after recovery").id;
 
         shutdown(tx, handle).await;
 

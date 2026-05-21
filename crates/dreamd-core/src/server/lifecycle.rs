@@ -379,7 +379,8 @@ mod tests {
         let minted = resp_rx
             .await
             .expect("append oneshot must be resolved by drain")
-            .expect("append must succeed under drain");
+            .expect("append must succeed under drain")
+            .id;
         assert!(minted.as_str().starts_with("evt_"));
 
         // File on disk has exactly one line.

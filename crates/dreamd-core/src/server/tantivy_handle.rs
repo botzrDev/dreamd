@@ -1108,7 +1108,8 @@ mod tests {
         let minted = resp_rx
             .await
             .expect("recv resp")
-            .expect("append must succeed even when indexer channel is full");
+            .expect("append must succeed even when indexer channel is full")
+            .id;
         assert!(minted.as_str().starts_with("evt_"));
 
         let (sh_tx, sh_rx) = oneshot::channel();
@@ -1149,7 +1150,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let id1 = r1_rx.await.unwrap().unwrap();
+        let id1 = r1_rx.await.unwrap().unwrap().id;
 
         // Second append with same key — idempotency hit, no new write.
         let (r2_tx, r2_rx) = oneshot::channel();
@@ -1161,7 +1162,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let id2 = r2_rx.await.unwrap().unwrap();
+        let id2 = r2_rx.await.unwrap().unwrap().id;
         assert_eq!(id1, id2, "dedup hit returns cached id");
 
         // Drain indexer rx and assert exactly one IndexerMsg::Append.
