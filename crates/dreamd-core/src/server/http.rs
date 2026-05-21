@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Extension, Json, State};
+use axum::extract::{Extension, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use dreamd_protocol::AgentLearning;
@@ -74,7 +74,7 @@ struct LearnResponse {
 pub fn build_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/api/v1/learn", axum::routing::post(post_learn))
-        .route("/api/v1/recall", axum::routing::get(stub_handler))
+        .route("/api/v1/recall", axum::routing::get(get_recall))
         .route("/api/v1/dream", axum::routing::post(stub_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -85,6 +85,90 @@ pub fn build_router(state: AppState) -> axum::Router {
 
 async fn stub_handler() -> axum::http::StatusCode {
     axum::http::StatusCode::NOT_IMPLEMENTED
+}
+
+#[derive(serde::Deserialize)]
+struct RecallParams {
+    q: String,
+    k: Option<u32>,
+}
+
+#[derive(serde::Serialize)]
+struct RecallResponse {
+    results: Vec<RecallResultJson>,
+}
+
+#[derive(serde::Serialize)]
+struct RecallResultJson {
+    score: f64,
+    bm25: f64,
+    salience: f64,
+    source: String,
+    content: String,
+    metadata: RecallMeta,
+}
+
+#[derive(serde::Serialize)]
+struct RecallMeta {
+    timestamp_sec: u64,
+    pain: f64,
+    importance: f64,
+    recurrence: u64,
+}
+
+async fn get_recall(
+    State(state): State<AppState>,
+    Extension(entry): Extension<crate::registry::ProjectEntry>,
+    Query(params): Query<RecallParams>,
+) -> axum::response::Response {
+    let k = params.k.unwrap_or(5);
+    let now_sec = chrono::Utc::now().timestamp();
+
+    // Lock, clone the reader, release the lock before calling recall().
+    // IndexReader is Clone (Arc-wrapped); holding the Mutex across the
+    // Tantivy search would block every concurrent request for its duration.
+    let reader = {
+        let mut map = state.index_map.lock().unwrap();
+        let root_path = std::path::Path::new(&entry.root);
+        match map.get_or_open(root_path, |root| {
+            crate::server::TantivyIndexHandle::open(
+                &crate::layout::AgentRoot::new(root),
+                crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
+            )
+        }) {
+            Ok(handle) => handle.reader().clone(),
+            Err(e) => return error_500(&format!("index open failed: {e}")),
+        }
+    }; // lock released here
+
+    let (_, schema_fields) = crate::index::build_schema();
+
+    match crate::recall(&reader, &schema_fields, &params.q, k as usize, None, now_sec) {
+        Ok(results) => {
+            let json_results: Vec<RecallResultJson> = results
+                .into_iter()
+                .map(|r| RecallResultJson {
+                    score: r.score,
+                    bm25: r.bm25,
+                    salience: r.salience,
+                    source: format!("{:?}", r.layer).to_lowercase(),
+                    content: r.content,
+                    metadata: RecallMeta {
+                        timestamp_sec: r.timestamp_sec,
+                        pain: r.pain,
+                        importance: r.importance,
+                        recurrence: r.recurrence,
+                    },
+                })
+                .collect();
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(RecallResponse { results: json_results }),
+            )
+                .into_response()
+        }
+        Err(e) => error_500(&format!("recall failed: {e}")),
+    }
 }
 
 /// `POST /api/v1/learn` — DR-402.
@@ -660,5 +744,83 @@ mod tests {
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ── WEG-69: GET /api/v1/recall tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn recall_missing_q_param_returns_400() {
+        // Axum's Query extractor rejects a missing required field with 400.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn recall_empty_index_returns_empty_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall?q=test&k=5")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["results"],
+            serde_json::json!([]),
+            "empty index must return empty results array"
+        );
+    }
+
+    #[tokio::test]
+    async fn recall_returns_200_for_registered_root() {
+        // Smoke test: registered root + valid q param → 200 with results array.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall?q=axum&k=3")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(
+            json["results"].is_array(),
+            "response must contain a results array; got: {json:?}"
+        );
     }
 }

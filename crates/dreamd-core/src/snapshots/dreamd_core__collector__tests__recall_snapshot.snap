@@ -1,6 +1,6 @@
 ---
 source: crates/dreamd-core/src/collector.rs
-assertion_line: 448
+assertion_line: 480
 expression: results
 ---
 [
@@ -12,6 +12,8 @@ expression: results
         importance: 9.0,
         recurrence: 3,
         layer: Episodic,
+        bm25: <f64>,
+        salience: <f64>,
     },
     RecallResult {
         score: <f64>,
@@ -21,6 +23,8 @@ expression: results
         importance: 7.0,
         recurrence: 3,
         layer: Episodic,
+        bm25: <f64>,
+        salience: <f64>,
     },
     RecallResult {
         score: <f64>,
@@ -30,5 +34,7 @@ expression: results
         importance: 5.0,
         recurrence: 3,
         layer: Episodic,
+        bm25: <f64>,
+        salience: <f64>,
     },
 ]

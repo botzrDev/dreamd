@@ -46,6 +46,10 @@ pub struct RecallResult {
     pub recurrence: u64,
     /// Memory layer the document was indexed under.
     pub layer: Layer,
+    /// Raw BM25 score before the salience multiply, for the `--explain` formatter (DR-703).
+    pub bm25: f64,
+    /// Salience multiplier at query time, for the `--explain` formatter (DR-703).
+    pub salience: f64,
 }
 
 /// Per-doc bookkeeping kept on the heap. Fast-field values are cached
@@ -61,6 +65,10 @@ pub struct ScoredDoc {
     pain: f64,
     importance: f64,
     recurrence: u64,
+    /// Raw BM25 score captured before the salience multiply (Tantivy's `f32 Score` widened to `f64`).
+    pub bm25: f64,
+    /// Salience multiplier computed at `collect()` time from the four FastFields.
+    pub salience: f64,
 }
 
 impl Eq for ScoredDoc {}
@@ -99,10 +107,11 @@ impl SegmentCollector for SalienceSegmentCollector {
         let imp = self.importance_col.first(doc).unwrap_or(0.0);
         let rec = self.recurrence_col.first(doc).unwrap_or(0);
 
-        let s = salience(self.now_sec, ts, p, imp, rec);
-        // Widen Tantivy's Score (f32) to f64 before multiplying to preserve
-        // sub-ULP precision in the salience product (relevant for --explain, DR-703).
-        let final_score = (score as f64) * s;
+        // Capture bm25 and salience before multiplying — after the product they are
+        // unrecoverable (0*anything=0; needed for the --explain formatter, DR-703).
+        let bm25 = score as f64;
+        let sal = salience(self.now_sec, ts, p, imp, rec);
+        let final_score = bm25 * sal;
 
         let entry = Reverse(ScoredDoc {
             score: OrderedFloat(final_score),
@@ -111,6 +120,8 @@ impl SegmentCollector for SalienceSegmentCollector {
             pain: p,
             importance: imp,
             recurrence: rec,
+            bm25,
+            salience: sal,
         });
 
         if self.heap.len() < self.k {
@@ -240,6 +251,8 @@ pub fn recall(
             .unwrap_or(Layer::Episodic);
         results.push(RecallResult {
             score: scored.score.0,
+            bm25: scored.bm25,
+            salience: scored.salience,
             content,
             timestamp_sec: scored.timestamp_sec,
             pain: scored.pain,
@@ -456,9 +469,13 @@ mod tests {
         )
         .unwrap();
         insta::with_settings!({
-            // Score values are formula-derived f64s — round to keep the
-            // snapshot stable under irrelevant floating-point drift.
-            filters => vec![(r"score: -?\d+\.\d+", "score: <f64>")],
+            // Numeric fields are formula-derived f64s — filter all three so the
+            // snapshot stays stable under irrelevant floating-point drift (DR-703).
+            filters => vec![
+                (r"score: -?\d+\.\d+", "score: <f64>"),
+                (r"bm25: -?\d+\.\d+", "bm25: <f64>"),
+                (r"salience: -?\d+\.\d+", "salience: <f64>"),
+            ],
         }, {
             insta::assert_debug_snapshot!(results);
         });
