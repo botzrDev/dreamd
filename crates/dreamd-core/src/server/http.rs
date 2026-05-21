@@ -3,10 +3,11 @@
 //! `AppState` — shared state cloned into every request.
 //! `build_router` — mounts `/api/v1` routes with `X-Agent-Root` middleware.
 //! `agent_root_middleware` — validates header + registry lookup on every request.
+//! `peer_uid_middleware` — WEG-72 / DR-407: SO_PEERCRED owner-UID enforcement.
 //! `post_learn` — WEG-68 / DR-402: validate → normalise → redact → dispatch → 201.
 //!
-//! Out of scope here: TraceLayer (WEG-144), SO_PEERCRED (WEG-72), TCP binding
-//! (WEG-73), TantivyIndexHandle::reader (WEG-69).
+//! Out of scope here: TraceLayer (WEG-144), TCP binding (WEG-73),
+//! TantivyIndexHandle::reader (WEG-69).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,12 @@ use crate::registry::ProjectEntry;
 use crate::server::lifecycle::CoordinatorSendError;
 use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 
+/// Peer UID injected at connection-accept time by `serve_uds`.
+/// Extracted by `peer_uid_middleware` to enforce daemon-owner-only access.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub struct PeerUid(pub u32);
+
 /// Shared application state cloned into every Axum request via
 /// `State<AppState>`. All fields behind `Arc` so cloning is cheap.
 ///
@@ -38,12 +45,17 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 /// `index_map` — lazy-opened per-project Tantivy handles. `Mutex` (not
 /// `RwLock`) because `ProjectIndexMap::get_or_open` is `&mut self` even
 /// for reads (mutates LRU ordering).
+///
+/// `daemon_uid` — UID of the process that started the daemon. Used by
+/// `peer_uid_middleware` (WEG-72 / DR-407) to reject connections from other
+/// users. Set to `nix::unistd::Uid::current().as_raw()` at startup.
 #[derive(Clone)]
 pub struct AppState {
     pub registry_path: PathBuf,
     pub supervisor: Arc<Supervisor>,
     pub config: Arc<Config>,
     pub index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
+    pub daemon_uid: u32,
 }
 
 impl AppState {
@@ -52,12 +64,14 @@ impl AppState {
         supervisor: Supervisor,
         config: Config,
         index_map: ProjectIndexMap<TantivyIndexHandle>,
+        daemon_uid: u32,
     ) -> Self {
         Self {
             registry_path,
             supervisor: Arc::new(supervisor),
             config: Arc::new(config),
             index_map: Arc::new(Mutex::new(index_map)),
+            daemon_uid,
         }
     }
 }
@@ -70,17 +84,25 @@ struct LearnResponse {
     deduplicated: bool,
 }
 
-/// Build the `/api/v1` router with `X-Agent-Root` validation middleware.
+/// Build the `/api/v1` router with `X-Agent-Root` validation middleware and,
+/// on Unix, `peer_uid_middleware` (WEG-72 / DR-407) as the outermost layer.
 pub fn build_router(state: AppState) -> axum::Router {
-    axum::Router::new()
+    let router = axum::Router::new()
         .route("/api/v1/learn", axum::routing::post(post_learn))
         .route("/api/v1/recall", axum::routing::get(get_recall))
         .route("/api/v1/dream", axum::routing::post(stub_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent_root_middleware,
-        ))
-        .with_state(state)
+        ));
+
+    #[cfg(unix)]
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        peer_uid_middleware,
+    ));
+
+    router.with_state(state)
 }
 
 async fn stub_handler() -> axum::http::StatusCode {
@@ -293,6 +315,39 @@ pub async fn agent_root_middleware(
     }
 }
 
+/// Enforce daemon-owner-only access by comparing the peer UID (injected at
+/// connection-accept time by `serve_uds`) to `state.daemon_uid`.
+///
+/// * Peer UID matches daemon UID → pass through to the next layer.
+/// * Peer UID present but wrong → 403 Forbidden, with a tracing warn.
+/// * No `PeerUid` extension (e.g., a non-UDS path or test without injection) → 403.
+#[cfg(unix)]
+pub async fn peer_uid_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer_uid = req.extensions().get::<PeerUid>().map(|p| p.0);
+
+    match peer_uid {
+        Some(uid) if uid == state.daemon_uid => next.run(req).await,
+        Some(uid) => {
+            tracing::warn!(peer_uid = uid, daemon_uid = state.daemon_uid, "UID mismatch -- 403");
+            error_403("forbidden: peer UID does not match daemon owner")
+        }
+        None => error_403("forbidden: peer UID not available"),
+    }
+}
+
+#[cfg(unix)]
+fn error_403(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 fn error_400(msg: &str) -> axum::response::Response {
     (
         axum::http::StatusCode::BAD_REQUEST,
@@ -342,6 +397,7 @@ mod tests {
             supervisor: Arc::new(supervisor),
             config: Arc::new(config),
             index_map: Arc::new(Mutex::new(index_map)),
+            daemon_uid: nix::unistd::Uid::current().as_raw(),
         }
     }
 
@@ -358,7 +414,18 @@ mod tests {
             index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
                 ProjectIndexMapConfig::default(),
             ))),
+            daemon_uid: nix::unistd::Uid::current().as_raw(),
         }
+    }
+
+    /// Inject the current process UID as PeerUid extension.
+    /// Required because build_router now includes peer_uid_middleware which
+    /// expects PeerUid to be set (as serve_uds does at connection-accept time).
+    #[cfg(unix)]
+    fn with_peer_uid(mut req: axum::http::Request<Body>) -> axum::http::Request<Body> {
+        let uid = nix::unistd::Uid::current().as_raw();
+        req.extensions_mut().insert(PeerUid(uid));
+        req
     }
 
     fn write_registry(registry_path: &std::path::Path, root: &str) {
@@ -413,11 +480,11 @@ mod tests {
         let state = make_test_state(dir.path().join("registry.toml"));
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -429,12 +496,12 @@ mod tests {
         let state = make_test_state(dir.path().join("registry.toml"));
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", dir.path().to_str().unwrap())
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -453,12 +520,12 @@ mod tests {
         // Empty body without content-type: middleware passes (registered root),
         // Json extractor rejects with 415. Confirms middleware no longer
         // short-circuits with 501.
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -476,12 +543,12 @@ mod tests {
         let state = make_test_state(registry_path);
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -500,13 +567,13 @@ mod tests {
         let router = build_router(state);
 
         let body = sample_body("rust.cargo.test", "learned something useful");
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -532,13 +599,13 @@ mod tests {
 
         // `!` is outside [a-z0-9_:.-]
         let body = sample_body("rust!invalid", "body");
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -558,13 +625,13 @@ mod tests {
         let router = build_router(state);
 
         let body = sample_body("  Rust.Cargo.TEST  ", "normalisation test");
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED, "normalised form is valid");
@@ -582,13 +649,13 @@ mod tests {
         let router = build_router(state);
 
         let body = sample_body("rust.test", "body");
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             // deliberately omitting x-agent-root
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -607,22 +674,22 @@ mod tests {
         let body = sample_body("rust.test", "dedup content");
         let body_bytes = serde_json::to_vec(&body).unwrap();
 
-        let req1 = Request::builder()
+        let req1 = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .header("x-client-dedup-key", "idempotency-key-42")
             .body(Body::from(body_bytes.clone()))
-            .unwrap();
-        let req2 = Request::builder()
+            .unwrap());
+        let req2 = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .header("x-client-dedup-key", "idempotency-key-42")
             .body(Body::from(body_bytes))
-            .unwrap();
+            .unwrap());
 
         let resp1 = router.clone().into_service().oneshot(req1).await.unwrap();
         assert_eq!(resp1.status(), StatusCode::CREATED);
@@ -649,13 +716,13 @@ mod tests {
 
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let body = sample_body("rust.test", &format!("key is {secret}"));
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -699,17 +766,18 @@ mod tests {
             index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
                 ProjectIndexMapConfig::default(),
             ))),
+            daemon_uid: nix::unistd::Uid::current().as_raw(),
         };
         let router = build_router(state);
 
         let body = sample_body("rust.test", "will not land");
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -734,13 +802,13 @@ mod tests {
 
         // 5 KiB content guarantees the serialized line exceeds MAX_LEARNING_LINE_BYTES.
         let body = sample_body("rust.test", &"x".repeat(5 * 1024));
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
             .header("x-agent-root", root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -759,12 +827,12 @@ mod tests {
         let state = make_test_state(registry_path);
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("GET")
             .uri("/api/v1/recall")
             .header("x-agent-root", root_str)
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -780,12 +848,12 @@ mod tests {
         let state = make_test_state(registry_path);
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("GET")
             .uri("/api/v1/recall?q=test&k=5")
             .header("x-agent-root", root_str)
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -808,12 +876,12 @@ mod tests {
         let state = make_test_state(registry_path);
         let router = build_router(state);
 
-        let req = Request::builder()
+        let req = with_peer_uid(Request::builder()
             .method("GET")
             .uri("/api/v1/recall?q=axum&k=3")
             .header("x-agent-root", root_str)
             .body(Body::empty())
-            .unwrap();
+            .unwrap());
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -821,6 +889,108 @@ mod tests {
         assert!(
             json["results"].is_array(),
             "response must contain a results array; got: {json:?}"
+        );
+    }
+
+    // ── WEG-72: SO_PEERCRED middleware tests ─────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn peer_uid_middleware_allows_matching_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+
+        // Inject the correct UID — middleware should pass through.
+        // agent_root_middleware will reject with 400 (no X-Agent-Root), which is fine.
+        let req = with_peer_uid(Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall?q=test")
+            .body(Body::empty())
+            .unwrap());
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        // peer_uid check passes; agent_root check fails with 400 (no header)
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn peer_uid_middleware_rejects_wrong_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+
+        // Inject a UID that doesn't match daemon_uid.
+        let wrong_uid = nix::unistd::Uid::current().as_raw().wrapping_add(1);
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall?q=test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(PeerUid(wrong_uid));
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn peer_uid_middleware_rejects_missing_peer_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+
+        // No PeerUid extension — must be rejected.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/recall?q=test")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_uds_smoke_test() {
+        use crate::server::uds_server::{bind_api_socket, serve_uds};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("smoke.sock");
+        let registry_path = dir.path().join("registry.toml");
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let listener = bind_api_socket(&sock_path).expect("bind");
+        tokio::spawn(async move {
+            serve_uds(listener, router).await.ok();
+        });
+
+        // Give the accept loop a moment to start.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Connect from the same process (same UID = daemon_uid).
+        let stream = tokio::net::UnixStream::connect(&sock_path).await.expect("connect");
+
+        // Send a minimal HTTP/1.1 request. No X-Agent-Root → 400 after peer-uid passes.
+        // The exact status just confirms the accept loop is wired end-to-end.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = stream;
+        stream
+            .write_all(b"GET /api/v1/recall?q=test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read response");
+        let response_str = String::from_utf8_lossy(&response);
+        // peer_uid passes (same process UID), agent_root_middleware rejects with 400
+        assert!(
+            response_str.contains("400") || response_str.contains("404"),
+            "expected 400 or 404, got: {response_str}"
         );
     }
 }
