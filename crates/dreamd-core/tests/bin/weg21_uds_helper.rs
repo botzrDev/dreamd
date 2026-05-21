@@ -120,7 +120,7 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     drop(client_tx); // satisfy shutdown-drain invariant
 
     let minted: EventId = match resp_rx.await {
-        Ok(Ok(id)) => id,
+        Ok(Ok(outcome)) => outcome.id,
         Ok(Err(e)) => {
             eprintln!("writer: coordinator error: {e}");
             return ExitCode::from(8);
