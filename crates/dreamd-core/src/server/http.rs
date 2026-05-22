@@ -116,26 +116,26 @@ struct RecallParams {
 }
 
 #[derive(serde::Serialize)]
-struct RecallResponse {
-    results: Vec<RecallResultJson>,
+pub(crate) struct RecallResponse {
+    pub(crate) results: Vec<RecallResultJson>,
 }
 
 #[derive(serde::Serialize)]
-struct RecallResultJson {
-    score: f64,
-    bm25: f64,
-    salience: f64,
-    source: String,
-    content: String,
-    metadata: RecallMeta,
+pub(crate) struct RecallResultJson {
+    pub(crate) score: f64,
+    pub(crate) bm25: f64,
+    pub(crate) salience: f64,
+    pub(crate) source: String,
+    pub(crate) content: String,
+    pub(crate) metadata: RecallMeta,
 }
 
 #[derive(serde::Serialize)]
-struct RecallMeta {
-    timestamp_sec: u64,
-    pain: f64,
-    importance: f64,
-    recurrence: u64,
+pub(crate) struct RecallMeta {
+    pub(crate) timestamp_sec: u64,
+    pub(crate) pain: f64,
+    pub(crate) importance: f64,
+    pub(crate) recurrence: u64,
 }
 
 async fn get_recall(
