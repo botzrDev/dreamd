@@ -87,30 +87,108 @@ pub struct MemoryMcpServer {
     // dead-code pass does not see macro-generated usage, hence the allow.
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<MemoryMcpServer>,
+    agent_root: Option<AgentRoot>,
 }
 
 #[tool_router]
 impl MemoryMcpServer {
-    /// Create a new in-process memory MCP server.
+    /// Create a new in-process memory MCP server with no agent root.
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            agent_root: None,
+        }
+    }
+
+    /// Create a new in-process memory MCP server bound to a specific agent root.
+    pub fn with_agent_root(root: AgentRoot) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            agent_root: Some(root),
         }
     }
 
     /// Search episodic memory using BM25 × salience scoring.
     ///
     /// Returns a ranked list of matching learning entries.
+    #[cfg(unix)]
     #[tool(description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided.")]
     async fn search_nodes(
         &self,
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
-        // TODO(WEG-78): wire to recall() once the coordinator is reachable from
-        // this context. Currently returns an empty result set.
+        use crate::index::build_schema;
+        use crate::server::http::{RecallMeta, RecallResponse, RecallResultJson};
+        use crate::server::tantivy_handle::{DEFAULT_COMMIT_CADENCE, TantivyIndexHandle};
+
+        let k = p.k.unwrap_or(5) as usize;
+        let query = p.query;
+
+        let root = match &self.agent_root {
+            Some(r) => r.clone(),
+            None => {
+                // No agent root discovered — return empty results.
+                let resp = RecallResponse { results: vec![] };
+                let json = serde_json::to_string(&resp)
+                    .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
+                return Ok(CallToolResult::success(vec![Content::text(json)]));
+            }
+        };
+
+        // Open (or reuse) the Tantivy index for this agent root.
+        let handle = match TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE) {
+            Ok(h) => h,
+            Err(e) => {
+                let msg = format!("index open failed: {e}");
+                return Err(McpError::invalid_request(msg, None));
+            }
+        };
+
+        let reader = handle.reader().clone();
+        let (_, schema_fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+
+        match crate::recall(&reader, &schema_fields, &query, k, None, now_sec) {
+            Ok(results) => {
+                let json_results: Vec<RecallResultJson> = results
+                    .into_iter()
+                    .map(|r| RecallResultJson {
+                        score: r.score,
+                        bm25: r.bm25,
+                        salience: r.salience,
+                        source: format!("{:?}", r.layer).to_lowercase(),
+                        content: r.content,
+                        metadata: RecallMeta {
+                            timestamp_sec: r.timestamp_sec,
+                            pain: r.pain,
+                            importance: r.importance,
+                            recurrence: r.recurrence,
+                        },
+                    })
+                    .collect();
+                let resp = RecallResponse {
+                    results: json_results,
+                };
+                let json = serde_json::to_string(&resp)
+                    .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Err(McpError::invalid_request(format!("recall failed: {e}"), None)),
+        }
+    }
+
+    /// Search episodic memory using BM25 × salience scoring (non-Unix stub).
+    #[cfg(not(unix))]
+    #[tool(description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided.")]
+    async fn search_nodes(
+        &self,
+        Parameters(p): Parameters<SearchNodesParams>,
+    ) -> Result<CallToolResult, McpError> {
         let _query = p.query;
         let _k = p.k.unwrap_or(5);
-        Ok(CallToolResult::success(vec![Content::text("[]")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            r#"{"results":[]}"#,
+        )]))
     }
 
     /// Append a new learning node to episodic memory.
@@ -273,7 +351,12 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     let _ = &sock_path;
 
     // Phase 1: run in-process MCP server over stdio.
-    let svc = MemoryMcpServer::new()
+    // Attempt to discover the agent root so search_nodes can open the index.
+    let server = match AgentRoot::discover(cwd) {
+        Ok(root) => MemoryMcpServer::with_agent_root(root),
+        Err(_) => MemoryMcpServer::new(),
+    };
+    let svc = server
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|e| McpRunError::Service(e.to_string()))?;
@@ -283,4 +366,138 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         .map_err(|e| McpRunError::Service(e.to_string()))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a tempdir with the minimal `.agent/episodic/` layout so that
+    /// `AgentRoot::discover` and `TantivyIndexHandle::open` both succeed.
+    fn setup_agent_root(dir: &std::path::Path) -> AgentRoot {
+        let root = AgentRoot::new(dir);
+        std::fs::create_dir_all(root.episodic_dir()).expect("create episodic dir");
+        root
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_empty_store_returns_empty() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+
+        let server = MemoryMcpServer::with_agent_root(root);
+        let result = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "rust".to_string(),
+                k: Some(3),
+            }))
+            .await
+            .expect("search_nodes ok");
+
+        // Extract the text content from the result.
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .expect("text content present");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(text).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+        assert!(
+            results.is_empty(),
+            "empty index must return empty results; got: {parsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_seeded_index_returns_results() {
+        use crate::server::index_map::IndexHandle;
+        use crate::server::tantivy_handle::{
+            DEFAULT_COMMIT_CADENCE, IndexerMsg, TantivyIndexHandle,
+        };
+        use chrono::{DateTime, Utc};
+        use dreamd_protocol::{AgentLearning, EventId};
+        use rmcp::handler::server::wrapper::Parameters;
+        use tokio::sync::oneshot;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+
+        // Seed two learnings via the indexer so they are committed before recall.
+        {
+            let handle =
+                TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE).expect("open handle");
+            let tx = handle.sender();
+
+            for (suffix, content) in [('0', "rust async tokio channel"), ('1', "rust borrow checker lifetime")] {
+                let raw_id = format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{suffix}");
+                let id = EventId::parse(&raw_id).expect("valid event id");
+                let learning = AgentLearning {
+                    schema_version: "1.0".to_string(),
+                    id: id.clone(),
+                    timestamp: DateTime::parse_from_rfc3339("2026-05-22T10:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    pain: 7.0,
+                    importance: 8.0,
+                    pinned: false,
+                    skill_action: "rust.tokio".to_string(),
+                    source_harness: "test-harness".to_string(),
+                    content: content.to_string(),
+                };
+                tx.send(IndexerMsg::Append {
+                    event_id: id,
+                    learning,
+                })
+                .await
+                .expect("send append");
+            }
+
+            // Flush to ensure the commit lands before we query.
+            let (ack_tx, ack_rx) = oneshot::channel();
+            tx.send(IndexerMsg::Flush { ack: ack_tx })
+                .await
+                .expect("send flush");
+            ack_rx.await.expect("flush ack recv").expect("flush ok");
+
+            drop(tx);
+            handle.shutdown().await.expect("shutdown");
+        }
+
+        // Now query via search_nodes.
+        let server = MemoryMcpServer::with_agent_root(root);
+        let result = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "rust tokio async".to_string(),
+                k: Some(5),
+            }))
+            .await
+            .expect("search_nodes ok");
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content present");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+
+        assert!(
+            !results.is_empty(),
+            "seeded index must return at least one result; got: {parsed:?}"
+        );
+        let score = results[0]["score"].as_f64().expect("score field");
+        assert!(score > 0.0, "top result must have positive score; got {score}");
+    }
 }
