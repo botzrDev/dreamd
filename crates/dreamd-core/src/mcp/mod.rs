@@ -16,14 +16,18 @@
 
 use std::path::{Path, PathBuf};
 
+use dreamd_protocol::{AgentLearning, EventId};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
+use crate::coordinator::MemoryCoordinatorMsg;
 use crate::layout::{DaemonHome, LayoutError};
 use crate::privacy::DR413_DISCLOSURE;
+use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
 
 // ---------------------------------------------------------------------------
@@ -70,6 +74,9 @@ pub struct AppendNodeParams {
     pub pain: Option<f64>,
     /// Importance score 0–10: how broadly applicable is this?
     pub importance: Option<f64>,
+    /// Optional idempotency key. Duplicate calls with the same key return the
+    /// cached id without a second write.
+    pub client_dedup_key: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +95,7 @@ pub struct MemoryMcpServer {
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<MemoryMcpServer>,
     agent_root: Option<AgentRoot>,
+    coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
 }
 
 #[tool_router]
@@ -97,6 +105,7 @@ impl MemoryMcpServer {
         Self {
             tool_router: Self::tool_router(),
             agent_root: None,
+            coordinator_tx: None,
         }
     }
 
@@ -105,6 +114,18 @@ impl MemoryMcpServer {
         Self {
             tool_router: Self::tool_router(),
             agent_root: Some(root),
+            coordinator_tx: None,
+        }
+    }
+
+    /// Create a new in-process memory MCP server bound to an agent root and a
+    /// live coordinator channel. Used by the Phase 1 fallback when the daemon
+    /// is not running.
+    pub fn with_coordinator(root: AgentRoot, tx: mpsc::Sender<MemoryCoordinatorMsg>) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            agent_root: Some(root),
+            coordinator_tx: Some(tx),
         }
     }
 
@@ -199,15 +220,78 @@ impl MemoryMcpServer {
         &self,
         Parameters(p): Parameters<AppendNodeParams>,
     ) -> Result<CallToolResult, McpError> {
-        // TODO(WEG-79): wire to coordinator learn() once the coordinator is
-        // reachable from this context. Currently acknowledges without storing.
-        let _content = p.content;
-        let _source_harness = p.source_harness;
-        let _skill_action = p.skill_action;
-        let _pain = p.pain;
-        let _importance = p.importance;
+        let tx = match self.coordinator_tx.as_ref() {
+            Some(tx) => tx,
+            None => {
+                return Err(McpError::internal_error(
+                    "coordinator unavailable: no agent root found",
+                    None,
+                ));
+            }
+        };
+
+        // Validate skill_action: trim → lowercase → collapse whitespace →
+        // replace spaces with `_` → charset [a-z0-9_:.-] → ≤ 256 bytes.
+        // Same rules as post_learn in server/http.rs.
+        let lowercased = p.skill_action.trim().to_lowercase();
+        let sa: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
+        if sa.is_empty() {
+            return Err(McpError::invalid_request(
+                "invalid skill_action: empty after normalisation",
+                None,
+            ));
+        }
+        if sa.len() > 256 {
+            return Err(McpError::invalid_request(
+                "invalid skill_action: exceeds 256 bytes",
+                None,
+            ));
+        }
+        if sa
+            .bytes()
+            .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-'))
+        {
+            return Err(McpError::invalid_request(
+                "invalid skill_action: contains characters outside [a-z0-9_:.-]",
+                None,
+            ));
+        }
+
+        let timestamp = chrono::Utc::now();
+        let learning = AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: EventId::parse("evt_00000000000000000000000000").unwrap(),
+            timestamp,
+            pain: p.pain.unwrap_or(5.0) as f32,
+            importance: p.importance.unwrap_or(5.0) as f32,
+            pinned: false,
+            skill_action: sa,
+            source_harness: p.source_harness,
+            content: p.content,
+        };
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning,
+            client_dedup_key: p.client_dedup_key,
+            response_tx: resp_tx,
+        })
+        .await
+        .map_err(|_| McpError::internal_error("coordinator unavailable", None))?;
+
+        let outcome = resp_rx
+            .await
+            .map_err(|_| McpError::internal_error("coordinator dropped", None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let json = serde_json::json!({
+            "id": outcome.id.to_string(),
+            "timestamp": timestamp.to_rfc3339(),
+            "deduplicated": outcome.deduplicated,
+        });
         Ok(CallToolResult::success(vec![Content::text(
-            r#"{"status":"ok"}"#,
+            serde_json::to_string(&json)
+                .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string()),
         )]))
     }
 }
@@ -351,20 +435,33 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     let _ = &sock_path;
 
     // Phase 1: run in-process MCP server over stdio.
-    // Attempt to discover the agent root so search_nodes can open the index.
-    let server = match AgentRoot::discover(cwd) {
-        Ok(root) => MemoryMcpServer::with_agent_root(root),
-        Err(_) => MemoryMcpServer::new(),
-    };
-    let svc = server
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|e| McpRunError::Service(e.to_string()))?;
-
-    svc.waiting()
-        .await
-        .map_err(|e| McpRunError::Service(e.to_string()))?;
-
+    // When an agent root is found, boot a MemoryCoordinator via Supervisor so
+    // append_node dispatches durably. `supervisor` is bound here and must
+    // outlive the serve call; it drops after svc.waiting() returns.
+    match AgentRoot::discover(cwd) {
+        Ok(root) => {
+            let supervisor = Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None)
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            let tx = supervisor.sender();
+            let svc = MemoryMcpServer::with_coordinator(root, tx)
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            svc.waiting()
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            // supervisor drops here, after serve completes
+        }
+        Err(_) => {
+            let svc = MemoryMcpServer::new()
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            svc.waiting()
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+        }
+    }
     Ok(())
 }
 
@@ -499,5 +596,74 @@ mod tests {
         );
         let score = results[0]["score"].as_f64().expect("score field");
         assert!(score > 0.0, "top result must have positive score; got {score}");
+    }
+
+    #[tokio::test]
+    async fn append_node_no_coordinator_returns_error() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let server = MemoryMcpServer::new();
+        let result = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "test content".to_string(),
+                source_harness: "test".to_string(),
+                skill_action: "rust.test".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "append_node with no coordinator must return an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_node_with_coordinator_returns_outcome() {
+        use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+
+        let supervisor =
+            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let tx = supervisor.sender();
+        let server = MemoryMcpServer::with_coordinator(root, tx);
+
+        let result = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "test content".to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust.test".to_string(),
+                pain: Some(6.0),
+                importance: Some(7.0),
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok");
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .expect("text content present");
+
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("valid json");
+        assert!(
+            parsed["id"].as_str().unwrap_or("").starts_with("evt_"),
+            "id must be daemon-minted; got: {parsed:?}"
+        );
+        assert!(
+            parsed["timestamp"].as_str().is_some(),
+            "timestamp must be present; got: {parsed:?}"
+        );
+        assert_eq!(
+            parsed["deduplicated"],
+            serde_json::json!(false),
+            "first append must not be deduplicated"
+        );
     }
 }
