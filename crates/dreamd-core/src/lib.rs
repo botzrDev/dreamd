@@ -7,6 +7,7 @@
 //! than building strings.
 
 pub mod collector;
+pub mod consolidation;
 pub mod config;
 pub mod coordinator;
 pub mod index;
