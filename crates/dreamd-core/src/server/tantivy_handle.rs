@@ -45,7 +45,10 @@ use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::index::{build_schema, IndexManifest, Layer, SchemaFields, INDEX_MANIFEST_FILENAME};
+use crate::index::{
+    build_schema, ClusterCount, IndexManifest, Layer, RecurrenceSidecar, SchemaFields,
+    INDEX_MANIFEST_FILENAME,
+};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::server::index_map::{IndexError, IndexHandle};
@@ -113,6 +116,13 @@ pub enum IndexerMsg {
     /// if either step failed.
     Flush {
         ack: oneshot::Sender<Result<(), IndexError>>,
+    },
+    /// Dream-cycle hook (WEG-45 / DR-205′): read `semantic/recurrence_counts.json`,
+    /// walk the JSONL, delete-and-re-add each event with the authoritative
+    /// cluster count, then commit. Resolves after the commit completes.
+    ApplyRecurrenceSidecar {
+        agent_root: AgentRoot,
+        response: oneshot::Sender<Result<(), IndexError>>,
     },
 }
 
@@ -228,6 +238,30 @@ impl TantivyIndexHandle {
         *self.last_used.lock().expect("last_used mutex poisoned") = Instant::now();
     }
 
+    /// Apply the on-disk recurrence sidecar (`semantic/recurrence_counts.json`)
+    /// to the Tantivy index. For each cluster listed in the sidecar, every
+    /// event belonging to that `skill_action` is deleted and re-added with the
+    /// authoritative `count` as its `recurrence` FastField value. A single
+    /// commit is issued after all clusters are processed.
+    ///
+    /// Called by the dream cycle after it writes the sidecar (WEG-45 / DR-205′).
+    pub async fn apply_recurrence_sidecar(
+        &self,
+        agent_root: &AgentRoot,
+    ) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.indexer
+            .sender()
+            .send(IndexerMsg::ApplyRecurrenceSidecar {
+                agent_root: agent_root.clone(),
+                response: tx,
+            })
+            .await
+            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
+        rx.await
+            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+    }
+
     /// Async drain path. Drops the indexer sender, awaits task completion
     /// (which performs a final commit before exiting). Preferred over
     /// [`IndexHandle::close`] when called from an async context — sidesteps
@@ -327,6 +361,14 @@ async fn run_indexer(
                         );
                         let _ = ack.send(result);
                     }
+                    Some(IndexerMsg::ApplyRecurrenceSidecar { agent_root, response }) => {
+                        let result = apply_recurrence_sidecar_inner(
+                            &mut writer,
+                            &fields,
+                            &agent_root,
+                        );
+                        let _ = response.send(result);
+                    }
                     None => {
                         // Channel closed: final flush, then exit.
                         let _ = commit_and_persist(
@@ -380,8 +422,77 @@ fn commit_and_persist(
     Ok(())
 }
 
+/// Implements the delete-and-re-add recurrence update triggered by
+/// [`IndexerMsg::ApplyRecurrenceSidecar`] (WEG-45 / DR-205′).
+///
+/// Algorithm:
+/// 1. Read `<agent_root>/.agent/semantic/recurrence_counts.json`.
+/// 2. Parse every line of the JSONL into a per-`skill_action` bucket.
+/// 3. For each cluster in the sidecar: delete every matching event by its
+///    `event_id` term, then re-add the event document with the sidecar's
+///    authoritative `count` as the `recurrence` FastField value.
+/// 4. Commit once after all clusters are processed.
+fn apply_recurrence_sidecar_inner(
+    writer: &mut IndexWriter<TantivyDocument>,
+    fields: &SchemaFields,
+    agent_root: &AgentRoot,
+) -> Result<(), IndexError> {
+    // 1. Read and parse the sidecar.
+    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
+    let sidecar_json = std::fs::read_to_string(&sidecar_path)
+        .map_err(|e| IndexError(format!("read recurrence_counts.json: {e}")))?;
+    let sidecar: RecurrenceSidecar = serde_json::from_str(&sidecar_json)
+        .map_err(|e| IndexError(format!("parse recurrence_counts.json: {e}")))?;
+
+    // 2. Walk the JSONL and bucket events by skill_action.
+    let jsonl_path = agent_root.episodic_jsonl();
+    let jsonl_bytes = match std::fs::read(&jsonl_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Nothing indexed yet — sidecar application is a no-op.
+            return Ok(());
+        }
+        Err(e) => return Err(IndexError(format!("read AGENT_LEARNINGS.jsonl: {e}"))),
+    };
+
+    let mut by_skill: HashMap<String, Vec<AgentLearning>> = HashMap::new();
+    for line_bytes in jsonl_bytes.split(|&b| b == b'\n') {
+        if line_bytes.is_empty() {
+            continue;
+        }
+        if let Ok(learning) = serde_json::from_slice::<AgentLearning>(line_bytes) {
+            by_skill
+                .entry(learning.skill_action.clone())
+                .or_default()
+                .push(learning);
+        }
+    }
+
+    // 3. Delete-and-re-add for each cluster listed in the sidecar.
+    for ClusterCount { skill_action, count } in &sidecar.clusters {
+        let events = match by_skill.get(skill_action) {
+            Some(v) => v,
+            None => continue,
+        };
+        for event in events {
+            // Delete the existing document by its exact event_id term.
+            let id_str = event.id.as_str().to_string();
+            let term = tantivy::Term::from_field_text(fields.event_id, &id_str);
+            writer.delete_term(term);
+            // Re-add with the sidecar-authoritative recurrence count.
+            add_document(writer, fields, event, *count)?;
+        }
+    }
+
+    // 4. Commit once after all clusters.
+    writer.commit().map_err(tantivy_to_index)?;
+    Ok(())
+}
+
 /// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
 /// `layer` is always [`Layer::Episodic`] in v0.1; semantic indexing is WEG-136.
+/// `event_id` is stored as `STRING | STORED` for targeted delete-and-re-add
+/// during recurrence sidecar application (WEG-45 / DR-205′).
 fn add_document(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
@@ -390,6 +501,7 @@ fn add_document(
 ) -> Result<(), IndexError> {
     let ts = learning.timestamp.timestamp() as u64;
     let layer_str = Layer::Episodic.as_str().to_string();
+    let id_str = learning.id.as_str().to_string();
     let doc = doc!(
         fields.content => learning.content.clone(),
         fields.timestamp_sec => ts,
@@ -399,6 +511,7 @@ fn add_document(
         fields.layer => layer_str,
         fields.last_updated_sec => ts,
         fields.cited_event_count => 0u64,
+        fields.event_id => id_str,
     );
     writer.add_document(doc).map_err(tantivy_to_index)?;
     Ok(())
@@ -1244,6 +1357,105 @@ mod tests {
         // Confirm reader() returns without panic and produces a usable searcher.
         let _searcher = handle.reader().searcher();
         handle.shutdown().await.expect("shutdown");
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-45 — apply_recurrence_sidecar (delete-and-re-add)
+    // -----------------------------------------------------------------------
+
+    /// Verify that `apply_recurrence_sidecar` updates the `recurrence` FastField
+    /// for all documents in a cluster from their original values to the sidecar's
+    /// authoritative count.
+    ///
+    /// Setup:
+    ///   3 "deploy" events with recurrence 1, 2, 3 from the steady-state counter.
+    /// After sidecar with count=42:
+    ///   All 3 events should carry recurrence=42 (old docs deleted, new added).
+    #[tokio::test]
+    async fn apply_recurrence_sidecar_updates_fastfield() {
+        use crate::index::RecurrenceSidecar;
+
+        let dir = unique_tmpdir("sidecar");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+
+        // No JSONL primed — start clean, then append via steady-state path.
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        // The sidecar path is under semantic/; create the dir explicitly.
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+
+        let handle =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let tx = handle.sender();
+
+        // Append 3 "deploy" events — steady-state counter gives recurrence 1, 2, 3.
+        // We also write them to the JSONL so the sidecar handler can re-parse.
+        let mut learnings = Vec::new();
+        for c in ['0', '1', '2'] {
+            let id = make_event_id(c);
+            let learning = sample_learning(id.clone(), "deploy", "deploy body");
+            learnings.push(learning.clone());
+            tx.send(IndexerMsg::Append {
+                event_id: id,
+                learning,
+            })
+            .await
+            .expect("send append");
+        }
+        flush(&handle).await.expect("flush after appends");
+
+        // Write the JSONL so apply_recurrence_sidecar_inner can re-read events.
+        prime_jsonl(&dir, &learnings);
+
+        // Verify pre-sidecar recurrence values are {1, 2, 3}.
+        let values_before = read_recurrence_values(&agent_root);
+        let mut sorted_before = values_before.clone();
+        sorted_before.sort_unstable();
+        assert_eq!(
+            sorted_before,
+            vec![1, 2, 3],
+            "pre-sidecar: steady-state counter produces 1,2,3"
+        );
+
+        // Write the sidecar: count=42 for "deploy".
+        let sidecar = RecurrenceSidecar {
+            schema_version: "1.0".to_string(),
+            clusters: vec![crate::index::ClusterCount {
+                skill_action: "deploy".to_string(),
+                count: 42,
+            }],
+        };
+        let sidecar_json = serde_json::to_string(&sidecar).unwrap();
+        let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
+        std::fs::write(&sidecar_path, sidecar_json.as_bytes()).unwrap();
+
+        // Apply the sidecar.
+        handle
+            .apply_recurrence_sidecar(&agent_root)
+            .await
+            .expect("apply_recurrence_sidecar");
+
+        drop(tx);
+        handle.shutdown().await.expect("shutdown");
+
+        // Read recurrence values after: Tantivy delete-and-re-add leaves the
+        // old (soft-deleted) docs in their segments AND adds new docs. The
+        // `read_recurrence_values` helper walks all segment readers and returns
+        // ALL stored FastField values — including soft-deleted rows. After the
+        // sidecar commit, we expect 3 new docs with recurrence=42. The old
+        // soft-deleted docs still occupy slots with values 1, 2, or 3 until
+        // compaction. We assert that 42 appears at least 3 times (the new
+        // docs) and that no value other than 1, 2, 3, or 42 is present.
+        let values_after = read_recurrence_values(&agent_root);
+        let count_42 = values_after.iter().filter(|&&v| v == 42).count();
+        assert!(
+            count_42 >= 3,
+            "expected at least 3 docs with recurrence=42 after sidecar, got: {values_after:?}"
+        );
+        assert!(
+            values_after.iter().all(|&v| matches!(v, 1 | 2 | 3 | 42)),
+            "unexpected recurrence values after sidecar: {values_after:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

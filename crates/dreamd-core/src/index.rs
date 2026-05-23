@@ -20,7 +20,8 @@ use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 /// the value carried on the per-project index manifest and refuses to
 /// start on mismatch.
 // bumped in WEG-43 when content gained STORED
-pub const SCHEMA_VERSION: &str = "index/1.1";
+// bumped in WEG-45 when event_id (STRING | STORED) was added for delete-and-re-add
+pub const SCHEMA_VERSION: &str = "index/1.2";
 
 /// Canonical field-name strings for the dreamd Tantivy schema.
 ///
@@ -37,6 +38,10 @@ pub const RECURRENCE_FIELD: &str = "recurrence";
 pub const LAYER_FIELD: &str = "layer";
 pub const LAST_UPDATED_SEC_FIELD: &str = "last_updated_sec";
 pub const CITED_EVENT_COUNT_FIELD: &str = "cited_event_count";
+/// Exact-match indexed field carrying the `EventId` string (`evt_` + ULID).
+/// `STRING | STORED` — not tokenized — so `Term::from_field_text` resolves to
+/// exactly one document during the delete-and-re-add cycle (WEG-45 / DR-205′).
+pub const EVENT_ID_FIELD: &str = "event_id";
 
 /// Memory layer for an indexed document.
 ///
@@ -100,6 +105,9 @@ pub struct SchemaFields {
     pub last_updated_sec: Field,
     /// `FAST` only -- number of times this event has been cited (future use).
     pub cited_event_count: Field,
+    /// `STRING | STORED` -- daemon-assigned `EventId` (`evt_` + ULID) for
+    /// targeted delete-and-re-add during recurrence sidecar application (WEG-45).
+    pub event_id: Field,
 }
 
 /// Build the canonical dreamd Tantivy schema.
@@ -120,6 +128,8 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let layer             = b.add_text_field(LAYER_FIELD, STRING | STORED);
     let last_updated_sec  = b.add_u64_field(LAST_UPDATED_SEC_FIELD, FAST);
     let cited_event_count = b.add_u64_field(CITED_EVENT_COUNT_FIELD, FAST);
+    // WEG-45: STRING | STORED (not TEXT) for exact-match delete-and-re-add.
+    let event_id          = b.add_text_field(EVENT_ID_FIELD, STRING | STORED);
 
     let schema = b.build();
     (
@@ -133,6 +143,7 @@ pub fn build_schema() -> (Schema, SchemaFields) {
             layer,
             last_updated_sec,
             cited_event_count,
+            event_id,
         },
     )
 }
@@ -163,6 +174,28 @@ impl IndexManifest {
 /// Relative filename for the index manifest, joined under the project's
 /// `.dreamd/` directory. Used by WEG-42 to write and WEG-49 to read.
 pub const INDEX_MANIFEST_FILENAME: &str = "index_manifest.json";
+
+/// On-disk sidecar that records per-cluster recurrence counts, written by the
+/// dream cycle (WEG-45 / DR-205′). Consumed by
+/// [`crate::server::tantivy_handle::TantivyIndexHandle::apply_recurrence_sidecar`]
+/// which performs a delete-and-re-add pass to refresh the `recurrence`
+/// FastField on all documents in each cluster.
+///
+/// Canonical path: `<agent_root>/.agent/semantic/recurrence_counts.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecurrenceSidecar {
+    pub schema_version: String,
+    pub clusters: Vec<ClusterCount>,
+}
+
+/// One entry in [`RecurrenceSidecar::clusters`]: maps a `skill_action`
+/// clustering key to its authoritative global recurrence count after the
+/// current dream cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterCount {
+    pub skill_action: String,
+    pub count: u32,
+}
 
 /// Result of a startup manifest version check.
 ///
@@ -260,6 +293,10 @@ mod tests {
         ] {
             assert!(schema.get_field(name).is_ok(), "missing field: {name}");
         }
+        assert!(
+            schema.get_field("event_id").is_ok(),
+            "missing field: event_id"
+        );
     }
 
     #[test]
@@ -355,14 +392,14 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: IndexManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
-        assert_eq!(deserialized.schema_version, "index/1.1");
+        assert_eq!(deserialized.schema_version, "index/1.2");
     }
 
     /// `SCHEMA_VERSION` must equal the hardcoded string so accidental bumps
     /// (e.g. whitespace, prefix change) are caught before they reach CI.
     #[test]
     fn schema_version_constant_value() {
-        assert_eq!(SCHEMA_VERSION, "index/1.1");
+        assert_eq!(SCHEMA_VERSION, "index/1.2");
     }
 
     #[test]
@@ -377,23 +414,23 @@ mod tests {
     fn manifest_current() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index_manifest.json");
-        std::fs::write(&path, r#"{"schema_version":"index/1.1"}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":"index/1.2"}"#).unwrap();
         let outcome = check_manifest_version(&path).unwrap();
         assert_eq!(outcome, ManifestCheckOutcome::Current);
     }
 
     #[test]
     fn manifest_needs_migration() {
-        // index/1.0 was the pre-WEG-43 schema (content was TEXT only); any
-        // on-disk index at 1.0 must be rebuilt before recall hydrates docs.
+        // index/1.1 was the pre-WEG-45 schema (no event_id field); any
+        // on-disk index at 1.1 must be rebuilt before delete-and-re-add works.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index_manifest.json");
-        std::fs::write(&path, r#"{"schema_version":"index/1.0"}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":"index/1.1"}"#).unwrap();
         let outcome = check_manifest_version(&path).unwrap();
         assert_eq!(
             outcome,
             ManifestCheckOutcome::NeedsMigration {
-                from: "index/1.0".to_owned(),
+                from: "index/1.1".to_owned(),
             }
         );
     }
@@ -407,7 +444,7 @@ mod tests {
         match err {
             ManifestVersionError::TooNew { manifest, binary } => {
                 assert_eq!(manifest, "index/2.0");
-                assert_eq!(binary, "index/1.1");
+                assert_eq!(binary, "index/1.2");
             }
             other => panic!("expected TooNew, got {other:?}"),
         }
