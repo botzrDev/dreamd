@@ -993,4 +993,71 @@ mod tests {
             "expected 400 or 404, got: {response_str}"
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_api_socket_creates_0600_socket() {
+        use crate::server::uds_server::bind_api_socket;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("api.sock");
+
+        let _listener = bind_api_socket(&sock_path).expect("bind_api_socket should succeed");
+
+        let mode = std::fs::metadata(&sock_path)
+            .expect("socket file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "socket perms should be 0600, got {:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_uds_rejects_mismatched_daemon_uid() {
+        use crate::server::uds_server::{bind_api_socket, serve_uds};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("reject.sock");
+        let registry_path = dir.path().join("registry.toml");
+
+        // daemon_uid deliberately wrong — current process sends its real UID via
+        // SO_PEERCRED; the middleware compares against this value and must return 403.
+        let wrong_uid = nix::unistd::Uid::current().as_raw().wrapping_add(1);
+        let state = AppState {
+            registry_path,
+            supervisor: Arc::new(Supervisor::for_backpressure_test().0),
+            config: Arc::new(Config::default()),
+            index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
+                ProjectIndexMapConfig::default(),
+            ))),
+            daemon_uid: wrong_uid,
+        };
+        let router = build_router(state);
+
+        let listener = bind_api_socket(&sock_path).expect("bind");
+        tokio::spawn(async move {
+            serve_uds(listener, router).await.ok();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::UnixStream::connect(&sock_path)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /api/v1/recall?q=test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read response");
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("403"),
+            "expected 403 for mismatched UID, got: {response_str}"
+        );
+    }
 }
