@@ -48,10 +48,14 @@ pub struct PromotedCluster {
     pub salience_sum: f64,
 }
 
-/// Minimum event count at a single depth for cluster promotion.
-///
-/// v0.1 uses raw event count; WEG-59 replaces this with windowed counts.
+/// Minimum event count within a recurrence window for cluster promotion.
 pub const PROMOTION_THRESHOLD: usize = 3;
+
+/// Trailing window for short-burst recurrence detection (seconds).
+pub const WINDOW_7_DAYS_SEC: i64 = 7 * 24 * 3600;
+
+/// Trailing window for slow-burn recurrence detection (seconds).
+pub const WINDOW_30_DAYS_SEC: i64 = 30 * 24 * 3600;
 
 /// Run the cluster engine against `agent_root`'s episodic JSONL.
 ///
@@ -61,8 +65,9 @@ pub const PROMOTION_THRESHOLD: usize = 3;
 /// 1. Read + parse `AGENT_LEARNINGS.jsonl`.
 /// 2. Build the prefix tree: each event contributes to every prefix of its
 ///    `skill_action` (split on `::`).
-/// 3. Find the deepest prefix where event count ≥ `PROMOTION_THRESHOLD`
-///    (deepest-wins — an event is assigned to exactly one promoted cluster).
+/// 3. Find the deepest prefix where the 7-day **or** 30-day trailing window
+///    holds ≥ `PROMOTION_THRESHOLD` events (deepest-wins — an event is
+///    assigned to exactly one promoted cluster).
 /// 4. Compute per-cluster salience sum.
 /// 5. Write `recurrence_counts.json` sidecar.
 /// 6. Return [`ClusterOutput`].
@@ -102,7 +107,9 @@ pub fn run_cluster_engine(
 
     for prefix in &prefixes {
         let member_indices = &depth_map[prefix];
-        if member_indices.len() < PROMOTION_THRESHOLD {
+        let in_7d = count_in_window(member_indices, &events, now_sec, WINDOW_7_DAYS_SEC);
+        let in_30d = count_in_window(member_indices, &events, now_sec, WINDOW_30_DAYS_SEC);
+        if in_7d < PROMOTION_THRESHOLD && in_30d < PROMOTION_THRESHOLD {
             continue;
         }
         for &idx in member_indices {
@@ -199,6 +206,11 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     Ok(())
 }
 
+fn count_in_window(indices: &[usize], events: &[AgentLearning], now_sec: i64, window_sec: i64) -> usize {
+    let cutoff = now_sec - window_sec;
+    indices.iter().filter(|&&i| events[i].timestamp.timestamp() >= cutoff).count()
+}
+
 fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<AgentLearning>, ConsolidationError> {
     let bytes = match std::fs::read(path.as_ref()) {
         Ok(b) => b,
@@ -274,6 +286,20 @@ mod tests {
             pain: 5.0,
             importance: 5.0,
             pinned,
+            skill_action: skill_action.to_string(),
+            source_harness: "test".to_string(),
+            content: format!("event {id}"),
+        }
+    }
+
+    fn make_event_at(id: u32, skill_action: &str, ts: i64) -> AgentLearning {
+        AgentLearning {
+            schema_version: "1.0".to_string(),
+            id: test_id(id),
+            timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
+            pain: 5.0,
+            importance: 5.0,
+            pinned: false,
             skill_action: skill_action.to_string(),
             source_harness: "test".to_string(),
             content: format!("event {id}"),
@@ -486,5 +512,58 @@ mod tests {
         assert_eq!(updated.len(), 2);
         assert!(!updated[0].pinned, "id 0: no LESSONS.md → pinned must be false");
         assert!(!updated[1].pinned, "id 1: no LESSONS.md → pinned must be false");
+    }
+
+    #[test]
+    fn cluster_3_events_within_7_days_promotes() {
+        let dir = unique_tmpdir("win7");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // 3 events 1, 2, 5 days ago — all within the 7-day window.
+        let events = vec![
+            make_event_at(0, "rust::borrow", NOW_SEC - 1 * 86400),
+            make_event_at(1, "rust::borrow", NOW_SEC - 2 * 86400),
+            make_event_at(2, "rust::borrow", NOW_SEC - 5 * 86400),
+        ];
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert_eq!(out.promoted.len(), 1);
+        assert_eq!(out.promoted[0].cluster_key, "rust::borrow");
+    }
+
+    #[test]
+    fn cluster_3_events_in_30_days_promotes() {
+        let dir = unique_tmpdir("win30");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // 3 events at 8, 15, 25 days ago — outside 7-day window but inside 30-day.
+        let events = vec![
+            make_event_at(0, "go::testing", NOW_SEC - 8 * 86400),
+            make_event_at(1, "go::testing", NOW_SEC - 15 * 86400),
+            make_event_at(2, "go::testing", NOW_SEC - 25 * 86400),
+        ];
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert_eq!(out.promoted.len(), 1);
+        assert_eq!(out.promoted[0].cluster_key, "go::testing");
+    }
+
+    #[test]
+    fn cluster_2_events_in_7_days_does_not_promote() {
+        let dir = unique_tmpdir("noprom");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // 2 events within 7 days + 1 beyond 30 days = neither window hits threshold.
+        let events = vec![
+            make_event_at(0, "py::async", NOW_SEC - 1 * 86400),
+            make_event_at(1, "py::async", NOW_SEC - 3 * 86400),
+            make_event_at(2, "py::async", NOW_SEC - 31 * 86400),
+        ];
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert!(out.promoted.is_empty());
     }
 }
