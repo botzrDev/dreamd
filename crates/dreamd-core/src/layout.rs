@@ -151,6 +151,13 @@ impl AgentRoot {
         self.dreamd_dir().join("state.json")
     }
 
+    /// `<project>/.agent/.dreamd/dream_in_progress.wal` — WAL for the dream
+    /// cycle. Exists only during an in-progress or crashed cycle; its presence
+    /// on startup is the signal to run recovery before serving traffic.
+    pub fn wal_path(&self) -> PathBuf {
+        self.dreamd_dir().join("dream_in_progress.wal")
+    }
+
     /// All seven `.agent/` subdirectories, in canonical order. Useful for
     /// scaffolding (`dreamd init`, DR-105) and integrity checks (DR-107).
     pub fn subdirs(&self) -> [PathBuf; 7] {

@@ -200,8 +200,19 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
         );
         out.push('\n');
     }
-    // TODO(WEG-60): wrap in WAL before the rewrite so a crash between
-    // "clear all pins" and "write modified JSONL" can be recovered.
+    // WAL: record intent before the destructive JSONL rewrite (WEG-60).
+    // The temp file written by write_atomic is the recovery artefact.
+    let tmp_path = jsonl_path.with_extension("tmp");
+    crate::wal::append_intent(
+        agent_root,
+        crate::wal::WalIntent::PruneEpisodicMemory {
+            temp_file_path: tmp_path.to_string_lossy().into_owned(),
+        },
+    )
+    .map_err(|e| match e {
+        crate::wal::WalError::Io(io) => ConsolidationError::Io(io),
+        crate::wal::WalError::Json(je) => ConsolidationError::Json { line: 0, source: je },
+    })?;
     write_atomic(&jsonl_path, out.as_bytes())?;
     Ok(())
 }

@@ -19,6 +19,7 @@ pub mod privacy;
 pub mod redaction;
 pub mod registry;
 pub mod salience;
+pub mod wal;
 
 pub use collector::{recall, RecallResult, SalienceCollector};
 
