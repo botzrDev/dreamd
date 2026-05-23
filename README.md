@@ -65,7 +65,15 @@ v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
 
 ## Performance
 
-Recall latency (warm index, 10k entries): **<5ms P50 / <50ms P99 cold-start.** These numbers reflect the query operation itself and will be confirmed by criterion benchmarks in v0.1.
+Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
+
+| Corpus size | Mean (warm) |
+|---|---|
+| 1 000 entries   | ~50 µs |
+| 10 000 entries  | ~313 µs |
+| 100 000 entries | ~2.8 ms |
+
+_Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
 
 > **Read-after-write visibility:** up to `commit_cadence_seconds` (default 5s). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
 

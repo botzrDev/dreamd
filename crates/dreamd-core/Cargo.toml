@@ -91,6 +91,8 @@ nix = { version = "0.29", default-features = false, features = ["process", "fs",
 # that production code intentionally excludes.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 tempfile = "3"
+# WEG-48 / DR-208 — Criterion benchmark harness for recall() latency.
+criterion = "0.5"
 # WEG-67 — `tower::ServiceExt::oneshot` for axum router unit tests. Pinned
 # to "0.5" to match the tower 0.5.3 already resolved transitively via axum.
 tower = "0.5"
@@ -126,3 +128,9 @@ path = "tests/bin/tantivy_spike.rs"
 test = false
 bench = false
 doc = false
+
+# WEG-48 / DR-208 — Criterion benchmarks for recall() at n=1k/10k/100k.
+# `harness = false` is required for Criterion (it provides its own main).
+[[bench]]
+name = "recall"
+harness = false
