@@ -158,6 +158,18 @@ impl AgentRoot {
         self.dreamd_dir().join("dream_in_progress.wal")
     }
 
+    /// `<project>/.agent/.dreamd/snapshots/` — archived episodic decay snapshots.
+    /// Gitignored via the existing `GITIGNORE_SNIPPET` (`.dreamd/` is excluded).
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.dreamd_dir().join("snapshots")
+    }
+
+    /// `<project>/.agent/.dreamd/snapshots/<date>.jsonl`
+    /// `date` is caller-supplied as `"YYYY-MM-DD"` — no wall-clock calls here.
+    pub fn snapshot_file(&self, date: &str) -> PathBuf {
+        self.snapshots_dir().join(format!("{date}.jsonl"))
+    }
+
     /// All seven `.agent/` subdirectories, in canonical order. Useful for
     /// scaffolding (`dreamd init`, DR-105) and integrity checks (DR-107).
     pub fn subdirs(&self) -> [PathBuf; 7] {
@@ -313,6 +325,16 @@ mod tests {
                 assert_ne!(dirs[i], dirs[j]);
             }
         }
+    }
+
+    #[test]
+    fn snapshot_file_is_under_dreamd_dir() {
+        let r = root();
+        assert_eq!(
+            r.snapshot_file("2026-05-24"),
+            PathBuf::from("/tmp/proj/.agent/.dreamd/snapshots/2026-05-24.jsonl"),
+        );
+        assert!(r.snapshot_file("2026-05-24").starts_with(r.dreamd_dir()));
     }
 
     #[test]
