@@ -11,6 +11,8 @@ use std::process::ExitCode;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
+use dreamd_core::config::{load_config, Config, DreamCycleMode};
+
 use crate::commands;
 use crate::commands::version::VERSION_SHORT;
 
@@ -33,10 +35,12 @@ pub struct Cli {
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
+    /// Run health checks and print status (dream-cycle mode, etc.).
+    Doctor,
     /// Scaffold per-project .agent/ store and register it with the daemon.
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
-    Mcp,
+    Mcp(McpArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
@@ -53,6 +57,14 @@ pub struct InitArgs {
     /// Does not delete the project's .agent/ store.
     #[arg(long)]
     pub uninstall_project: bool,
+}
+
+/// Arguments for the `dreamd mcp` subcommand.
+#[derive(Args)]
+pub struct McpArgs {
+    /// Hard-lock dream cycle to manual-only mode (overrides config.toml).
+    #[arg(long)]
+    pub manual_only: bool,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -74,6 +86,24 @@ pub enum ResetCommand {
     },
 }
 
+/// Guard that rejects `Auto` dream-cycle mode at v0.1.
+///
+/// Returns `Ok(())` for `Manual` mode; `Err(message)` for `Auto` mode.
+/// The caller is responsible for printing the error and calling
+/// `std::process::exit(1)` — this function does not exit so it can be
+/// unit-tested without spawning a subprocess.
+pub fn check_dream_mode(config: &Config) -> Result<(), String> {
+    if config.dream_cycle_mode == DreamCycleMode::Auto {
+        return Err(
+            "dream_cycle_mode = auto is not supported at v0.1; \
+             set dream_cycle_mode = \"manual\" in config.toml. \
+             Auto mode ships at v0.1.1."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Parse CLI args and dispatch to the matching subcommand handler.
 ///
 /// Returns [`ExitCode`] directly so `main` stays a one-liner.
@@ -92,6 +122,32 @@ pub fn run() -> ExitCode {
     };
 
     match command {
+        Command::Doctor => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let config = match load_config(&cwd) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("dreamd: error — {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            match commands::doctor::run(&config, &mut out) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::from(1),
+                Err(e) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Init(args) => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
@@ -122,7 +178,7 @@ pub fn run() -> ExitCode {
                 }
             }
         }
-        Command::Mcp => {
+        Command::Mcp(args) => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
                 Err(e) => {
@@ -130,6 +186,21 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            let mut config = match load_config(&cwd) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("dreamd: error — {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            // --manual-only overrides config before the Auto guard runs.
+            if args.manual_only {
+                config.dream_cycle_mode = DreamCycleMode::Manual;
+            }
+            if let Err(msg) = check_dream_mode(&config) {
+                eprintln!("dreamd: error — {msg}");
+                std::process::exit(1);
+            }
             commands::mcp::run(&cwd)
         }
         Command::Reset(args) => match args.command {
@@ -168,5 +239,29 @@ pub fn run() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_mode_rejected() {
+        let mut cfg = Config::default();
+        cfg.dream_cycle_mode = DreamCycleMode::Auto;
+        assert!(
+            check_dream_mode(&cfg).is_err(),
+            "auto mode must be rejected by check_dream_mode"
+        );
+    }
+
+    #[test]
+    fn manual_mode_accepted() {
+        let cfg = Config::default(); // default is Manual
+        assert!(
+            check_dream_mode(&cfg).is_ok(),
+            "manual mode must be accepted by check_dream_mode"
+        );
     }
 }

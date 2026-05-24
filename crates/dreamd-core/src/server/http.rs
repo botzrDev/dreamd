@@ -76,6 +76,11 @@ impl AppState {
     }
 }
 
+/// Maximum bytes served from `PREFERENCES.md` in a single response.
+/// Responses exceeding this cap are truncated and annotated with
+/// `X-Dreamd-Truncated: true` and `X-Dreamd-Original-Size: <n>`.
+const PREFERENCES_SIZE_CAP: usize = 16 * 1024; // 16 KB
+
 /// Response body for a successful `POST /api/v1/learn`.
 #[derive(serde::Serialize)]
 struct LearnResponse {
@@ -90,6 +95,7 @@ pub fn build_router(state: AppState) -> axum::Router {
     let router = axum::Router::new()
         .route("/api/v1/learn", axum::routing::post(post_learn))
         .route("/api/v1/recall", axum::routing::get(get_recall))
+        .route("/api/v1/preferences", axum::routing::get(get_preferences))
         .route("/api/v1/dream", axum::routing::post(stub_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -191,6 +197,75 @@ async fn get_recall(
         }
         Err(e) => error_500(&format!("recall failed: {e}")),
     }
+}
+
+/// `GET /api/v1/preferences` — DR-115.
+///
+/// Returns the contents of `.agent/personal/PREFERENCES.md` for the
+/// resolved project root.  Absent file → 200 with `body: ""`.
+/// Files exceeding `PREFERENCES_SIZE_CAP` are truncated and annotated
+/// with `X-Dreamd-Truncated: true` / `X-Dreamd-Original-Size: <n>`.
+async fn get_preferences(
+    State(_state): State<AppState>,
+    Extension(entry): Extension<ProjectEntry>,
+) -> axum::response::Response {
+    let root = crate::layout::AgentRoot::new(&entry.root);
+    let pref_path = root.preferences_md();
+
+    if !pref_path.exists() {
+        let body = serde_json::json!({ "body": "", "last_modified": null });
+        return (axum::http::StatusCode::OK, axum::Json(body)).into_response();
+    }
+
+    let bytes = match std::fs::read(&pref_path) {
+        Ok(b) => b,
+        Err(e) => return error_500(&format!("preferences read failed: {e}")),
+    };
+
+    let last_modified: Option<String> = std::fs::metadata(&pref_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        });
+
+    let original_size = bytes.len();
+    let truncated = original_size > PREFERENCES_SIZE_CAP;
+    let content_bytes = if truncated {
+        &bytes[..PREFERENCES_SIZE_CAP]
+    } else {
+        &bytes
+    };
+
+    let body_str = String::from_utf8_lossy(content_bytes).into_owned();
+
+    let body = serde_json::json!({
+        "body": body_str,
+        "last_modified": last_modified,
+    });
+
+    let mut headers = axum::http::HeaderMap::new();
+    if truncated {
+        headers.insert(
+            axum::http::HeaderName::from_static("x-dreamd-truncated"),
+            axum::http::HeaderValue::from_static("true"),
+        );
+        if let Ok(v) = axum::http::HeaderValue::from_str(&original_size.to_string()) {
+            headers.insert(
+                axum::http::HeaderName::from_static("x-dreamd-original-size"),
+                v,
+            );
+        }
+        tracing::warn!(
+            original_size,
+            cap = PREFERENCES_SIZE_CAP,
+            path = %pref_path.display(),
+            "PREFERENCES.md truncated to 16 KB cap"
+        );
+    }
+
+    (axum::http::StatusCode::OK, headers, axum::Json(body)).into_response()
 }
 
 /// `POST /api/v1/learn` — DR-402.
@@ -1059,5 +1134,179 @@ mod tests {
             response_str.contains("403"),
             "expected 403 for mismatched UID, got: {response_str}"
         );
+    }
+
+    // ── WEG-82: GET /api/v1/preferences tests (DR-115) ───────────────────────
+
+    /// T1: Absent PREFERENCES.md → 200, empty body, no truncation headers.
+    #[tokio::test]
+    async fn preferences_absent_returns_200_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        // Deliberately do NOT write PREFERENCES.md.
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/preferences")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("x-dreamd-truncated").is_none(),
+            "absent file must not set X-Dreamd-Truncated"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["body"], serde_json::json!(""), "body must be empty string");
+        assert_eq!(json["last_modified"], serde_json::json!(null), "last_modified must be null");
+    }
+
+    /// T2: Present PREFERENCES.md ≤ 16 KB → full body returned, no truncation headers.
+    #[tokio::test]
+    async fn preferences_small_file_returns_full_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        // Create .agent/personal/ and write a small PREFERENCES.md.
+        let agent_root = crate::layout::AgentRoot::new(dir.path());
+        let pref_path = agent_root.preferences_md();
+        std::fs::create_dir_all(pref_path.parent().unwrap()).unwrap();
+        let content = "# My Preferences\n\nI prefer concise answers.\n";
+        std::fs::write(&pref_path, content).unwrap();
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/preferences")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("x-dreamd-truncated").is_none(),
+            "small file must not set X-Dreamd-Truncated"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["body"].as_str().unwrap(),
+            content,
+            "body must match file contents exactly"
+        );
+        assert!(
+            json["last_modified"].as_str().is_some(),
+            "last_modified must be a non-null RFC 3339 string"
+        );
+    }
+
+    /// T3: Present PREFERENCES.md > 16 KB → truncated body, truncation headers set.
+    #[tokio::test]
+    async fn preferences_large_file_returns_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        let agent_root = crate::layout::AgentRoot::new(dir.path());
+        let pref_path = agent_root.preferences_md();
+        std::fs::create_dir_all(pref_path.parent().unwrap()).unwrap();
+
+        // Write exactly PREFERENCES_SIZE_CAP + 1 bytes (all ASCII 'x').
+        let oversized = vec![b'x'; PREFERENCES_SIZE_CAP + 1];
+        std::fs::write(&pref_path, &oversized).unwrap();
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/preferences")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert_eq!(
+            resp.headers()
+                .get("x-dreamd-truncated")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "X-Dreamd-Truncated must be 'true'"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-dreamd-original-size")
+                .and_then(|v| v.to_str().ok()),
+            Some((PREFERENCES_SIZE_CAP + 1).to_string().as_str()),
+            "X-Dreamd-Original-Size must equal the full file size"
+        );
+
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["body"].as_str().unwrap().len(),
+            PREFERENCES_SIZE_CAP,
+            "truncated body must be exactly PREFERENCES_SIZE_CAP bytes"
+        );
+    }
+
+    /// T4: Missing X-Agent-Root header → 400.
+    #[tokio::test]
+    async fn preferences_missing_agent_root_header_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/preferences")
+                // deliberately omitting x-agent-root
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// T5: X-Agent-Root present but path not in registry → 404.
+    #[tokio::test]
+    async fn preferences_unregistered_root_404() {
+        let dir = tempfile::tempdir().unwrap();
+        // Registry file is absent entirely — resolve_project returns Ok(None).
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/preferences")
+                .header("x-agent-root", dir.path().to_str().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
