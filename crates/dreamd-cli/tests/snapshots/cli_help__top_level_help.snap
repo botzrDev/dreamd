@@ -9,6 +9,7 @@ Usage: dreamd [COMMAND]
 
 Commands:
   doctor   Run health checks and print status (dream-cycle mode, etc.)
+  dream    Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
   init     Scaffold per-project .agent/ store and register it with the daemon
   mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
   reset    Reset scratch state (DR-113). Today only `workspace` is supported

@@ -32,11 +32,27 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// Arguments for the `dreamd dream` subcommand.
+#[derive(Args, Debug)]
+pub struct DreamArgs {
+    /// Dry run: print what would change without writing.
+    /// Not yet implemented; ships v0.1.1.
+    #[arg(long)]
+    pub dry: bool,
+    /// Schedule automatic dream cycles.
+    /// Not yet supported at v0.1; ships v0.1.1.
+    #[arg(long, hide = true)]
+    pub auto: bool,
+}
+
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
     /// Run health checks and print status (dream-cycle mode, etc.).
     Doctor,
+    /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
+    /// prune decayed episodic events.
+    Dream(DreamArgs),
     /// Scaffold per-project .agent/ store and register it with the daemon.
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
@@ -144,6 +160,45 @@ pub fn run() -> ExitCode {
                 Ok(false) => ExitCode::from(1),
                 Err(e) => {
                     eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Command::Dream(args) => {
+            if args.auto {
+                eprintln!(
+                    "dreamd: --auto is not yet supported at v0.1; \
+                     set dream_cycle_mode = \"manual\" in config.toml. \
+                     Auto mode ships at v0.1.1."
+                );
+                return ExitCode::from(2);
+            }
+            if args.dry {
+                eprintln!("dreamd: --dry is not yet implemented (ships v0.1.1).");
+                return ExitCode::from(2);
+            }
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let config = match load_config(&cwd) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("dreamd: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            if let Err(msg) = check_dream_mode(&config) {
+                eprintln!("dreamd: {msg}");
+                return ExitCode::from(2);
+            }
+            match commands::dream::run(&cwd, &mut std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("dreamd: {e}");
                     ExitCode::from(1)
                 }
             }
