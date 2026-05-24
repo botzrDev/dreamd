@@ -8,6 +8,7 @@ Portable memory layer for AI coding agents
 Usage: dreamd [COMMAND]
 
 Commands:
+  doctor   Run health checks and print status (dream-cycle mode, etc.)
   init     Scaffold per-project .agent/ store and register it with the daemon
   mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
   reset    Reset scratch state (DR-113). Today only `workspace` is supported
