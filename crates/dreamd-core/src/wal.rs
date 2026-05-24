@@ -106,7 +106,7 @@ pub fn recover_if_needed(agent_root: &AgentRoot, _now_sec: i64) -> Result<Recove
     }
 
     let wal: DreamWal = serde_json::from_str(&std::fs::read_to_string(&wal_path)?)?;
-    let committed = wal.intents.iter().any(|i| *i == WalIntent::Commit);
+    let committed = wal.intents.contains(&WalIntent::Commit);
 
     if committed {
         update_state_json(agent_root, "complete", None)?;

@@ -124,6 +124,12 @@ pub enum IndexerMsg {
         agent_root: AgentRoot,
         response: oneshot::Sender<Result<(), IndexError>>,
     },
+    /// Decay pruner hook (WEG-62 / DR-309): delete decayed event IDs from the index.
+    /// Does not touch the JSONL — JSONL rewrite is handled by `run_decay_pruner`.
+    PruneDecayedEvents {
+        event_ids: Vec<EventId>,
+        response: oneshot::Sender<Result<(), IndexError>>,
+    },
 }
 
 /// Owning handle for the spawned indexer task. Constructed inside
@@ -262,6 +268,20 @@ impl TantivyIndexHandle {
             .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
     }
 
+    /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
+    /// Called by the dream cycle orchestrator after `run_decay_pruner` returns.
+    /// No-op if `event_ids` is empty (still sends message to stay on the indexer task).
+    pub async fn prune_decayed_events(&self, event_ids: Vec<EventId>) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.indexer
+            .sender()
+            .send(IndexerMsg::PruneDecayedEvents { event_ids, response: tx })
+            .await
+            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
+        rx.await
+            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+    }
+
     /// Async drain path. Drops the indexer sender, awaits task completion
     /// (which performs a final commit before exiting). Preferred over
     /// [`IndexHandle::close`] when called from an async context — sidesteps
@@ -367,6 +387,17 @@ async fn run_indexer(
                             &fields,
                             &agent_root,
                         );
+                        let _ = response.send(result);
+                    }
+                    Some(IndexerMsg::PruneDecayedEvents { event_ids, response }) => {
+                        let result = (|| -> Result<(), IndexError> {
+                            for id in &event_ids {
+                                let term = tantivy::Term::from_field_text(fields.event_id, id.as_str());
+                                writer.delete_term(term);
+                            }
+                            writer.commit().map_err(tantivy_to_index)?;
+                            Ok(())
+                        })();
                         let _ = response.send(result);
                     }
                     None => {
@@ -1456,6 +1487,63 @@ mod tests {
             values_after.iter().all(|&v| matches!(v, 1 | 2 | 3 | 42)),
             "unexpected recurrence values after sidecar: {values_after:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-62 — prune_decayed_events removes docs from index
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn prune_decayed_events_removes_docs_from_index() {
+        let dir = unique_tmpdir("prune-decay");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let tx = handle.sender();
+
+        // Append 5 events.
+        let ids: Vec<EventId> = vec!['0', '1', '2', '3', '4']
+            .into_iter()
+            .map(make_event_id)
+            .collect();
+        for id in &ids {
+            let learning = sample_learning(id.clone(), "rust.test", "body");
+            tx.send(IndexerMsg::Append {
+                event_id: id.clone(),
+                learning,
+            })
+            .await
+            .expect("send append");
+        }
+        flush(&handle).await.expect("flush");
+
+        // Reload reader and confirm 5 docs.
+        handle.reader().reload().expect("reload reader");
+        assert_eq!(
+            handle.reader().searcher().search(&AllQuery, &tantivy::collector::Count).expect("count"),
+            5,
+            "5 docs after append"
+        );
+
+        // Prune 3 of the 5 events.
+        let to_prune = ids[..3].to_vec();
+        handle
+            .prune_decayed_events(to_prune)
+            .await
+            .expect("prune_decayed_events");
+
+        // Reload reader and confirm 2 docs remain.
+        handle.reader().reload().expect("reload after prune");
+        assert_eq!(
+            handle.reader().searcher().search(&AllQuery, &tantivy::collector::Count).expect("count after prune"),
+            2,
+            "2 docs remain after pruning 3"
+        );
+
+        drop(tx);
+        handle.shutdown().await.expect("shutdown");
     }
 
     // -----------------------------------------------------------------------

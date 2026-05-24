@@ -44,17 +44,12 @@ pub struct Config {
 
 /// Dream-cycle scheduling mode (DR-315). Flat key `dream_cycle_mode` with
 /// values `"manual" | "auto"`; v0.1 hard-locks to `manual`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DreamCycleMode {
+    #[default]
     Manual,
     Auto,
-}
-
-impl Default for DreamCycleMode {
-    fn default() -> Self {
-        DreamCycleMode::Manual
-    }
 }
 
 impl Default for Config {
@@ -73,9 +68,16 @@ impl Default for Config {
 /// Failure modes for [`load_config`] / [`load_config_from`].
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// Malformed TOML or type-mismatch in a present file.
+    /// Malformed TOML or type-mismatch in a present file. Boxed to keep the
+    /// enum variant within the 128-byte threshold (`figment::Error` is 208 B).
     #[error("config parse error: {0}")]
-    Parse(#[from] figment::Error),
+    Parse(Box<figment::Error>),
+}
+
+impl From<figment::Error> for ConfigError {
+    fn from(e: figment::Error) -> Self {
+        ConfigError::Parse(Box::new(e))
+    }
 }
 
 /// Commented-out template written by `dreamd init` (D1 of WEG-14.v2) to

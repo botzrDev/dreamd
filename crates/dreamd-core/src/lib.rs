@@ -10,6 +10,7 @@ pub mod collector;
 pub mod consolidation;
 pub mod config;
 pub mod coordinator;
+pub mod decay;
 pub mod index;
 pub mod io;
 pub mod layout;
