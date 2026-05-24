@@ -79,6 +79,26 @@ Some decisions in the implementation are not negotiable without re-reading the P
 
 If your PR touches any of these areas, please call it out in the description and link the relevant section of [`CLAUDE.md`](./CLAUDE.md) (or, post-v0.1, the architecture doc that supersedes it).
 
+## Snapshot tests (insta)
+
+### CLI snapshots (help text)
+
+```bash
+cargo test -p dreamd --test cli_help
+cargo insta review
+```
+
+Snapshot files live in `crates/dreamd-cli/tests/snapshots/`. Any change to `Command` enum variants, flags, or `clap` metadata will update these snapshots — review via `cargo insta review` before accepting.
+
+### dreamd-core snapshots (dream-cycle output)
+
+```bash
+cargo test -p dreamd-core --test dream_cycle_snapshot
+cargo insta review
+```
+
+Snapshot files live in `crates/dreamd-core/tests/snapshots/`. Any change to `run_deterministic_dream_cycle`, `run_cluster_engine`, `write_lessons_file`, or `wal::commit_cycle` may produce a snapshot diff — review it via `cargo insta review` before accepting. The fixture corpus at `tests/fixtures/dream-cycle-snapshot/` is frozen; do not modify it without updating the spec and snapshots together.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](./LICENSE).

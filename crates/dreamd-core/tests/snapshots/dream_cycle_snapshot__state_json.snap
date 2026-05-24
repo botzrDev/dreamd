@@ -1,0 +1,10 @@
+---
+source: crates/dreamd-core/tests/dream_cycle_snapshot.rs
+expression: content
+---
+{
+  "daemon_version": "<version>",
+  "last_dream_cycle_at": "2025-05-13T12:00:00+00:00",
+  "last_dream_cycle_status": "complete",
+  "schema_version": "1.0"
+}
