@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 dreamd-core = { path = "../dreamd-core", version = "0.0.0" }
+chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
 serde = { version = "1", features = ["derive"] }

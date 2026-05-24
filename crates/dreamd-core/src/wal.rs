@@ -137,6 +137,21 @@ pub fn recover_if_needed(agent_root: &AgentRoot, _now_sec: i64) -> Result<Recove
     Ok(RecoveryOutcome::Recovered { cleaned_files: cleaned })
 }
 
+/// Read `last_dream_cycle_status` from `state.json`.
+/// Returns `"idle"` if the file is absent or the key is missing.
+pub fn read_last_cycle_status(agent_root: &AgentRoot) -> Result<String, WalError> {
+    let path = agent_root.state_json();
+    if !path.exists() {
+        return Ok("idle".to_string());
+    }
+    let bytes = std::fs::read(&path)?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(v.get("last_dream_cycle_status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("idle")
+        .to_string())
+}
+
 fn read_schema_version(agent_root: &AgentRoot) -> Option<String> {
     let bytes = std::fs::read(agent_root.state_json()).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;

@@ -96,7 +96,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/learn", axum::routing::post(post_learn))
         .route("/api/v1/recall", axum::routing::get(get_recall))
         .route("/api/v1/preferences", axum::routing::get(get_preferences))
-        .route("/api/v1/dream", axum::routing::post(stub_handler))
+        .route("/api/v1/dream", axum::routing::post(post_dream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent_root_middleware,
@@ -111,8 +111,112 @@ pub fn build_router(state: AppState) -> axum::Router {
     router.with_state(state)
 }
 
-async fn stub_handler() -> axum::http::StatusCode {
-    axum::http::StatusCode::NOT_IMPLEMENTED
+/// `POST /api/v1/dream` — DR-404 / WEG-70.
+///
+/// Runs a full deterministic dream cycle for the resolved project root:
+///   1. 409 guard: reject if `state.json` shows `"in_progress"`.
+///   2. `run_deterministic_dream_cycle` — cluster engine + LESSONS.md write.
+///   3. `run_decay_pruner` — JSONL prune + snapshot write.
+///   4. If any events decayed, send `PruneDecayedEvents` to the Tantivy indexer.
+///
+/// Returns 200 `{"status":"ok"}` on success.
+async fn post_dream(
+    State(state): State<AppState>,
+    Extension(entry): Extension<crate::registry::ProjectEntry>,
+) -> impl IntoResponse {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::oneshot;
+    use crate::server::tantivy_handle::IndexerMsg;
+
+    let agent_root = crate::layout::AgentRoot::new(&entry.root);
+
+    // One SystemTime::now() call — both now_sec and cycle_date derive from it.
+    let now_sec = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
+        .expect("valid unix timestamp")
+        .format("%Y-%m-%d")
+        .to_string();
+
+    // 409 guard: reject concurrent cycles.
+    match crate::wal::read_last_cycle_status(&agent_root) {
+        Ok(status) if status == "in_progress" => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": "dream cycle in progress"})),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": e.to_string()})),
+            ).into_response();
+        }
+        Ok(_) => {}
+    }
+
+    // Consolidation + LESSONS.md write.
+    if let Err(e) = crate::consolidation::run_deterministic_dream_cycle(&agent_root, now_sec) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        ).into_response();
+    }
+
+    // Decay pruner — JSONL prune + snapshot write.
+    let decay_result = match crate::decay::run_decay_pruner(&agent_root, now_sec, &cycle_date) {
+        Ok(r) => r,
+        Err(e) => return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        ).into_response(),
+    };
+
+    // Tantivy prune — only if any events decayed.
+    // Escape pattern: clone the mpsc::Sender while holding the lock, release lock,
+    // then send PruneDecayedEvents and await response (no lock held across .await).
+    if !decay_result.decayed_ids.is_empty() {
+        let sender = {
+            let mut map = state.index_map.lock().unwrap();
+            match map.get_or_open(
+                std::path::Path::new(&entry.root),
+                |path| crate::server::tantivy_handle::TantivyIndexHandle::open(
+                    &crate::layout::AgentRoot::new(path),
+                    crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
+                ),
+            ) {
+                Ok(handle) => handle.sender(),
+                Err(e) => return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": e.to_string()})),
+                ).into_response(),
+            }
+        }; // Mutex released here — sender is Clone (mpsc::Sender)
+
+        let (tx, rx) = oneshot::channel();
+        if sender.send(IndexerMsg::PruneDecayedEvents {
+            event_ids: decay_result.decayed_ids,
+            response: tx,
+        }).await.is_err() {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "indexer channel closed"})),
+            ).into_response();
+        }
+        if let Err(e) = rx.await.unwrap_or(Err(crate::server::index_map::IndexError("indexer dropped response".to_string()))) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": e.to_string()})),
+            ).into_response();
+        }
+    }
+
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({"status": "ok"})),
+    ).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1308,5 +1412,121 @@ mod tests {
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── WEG-70: POST /api/v1/dream tests (DR-404) ────────────────────────────
+
+    /// T1 — Happy path: non-empty JSONL, POST /api/v1/dream → 200 {"status":"ok"}.
+    #[tokio::test]
+    async fn dream_happy_path_returns_200() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        // Scaffold minimal .agent/ with one learning in the episodic JSONL.
+        let agent_root = AgentRoot::new(dir.path());
+        let jsonl_path = agent_root.episodic_jsonl();
+        std::fs::create_dir_all(jsonl_path.parent().unwrap()).unwrap();
+        // Also create the .dreamd/ dir so WAL can write state.json.
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+        std::fs::write(
+            &jsonl_path,
+            b"{\"schema_version\":\"1.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"pain\":5.0,\"importance\":5.0,\"pinned\":false,\"skill_action\":\"rust.test\",\"source_harness\":\"test\",\"content\":\"test content\",\"recurrence\":0}\n",
+        )
+        .unwrap();
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dream")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], serde_json::json!("ok"));
+    }
+
+    /// T2 — 409 guard: state.json with "in_progress" → 409.
+    #[tokio::test]
+    async fn dream_in_progress_returns_409() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        // Write state.json with "in_progress" status to simulate a running cycle.
+        let agent_root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+        std::fs::write(
+            agent_root.state_json(),
+            b"{\"schema_version\":\"1.0\",\"last_dream_cycle_status\":\"in_progress\"}\n",
+        )
+        .unwrap();
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dream")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// T3 — Empty JSONL: POST /api/v1/dream → 200, LESSONS.md NOT created.
+    ///
+    /// `run_deterministic_dream_cycle` early-returns when the JSONL is empty
+    /// (no promoted clusters), so LESSONS.md is never written.
+    #[tokio::test]
+    async fn dream_empty_jsonl_returns_200_no_lessons_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        // Scaffold .agent/ with an empty JSONL.
+        let agent_root = AgentRoot::new(dir.path());
+        let jsonl_path = agent_root.episodic_jsonl();
+        std::fs::create_dir_all(jsonl_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+        std::fs::write(&jsonl_path, b"").unwrap();
+
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+
+        let req = with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dream")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], serde_json::json!("ok"));
+
+        // LESSONS.md must NOT have been created for an empty JSONL.
+        let lessons_path = agent_root.semantic_dir().join("LESSONS.md");
+        assert!(
+            !lessons_path.exists(),
+            "LESSONS.md must not be created when JSONL is empty"
+        );
     }
 }
