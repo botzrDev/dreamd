@@ -12,13 +12,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use dreamd_protocol::AgentLearning;
 
 use crate::index::{ClusterCount, RecurrenceSidecar};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
-use crate::lessons;
+use crate::lessons::{self, Lesson, LessonsFile};
 use crate::salience::salience;
+use crate::wal::{self, WalError, WalIntent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidationError {
@@ -217,6 +219,115 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     Ok(())
 }
 
+/// Error type for the deterministic dream cycle orchestrator.
+#[derive(Debug, thiserror::Error)]
+pub enum DreamCycleError {
+    #[error("cluster engine: {0}")]
+    Cluster(#[from] ConsolidationError),
+    #[error("WAL: {0}")]
+    Wal(#[from] WalError),
+    #[error("lessons write: {0}")]
+    Lessons(#[from] std::io::Error),
+}
+
+/// Orchestrate the full dream cycle in `--no-llm` deterministic mode (DR-308).
+///
+/// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
+/// top promoted cluster (highest `salience_sum`). No network calls are made.
+pub fn run_deterministic_dream_cycle(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+) -> Result<(), DreamCycleError> {
+    wal::begin_cycle(agent_root, now_sec)?;
+
+    let cluster_output = run_cluster_engine(agent_root, now_sec)?;
+
+    if cluster_output.promoted.is_empty() {
+        wal::commit_cycle(agent_root, now_sec)?;
+        return Ok(());
+    }
+
+    let top_cluster = cluster_output
+        .promoted
+        .iter()
+        .max_by(|a, b| {
+            a.salience_sum
+                .partial_cmp(&b.salience_sum)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap(); // safe: promoted.is_empty() guarded above
+
+    let exemplar = pick_exemplar(&top_cluster.events, now_sec);
+    let lessons = vec![Lesson {
+        id: exemplar.id.as_str().to_string(),
+        content: exemplar.content.clone(),
+        pinned: false,
+    }];
+
+    let lessons_path = agent_root.lessons_md();
+    let temp_path = lessons_path
+        .with_extension("tmp")
+        .to_string_lossy()
+        .into_owned();
+    wal::append_intent(
+        agent_root,
+        WalIntent::ReplaceSemanticMemory {
+            temp_file_path: temp_path,
+        },
+    )?;
+
+    let last_updated = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap_or_default();
+    let f = LessonsFile {
+        last_updated,
+        prompt_version: "deterministic-only".to_string(),
+        cluster_key: top_cluster.cluster_key.clone(),
+        lessons,
+    };
+    std::fs::create_dir_all(agent_root.semantic_dir())?;
+    lessons::write_lessons_file(&lessons_path, &f)?;
+
+    wal::commit_cycle(agent_root, now_sec)?;
+
+    apply_pin_unpin(agent_root)?;
+
+    Ok(())
+}
+
+fn pick_exemplar(events: &[AgentLearning], now_sec: i64) -> &AgentLearning {
+    events
+        .iter()
+        .max_by(|a, b| {
+            let sa = salience(
+                now_sec,
+                a.timestamp.timestamp(),
+                a.pain as f64,
+                a.importance as f64,
+                events.len() as u64,
+            );
+            let sb = salience(
+                now_sec,
+                b.timestamp.timestamp(),
+                b.pain as f64,
+                b.importance as f64,
+                events.len() as u64,
+            );
+            sa.partial_cmp(&sb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.pain
+                        .partial_cmp(&b.pain)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.importance
+                        .partial_cmp(&b.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| b.id.as_str().cmp(a.id.as_str()))
+        })
+        .unwrap() // safe: events is non-empty (only promoted clusters reach here)
+}
+
 fn count_in_window(indices: &[usize], events: &[AgentLearning], now_sec: i64, window_sec: i64) -> usize {
     let cutoff = now_sec - window_sec;
     indices.iter().filter(|&&i| events[i].timestamp.timestamp() >= cutoff).count()
@@ -252,7 +363,7 @@ mod tests {
     use dreamd_protocol::EventId;
 
     use crate::layout::AgentRoot;
-    use crate::lessons::{write_lessons_file, Lesson, LessonsFile};
+    use crate::lessons::{read_lessons_file, write_lessons_file, Lesson, LessonsFile};
 
     fn unique_tmpdir(label: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -576,5 +687,103 @@ mod tests {
 
         let out = run_cluster_engine(&root, NOW_SEC).unwrap();
         assert!(out.promoted.is_empty());
+    }
+
+    // --- WEG-61: run_deterministic_dream_cycle tests ---
+
+    #[test]
+    fn deterministic_cycle_empty_jsonl_no_lessons_md() {
+        let dir = unique_tmpdir("dc-empty");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        assert!(!root.lessons_md().exists());
+    }
+
+    #[test]
+    fn deterministic_cycle_single_cluster_highest_salience_exemplar() {
+        let dir = unique_tmpdir("dc-single");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // Events with distinct pain values; all age_days=0 so salience ∝ pain.
+        // Event 2 has the highest pain → highest salience → must be the exemplar.
+        let events = vec![
+            { let mut e = make_event(0, "rust::types", false); e.pain = 3.0; e },
+            { let mut e = make_event(1, "rust::types", false); e.pain = 5.0; e },
+            { let mut e = make_event(2, "rust::types", false); e.pain = 8.0; e },
+        ];
+        write_jsonl(&root, &events);
+
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        assert!(root.lessons_md().exists());
+        let lf = read_lessons_file(&root.lessons_md()).unwrap();
+        assert_eq!(lf.lessons.len(), 1);
+        assert_eq!(lf.prompt_version, "deterministic-only");
+        assert_eq!(lf.lessons[0].id, test_id(2).as_str().to_string());
+    }
+
+    #[test]
+    fn deterministic_cycle_tiebreak_lowest_id_wins() {
+        let dir = unique_tmpdir("dc-tie");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // Identical pain, importance, timestamp → salience tie on all three.
+        // Tie-break 3: lowest id lexicographically. test_id(5) < test_id(10) < test_id(20).
+        let events = vec![
+            make_event(10, "rust::types", false),
+            make_event(5, "rust::types", false),
+            make_event(20, "rust::types", false),
+        ];
+        write_jsonl(&root, &events);
+
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        let lf = read_lessons_file(&root.lessons_md()).unwrap();
+        assert_eq!(lf.lessons[0].id, test_id(5).as_str().to_string());
+    }
+
+    #[test]
+    fn deterministic_cycle_wal_absent_after_commit() {
+        let dir = unique_tmpdir("dc-wal");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
+            .map(|i| make_event(i as u32, "rust::types", false))
+            .collect();
+        write_jsonl(&root, &events);
+
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        assert!(!root.wal_path().exists(), "WAL must be deleted after commit");
+    }
+
+    #[test]
+    fn deterministic_cycle_exemplar_pinned_non_exemplars_unpinned() {
+        let dir = unique_tmpdir("dc-pin");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        // Event 2 has highest pain → exemplar → pinned; events 0 and 1 → not pinned.
+        let events = vec![
+            { let mut e = make_event(0, "rust::types", false); e.pain = 3.0; e },
+            { let mut e = make_event(1, "rust::types", false); e.pain = 5.0; e },
+            { let mut e = make_event(2, "rust::types", false); e.pain = 8.0; e },
+        ];
+        write_jsonl(&root, &events);
+
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        assert_eq!(updated.len(), 3);
+        let pinned = |n: u32| {
+            updated
+                .iter()
+                .find(|e| e.id.as_str() == test_id(n).as_str())
+                .unwrap()
+                .pinned
+        };
+        assert!(pinned(2), "exemplar (id 2) must be pinned");
+        assert!(!pinned(0), "non-exemplar (id 0) must not be pinned");
+        assert!(!pinned(1), "non-exemplar (id 1) must not be pinned");
     }
 }
