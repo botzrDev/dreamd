@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-core/tests/dream_cycle_snapshot.rs
+expression: content
+---
+{
+  "schema_version": "1.0",
+  "clusters": [
+    {
+      "skill_action": "rust::axum::error_handling",
+      "count": 3
+    },
+    {
+      "skill_action": "rust::tokio::async_patterns",
+      "count": 4
+    }
+  ]
+}
