@@ -52,7 +52,9 @@ pub fn resolve_project(
     // register_project()'s write-side behavior.
     let canonical = std::fs::canonicalize(agent_root)
         .unwrap_or_else(|_| agent_root.to_path_buf());
-    let canonical_str = canonical.to_string_lossy();
+    let canonical_str = canonical.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "project path is not valid UTF-8")
+    })?;
     Ok(registry.projects.into_iter().find(|p| p.root == canonical_str))
 }
 

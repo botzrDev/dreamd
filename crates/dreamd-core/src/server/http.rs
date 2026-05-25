@@ -136,7 +136,7 @@ async fn post_dream(
         .unwrap_or_default()
         .as_secs() as i64;
     let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
-        .expect("valid unix timestamp")
+        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH)
         .format("%Y-%m-%d")
         .to_string();
 
@@ -179,7 +179,10 @@ async fn post_dream(
     // then send PruneDecayedEvents and await response (no lock held across .await).
     if !decay_result.decayed_ids.is_empty() {
         let sender = {
-            let mut map = state.index_map.lock().unwrap();
+            let mut map = match state.index_map.lock() {
+                Ok(guard) => guard,
+                Err(_) => return error_500("index map mutex poisoned"),
+            };
             match map.get_or_open(
                 std::path::Path::new(&entry.root),
                 |path| crate::server::tantivy_handle::TantivyIndexHandle::open(
@@ -615,6 +618,19 @@ mod tests {
         .unwrap();
     }
 
+    /// Create a TempDir, write a registry pointing at it, and return a mock-state
+    /// router + owned root path string. Keep the returned TempDir alive for the
+    /// duration of the test.
+    fn mock_router_with_dir() -> (tempfile::TempDir, String, axum::Router) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap().to_owned();
+        write_registry(&registry_path, &root_str);
+        let state = make_test_state(registry_path);
+        let router = build_router(state);
+        (dir, root_str, router)
+    }
+
     fn sample_body(skill_action: &str, content: &str) -> serde_json::Value {
         serde_json::json!({
             "schema_version": "1.0",
@@ -688,13 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_agent_root_passes_middleware() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap();
-        write_registry(&registry_path, root_str);
-
-        let state = make_test_state(registry_path);
-        let router = build_router(state);
+        let (_dir, root_str, router) = mock_router_with_dir();
 
         // Empty body without content-type: middleware passes (registered root),
         // Json extractor rejects with 415. Confirms middleware no longer
@@ -702,7 +712,7 @@ mod tests {
         let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
-            .header("x-agent-root", root_str)
+            .header("x-agent-root", &root_str)
             .body(Body::empty())
             .unwrap());
 
@@ -714,18 +724,12 @@ mod tests {
     async fn stub_learn_endpoint_returns_501() {
         // Previously tested that the stub handler returned 501; now that
         // post_learn is wired, an empty body without content-type yields 415.
-        let dir = tempfile::tempdir().unwrap();
-        let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap();
-        write_registry(&registry_path, root_str);
-
-        let state = make_test_state(registry_path);
-        let router = build_router(state);
+        let (_dir, root_str, router) = mock_router_with_dir();
 
         let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
-            .header("x-agent-root", root_str)
+            .header("x-agent-root", &root_str)
             .body(Body::empty())
             .unwrap());
 
@@ -768,13 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn learn_invalid_skill_action_returns_400() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap();
-        write_registry(&registry_path, root_str);
-
-        let state = make_test_state(registry_path);
-        let router = build_router(state);
+        let (_dir, root_str, router) = mock_router_with_dir();
 
         // `!` is outside [a-z0-9_:.-]
         let body = sample_body("rust!invalid", "body");
