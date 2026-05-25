@@ -47,6 +47,11 @@ pub fn should_decay(now_sec: i64, learning: &AgentLearning, recurrence: u64) -> 
     sal < DECAY_SALIENCE_THRESHOLD
 }
 
+// DECISION (WEG-25 T06): No function in this module takes >3 parameters.
+// Both `should_decay(3)` and `run_decay_pruner(3)` have focused signatures;
+// grouping into a struct would add ceremony without reducing cognitive load.
+// Keeping flat parameters.
+
 /// Returned by [`run_decay_pruner`] on success.
 #[derive(Debug, Default)]
 pub struct DecayResult {
@@ -71,7 +76,10 @@ pub enum DecayError {
     #[error("decay I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("decay parse at line {line}: {source}")]
-    Json { line: usize, source: serde_json::Error },
+    Json {
+        line: usize,
+        source: serde_json::Error,
+    },
     #[error("decay WAL: {0}")]
     Wal(#[from] crate::wal::WalError),
 }
@@ -116,13 +124,19 @@ pub fn run_decay_pruner(
         if line.is_empty() {
             continue;
         }
-        let event = serde_json::from_slice::<AgentLearning>(line)
-            .map_err(|e| DecayError::Json { line: i + 1, source: e })?;
+        let event =
+            serde_json::from_slice::<AgentLearning>(line).map_err(|e| DecayError::Json {
+                line: i + 1,
+                source: e,
+            })?;
         all_events.push(event);
     }
 
     if all_events.is_empty() {
-        return Ok(DecayResult { decayed_ids: Vec::new(), kept_count: 0 });
+        return Ok(DecayResult {
+            decayed_ids: Vec::new(),
+            kept_count: 0,
+        });
     }
 
     // Step 2: partition into decayed / kept (recurrence = 0 per spec).
@@ -138,7 +152,10 @@ pub fn run_decay_pruner(
 
     // Step 3: if nothing decayed, return early — no files touched, no WAL.
     if decayed.is_empty() {
-        return Ok(DecayResult { decayed_ids: Vec::new(), kept_count: kept.len() });
+        return Ok(DecayResult {
+            decayed_ids: Vec::new(),
+            kept_count: kept.len(),
+        });
     }
 
     // Step 4: ensure snapshot directory exists.
@@ -198,7 +215,10 @@ pub fn run_decay_pruner(
 
     // Step 13: return result.
     let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();
-    Ok(DecayResult { decayed_ids, kept_count: kept.len() })
+    Ok(DecayResult {
+        decayed_ids,
+        kept_count: kept.len(),
+    })
 }
 
 // ===========================================================================

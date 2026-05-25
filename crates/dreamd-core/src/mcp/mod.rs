@@ -169,33 +169,30 @@ impl MemoryMcpServer {
         let (_, schema_fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
 
-        match crate::recall(&reader, &schema_fields, &query, k, None, now_sec) {
-            Ok(results) => {
-                let json_results: Vec<RecallResultJson> = results
-                    .into_iter()
-                    .map(|r| RecallResultJson {
-                        score: r.score,
-                        bm25: r.bm25,
-                        salience: r.salience,
-                        source: format!("{:?}", r.layer).to_lowercase(),
-                        content: r.content,
-                        metadata: RecallMeta {
-                            timestamp_sec: r.timestamp_sec,
-                            pain: r.pain,
-                            importance: r.importance,
-                            recurrence: r.recurrence,
-                        },
-                    })
-                    .collect();
-                let resp = RecallResponse {
-                    results: json_results,
-                };
-                let json = serde_json::to_string(&resp)
-                    .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
-                Ok(CallToolResult::success(vec![Content::text(json)]))
-            }
-            Err(e) => Err(McpError::invalid_request(format!("recall failed: {e}"), None)),
-        }
+        let results = crate::recall(&reader, &schema_fields, &query, k, None, now_sec)
+            .map_err(|e| McpError::invalid_request(format!("recall failed: {e}"), None))?;
+        let json_results: Vec<RecallResultJson> = results
+            .into_iter()
+            .map(|r| RecallResultJson {
+                score: r.score,
+                bm25: r.bm25,
+                salience: r.salience,
+                source: format!("{:?}", r.layer).to_lowercase(),
+                content: r.content,
+                metadata: RecallMeta {
+                    timestamp_sec: r.timestamp_sec,
+                    pain: r.pain,
+                    importance: r.importance,
+                    recurrence: r.recurrence,
+                },
+            })
+            .collect();
+        let resp = RecallResponse {
+            results: json_results,
+        };
+        let json = serde_json::to_string(&resp)
+            .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Search episodic memory using BM25 × salience scoring (non-Unix stub).

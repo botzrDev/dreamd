@@ -120,16 +120,16 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let mut b = Schema::builder();
     // content gains STORED in WEG-43 so recall results can be hydrated
     // back to the original text without a separate JSONL lookup.
-    let content           = b.add_text_field(CONTENT_FIELD, TEXT | STORED);
-    let timestamp_sec     = b.add_u64_field(TIMESTAMP_SEC_FIELD, INDEXED | FAST);
-    let pain              = b.add_f64_field(PAIN_FIELD, FAST);
-    let importance        = b.add_f64_field(IMPORTANCE_FIELD, FAST);
-    let recurrence        = b.add_u64_field(RECURRENCE_FIELD, FAST);
-    let layer             = b.add_text_field(LAYER_FIELD, STRING | STORED);
-    let last_updated_sec  = b.add_u64_field(LAST_UPDATED_SEC_FIELD, FAST);
+    let content = b.add_text_field(CONTENT_FIELD, TEXT | STORED);
+    let timestamp_sec = b.add_u64_field(TIMESTAMP_SEC_FIELD, INDEXED | FAST);
+    let pain = b.add_f64_field(PAIN_FIELD, FAST);
+    let importance = b.add_f64_field(IMPORTANCE_FIELD, FAST);
+    let recurrence = b.add_u64_field(RECURRENCE_FIELD, FAST);
+    let layer = b.add_text_field(LAYER_FIELD, STRING | STORED);
+    let last_updated_sec = b.add_u64_field(LAST_UPDATED_SEC_FIELD, FAST);
     let cited_event_count = b.add_u64_field(CITED_EVENT_COUNT_FIELD, FAST);
     // WEG-45: STRING | STORED (not TEXT) for exact-match delete-and-re-add.
-    let event_id          = b.add_text_field(EVENT_ID_FIELD, STRING | STORED);
+    let event_id = b.add_text_field(EVENT_ID_FIELD, STRING | STORED);
 
     let schema = b.build();
     (
@@ -191,7 +191,7 @@ pub struct RecurrenceSidecar {
 /// One entry in [`RecurrenceSidecar::clusters`]: maps a `skill_action`
 /// clustering key to its authoritative global recurrence count after the
 /// current dream cycle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClusterCount {
     pub skill_action: String,
     pub count: u32,
@@ -456,10 +456,7 @@ mod tests {
         let path = dir.path().join("index_manifest.json");
         std::fs::write(&path, "not json").unwrap();
         let result = check_manifest_version(&path);
-        assert!(matches!(
-            result,
-            Err(ManifestVersionError::Corrupt(_))
-        ));
+        assert!(matches!(result, Err(ManifestVersionError::Corrupt(_))));
     }
 
     #[test]
@@ -475,5 +472,12 @@ mod tests {
     #[test]
     fn parse_index_version_bad_semver() {
         assert_eq!(parse_index_version("index/x.y"), None);
+    }
+
+    #[test]
+    fn cluster_count_default() {
+        let cc = ClusterCount::default();
+        assert_eq!(cc.skill_action, "");
+        assert_eq!(cc.count, 0);
     }
 }
