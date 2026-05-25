@@ -643,6 +643,19 @@ mod tests {
         (dir, root_str, router)
     }
 
+    /// Like `mock_router_with_dir` but backed by a real `MemoryCoordinator`.
+    /// Use for tests that need actual append/dedup/durability semantics.
+    /// Returns `(dir, root_str, router)`; keep `dir` alive for the test.
+    fn real_router_with_dir() -> (tempfile::TempDir, String, axum::Router) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap().to_owned();
+        write_registry(&registry_path, &root_str);
+        let state = make_real_state(dir.path(), registry_path);
+        let router = build_router(state);
+        (dir, root_str, router)
+    }
+
     fn sample_body(skill_action: &str, content: &str) -> serde_json::Value {
         serde_json::json!({
             "schema_version": "1.0",
@@ -749,19 +762,13 @@ mod tests {
 
     #[tokio::test]
     async fn learn_valid_body_returns_201() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap();
-        write_registry(&registry_path, root_str);
-
-        let state = make_real_state(dir.path(), registry_path);
-        let router = build_router(state);
+        let (_dir, root_str, router) = real_router_with_dir();
 
         let body = sample_body("rust.cargo.test", "learned something useful");
         let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
-            .header("x-agent-root", root_str)
+            .header("x-agent-root", &root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap());
@@ -800,20 +807,14 @@ mod tests {
     async fn learn_skill_action_normalised() {
         // Uppercase letters and leading/trailing whitespace must be normalised
         // before validation. "  Rust.Cargo.TEST  " → "rust.cargo.test".
-        let dir = tempfile::tempdir().unwrap();
-        let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap();
-        write_registry(&registry_path, root_str);
-
-        let state = make_real_state(dir.path(), registry_path.clone());
+        let (dir, root_str, router) = real_router_with_dir();
         let agent_root = AgentRoot::new(dir.path());
-        let router = build_router(state);
 
         let body = sample_body("  Rust.Cargo.TEST  ", "normalisation test");
         let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
-            .header("x-agent-root", root_str)
+            .header("x-agent-root", &root_str)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap());

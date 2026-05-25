@@ -35,7 +35,7 @@ pub enum ConsolidationError {
 
 /// Output of [`run_cluster_engine`]: which clusters were promoted and their
 /// member events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClusterOutput {
     /// Promoted clusters in deepest-wins order. Each event belongs to exactly
     /// one cluster.
@@ -838,5 +838,11 @@ mod tests {
         assert!(pinned(2), "exemplar (id 2) must be pinned");
         assert!(!pinned(0), "non-exemplar (id 0) must not be pinned");
         assert!(!pinned(1), "non-exemplar (id 1) must not be pinned");
+    }
+
+    #[test]
+    fn cluster_output_default_is_empty() {
+        let output = ClusterOutput::default();
+        assert!(output.promoted.is_empty());
     }
 }

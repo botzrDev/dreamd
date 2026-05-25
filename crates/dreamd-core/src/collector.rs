@@ -67,7 +67,7 @@ pub struct ScoredDoc {
     recurrence: u64,
     /// Raw BM25 score captured before the salience multiply (Tantivy's `f32 Score` widened to `f64`).
     pub bm25: f64,
-    /// Salience multiplier computed at `collect()` time from the four FastFields.
+    /// Salience multiplier computed at `collect()` time from the four `FastFields`.
     pub salience: f64,
 }
 
@@ -179,10 +179,7 @@ impl Collector for SalienceCollector {
         true
     }
 
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<Vec<ScoredDoc>>,
-    ) -> tantivy::Result<Vec<ScoredDoc>> {
+    fn merge_fruits(&self, segment_fruits: Vec<Vec<ScoredDoc>>) -> tantivy::Result<Vec<ScoredDoc>> {
         let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(self.k + 1);
         for doc in segment_fruits.into_iter().flatten() {
             if merged.len() < self.k {
@@ -397,7 +394,15 @@ mod tests {
                 Layer::Episodic,
             ),
         ]);
-        let results = recall(&reader, &fields, "tokio", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
+        let results = recall(
+            &reader,
+            &fields,
+            "tokio",
+            10,
+            Some(Layer::Episodic),
+            NOW_SEC,
+        )
+        .unwrap();
         assert_eq!(results.len(), 2);
         assert!(
             results[0].score > results[1].score,
