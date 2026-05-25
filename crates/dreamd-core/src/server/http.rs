@@ -136,7 +136,7 @@ async fn post_dream(
         .unwrap_or_default()
         .as_secs() as i64;
     let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
         .format("%Y-%m-%d")
         .to_string();
 
@@ -263,7 +263,10 @@ async fn get_recall(
     // IndexReader is Clone (Arc-wrapped); holding the Mutex across the
     // Tantivy search would block every concurrent request for its duration.
     let reader = {
-        let mut map = state.index_map.lock().unwrap();
+        let mut map = match state.index_map.lock() {
+            Ok(guard) => guard,
+            Err(_) => return error_500("index map lock poisoned"),
+        };
         let root_path = std::path::Path::new(&entry.root);
         match map.get_or_open(root_path, |root| {
             crate::server::TantivyIndexHandle::open(
@@ -600,6 +603,15 @@ mod tests {
         }
     }
 
+    /// Create a TempDir + minimal AppState + Router.
+    /// Use for tests that only need HTTP routing without a registered project.
+    fn test_router() -> (tempfile::TempDir, axum::Router) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = make_test_state(dir.path().join("registry.toml"));
+        let router = build_router(state);
+        (dir, router)
+    }
+
     /// Inject the current process UID as PeerUid extension.
     /// Required because build_router now includes peer_uid_middleware which
     /// expects PeerUid to be set (as serve_uds does at connection-accept time).
@@ -624,7 +636,7 @@ mod tests {
     fn mock_router_with_dir() -> (tempfile::TempDir, String, axum::Router) {
         let dir = tempfile::tempdir().unwrap();
         let registry_path = dir.path().join("registry.toml");
-        let root_str = dir.path().to_str().unwrap().to_owned();
+        let root_str = dir.path().to_string_lossy().into_owned();
         write_registry(&registry_path, &root_str);
         let state = make_test_state(registry_path);
         let router = build_router(state);
@@ -671,9 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_x_agent_root_returns_400() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = make_test_state(dir.path().join("registry.toml"));
-        let router = build_router(state);
+        let (_dir, router) = test_router();
 
         let req = with_peer_uid(Request::builder()
             .method("POST")
@@ -687,14 +697,12 @@ mod tests {
 
     #[tokio::test]
     async fn unregistered_agent_root_returns_404() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = make_test_state(dir.path().join("registry.toml"));
-        let router = build_router(state);
+        let (_dir, router) = test_router();
 
         let req = with_peer_uid(Request::builder()
             .method("POST")
             .uri("/api/v1/learn")
-            .header("x-agent-root", dir.path().to_str().unwrap())
+            .header("x-agent-root", _dir.path().to_str().unwrap())
             .body(Body::empty())
             .unwrap());
 
@@ -1403,7 +1411,7 @@ mod tests {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/preferences")
-                .header("x-agent-root", dir.path().to_str().unwrap())
+            .header("x-agent-root", dir.path().to_str().unwrap())
                 .body(Body::empty())
                 .unwrap(),
         );

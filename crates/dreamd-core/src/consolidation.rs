@@ -27,7 +27,10 @@ pub enum ConsolidationError {
     #[error("reading AGENT_LEARNINGS.jsonl: {0}")]
     Io(#[from] std::io::Error),
     #[error("parsing event at line {line}: {source}")]
-    Json { line: usize, source: serde_json::Error },
+    Json {
+        line: usize,
+        source: serde_json::Error,
+    },
 }
 
 /// Output of [`run_cluster_engine`]: which clusters were promoted and their
@@ -99,7 +102,8 @@ pub fn run_cluster_engine(
     // claimed by the deepest qualifying cluster on first encounter.
     let mut prefixes: Vec<String> = depth_map.keys().cloned().collect();
     prefixes.sort_by(|a, b| {
-        b.split("::").count()
+        b.split("::")
+            .count()
             .cmp(&a.split("::").count())
             .then(a.cmp(b))
     });
@@ -213,7 +217,10 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     )
     .map_err(|e| match e {
         crate::wal::WalError::Io(io) => ConsolidationError::Io(io),
-        crate::wal::WalError::Json(je) => ConsolidationError::Json { line: 0, source: je },
+        crate::wal::WalError::Json(je) => ConsolidationError::Json {
+            line: 0,
+            source: je,
+        },
     })?;
     write_atomic(&jsonl_path, out.as_bytes())?;
     Ok(())
@@ -280,14 +287,14 @@ pub fn run_deterministic_dream_cycle(
     )?;
 
     let last_updated = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap_or_default();
-    let f = LessonsFile {
+    let lessons_file = LessonsFile {
         last_updated,
         prompt_version: "deterministic-only".to_string(),
         cluster_key: top_cluster.cluster_key.clone(),
         lessons,
     };
     std::fs::create_dir_all(agent_root.semantic_dir())?;
-    lessons::write_lessons_file(&lessons_path, &f)?;
+    lessons::write_lessons_file(&lessons_path, &lessons_file)?;
 
     wal::commit_cycle(agent_root, now_sec)?;
 
@@ -331,9 +338,17 @@ fn pick_exemplar(events: &[AgentLearning], now_sec: i64) -> &AgentLearning {
         .unwrap() // safe: events is non-empty (only promoted clusters reach here)
 }
 
-fn count_in_window(indices: &[usize], events: &[AgentLearning], now_sec: i64, window_sec: i64) -> usize {
+fn count_in_window(
+    indices: &[usize],
+    events: &[AgentLearning],
+    now_sec: i64,
+    window_sec: i64,
+) -> usize {
     let cutoff = now_sec - window_sec;
-    indices.iter().filter(|&&i| events[i].timestamp.timestamp() >= cutoff).count()
+    indices
+        .iter()
+        .filter(|&&i| events[i].timestamp.timestamp() >= cutoff)
+        .count()
 }
 
 fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<AgentLearning>, ConsolidationError> {
@@ -347,8 +362,12 @@ fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<AgentLearning>, Consolidatio
         if line.is_empty() {
             continue;
         }
-        let event = serde_json::from_slice::<AgentLearning>(line)
-            .map_err(|e| ConsolidationError::Json { line: i + 1, source: e })?;
+        let event = serde_json::from_slice::<AgentLearning>(line).map_err(|e| {
+            ConsolidationError::Json {
+                line: i + 1,
+                source: e,
+            }
+        })?;
         events.push(event);
     }
     Ok(events)
@@ -462,9 +481,7 @@ mod tests {
         let dir = unique_tmpdir("depths");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
-        let events: Vec<AgentLearning> = (0..3)
-            .map(|i| make_event(i, "a::b::c", false))
-            .collect();
+        let events: Vec<AgentLearning> = (0..3).map(|i| make_event(i, "a::b::c", false)).collect();
         write_jsonl(&root, &events);
 
         let out = run_cluster_engine(&root, NOW_SEC).unwrap();
@@ -635,8 +652,14 @@ mod tests {
 
         let updated = read_jsonl(root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 2);
-        assert!(!updated[0].pinned, "id 0: no LESSONS.md → pinned must be false");
-        assert!(!updated[1].pinned, "id 1: no LESSONS.md → pinned must be false");
+        assert!(
+            !updated[0].pinned,
+            "id 0: no LESSONS.md → pinned must be false"
+        );
+        assert!(
+            !updated[1].pinned,
+            "id 1: no LESSONS.md → pinned must be false"
+        );
     }
 
     #[test]
@@ -711,9 +734,21 @@ mod tests {
         // Events with distinct pain values; all age_days=0 so salience ∝ pain.
         // Event 2 has the highest pain → highest salience → must be the exemplar.
         let events = vec![
-            { let mut e = make_event(0, "rust::types", false); e.pain = 3.0; e },
-            { let mut e = make_event(1, "rust::types", false); e.pain = 5.0; e },
-            { let mut e = make_event(2, "rust::types", false); e.pain = 8.0; e },
+            {
+                let mut e = make_event(0, "rust::types", false);
+                e.pain = 3.0;
+                e
+            },
+            {
+                let mut e = make_event(1, "rust::types", false);
+                e.pain = 5.0;
+                e
+            },
+            {
+                let mut e = make_event(2, "rust::types", false);
+                e.pain = 8.0;
+                e
+            },
         ];
         write_jsonl(&root, &events);
 
@@ -758,7 +793,10 @@ mod tests {
 
         run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
 
-        assert!(!root.wal_path().exists(), "WAL must be deleted after commit");
+        assert!(
+            !root.wal_path().exists(),
+            "WAL must be deleted after commit"
+        );
     }
 
     #[test]
@@ -768,9 +806,21 @@ mod tests {
         let root = AgentRoot::new(&dir);
         // Event 2 has highest pain → exemplar → pinned; events 0 and 1 → not pinned.
         let events = vec![
-            { let mut e = make_event(0, "rust::types", false); e.pain = 3.0; e },
-            { let mut e = make_event(1, "rust::types", false); e.pain = 5.0; e },
-            { let mut e = make_event(2, "rust::types", false); e.pain = 8.0; e },
+            {
+                let mut e = make_event(0, "rust::types", false);
+                e.pain = 3.0;
+                e
+            },
+            {
+                let mut e = make_event(1, "rust::types", false);
+                e.pain = 5.0;
+                e
+            },
+            {
+                let mut e = make_event(2, "rust::types", false);
+                e.pain = 8.0;
+                e
+            },
         ];
         write_jsonl(&root, &events);
 

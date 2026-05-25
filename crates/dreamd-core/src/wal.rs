@@ -99,7 +99,10 @@ pub fn commit_cycle(agent_root: &AgentRoot, now_sec: i64) -> Result<(), WalError
 
 /// Check for a stale WAL on startup and run recovery.
 /// Returns `Clean` if no WAL found, `Recovered` if incomplete cycle cleaned up.
-pub fn recover_if_needed(agent_root: &AgentRoot, _now_sec: i64) -> Result<RecoveryOutcome, WalError> {
+pub fn recover_if_needed(
+    agent_root: &AgentRoot,
+    _now_sec: i64,
+) -> Result<RecoveryOutcome, WalError> {
     let wal_path = agent_root.wal_path();
     if !wal_path.exists() {
         return Ok(RecoveryOutcome::Clean);
@@ -134,7 +137,9 @@ pub fn recover_if_needed(agent_root: &AgentRoot, _now_sec: i64) -> Result<Recove
 
     std::fs::remove_file(&wal_path)?;
     update_state_json(agent_root, "failed", None)?;
-    Ok(RecoveryOutcome::Recovered { cleaned_files: cleaned })
+    Ok(RecoveryOutcome::Recovered {
+        cleaned_files: cleaned,
+    })
 }
 
 /// Read `last_dream_cycle_status` from `state.json`.
@@ -254,7 +259,10 @@ mod tests {
         begin_cycle(&root, NOW_SEC).unwrap();
         commit_cycle(&root, NOW_SEC).unwrap();
 
-        assert!(!root.wal_path().exists(), "WAL must be deleted after commit_cycle");
+        assert!(
+            !root.wal_path().exists(),
+            "WAL must be deleted after commit_cycle"
+        );
 
         let state: serde_json::Value =
             serde_json::from_slice(&fs::read(root.state_json()).unwrap()).unwrap();
@@ -279,6 +287,42 @@ mod tests {
         assert!(!root.state_json().exists());
         let status = read_last_cycle_status(&root).unwrap();
         assert_eq!(status, "idle");
+    }
+
+    #[test]
+    fn read_last_cycle_status_returns_idle_when_key_missing() {
+        let (root, _g) = setup_root("idle-key-missing");
+        // state.json exists but has no last_dream_cycle_status key.
+        let state = serde_json::json!({"schema_version": "1.0", "daemon_version": "0.0.0"});
+        fs::write(
+            root.state_json(),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let status = read_last_cycle_status(&root).unwrap();
+        assert_eq!(status, "idle");
+    }
+
+    #[test]
+    fn read_cycle_started_at_returns_none_when_file_missing() {
+        let (root, _g) = setup_root("cycle-started-missing");
+        assert!(!root.state_json().exists());
+        let started = read_cycle_started_at(&root).unwrap();
+        assert_eq!(started, None);
+    }
+
+    #[test]
+    fn read_cycle_started_at_returns_some_after_commit() {
+        let (root, _g) = setup_root("cycle-started-set");
+        begin_cycle(&root, NOW_SEC).unwrap();
+        commit_cycle(&root, NOW_SEC).unwrap();
+        let started = read_cycle_started_at(&root).unwrap();
+        assert!(started.is_some(), "must return Some after commit");
+        assert!(
+            started.as_ref().unwrap().contains('T'),
+            "expected ISO date with time, got {:?}",
+            started
+        );
     }
 
     #[test]
