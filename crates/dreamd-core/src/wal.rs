@@ -152,6 +152,20 @@ pub fn read_last_cycle_status(agent_root: &AgentRoot) -> Result<String, WalError
         .to_string())
 }
 
+/// Read `last_dream_cycle_at` from `state.json`.
+/// Returns `None` if the file is absent, the key is missing, or the value is JSON null.
+pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, WalError> {
+    let path = agent_root.state_json();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path)?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(v.get("last_dream_cycle_at")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string()))
+}
+
 fn read_schema_version(agent_root: &AgentRoot) -> Option<String> {
     let bytes = std::fs::read(agent_root.state_json()).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -256,6 +270,15 @@ mod tests {
         let (root, _g) = setup_root("clean");
         let outcome = recover_if_needed(&root, NOW_SEC).unwrap();
         assert_eq!(outcome, RecoveryOutcome::Clean);
+    }
+
+    #[test]
+    fn read_last_cycle_status_returns_idle_when_file_missing() {
+        let (root, _g) = setup_root("idle-default");
+        // state.json does not exist yet
+        assert!(!root.state_json().exists());
+        let status = read_last_cycle_status(&root).unwrap();
+        assert_eq!(status, "idle");
     }
 
     #[test]

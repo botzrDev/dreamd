@@ -151,6 +151,11 @@ impl AgentRoot {
         self.dreamd_dir().join("state.json")
     }
 
+    /// `<project>/.agent/.dreamd/agent.log` — rolling daemon log for this project.
+    pub fn agent_log(&self) -> PathBuf {
+        self.dreamd_dir().join("agent.log")
+    }
+
     /// `<project>/.agent/.dreamd/dream_in_progress.wal` — WAL for the dream
     /// cycle. Exists only during an in-progress or crashed cycle; its presence
     /// on startup is the signal to run recovery before serving traffic.
@@ -182,6 +187,12 @@ impl AgentRoot {
             self.protocols_dir(),
             self.dreamd_dir(),
         ]
+    }
+}
+
+impl std::fmt::Display for AgentRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.project_root.display())
     }
 }
 
@@ -309,6 +320,19 @@ mod tests {
         assert_eq!(
             root().decisions_md(),
             PathBuf::from("/tmp/proj/.agent/personal/DECISIONS.md"),
+        );
+    }
+
+    #[test]
+    fn agent_root_display_shows_project_root() {
+        assert_eq!(root().to_string(), "/tmp/proj");
+    }
+
+    #[test]
+    fn agent_log_is_under_dreamd_dir() {
+        assert_eq!(
+            root().agent_log(),
+            PathBuf::from("/tmp/proj/.agent/.dreamd/agent.log"),
         );
     }
 

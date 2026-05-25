@@ -45,6 +45,21 @@ pub struct DreamArgs {
     pub auto: bool,
 }
 
+impl DreamArgs {
+    /// Validate flag combinations. Returns `Err` with a user-facing message if
+    /// the combination is invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dry && self.auto {
+            return Err(
+                "--dry and --auto are mutually exclusive: \
+                 auto mode performs real writes on a schedule"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
@@ -165,6 +180,10 @@ pub fn run() -> ExitCode {
             }
         }
         Command::Dream(args) => {
+            if let Err(msg) = args.validate() {
+                eprintln!("dreamd: {msg}");
+                return ExitCode::from(2);
+            }
             if args.auto {
                 eprintln!(
                     "dreamd: --auto is not yet supported at v0.1; \

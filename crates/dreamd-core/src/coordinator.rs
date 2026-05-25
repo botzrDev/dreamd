@@ -39,7 +39,7 @@ const IDEMPOTENCY_CAPACITY: usize = 1024;
 
 /// The outcome of a successful coordinator append. Returned via the oneshot
 /// channel so the HTTP handler can include `deduplicated` in the response body.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AppendOutcome {
     pub id: EventId,
     /// `true` when the idempotency LRU returned a cached `EventId` instead of

@@ -32,7 +32,16 @@ impl fmt::Display for DreamCliError {
     }
 }
 
-impl std::error::Error for DreamCliError {}
+impl std::error::Error for DreamCliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DreamCycle(e) => Some(e),
+            Self::Decay(e) => Some(e),
+            Self::Index(_) => None,
+            Self::Io(e) => Some(e),
+        }
+    }
+}
 
 impl From<std::io::Error> for DreamCliError {
     fn from(e: std::io::Error) -> Self {

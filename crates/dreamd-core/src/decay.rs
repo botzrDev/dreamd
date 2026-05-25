@@ -48,12 +48,21 @@ pub fn should_decay(now_sec: i64, learning: &AgentLearning, recurrence: u64) -> 
 }
 
 /// Returned by [`run_decay_pruner`] on success.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DecayResult {
     /// IDs of events moved to the snapshot file.
     pub decayed_ids: Vec<EventId>,
     /// Count of events that remain in the live JSONL.
     pub kept_count: usize,
+}
+
+impl DecayResult {
+    /// Returns `true` when the pruner ran but made no changes: no events
+    /// decayed and nothing was kept (i.e., the JSONL was absent or empty).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.decayed_ids.is_empty() && self.kept_count == 0
+    }
 }
 
 /// Errors from [`run_decay_pruner`].
@@ -94,13 +103,13 @@ pub fn run_decay_pruner(
 ) -> Result<DecayResult, DecayError> {
     // Step 1: read + parse AGENT_LEARNINGS.jsonl.
     let jsonl_path = agent_root.episodic_jsonl();
-    let bytes = match fs::read(&jsonl_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DecayResult { decayed_ids: Vec::new(), kept_count: 0 });
+    let read_result = fs::read(&jsonl_path);
+    if let Err(ref e) = read_result {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return Ok(DecayResult::default());
         }
-        Err(e) => return Err(DecayError::Io(e)),
-    };
+    }
+    let bytes = read_result?;
 
     let mut all_events: Vec<AgentLearning> = Vec::new();
     for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
@@ -270,6 +279,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn decay_result_default_is_empty() {
+        let r = DecayResult::default();
+        assert!(r.decayed_ids.is_empty());
+        assert_eq!(r.kept_count, 0);
+    }
 
     #[test]
     fn should_decay_old_low_salience() {

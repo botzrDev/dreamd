@@ -220,6 +220,7 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
 }
 
 /// Error type for the deterministic dream cycle orchestrator.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum DreamCycleError {
     #[error("cluster engine: {0}")]
@@ -234,10 +235,12 @@ pub enum DreamCycleError {
 ///
 /// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
 /// top promoted cluster (highest `salience_sum`). No network calls are made.
+#[must_use = "dream cycle errors must be handled"]
 pub fn run_deterministic_dream_cycle(
     agent_root: &AgentRoot,
     now_sec: i64,
 ) -> Result<(), DreamCycleError> {
+    let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
     wal::begin_cycle(agent_root, now_sec)?;
 
     let cluster_output = run_cluster_engine(agent_root, now_sec)?;
@@ -336,8 +339,8 @@ fn count_in_window(indices: &[usize], events: &[AgentLearning], now_sec: i64, wi
 fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<AgentLearning>, ConsolidationError> {
     let bytes = match std::fs::read(path.as_ref()) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(ConsolidationError::Io(e)),
+        Err(not_found) if not_found.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(io_err) => return Err(ConsolidationError::Io(io_err)),
     };
     let mut events = Vec::new();
     for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
