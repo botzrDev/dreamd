@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dreamd": {
+      "command": "npx",
+      "args": ["-y", "@dataprime1/dreamd-mcp"]
+    }
+  }
+}
