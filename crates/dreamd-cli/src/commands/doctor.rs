@@ -6,13 +6,18 @@
 
 use std::io::{self, Write};
 
+use dreamd_core::autobiography::AutobiographySkip;
 use dreamd_core::config::{Config, DreamCycleMode};
 
 /// Run `dreamd doctor` and write output to `out`.
 ///
 /// Returns `Ok(true)` if all checks passed (exit 0 caller), `Ok(false)` if any
 /// WARNING or ERROR was emitted (exit 1 caller).
-pub fn run(config: &Config, out: &mut impl Write) -> io::Result<bool> {
+pub fn run(
+    config: &Config,
+    skip: Option<&AutobiographySkip>,
+    out: &mut impl Write,
+) -> io::Result<bool> {
     let mut all_ok = true;
 
     // DR-315 — dream-cycle mode line.
@@ -29,7 +34,35 @@ pub fn run(config: &Config, out: &mut impl Write) -> io::Result<bool> {
         }
     }
 
+    // WEG-63 — last autobiography skip (if any).
+    if let Some(s) = skip {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let elapsed = now.saturating_sub(s.at);
+        let duration_str = format_elapsed(elapsed);
+        let file_count = s.files.len();
+        writeln!(
+            out,
+            "last autobiography skip: {} ago — {} — {} files",
+            duration_str, s.reason, file_count,
+        )?;
+    }
+
     Ok(all_ok)
+}
+
+fn format_elapsed(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs} seconds")
+    } else if secs < 3600 {
+        format!("{} minutes", secs / 60)
+    } else if secs < 86400 {
+        format!("{} hours", secs / 3600)
+    } else {
+        format!("{} days", secs / 86400)
+    }
 }
 
 #[cfg(test)]
@@ -40,7 +73,7 @@ mod tests {
     fn doctor_output_contains_dream_cycle_mode_manual() {
         let cfg = Config::default(); // default is Manual
         let mut buf = Vec::new();
-        let ok = run(&cfg, &mut buf).expect("run ok");
+        let ok = run(&cfg, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             output.contains("dream_cycle_mode:"),
@@ -58,7 +91,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.dream_cycle_mode = DreamCycleMode::Auto;
         let mut buf = Vec::new();
-        let ok = run(&cfg, &mut buf).expect("run ok");
+        let ok = run(&cfg, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             output.contains("dream_cycle_mode:"),
@@ -69,5 +102,50 @@ mod tests {
             "auto mode must emit WARNING; got: {output:?}"
         );
         assert!(!ok, "auto mode must return all_ok=false");
+    }
+
+    #[test]
+    fn doctor_skip_some_renders_line() {
+        let cfg = Config::default();
+        let skip = AutobiographySkip {
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 300, // 5 minutes ago
+            reason: "user_dirty_tree".to_string(),
+            files: vec![
+                ".agent/semantic/LESSONS.md".to_string(),
+                ".agent/episodic/AGENT_LEARNINGS.jsonl".to_string(),
+            ],
+        };
+        let mut buf = Vec::new();
+        let ok = run(&cfg, Some(&skip), &mut buf).expect("run ok");
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            output.contains("last autobiography skip:"),
+            "skip line must be present; got: {output:?}"
+        );
+        assert!(
+            output.contains("user_dirty_tree"),
+            "reason must appear; got: {output:?}"
+        );
+        assert!(
+            output.contains("2 files"),
+            "file count must appear; got: {output:?}"
+        );
+        assert!(ok, "skip line must not change all_ok");
+    }
+
+    #[test]
+    fn doctor_skip_none_no_skip_line() {
+        let cfg = Config::default();
+        let mut buf = Vec::new();
+        run(&cfg, None, &mut buf).expect("run ok");
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            !output.contains("last autobiography skip"),
+            "no skip line when skip is None; got: {output:?}"
+        );
     }
 }

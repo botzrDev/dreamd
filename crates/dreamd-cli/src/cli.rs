@@ -43,6 +43,10 @@ pub struct DreamArgs {
     /// Not yet supported at v0.1; ships v0.1.1.
     #[arg(long, hide = true)]
     pub auto: bool,
+    /// Skip the autobiography commit. The cycle still runs and writes to disk;
+    /// only the git2 commit step is skipped. Useful in CI.
+    #[arg(long)]
+    pub no_commit: bool,
 }
 
 impl DreamArgs {
@@ -176,9 +180,11 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            let agent_root = dreamd_core::layout::AgentRoot::new(&cwd);
+            let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-            match commands::doctor::run(&config, &mut out) {
+            match commands::doctor::run(&config, skip.as_ref(), &mut out) {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::from(1),
                 Err(e) => {
@@ -222,7 +228,7 @@ pub fn run() -> ExitCode {
                 eprintln!("dreamd: {msg}");
                 return ExitCode::from(2);
             }
-            match commands::dream::run(&cwd, &mut std::io::stdout()) {
+            match commands::dream::run(&cwd, &mut std::io::stdout(), args.no_commit) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("dreamd: {e}");
