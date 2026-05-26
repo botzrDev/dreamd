@@ -157,6 +157,12 @@ async fn post_dream(
         Ok(_) => {}
     }
 
+    // WEG-63 — capture dirty state BEFORE the cycle runs.
+    let dirty_at_cycle_start = crate::autobiography::check_dirty_at_cycle_start(
+        std::path::Path::new(&entry.root),
+    )
+    .unwrap_or_default();
+
     // Consolidation + LESSONS.md write.
     if let Err(e) = crate::consolidation::run_deterministic_dream_cycle(&agent_root, now_sec) {
         return (
@@ -214,6 +220,19 @@ async fn post_dream(
                 axum::Json(serde_json::json!({"error": e.to_string()})),
             ).into_response();
         }
+    }
+
+    // WEG-63 — autobiography commit. Best-effort: failures are logged but
+    // do not turn the cycle into a 500.
+    if let Err(e) = crate::autobiography::commit_cycle(
+        &agent_root,
+        &cycle_date,
+        &dirty_at_cycle_start,
+    ) {
+        tracing::error!(
+            error = %e,
+            "autobiography commit failed (dream cycle still succeeded)"
+        );
     }
 
     (

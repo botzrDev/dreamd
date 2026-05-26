@@ -49,6 +49,11 @@ fn snapshot_init_help() {
 }
 
 #[test]
+fn snapshot_dream_help() {
+    assert_snapshot!("dream_help", subcommand_help("dream"));
+}
+
+#[test]
 fn snapshot_version_help() {
     assert_snapshot!("version_help", subcommand_help("version"));
 }

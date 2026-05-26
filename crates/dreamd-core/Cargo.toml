@@ -75,6 +75,11 @@ schemars = "1"
 # WEG-XX redaction module — already resolved transitively via tantivy (1.12.3
 # in Cargo.lock), so adding as a direct dep causes no resolution churn.
 regex = "1"
+# WEG-63 / DR-311 — autobiography commit on dream-cycle completion.
+# git2 wraps libgit2 (C); adds ~1-2MB to the stripped binary. WEG-54
+# (DR-809 binary size CI gate, 15MB) is the upper bound; current binary
+# is 839KB stripped, so the addition is comfortably under.
+git2 = "0.21"
 # WEG-72 / DR-407 — SO_PEERCRED middleware. `serve_uds` drives hyper-util's
 # auto-HTTP connection builder so each accepted UDS stream is served via
 # HTTP/1.1 or HTTP/2. Pin to "0.1" to match the 0.1.20 already resolved

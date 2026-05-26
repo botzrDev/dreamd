@@ -50,7 +50,11 @@ impl From<std::io::Error> for DreamCliError {
 }
 
 /// Run the full deterministic dream cycle from the CLI.
-pub fn run(project_root: &Path, out: &mut impl Write) -> Result<(), DreamCliError> {
+pub fn run(
+    project_root: &Path,
+    out: &mut impl Write,
+    no_commit: bool,
+) -> Result<(), DreamCliError> {
     let agent_root = AgentRoot::new(project_root);
 
     // One SystemTime::now() call — both values derive from it.
@@ -62,6 +66,14 @@ pub fn run(project_root: &Path, out: &mut impl Write) -> Result<(), DreamCliErro
         .expect("valid unix timestamp")
         .format("%Y-%m-%d")
         .to_string();
+
+    // WEG-63 — capture dirty state BEFORE the cycle runs.
+    let dirty_at_cycle_start = if no_commit {
+        Vec::new()
+    } else {
+        dreamd_core::autobiography::check_dirty_at_cycle_start(project_root)
+            .unwrap_or_default()
+    };
 
     run_deterministic_dream_cycle(&agent_root, now_sec).map_err(DreamCliError::DreamCycle)?;
 
@@ -82,6 +94,20 @@ pub fn run(project_root: &Path, out: &mut impl Write) -> Result<(), DreamCliErro
             .unwrap()
             .block_on(handle.prune_decayed_events(result.decayed_ids))
             .map_err(|e| DreamCliError::Index(e.to_string()))?;
+    }
+
+    // WEG-63 — autobiography commit. Best-effort; failure does not fail the cycle.
+    if !no_commit {
+        if let Err(e) = dreamd_core::autobiography::commit_cycle(
+            &agent_root,
+            &cycle_date,
+            &dirty_at_cycle_start,
+        ) {
+            tracing::error!(
+                error = %e,
+                "autobiography commit failed (dream cycle still succeeded)"
+            );
+        }
     }
 
     writeln!(

@@ -686,6 +686,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "vergen",
  "vergen-gitcl",
 ]
@@ -700,6 +701,7 @@ dependencies = [
  "dirs",
  "dreamd-protocol",
  "figment",
+ "git2",
  "hyper-util",
  "insta",
  "lru 0.12.5",
@@ -964,6 +966,18 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "git2"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
+dependencies = [
+ "bitflags",
+ "libc",
+ "libgit2-sys",
+ "log",
 ]
 
 [[package]]
@@ -1290,12 +1304,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libgit2-sys"
+version = "0.18.4+1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -2470,6 +2508,12 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vergen"

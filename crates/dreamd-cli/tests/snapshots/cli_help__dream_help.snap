@@ -1,0 +1,18 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 53
+expression: "subcommand_help(\"dream\")"
+---
+Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+
+Usage: dream [OPTIONS]
+
+Options:
+      --dry
+          Dry run: print what would change without writing. Not yet implemented; ships v0.1.1
+
+      --no-commit
+          Skip the autobiography commit. The cycle still runs and writes to disk; only the git2 commit step is skipped. Useful in CI
+
+  -h, --help
+          Print help
