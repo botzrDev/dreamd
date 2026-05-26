@@ -1,0 +1,128 @@
+//! `run_watch` — foreground daemon entry point (WEG-88 / DR-702).
+
+#![cfg(unix)]
+
+use std::path::Path;
+
+use crate::config::{load_config, DreamCycleMode};
+use crate::layout::{AgentRoot, DaemonHome};
+use crate::server::http::AppState;
+use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
+use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+use crate::server::tantivy_handle::TantivyIndexHandle;
+use crate::server::uds_server::{bind_api_socket, serve_uds};
+use crate::server::build_router;
+
+/// Failure modes surfaced by [`run_watch`].
+#[derive(Debug, thiserror::Error)]
+pub enum WatchError {
+    #[error("no project root found from {0:?}; run `dreamd init` first")]
+    NoProjectRoot(String),
+    #[error("config: {0}")]
+    DreamMode(String),
+    #[error("supervisor: {0}")]
+    Server(#[from] ServerError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("config load: {0}")]
+    Config(String),
+}
+
+/// Boot a per-project daemon in the foreground, binding `~/.agent/dreamd.sock`,
+/// and block until SIGINT/SIGTERM. Called by `dreamd watch`.
+///
+/// The sequence is: discover AgentRoot → load config + WEG-66 guard →
+/// boot Supervisor → compose AppState → bind socket → serve until Ctrl-C.
+pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
+    // 1. Discover project root from cwd.
+    let agent_root = AgentRoot::discover(cwd)
+        .map_err(|_| WatchError::NoProjectRoot(cwd.display().to_string()))?;
+
+    // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto in v0.1).
+    let config = load_config(agent_root.project_root())
+        .map_err(|e| WatchError::Config(e.to_string()))?;
+    if config.dream_cycle_mode == DreamCycleMode::Auto {
+        return Err(WatchError::DreamMode(
+            "dream_cycle_mode = \"auto\" is not supported in v0.1 \
+             (LLM mode ships in v0.1.1)"
+                .into(),
+        ));
+    }
+
+    // 3. Boot supervisor against the project root.
+    let supervisor = Supervisor::start(&agent_root, COORDINATOR_CHANNEL_CAPACITY, None)?;
+
+    // 4. Compose AppState. daemon_uid is this process's UID — peer_uid_middleware
+    //    (WEG-72 / DR-407) rejects any connection whose peer UID differs.
+    let home = dirs::home_dir().ok_or_else(|| {
+        WatchError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not determine home directory",
+        ))
+    })?;
+    let daemon_home = DaemonHome::new(home.join(".agent"));
+    let registry_path = daemon_home.registry_toml();
+    let index_map = ProjectIndexMap::<TantivyIndexHandle>::new(ProjectIndexMapConfig::default());
+    let daemon_uid = nix::unistd::Uid::current().as_raw();
+    let state = AppState::new(registry_path, supervisor, config, index_map, daemon_uid);
+    let router = build_router(state);
+
+    // 5. Bind socket + serve. bind_api_socket handles stale-socket recovery.
+    let sock_path = daemon_home.socket_path();
+    let listener = bind_api_socket(&sock_path)?;
+
+    tracing::info!(
+        "dreamd watch: serving on {} (project: {})",
+        sock_path.display(),
+        agent_root.project_root().display(),
+    );
+
+    // 6. Serve until SIGINT. select! exits cleanly on Ctrl-C; the Supervisor
+    //    drops at end of scope, which drains the coordinator channel.
+    tokio::select! {
+        result = serve_uds(listener, router) => {
+            result?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("dreamd watch: shutdown requested, exiting");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn run_watch_rejects_missing_project_root() {
+        let dir = tempdir().expect("tempdir");
+        // No .agent/ directory — AgentRoot::discover returns Err
+        let result = run_watch(dir.path()).await;
+        assert!(
+            matches!(result, Err(WatchError::NoProjectRoot(_))),
+            "expected NoProjectRoot, got: {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_watch_rejects_dream_mode_auto() {
+        let dir = tempdir().expect("tempdir");
+        // Create .agent/ so AgentRoot::discover succeeds
+        std::fs::create_dir(dir.path().join(".agent")).expect("create .agent");
+        // Write config with dream_cycle_mode = "auto"
+        std::fs::create_dir_all(dir.path().join(".agent/.dreamd")).expect("create .dreamd");
+        std::fs::write(
+            dir.path().join(".agent/.dreamd/config.toml"),
+            r#"dream_cycle_mode = "auto""#,
+        )
+        .expect("write config");
+        let result = run_watch(dir.path()).await;
+        assert!(
+            matches!(result, Err(WatchError::DreamMode(_))),
+            "expected DreamMode error, got: {result:?}",
+        );
+    }
+}
