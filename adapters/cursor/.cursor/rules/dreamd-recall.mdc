@@ -1,0 +1,31 @@
+---
+description: Recall lessons, decisions, and prior context from the .agent/ memory daemon. Use when starting work in a project that has a .agent/ folder, when the user references a past decision, or when you are about to make a choice that has a documented prior.
+alwaysApply: false
+---
+
+## When to use
+Use `search_nodes` (MCP) when:
+- Starting a new task in a project you have worked in before
+- The user references a past decision or problem
+- You are about to make a choice that has a documented prior
+
+## How to log a learning
+When you discover something worth remembering, call `append_node` with:
+- `skill_action`: `::` -separated key — always language-first, e.g. `rust::error_handling`, `rust::api_design`, `rust::clippy::<lint_name>`
+- `source_harness`: `"cursor"` (required — omitting causes a deserialization error)
+- `pain`: 0–10 (friction caused)
+- `importance`: 0–10 (how often this pattern recurs)
+- `content`: one clear sentence of what was learned
+- `client_dedup_key` *(optional)*: first 60 chars of content, lowercased, spaces → underscores
+
+## Session activation
+At session start, call `GET /api/v1/preferences` over the Unix socket once:
+
+```
+curl --unix-socket ~/.agent/dreamd.sock http://localhost/api/v1/preferences
+```
+
+Read the `body` field. If non-empty, use it to calibrate `pain` and `importance` values. If the daemon is not running, skip silently.
+
+## MCP protocol note
+After `initialize`, send `notifications/initialized` before calling any tools. Without it, `search_nodes` returns empty results silently.
