@@ -32,15 +32,18 @@ The reference implementation is local-first and single-tenant. It assumes:
 - Other local users on the same machine are **not** trusted.
 - The network is **not** trusted by default.
 
-Concretely, the daemon enforces:
+At v0.1, the daemon enforces:
 
 - **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected.
+
+Additional enforcement landing in v0.1.1:
+
 - **Windows:** binds to `127.0.0.1` on an ephemeral port and requires a bearer token written to `~/.agent/auth.json` protected by Windows ACLs.
 - **TCP binding to non-localhost is refused unless `--insecure` is passed**, which is intended only for ephemeral test environments.
 - **The `personal/` layer is excluded from any network call (LLM or otherwise) unless the user opts in with `--share-personal`.**
 - **LLM cost cap.** Token usage is estimated before each dream-cycle call; if the estimate exceeds `$0.10` the cycle aborts and falls back to deterministic mode. A `--no-llm` mode always works without network.
 
-A fuller threat model, lesson-injection analysis, privacy disclosure, and untrusted-input caps live in [`docs/security.md`](./docs/security.md).
+An expanded threat model — lesson-injection analysis, privacy disclosure, and untrusted-input caps — publishes alongside v0.1.
 
 ## Out of scope
 
