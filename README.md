@@ -1,5 +1,10 @@
 # dreamd
 
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
+![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
+[![Status](https://img.shields.io/badge/v0.1-in%20progress-orange.svg)](#v01-progress)
+
 **Same memory in every IDE.**
 
 dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP (Model Context Protocol) -aware coding agent reads and writes to the same memory -- episodic events, lessons, your preferences -- checked into git alongside your code.
@@ -39,11 +44,13 @@ If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteret
 
 ## Status
 
-**v0.1 (spec drafted, implementation starting).** Episodic memory + BM25-by-salience recall + deterministic dream cycle. Claude Code and Cursor adapters land in v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract, [`FUTURE.md`](./FUTURE.md) for where this is going, and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+**v0.1 in active development — targeting 2026-07-07.** Sprint 2 of 6 in progress; Sprint 1 (16/16 tickets) shipped. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+
+⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
 ## Getting started
 
-*v0.1 is being implemented. The commands below are the target surface.*
+*The daemon builds and runs from source today. The `npx` install path below is the v0.1 distribution surface, landing ahead of 2026-07-07.*
 
 ```bash
 # scaffold .agent/ into the current project
@@ -57,7 +64,7 @@ Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the 
 
 ### Privacy
 
-When LLM mode is enabled in v0.1.1, episodic content meeting the salience threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. Full disclosure: [`docs/security.md`](./docs/security.md).
+When LLM mode is enabled in v0.1.1, episodic content meeting the salience threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. See [`SECURITY.md`](./SECURITY.md) for the threat model and disclosure policy.
 
 ## Platforms
 
@@ -90,9 +97,9 @@ To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTR
 | Layer | Status |
 |---|---|
 | `SPEC.md` v0.1-draft | Drafted |
-| Reference implementation | Not started — see `src/main.rs` |
-| MCP server (`dreamd-mcp`) | Not started |
-| CI / cross-platform matrix | Wiring up |
+| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress — Sprint 2 of 6 |
+| MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Subcommand built; npx distribution lands ahead of v0.1 |
+| CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Not started |
 
 ## Contributing
