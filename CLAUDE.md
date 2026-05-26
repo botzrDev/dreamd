@@ -40,7 +40,7 @@ scripts/coverage.sh                      # workspace coverage (html + lcov) → 
 scripts/coverage.sh --open               # same, open HTML in browser
 ```
 
-CLI package name is `dreamd`, not `dreamd-cli` — see [[cargo-package-name-is-dreamd]]. Cargo test filter form — see [[cargo-test-filter-form]]. `Justfile` / `cargo xtask` (DR-005) and CI matrix (DR-003) are queued, not present.
+CLI package name is `dreamd`, not `dreamd-cli` — see [[cargo-package-name-is-dreamd]]. Cargo test filter form — see [[cargo-test-filter-form]]. `Justfile` / `cargo xtask` (DR-005) is queued, not present; CI matrix (DR-003) ships at `.github/workflows/ci.yml` (Ubuntu+macOS+Windows).
 
 ## Target architecture (end-state)
 

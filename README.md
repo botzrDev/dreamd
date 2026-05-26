@@ -7,7 +7,7 @@
 
 **Same memory in every IDE.**
 
-dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP (Model Context Protocol) -aware coding agent reads and writes to the same memory -- episodic events, lessons, your preferences -- checked into git alongside your code.
+dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding agent reads and writes the same memory -- episodic events, lessons, your preferences -- checked into git alongside your code.
 
 Every coding agent ships its own memory format. dreamd is what they could share.
 
@@ -48,9 +48,44 @@ If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteret
 
 ⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
+## Performance
+
+Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
+
+| Corpus size | Mean (warm) |
+|---|---|
+| 1 000 entries   | ~50 µs |
+| 10 000 entries  | ~313 µs |
+| 100 000 entries | ~2.8 ms |
+
+_Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
+
+> **Read-after-write visibility:** up to `commit_cadence_seconds` (default 5s). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
+
+Users who need tighter freshness can lower the commit cadence at the cost of higher index churn. User-facing config lands in v0.1.1; the cadence is a constructor argument today.
+
 ## Getting started
 
-*The daemon builds and runs from source today. The `npx` install path below is the v0.1 distribution surface, landing ahead of 2026-07-07.*
+### Try it today (from source)
+
+While v0.1 finishes baking, build the daemon locally:
+
+```bash
+git clone https://github.com/botzrDev/dreamd.git
+cd dreamd
+cargo install --path crates/dreamd-cli
+
+# Then in any project:
+cd ~/your-project
+dreamd init      # scaffold .agent/
+dreamd mcp       # speak MCP over stdio -- point Claude Code, Cursor, etc. at this
+```
+
+Requires Rust stable. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full dev setup.
+
+### v0.1 install path
+
+*Landing ahead of 2026-07-07.*
 
 ```bash
 # scaffold .agent/ into the current project
@@ -69,22 +104,6 @@ When LLM mode is enabled in v0.1.1, episodic content meeting the salience thresh
 ## Platforms
 
 v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
-
-## Performance
-
-Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
-
-| Corpus size | Mean (warm) |
-|---|---|
-| 1 000 entries   | ~50 µs |
-| 10 000 entries  | ~313 µs |
-| 100 000 entries | ~2.8 ms |
-
-_Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
-
-> **Read-after-write visibility:** up to `commit_cadence_seconds` (default 5s). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
-
-Users who need tighter freshness can lower the commit cadence at the cost of higher index churn. User-facing config lands in v0.1.1; the cadence is a constructor argument today.
 
 ## Spec
 

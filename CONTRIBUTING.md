@@ -9,7 +9,7 @@ Participation in this project is governed by the [Code of Conduct](./CODE_OF_CON
 ## Reporting bugs and proposing features
 
 - **Bug:** open an issue using the *Bug report* template. Include the version, OS, and a minimal reproduction.
-- **Feature:** open an issue using the *Feature request* template.
+- **Feature:** open a regular issue describing the use case and the gap.
 - **Spec change:** open an issue using the *RFC* template, with the title prefixed `[RFC]`. Spec changes are decided by discussion on the issue.
 - **Security vulnerability:** **do not** open a public issue. See [SECURITY.md](./SECURITY.md).
 
@@ -17,19 +17,12 @@ Participation in this project is governed by the [Code of Conduct](./CODE_OF_CON
 
 Requirements:
 
-- Rust stable matching the `rust-version` field in [`Cargo.toml`](./Cargo.toml) (current MSRV).
-- `just` (optional but recommended) — see [`Justfile`](./Justfile).
+- Rust stable. An MSRV will be pinned ahead of v0.1.
 
 ```bash
 git clone https://github.com/botzrDev/dreamd.git
 cd dreamd
 
-# common tasks (with just):
-just lint        # cargo fmt --check && cargo clippy -- -D warnings
-just test        # cargo test
-just build       # cargo build --release
-
-# or directly with cargo:
 cargo build
 cargo test
 cargo clippy -- -D warnings
@@ -41,12 +34,11 @@ CI runs the same checks across Linux, macOS, and Windows. PRs must be green befo
 ## Pull requests
 
 1. Fork the repo and create a topic branch from `main`.
-2. Reference the relevant story ID in the branch and commits when one exists. Story IDs follow `DR-XXX` (see the agile plan; the backlog is currently kept locally and will be migrated to GitHub Issues before v0.1).
+2. Reference the relevant story ID in the branch and commits when one exists. Story IDs follow `DR-XXX` and are assigned by the dreamd team — external contributors don't need to assign one.
 3. Keep PRs focused. One concern per PR. If you find yourself bundling, split it.
 4. Update [`CHANGELOG.md`](./CHANGELOG.md) under `## [Unreleased]` for any user-visible change.
 5. Update tests. New behavior gets new tests; bug fixes get regression tests.
-6. Run `just lint && just test` locally before pushing.
-7. Fill out the PR template.
+6. Run `cargo fmt --check && cargo clippy -- -D warnings && cargo test` locally before pushing.
 
 ### Commit messages
 
