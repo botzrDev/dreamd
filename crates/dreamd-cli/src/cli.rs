@@ -60,6 +60,12 @@ impl DreamArgs {
     }
 }
 
+/// Arguments for the `dreamd watch` subcommand.
+///
+/// Empty for v0.1. Reserved for future flags (`--manual-only`, etc.).
+#[derive(Args, Debug)]
+pub struct WatchArgs {}
+
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
@@ -74,6 +80,8 @@ pub enum Command {
     Mcp(McpArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
+    /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
+    Watch(WatchArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
     Version,
 }
@@ -302,6 +310,16 @@ pub fn run() -> ExitCode {
                 }
             }
         },
+        Command::Watch(_args) => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            commands::watch::run(&cwd)
+        }
         Command::Version => {
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
