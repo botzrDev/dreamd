@@ -44,7 +44,7 @@ If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteret
 
 ## Status
 
-**v0.1 in active development — targeting 2026-07-07.** Sprint 2 of 6 in progress; Sprint 1 (16/16 tickets) shipped. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+**v0.1 in active development — targeting 2026-07-07.** Sprint 3 in progress; 27 tickets shipped to date. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
 
 ⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
