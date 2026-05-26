@@ -1,6 +1,6 @@
 # `.agent/` — Portable Memory for AI Coding Agents
 
-**Status:** v0.1-draft · 2026-05-12
+**Status:** v0.1-draft · 2026-05-26
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
