@@ -7,11 +7,11 @@
 
 **Same memory in every IDE.**
 
-dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding agent reads and writes the same memory -- episodic events, lessons, your preferences -- checked into git alongside your code.
+dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a .agent/ folder in your repo. Every coding agent you use reads and writes to it.
 
 Every coding agent ships its own memory format. dreamd is what they could share.
 
-`AGENTS.md` is what you wrote down. `.agent/` is what your agent learned. dreamd is how it learns it once and remembers it everywhere.
+AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
 
 ## The moment it earns its name
 
