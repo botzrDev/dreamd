@@ -274,7 +274,7 @@ mod tests {
 
     fn make_learning(id: EventId, ts: i64, pinned: bool) -> AgentLearning {
         AgentLearning {
-            schema_version: "1.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             id,
             timestamp: Utc.timestamp_opt(ts, 0).single().expect("valid ts"),
             pain: 5.0,

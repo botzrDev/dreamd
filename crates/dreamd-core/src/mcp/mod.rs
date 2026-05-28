@@ -536,7 +536,7 @@ mod tests {
                 let raw_id = format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{suffix}");
                 let id = EventId::parse(&raw_id).expect("valid event id");
                 let learning = AgentLearning {
-                    schema_version: "1.0".to_string(),
+                    schema_version: "1.0.0".to_string(),
                     id: id.clone(),
                     timestamp: DateTime::parse_from_rfc3339("2026-05-22T10:00:00Z")
                         .unwrap()

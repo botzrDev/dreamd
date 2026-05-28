@@ -424,7 +424,7 @@ mod tests {
 
     fn make_event(id: u32, skill_action: &str, pinned: bool) -> AgentLearning {
         AgentLearning {
-            schema_version: "1.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             id: test_id(id),
             timestamp: fixed_ts(),
             pain: 5.0,
@@ -438,7 +438,7 @@ mod tests {
 
     fn make_event_at(id: u32, skill_action: &str, ts: i64) -> AgentLearning {
         AgentLearning {
-            schema_version: "1.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             id: test_id(id),
             timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
             pain: 5.0,

@@ -718,7 +718,7 @@ mod tests {
     /// coupling tests to the salience formula constants.
     fn sample_learning(id: EventId, skill: &str, content: &str) -> AgentLearning {
         AgentLearning {
-            schema_version: "1.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             id,
             timestamp: DateTime::parse_from_rfc3339("2026-05-14T08:00:00Z")
                 .unwrap()
