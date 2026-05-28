@@ -84,7 +84,7 @@ impl<'de> Deserialize<'de> for EventId {
 /// "Load-bearing engineering decisions" section 1).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentLearning {
-    /// Forward-compatible schema tag. Always `"1.0"` in v0.1; bump requires
+    /// Forward-compatible schema tag. Always `"1.0.0"` in v0.1; bump requires
     /// a `dreamd migrate` path (DR-009).
     pub schema_version: String,
     /// Daemon-assigned event identifier (`evt_` + 26-char ULID). Overwritten

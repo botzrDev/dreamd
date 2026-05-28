@@ -677,7 +677,7 @@ mod tests {
 
     fn sample_body(skill_action: &str, content: &str) -> serde_json::Value {
         serde_json::json!({
-            "schema_version": "1.0",
+            "schema_version": "1.0.0",
             "id": format!("evt_{SAMPLE_ULID}"),
             "timestamp": "2026-05-20T12:00:00Z",
             "pain": 5.0,
@@ -690,7 +690,7 @@ mod tests {
 
     fn placeholder_learning(skill_action: &str) -> AgentLearning {
         AgentLearning {
-            schema_version: "1.0".to_owned(),
+            schema_version: "1.0.0".to_owned(),
             id: EventId::parse(&format!("evt_{SAMPLE_ULID}")).unwrap(),
             timestamp: DateTime::parse_from_rfc3339("2026-05-20T12:00:00Z")
                 .unwrap()

@@ -126,7 +126,7 @@ fn synth_learning(i: u64, rng: &mut Lcg) -> AgentLearning {
     let offset_sec = (rng.next_u64() % (60 * 24 * 60 * 60)) as i64;
     let ts = Utc.timestamp_opt(base_sec + offset_sec, 0).unwrap();
     AgentLearning {
-        schema_version: "1.0".to_string(),
+        schema_version: "1.0.0".to_string(),
         id: EventId::parse(PLACEHOLDER_EVENT_ID).expect("placeholder parses"),
         timestamp: ts,
         pain: rng.next_f32(0.0, 10.0),
