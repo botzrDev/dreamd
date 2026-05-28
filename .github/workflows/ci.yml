@@ -142,6 +142,10 @@ jobs:
           SIZE_BYTES=$(stat -c%s "$BINARY")
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
           echo "Stripped binary size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          WARN_BYTES=$((12 * 1024 * 1024))
+          if [ "$SIZE_BYTES" -gt "$WARN_BYTES" ]; then
+            echo "::warning::Binary size ${SIZE_MB} MB has crossed the 12 MB soft warning threshold (hard limit: 15 MB, NFR-2)"
+          fi
           # NFR-2: must be < 15 MB
           MAX_BYTES=$((15 * 1024 * 1024))
           if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
@@ -234,3 +238,63 @@ jobs:
             exit 1
           fi
           echo "All commits are signed off."
+
+  # ── Binary size reporting — macOS (informational, DR-809) ────────────────────
+  size-report-macos:
+    name: Binary size (macOS, informational)
+    runs-on: macos-latest
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build and report binary size
+        run: |
+          cargo build --release
+          BINARY=target/release/dreamd
+          strip "$BINARY"
+          SIZE_BYTES=$(stat -f%z "$BINARY")
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+          echo "macOS stripped binary: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          echo "### macOS binary size: ${SIZE_MB} MB" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Binary size reporting — Windows (informational, DR-809) ──────────────────
+  size-report-windows:
+    name: Binary size (Windows, informational)
+    runs-on: windows-latest
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build and report binary size
+        shell: pwsh
+        run: |
+          cargo build --release
+          $binary = "target\release\dreamd.exe"
+          $sizeBytes = (Get-Item $binary).Length
+          $sizeMB = [math]::Round($sizeBytes / 1MB, 2)
+          Write-Output "Windows binary (unstripped): $sizeMB MB ($sizeBytes bytes)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows binary size: $sizeMB MB (unstripped)"
