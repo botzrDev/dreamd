@@ -57,11 +57,11 @@ pub fn run(
 ) -> Result<(), DreamCliError> {
     let agent_root = AgentRoot::new(project_root);
 
-    // One SystemTime::now() call — both values derive from it.
-    let now_sec = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    // Clock read for the cycle — both values derive from it. The core threads
+    // `now_sec` as a caller-provided parameter (see consolidation.rs: "now_sec
+    // is caller-provided for determinism — do not call Utc::now()"); this is the
+    // lone CLI-boundary clock read, so SOURCE_DATE_EPOCH is honored here.
+    let now_sec = resolve_now_sec()?;
     let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
         .expect("valid unix timestamp")
         .format("%Y-%m-%d")
@@ -115,4 +115,59 @@ pub fn run(
         "dream cycle complete ({decayed_count} events decayed, {kept_count} kept)",
     )?;
     Ok(())
+}
+
+/// Resolve the dream-cycle clock.
+///
+/// `SOURCE_DATE_EPOCH` (the reproducible-builds convention, an integer unix
+/// timestamp) pins the clock so deterministic fixtures regenerate
+/// byte-identically; absent → the wall clock. Reading an env var rather than
+/// adding a flag keeps the `dreamd dream` clap surface — and its byte-locked
+/// help snapshot — unchanged.
+fn resolve_now_sec() -> Result<i64, DreamCliError> {
+    match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(raw) => parse_epoch_override(&raw),
+        Err(_) => Ok(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64),
+    }
+}
+
+/// Parse a `SOURCE_DATE_EPOCH` value into a unix-second count.
+///
+/// Surrounding whitespace is tolerated; anything else fails with
+/// [`std::io::ErrorKind::InvalidInput`] rather than silently falling back to
+/// the wall clock (a malformed pin would defeat the determinism it requests).
+fn parse_epoch_override(raw: &str) -> Result<i64, DreamCliError> {
+    raw.trim().parse::<i64>().map_err(|_| {
+        DreamCliError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SOURCE_DATE_EPOCH must be an integer unix timestamp",
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_epoch_override_accepts_integer() {
+        assert_eq!(parse_epoch_override("1748520000").unwrap(), 1_748_520_000);
+    }
+
+    #[test]
+    fn parse_epoch_override_trims_whitespace() {
+        assert_eq!(parse_epoch_override("  1748520000\n").unwrap(), 1_748_520_000);
+    }
+
+    #[test]
+    fn parse_epoch_override_rejects_non_integer() {
+        let err = parse_epoch_override("not-a-number").unwrap_err();
+        match err {
+            DreamCliError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+            other => panic!("expected Io(InvalidInput), got {other:?}"),
+        }
+    }
 }

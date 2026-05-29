@@ -1,0 +1,4 @@
+# Derived / binary daemon state — never committed. dreamd regenerates it
+# on demand (tantivy index + state.json live here). The file system of truth
+# is the plain working/, episodic/, semantic/, and personal/ files alongside it.
+.dreamd/
