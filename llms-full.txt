@@ -1,0 +1,165 @@
+# dreamd — Full Documentation for LLMs
+
+## What dreamd is
+
+dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/`
+folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding agent reads and
+writes the same memory — episodic events, lessons, preferences — checked into git
+alongside your code.
+
+AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+
+The problem dreamd solves: developers now run 4+ coding agents in rotation. Every one
+of them has amnesia about your codebase. Claude Code learns something Tuesday afternoon;
+Cursor has no idea Friday morning. dreamd is the fix — a shared memory layer all of them
+read and write via MCP, without any of them needing to know the others exist.
+
+## What dreamd is not
+
+- Not a vector database. v0.1 uses BM25 lexical recall (Tantivy). Semantic/embedding
+  recall is v0.2.
+- Not a hosted SaaS. v0.1 makes zero network calls. Everything stays on your machine.
+- Not a replacement for AGENTS.md or SKILL.md. Those are human-authored project rules;
+  `.agent/` is machine-written runtime memory. They complement each other.
+- Not a Python SDK. No Python required. Distribution is npm (`npx`) and Rust (`cargo`).
+- Not competing with Mem0, Letta, or Zep. Those are SDKs you embed in one agent you
+  control. dreamd is a memory layer multiple existing agents share via MCP — a
+  different problem entirely. None of them has a cross-harness story.
+
+## Install
+
+### No Rust required (v0.1 path)
+
+  npx @dataprime1/dreamd-mcp init   # scaffold .agent/ in your project
+  npx @dataprime1/dreamd-mcp        # start the MCP server (stdio)
+
+Supported: Linux x86_64/aarch64, macOS x86_64/aarch64. Node >= 18 required.
+Windows arrives in v0.1.1.
+
+### From source (requires Rust stable)
+
+  git clone https://github.com/botzrDev/dreamd.git
+  cd dreamd
+  cargo install --path crates/dreamd-cli
+  dreamd init
+  dreamd mcp
+
+## MCP configuration
+
+### Claude Code — add to `.mcp.json` in your project root:
+
+  {
+    "mcpServers": {
+      "dreamd": {
+        "command": "npx",
+        "args": ["-y", "@dataprime1/dreamd-mcp"]
+      }
+    }
+  }
+
+### Cursor — same `.mcp.json` config. Also copy
+  `adapters/cursor/.cursor/rules/dreamd-recall.mdc`
+  into your project's `.cursor/rules/` for automatic recall on session start.
+
+### Cline / other MCP-aware harnesses — same `.mcp.json` config applies.
+
+## MCP tools
+
+dreamd exposes two MCP tools: `search_nodes` and `append_node`.
+
+### search_nodes — recall from memory
+
+  Input:  { "query": "string", "k": number }   (k defaults to 10)
+  Output: ranked list of episodic events, scored by BM25 × salience
+
+  Use when:
+  - Starting a new task in a project worked in before
+  - The user references a past decision or problem
+  - About to make a choice that may have a documented prior
+
+### append_node — write to memory
+
+  Input:
+  {
+    "skill_action":   "rust::error_handling::axum_rejection",  // :: -separated, language-first
+    "content":        "Axum requires custom Error types to implement IntoResponse.",
+    "source_harness": "claude-code",   // required — omitting causes a deserialization error
+    "pain":           7.5,             // 0–10, friction caused by this problem
+    "importance":     8.0,             // 0–10, how often this pattern recurs
+    "client_dedup_key": "axum_requires_custom_error_types_to_implement_intoresponse"
+      // optional; first 60 chars of content, lowercased, spaces → underscores
+  }
+  Returns: 201 after fdatasync
+
+  skill_action convention: language::domain::specific
+    rust::error_handling::axum_rejection
+    typescript::testing::vitest_async_timeout
+    python::deps::virtualenv_activation
+
+PROTOCOL NOTE: after `initialize`, send `notifications/initialized` before calling any
+tools. Without it, `search_nodes` returns empty results silently.
+
+## .agent/ folder layout
+
+  .agent/
+    episodic/AGENT_LEARNINGS.jsonl   # append-only event log
+    semantic/LESSONS.md              # lessons consolidated by the dream cycle
+    personal/PREFERENCES.md          # user preferences (never sent to LLM without consent)
+    working/                         # reserved for v0.2
+    .dreamd/                         # implementation state — gitignored
+
+All files are UTF-8 plaintext. `.agent/` is checked into git. You can cat, grep,
+git diff, and hand-edit any file. The agent reads your edits.
+
+## Episodic record schema (schema_version: "1.0.0")
+
+  {
+    "schema_version": "1.0.0",
+    "id":             "evt_01hz8k2x",
+    "timestamp":      "2026-05-08T10:55:00Z",
+    "source_harness": "claude-code",
+    "skill_action":   "rust::error_handling::axum_rejection",
+    "content":        "Axum requires custom Error types to implement IntoResponse.",
+    "pain":           7.5,
+    "importance":     8.0,
+    "pinned":         false
+  }
+
+## CLI commands
+
+  dreamd init              # scaffold .agent/ in the current project
+  dreamd mcp               # start MCP server over stdio
+  dreamd watch             # foreground daemon mode (SIGINT/SIGTERM-graceful)
+  dreamd dream             # run the dream cycle: consolidate episodic → semantic
+  dreamd dream --dry       # preview what the dream cycle would do
+  dreamd doctor            # health check
+  dreamd version           # structured version output
+  dreamd reset workspace   # re-scaffold working/WORKSPACE.md
+
+## Recall latency (v0.1, warm BM25 index, Criterion 0.5, WSL2/Linux)
+
+  1,000 entries    ~50 µs
+  10,000 entries   ~313 µs
+  100,000 entries  ~2.8 ms
+
+All well under the <5ms P50 warm target. Run `cargo bench -p dreamd-core` to reproduce.
+Read-after-write visibility: up to commit_cadence_seconds (default 5s).
+
+## Privacy
+
+v0.1 makes zero network calls. `personal/PREFERENCES.md` is never sent to any LLM.
+When LLM-assisted dream cycle lands in v0.1.1, episodic content above the salience
+threshold may be sent to the configured provider — opt-in, `personal/` excluded by
+default unless you explicitly pass `--share-personal`.
+
+## v0.1 scope (do not promise beyond this)
+
+IN v0.1: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
+v0.1.1: semantic/embedding recall, Windows, LLM-assisted dream cycle, Homebrew/cargo install.
+
+## Key links
+
+  Repo:    https://github.com/botzrDev/dreamd
+  SPEC.md: https://github.com/botzrDev/dreamd/blob/main/SPEC.md
+  npm:     https://www.npmjs.com/package/@dataprime1/dreamd-mcp
+  License: Apache-2.0
