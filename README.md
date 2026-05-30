@@ -99,7 +99,7 @@ Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the 
 
 ### Privacy
 
-When LLM mode is enabled in v0.1.1, episodic content meeting the salience threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. See [`SECURITY.md`](./SECURITY.md) for the threat model and disclosure policy.
+When LLM mode is enabled in v0.1.1, entries above the relevance threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. See [`SECURITY.md`](./SECURITY.md) for the threat model and disclosure policy.
 
 ## Platforms
 
@@ -107,7 +107,7 @@ v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
 
 ## Spec
 
-The on-disk layout, JSON schema, salience formula, and dream-cycle contract are defined in [`SPEC.md`](./SPEC.md). The spec is implementation-agnostic — `dreamd` is one implementation, not the only one.
+The on-disk layout, JSON schema, scoring formula, and dream-cycle contract are defined in [`SPEC.md`](./SPEC.md). The spec is implementation-agnostic — `dreamd` is one implementation, not the only one.
 
 To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 

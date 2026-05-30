@@ -10,7 +10,7 @@ npx @dataprime1/dreamd-mcp
 npx dreamd-mcp
 ```
 
-No Rust installation required. Supports Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64.
+No Rust installation required. Supports Linux x86_64/aarch64, macOS x86_64/aarch64.
 
 ## Override
 
