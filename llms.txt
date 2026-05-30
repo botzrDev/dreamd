@@ -1,0 +1,25 @@
+# dreamd
+
+> dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a
+> `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding
+> agent reads and writes the same memory — checked into git alongside your code.
+>
+> AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+
+## Documentation
+
+- [README](https://github.com/botzrDev/dreamd/blob/main/README.md): Overview, install, and quick start
+- [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): `.agent/` folder layout, JSON schema, salience formula, dream-cycle contract
+- [AGENTS.md](https://github.com/botzrDev/dreamd/blob/main/AGENTS.md): Project context for coding agents working in this repo
+- [CONTRIBUTING.md](https://github.com/botzrDev/dreamd/blob/main/CONTRIBUTING.md): Dev setup and contribution guide
+- [SECURITY.md](https://github.com/botzrDev/dreamd/blob/main/SECURITY.md): Threat model and disclosure policy
+- [CHANGELOG.md](https://github.com/botzrDev/dreamd/blob/main/CHANGELOG.md): Version history
+
+## Adapters
+
+- [Claude Code](https://github.com/botzrDev/dreamd/blob/main/adapters/claude-code/.mcp.json.example): `.mcp.json` config for Claude Code
+- [Cursor](https://github.com/botzrDev/dreamd/blob/main/adapters/cursor/README.md): MCP config and agent recall rule for Cursor
+
+## Package
+
+- [npm: @dataprime1/dreamd-mcp](https://www.npmjs.com/package/@dataprime1/dreamd-mcp): `npx @dataprime1/dreamd-mcp` — downloads the right prebuilt binary, no Rust required
