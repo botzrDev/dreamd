@@ -71,8 +71,7 @@ pub fn run(
     let dirty_at_cycle_start = if no_commit {
         Vec::new()
     } else {
-        dreamd_core::autobiography::check_dirty_at_cycle_start(project_root)
-            .unwrap_or_default()
+        dreamd_core::autobiography::check_dirty_at_cycle_start(project_root).unwrap_or_default()
     };
 
     run_deterministic_dream_cycle(&agent_root, now_sec).map_err(DreamCliError::DreamCycle)?;
@@ -159,7 +158,10 @@ mod tests {
 
     #[test]
     fn parse_epoch_override_trims_whitespace() {
-        assert_eq!(parse_epoch_override("  1748520000\n").unwrap(), 1_748_520_000);
+        assert_eq!(
+            parse_epoch_override("  1748520000\n").unwrap(),
+            1_748_520_000
+        );
     }
 
     #[test]

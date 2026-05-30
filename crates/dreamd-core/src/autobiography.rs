@@ -78,19 +78,15 @@ pub struct AutobiographySkip {
 ///
 /// Returns the subset of tracked paths that are dirty. Empty Vec → clean.
 /// Returns `Ok(Vec::new())` if no git repo is found (capability absence).
-pub fn check_dirty_at_cycle_start(
-    project_root: &Path,
-) -> Result<Vec<PathBuf>, AutobiographyError> {
+pub fn check_dirty_at_cycle_start(project_root: &Path) -> Result<Vec<PathBuf>, AutobiographyError> {
     let repo = match Repository::discover(project_root) {
         Ok(r) => r,
         Err(e) if e.code() == ErrorCode::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(AutobiographyError::Git(e)),
     };
 
-    let user_dirty = Status::WT_MODIFIED
-        | Status::INDEX_MODIFIED
-        | Status::WT_NEW
-        | Status::INDEX_NEW;
+    let user_dirty =
+        Status::WT_MODIFIED | Status::INDEX_MODIFIED | Status::WT_NEW | Status::INDEX_NEW;
 
     let mut dirty = Vec::new();
     for p in TRACKED_PATHS {
@@ -156,7 +152,9 @@ pub fn commit_cycle(
                 files: files.clone(),
             },
         )?;
-        return Ok(AutobiographyOutcome::Skipped(SkipReason::UserDirtyTree { files }));
+        return Ok(AutobiographyOutcome::Skipped(SkipReason::UserDirtyTree {
+            files,
+        }));
     }
 
     // 3. Stage tracked paths.
@@ -221,8 +219,7 @@ fn clear_skip_marker(agent_root: &AgentRoot) -> Result<(), AutobiographyError> {
     if !path.exists() {
         return Ok(());
     }
-    let mut state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    let mut state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
     if let Some(obj) = state.as_object_mut() {
         obj.remove("last_autobiography_skip");
     }
@@ -337,11 +334,7 @@ mod tests {
         make_initial_commit(&repo, &dir);
 
         // Modify LESSONS.md without staging — WT_MODIFIED.
-        std::fs::write(
-            dir.path().join(".agent/semantic/LESSONS.md"),
-            b"user edit",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".agent/semantic/LESSONS.md"), b"user edit").unwrap();
 
         let dirty = check_dirty_at_cycle_start(dir.path()).unwrap();
         assert!(
@@ -353,7 +346,10 @@ mod tests {
         let outcome = commit_cycle(&agent_root, "2026-05-26", &dirty).unwrap();
 
         assert!(
-            matches!(outcome, AutobiographyOutcome::Skipped(SkipReason::UserDirtyTree { .. })),
+            matches!(
+                outcome,
+                AutobiographyOutcome::Skipped(SkipReason::UserDirtyTree { .. })
+            ),
             "expected Skipped(UserDirtyTree)"
         );
 
@@ -386,7 +382,11 @@ mod tests {
         match outcome {
             AutobiographyOutcome::Committed(oid) => {
                 let commit = repo.find_commit(oid).unwrap();
-                assert_eq!(commit.parent_count(), 0, "initial commit must have no parents");
+                assert_eq!(
+                    commit.parent_count(),
+                    0,
+                    "initial commit must have no parents"
+                );
                 assert_eq!(commit.message().unwrap(), "dreamd: cycle 2026-05-26");
                 assert_eq!(commit.committer().name().unwrap(), "dreamd");
             }
@@ -443,11 +443,7 @@ mod tests {
         make_initial_commit(&repo, &dir);
 
         // Modify LESSONS.md on disk without staging.
-        std::fs::write(
-            dir.path().join(".agent/semantic/LESSONS.md"),
-            b"user edit",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".agent/semantic/LESSONS.md"), b"user edit").unwrap();
 
         let dirty = check_dirty_at_cycle_start(dir.path()).unwrap();
         assert!(

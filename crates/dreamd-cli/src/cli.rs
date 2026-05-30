@@ -54,11 +54,9 @@ impl DreamArgs {
     /// the combination is invalid.
     pub fn validate(&self) -> Result<(), String> {
         if self.dry && self.auto {
-            return Err(
-                "--dry and --auto are mutually exclusive: \
+            return Err("--dry and --auto are mutually exclusive: \
                  auto mode performs real writes on a schedule"
-                    .to_string(),
-            );
+                .to_string());
         }
         Ok(())
     }
@@ -137,12 +135,10 @@ pub enum ResetCommand {
 /// unit-tested without spawning a subprocess.
 pub fn check_dream_mode(config: &Config) -> Result<(), String> {
     if config.dream_cycle_mode == DreamCycleMode::Auto {
-        return Err(
-            "dream_cycle_mode = auto is not supported at v0.1; \
+        return Err("dream_cycle_mode = auto is not supported at v0.1; \
              set dream_cycle_mode = \"manual\" in config.toml. \
              Auto mode ships at v0.1.1."
-                .to_string(),
-        );
+            .to_string());
     }
     Ok(())
 }
@@ -253,7 +249,13 @@ pub fn run() -> ExitCode {
             let mut out = stdout.lock();
             let mut err = stderr.lock();
             let result = if args.uninstall_project {
-                commands::init::uninstall_project(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+                commands::init::uninstall_project(
+                    &cwd,
+                    &daemon_home,
+                    args.quiet,
+                    &mut out,
+                    &mut err,
+                )
             } else {
                 commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
             };

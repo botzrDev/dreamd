@@ -166,10 +166,7 @@ impl Supervisor {
     ///
     /// Axum handlers (WEG-67+) call this instead of cloning `tx` directly —
     /// the method is the single enforcement point for the backpressure contract.
-    pub async fn try_send(
-        &self,
-        msg: MemoryCoordinatorMsg,
-    ) -> Result<(), CoordinatorSendError> {
+    pub async fn try_send(&self, msg: MemoryCoordinatorMsg) -> Result<(), CoordinatorSendError> {
         match tokio::time::timeout(COORDINATOR_SEND_TIMEOUT, self.tx.send(msg)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(CoordinatorSendError::Closed),

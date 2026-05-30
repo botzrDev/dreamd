@@ -65,8 +65,8 @@ fn snapshot_recurrence_counts() {
 #[test]
 fn snapshot_state_json() {
     let (_dir, root) = run_cycle_on_fixture();
-    let content = fs::read_to_string(root.state_json())
-        .expect("state.json must exist after cycle commit");
+    let content =
+        fs::read_to_string(root.state_json()).expect("state.json must exist after cycle commit");
     // daemon_version drifts across releases — filter it out.
     insta::with_settings!({
         filters => vec![

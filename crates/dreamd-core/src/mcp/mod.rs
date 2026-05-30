@@ -133,14 +133,16 @@ impl MemoryMcpServer {
     ///
     /// Returns a ranked list of matching learning entries.
     #[cfg(unix)]
-    #[tool(description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided.")]
+    #[tool(
+        description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided."
+    )]
     async fn search_nodes(
         &self,
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
         use crate::index::build_schema;
         use crate::server::http::{RecallMeta, RecallResponse, RecallResultJson};
-        use crate::server::tantivy_handle::{DEFAULT_COMMIT_CADENCE, TantivyIndexHandle};
+        use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
         let k = p.k.unwrap_or(5) as usize;
         let query = p.query;
@@ -190,14 +192,15 @@ impl MemoryMcpServer {
         let resp = RecallResponse {
             results: json_results,
         };
-        let json = serde_json::to_string(&resp)
-            .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
+        let json = serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Search episodic memory using BM25 × salience scoring (non-Unix stub).
     #[cfg(not(unix))]
-    #[tool(description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided.")]
+    #[tool(
+        description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided."
+    )]
     async fn search_nodes(
         &self,
         Parameters(p): Parameters<SearchNodesParams>,
@@ -212,7 +215,9 @@ impl MemoryMcpServer {
     /// Append a new learning node to episodic memory.
     ///
     /// The entry is durably fsynced before this call returns (DR-103).
-    #[tool(description = "Append a new learning to episodic memory -- use when: note that, remember, log this, save this lesson.")]
+    #[tool(
+        description = "Append a new learning to episodic memory -- use when: note that, remember, log this, save this lesson."
+    )]
     async fn append_node(
         &self,
         Parameters(p): Parameters<AppendNodeParams>,
@@ -297,13 +302,8 @@ impl MemoryMcpServer {
 impl ServerHandler for MemoryMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "dreamd-mcp",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(
-                "dreamd memory server — search and append episodic agent learnings.",
-            )
+            .with_server_info(Implementation::new("dreamd-mcp", env!("CARGO_PKG_VERSION")))
+            .with_instructions("dreamd memory server — search and append episodic agent learnings.")
     }
 }
 
@@ -345,10 +345,7 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 // and re-serialising before forwarding to the socket. For now we do a raw
 // byte-copy pass-through.
 #[cfg(unix)]
-async fn run_bridge(
-    stream: tokio::net::UnixStream,
-    cwd: &Path,
-) -> Result<(), McpRunError> {
+async fn run_bridge(stream: tokio::net::UnixStream, cwd: &Path) -> Result<(), McpRunError> {
     // Log which agent root (if any) this bridge session is bound to.
     match AgentRoot::discover(cwd) {
         Ok(root) => {
@@ -502,8 +499,7 @@ mod tests {
             .find_map(|c| c.as_text().map(|t| t.text.as_str()))
             .expect("text content present");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(text).expect("valid json");
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("valid json");
         let results = parsed["results"].as_array().expect("results array");
         assert!(
             results.is_empty(),
@@ -516,7 +512,7 @@ mod tests {
     async fn search_nodes_seeded_index_returns_results() {
         use crate::server::index_map::IndexHandle;
         use crate::server::tantivy_handle::{
-            DEFAULT_COMMIT_CADENCE, IndexerMsg, TantivyIndexHandle,
+            IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
         };
         use chrono::{DateTime, Utc};
         use dreamd_protocol::{AgentLearning, EventId};
@@ -532,7 +528,10 @@ mod tests {
                 TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE).expect("open handle");
             let tx = handle.sender();
 
-            for (suffix, content) in [('0', "rust async tokio channel"), ('1', "rust borrow checker lifetime")] {
+            for (suffix, content) in [
+                ('0', "rust async tokio channel"),
+                ('1', "rust borrow checker lifetime"),
+            ] {
                 let raw_id = format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{suffix}");
                 let id = EventId::parse(&raw_id).expect("valid event id");
                 let learning = AgentLearning {
@@ -583,8 +582,7 @@ mod tests {
             .find_map(|c| c.as_text().map(|t| t.text.clone()))
             .expect("text content present");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).expect("valid json");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
         let results = parsed["results"].as_array().expect("results array");
 
         assert!(
@@ -592,7 +590,10 @@ mod tests {
             "seeded index must return at least one result; got: {parsed:?}"
         );
         let score = results[0]["score"].as_f64().expect("score field");
-        assert!(score > 0.0, "top result must have positive score; got {score}");
+        assert!(
+            score > 0.0,
+            "top result must have positive score; got {score}"
+        );
     }
 
     #[tokio::test]

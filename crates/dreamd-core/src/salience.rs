@@ -36,7 +36,10 @@ mod tests {
         let one_day = salience(NOW, NOW - DAY, 5.0, 5.0, 3);
         let one_week = salience(NOW, NOW - 7 * DAY, 5.0, 5.0, 3);
         let one_month = salience(NOW, NOW - 30 * DAY, 5.0, 5.0, 3);
-        assert!(one_day > one_week, "1d ({one_day}) should beat 7d ({one_week})");
+        assert!(
+            one_day > one_week,
+            "1d ({one_day}) should beat 7d ({one_week})"
+        );
         assert!(
             one_week > one_month,
             "7d ({one_week}) should beat 30d ({one_month})"
@@ -48,7 +51,10 @@ mod tests {
         let lo = salience(NOW, NOW - DAY, 1.0, 5.0, 3);
         let mid = salience(NOW, NOW - DAY, 5.0, 5.0, 3);
         let hi = salience(NOW, NOW - DAY, 10.0, 5.0, 3);
-        assert!(lo <= mid && mid <= hi, "pain monotonicity: {lo} <= {mid} <= {hi}");
+        assert!(
+            lo <= mid && mid <= hi,
+            "pain monotonicity: {lo} <= {mid} <= {hi}"
+        );
         assert!(lo < hi, "pain should strictly increase score: {lo} < {hi}");
     }
 

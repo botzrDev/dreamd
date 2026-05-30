@@ -8,8 +8,8 @@
 
 pub mod autobiography;
 pub mod collector;
-pub mod consolidation;
 pub mod config;
+pub mod consolidation;
 pub mod coordinator;
 pub mod decay;
 pub mod index;

@@ -114,7 +114,13 @@ fn uninstall_is_idempotent() {
     // Second uninstall — should still be Ok
     let mut out2 = Cursor::new(Vec::new());
     let mut err2 = Cursor::new(Vec::new());
-    let result = init::uninstall_project(project.path(), daemon_home.path(), false, &mut out2, &mut err2);
+    let result = init::uninstall_project(
+        project.path(),
+        daemon_home.path(),
+        false,
+        &mut out2,
+        &mut err2,
+    );
     assert!(result.is_ok(), "second uninstall must be Ok");
 
     let stdout2 = String::from_utf8(out2.into_inner()).unwrap();
@@ -135,5 +141,8 @@ fn quiet_uninstall_produces_no_output() {
     init::uninstall_project(project.path(), daemon_home.path(), true, &mut out, &mut err).unwrap();
 
     let stdout = String::from_utf8(out.into_inner()).unwrap();
-    assert!(stdout.is_empty(), "quiet mode must produce no output, got: {stdout:?}");
+    assert!(
+        stdout.is_empty(),
+        "quiet mode must produce no output, got: {stdout:?}"
+    );
 }

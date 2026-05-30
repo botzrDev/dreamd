@@ -156,7 +156,10 @@ mod tests {
 
         let cfg = load_config_from(Some(&user_path), &project_path).expect("load ok");
         assert_eq!(cfg.log_level, "debug", "project must beat user");
-        assert!(!cfg.redaction, "user must beat default when project is silent");
+        assert!(
+            !cfg.redaction,
+            "user must beat default when project is silent"
+        );
         assert_eq!(
             cfg.dream_cycle_mode,
             DreamCycleMode::Manual,
@@ -196,7 +199,11 @@ mod tests {
         // Round 1: fully commented template.
         fs::write(&project_path, CONFIG_TEMPLATE).unwrap();
         let cfg = load_config_from(None, &project_path).expect("template parses");
-        assert_eq!(cfg, Config::default(), "fully commented template = defaults");
+        assert_eq!(
+            cfg,
+            Config::default(),
+            "fully commented template = defaults"
+        );
 
         // Round 2: one key uncommented and customized.
         fs::write(&project_path, &customized).unwrap();

@@ -50,12 +50,17 @@ pub fn resolve_project(
     // Stored roots are canonicalized at write time; canonicalize the query
     // the same way. Fall back to the raw path on failure — mirrors
     // register_project()'s write-side behavior.
-    let canonical = std::fs::canonicalize(agent_root)
-        .unwrap_or_else(|_| agent_root.to_path_buf());
+    let canonical = std::fs::canonicalize(agent_root).unwrap_or_else(|_| agent_root.to_path_buf());
     let canonical_str = canonical.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "project path is not valid UTF-8")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "project path is not valid UTF-8",
+        )
     })?;
-    Ok(registry.projects.into_iter().find(|p| p.root == canonical_str))
+    Ok(registry
+        .projects
+        .into_iter()
+        .find(|p| p.root == canonical_str))
 }
 
 #[cfg(test)]
@@ -111,7 +116,10 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         write!(f, "this is not valid toml ][[\n").unwrap();
         let result = resolve_project(f.path(), std::path::Path::new("/any"));
-        assert!(result.is_err(), "malformed TOML must produce Err, not panic");
+        assert!(
+            result.is_err(),
+            "malformed TOML must produce Err, not panic"
+        );
     }
 
     #[test]

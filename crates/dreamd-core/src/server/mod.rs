@@ -29,12 +29,12 @@ pub mod uds;
 pub mod uds_server;
 pub mod watch;
 
+pub use http::{build_router, AppState};
 pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,
 };
 pub use tantivy_handle::{IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 pub use uds::{bind_writer_socket, try_connect_existing, SocketGuard, UdsBindError};
-pub use http::{AppState, build_router};
 #[cfg(unix)]
 pub use watch::{run_watch, WatchError};
