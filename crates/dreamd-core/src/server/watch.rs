@@ -6,12 +6,12 @@ use std::path::Path;
 
 use crate::config::{load_config, DreamCycleMode};
 use crate::layout::{AgentRoot, DaemonHome};
+use crate::server::build_router;
 use crate::server::http::AppState;
 use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::server::tantivy_handle::TantivyIndexHandle;
 use crate::server::uds_server::{bind_api_socket, serve_uds};
-use crate::server::build_router;
 
 /// Failure modes surfaced by [`run_watch`].
 #[derive(Debug, thiserror::Error)]
@@ -39,8 +39,8 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
         .map_err(|_| WatchError::NoProjectRoot(cwd.display().to_string()))?;
 
     // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto in v0.1).
-    let config = load_config(agent_root.project_root())
-        .map_err(|e| WatchError::Config(e.to_string()))?;
+    let config =
+        load_config(agent_root.project_root()).map_err(|e| WatchError::Config(e.to_string()))?;
     if config.dream_cycle_mode == DreamCycleMode::Auto {
         return Err(WatchError::DreamMode(
             "dream_cycle_mode = \"auto\" is not supported in v0.1 \

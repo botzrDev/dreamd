@@ -17,20 +17,17 @@ use regex::Regex;
 
 /// AWS access key ID — exactly the `AKIA` prefix followed by 16 uppercase
 /// alphanumerics.
-static RE_AWS_KEY_ID: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"AKIA[0-9A-Z]{16}").expect("RE_AWS_KEY_ID pattern is valid")
-});
+static RE_AWS_KEY_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").expect("RE_AWS_KEY_ID pattern is valid"));
 
 /// HTTP Bearer token — `Bearer ` followed by any run of base64url + dot chars.
-static RE_BEARER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Bearer [a-zA-Z0-9._-]+").expect("RE_BEARER pattern is valid")
-});
+static RE_BEARER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Bearer [a-zA-Z0-9._-]+").expect("RE_BEARER pattern is valid"));
 
 /// OpenAI-style secret key — `sk-` followed by at least 10 alnum chars.
 /// The 10-char floor avoids false positives on short tokens like `sk-short`.
-static RE_OPENAI_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"sk-[a-zA-Z0-9]{10,}").expect("RE_OPENAI_KEY pattern is valid")
-});
+static RE_OPENAI_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"sk-[a-zA-Z0-9]{10,}").expect("RE_OPENAI_KEY pattern is valid"));
 
 /// Anthropic-style secret key — `sk-ant-` followed by alnum / underscore / dash.
 /// Listed before RE_OPENAI_KEY in the apply order so the longer prefix is
@@ -42,14 +39,12 @@ static RE_ANTHROPIC_KEY: LazyLock<Regex> = LazyLock::new(|| {
 /// Common env-var assignment patterns: `API_KEY`, `SECRET`, `TOKEN`, or
 /// `PASSWORD` followed by optional whitespace, `=`, and a non-whitespace run.
 static RE_ENV_VAR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(API_KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+")
-        .expect("RE_ENV_VAR pattern is valid")
+    Regex::new(r"(API_KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+").expect("RE_ENV_VAR pattern is valid")
 });
 
 /// AWS secret access key env-var assignment.
 static RE_AWS_SECRET_ENV: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+")
-        .expect("RE_AWS_SECRET_ENV pattern is valid")
+    Regex::new(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+").expect("RE_AWS_SECRET_ENV pattern is valid")
 });
 
 // ── public API ─────────────────────────────────────────────────────────────
@@ -159,15 +154,17 @@ mod tests {
     #[test]
     fn redacts_multiple_hits_in_one_pass() {
         // Two distinct patterns: bearer token + env-var assignment.
-        let input =
-            "auth: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig and SECRET=hunter2";
+        let input = "auth: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig and SECRET=hunter2";
         let out = redact(input, true);
         // Both original values must be gone.
         assert!(
             !out.contains("eyJhbGciOiJIUzI1NiJ9"),
             "bearer token must not appear: {out}"
         );
-        assert!(!out.contains("hunter2"), "secret value must not appear: {out}");
+        assert!(
+            !out.contains("hunter2"),
+            "secret value must not appear: {out}"
+        );
         // At least two [REDACTED] markers present.
         assert!(
             out.matches(REDACTED).count() >= 2,

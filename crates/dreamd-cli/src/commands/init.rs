@@ -154,7 +154,10 @@ pub fn uninstall_project(
 
     if !registry_path.exists() {
         if !quiet {
-            writeln!(out, "dreamd: project not registered \u{2014} nothing to do.")?;
+            writeln!(
+                out,
+                "dreamd: project not registered \u{2014} nothing to do."
+            )?;
         }
         return Ok(());
     }
@@ -163,8 +166,7 @@ pub fn uninstall_project(
     let mut registry: Registry =
         toml::from_str(&raw).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
 
-    let canonical =
-        fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical = fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     let before = registry.projects.len();
@@ -172,7 +174,10 @@ pub fn uninstall_project(
 
     if registry.projects.len() == before {
         if !quiet {
-            writeln!(out, "dreamd: project not registered \u{2014} nothing to do.")?;
+            writeln!(
+                out,
+                "dreamd: project not registered \u{2014} nothing to do."
+            )?;
         }
         return Ok(());
     }
@@ -198,8 +203,7 @@ fn register_project(daemon_home: &Path, project_root: &Path) -> Result<(), InitE
         Registry::default()
     };
 
-    let canonical =
-        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     if registry.projects.iter().any(|p| p.root == canonical_str) {

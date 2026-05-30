@@ -97,10 +97,12 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
             match try_connect_existing(path) {
                 Ok(stream) => Err(UdsBindError::AlreadyBound(stream)),
-                Err(e) if matches!(
-                    e.kind(),
-                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                ) => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) =>
+                {
                     // Orphaned socket file: previous writer-process exited
                     // without cleanup. Unlink and re-bind. We treat NotFound
                     // as orphaned too — a race where the file vanished

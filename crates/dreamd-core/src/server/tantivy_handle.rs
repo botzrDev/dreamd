@@ -251,10 +251,7 @@ impl TantivyIndexHandle {
     /// commit is issued after all clusters are processed.
     ///
     /// Called by the dream cycle after it writes the sidecar (WEG-45 / DR-205′).
-    pub async fn apply_recurrence_sidecar(
-        &self,
-        agent_root: &AgentRoot,
-    ) -> Result<(), IndexError> {
+    pub async fn apply_recurrence_sidecar(&self, agent_root: &AgentRoot) -> Result<(), IndexError> {
         let (tx, rx) = oneshot::channel();
         self.indexer
             .sender()
@@ -275,7 +272,10 @@ impl TantivyIndexHandle {
         let (tx, rx) = oneshot::channel();
         self.indexer
             .sender()
-            .send(IndexerMsg::PruneDecayedEvents { event_ids, response: tx })
+            .send(IndexerMsg::PruneDecayedEvents {
+                event_ids,
+                response: tx,
+            })
             .await
             .map_err(|_| IndexError("indexer channel closed".to_string()))?;
         rx.await
@@ -500,7 +500,11 @@ fn apply_recurrence_sidecar_inner(
     }
 
     // 3. Delete-and-re-add for each cluster listed in the sidecar.
-    for ClusterCount { skill_action, count } in &sidecar.clusters {
+    for ClusterCount {
+        skill_action,
+        count,
+    } in &sidecar.clusters
+    {
         let events = match by_skill.get(skill_action) {
             Some(v) => v,
             None => continue,
@@ -1383,8 +1387,8 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
-            .expect("open handle");
+        let handle =
+            TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open handle");
         // Confirm reader() returns without panic and produces a usable searcher.
         let _searcher = handle.reader().searcher();
         handle.shutdown().await.expect("shutdown");
@@ -1415,8 +1419,7 @@ mod tests {
         // The sidecar path is under semantic/; create the dir explicitly.
         std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
 
-        let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
         // Append 3 "deploy" events — steady-state counter gives recurrence 1, 2, 3.
@@ -1522,7 +1525,11 @@ mod tests {
         // Reload reader and confirm 5 docs.
         handle.reader().reload().expect("reload reader");
         assert_eq!(
-            handle.reader().searcher().search(&AllQuery, &tantivy::collector::Count).expect("count"),
+            handle
+                .reader()
+                .searcher()
+                .search(&AllQuery, &tantivy::collector::Count)
+                .expect("count"),
             5,
             "5 docs after append"
         );
@@ -1537,7 +1544,11 @@ mod tests {
         // Reload reader and confirm 2 docs remain.
         handle.reader().reload().expect("reload after prune");
         assert_eq!(
-            handle.reader().searcher().search(&AllQuery, &tantivy::collector::Count).expect("count after prune"),
+            handle
+                .reader()
+                .searcher()
+                .search(&AllQuery, &tantivy::collector::Count)
+                .expect("count after prune"),
             2,
             "2 docs remain after pruning 3"
         );

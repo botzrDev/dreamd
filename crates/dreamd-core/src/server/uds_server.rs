@@ -24,9 +24,7 @@ use crate::server::uds::bind_socket_raw;
 /// The directory is `0700` (not `0755`) so other users cannot stat the socket
 /// path at all — the socket `0600` alone would block connects but still expose
 /// the socket's existence. Defense-in-depth per DR-101 §Security.
-pub fn bind_api_socket(
-    path: &Path,
-) -> Result<tokio::net::UnixListener, ServerError> {
+pub fn bind_api_socket(path: &Path) -> Result<tokio::net::UnixListener, ServerError> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)?;
