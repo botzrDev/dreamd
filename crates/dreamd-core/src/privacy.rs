@@ -8,7 +8,7 @@
 /// PRD §5 privacy disclosure, ASCII-rendered, 60-col wrapped (locked verbatim).
 pub const DR413_DISCLOSURE: &str = "\
 dreamd: first run — When LLM mode is enabled, the content
-of AGENT_LEARNINGS.jsonl entries meeting the salience
+of AGENT_LEARNINGS.jsonl entries above the relevance
 threshold is sent to the configured LLM provider. No data
 is sent in --no-llm mode. Users working with sensitive
 codebases should use --no-llm or a local model via Ollama.
