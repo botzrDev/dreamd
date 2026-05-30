@@ -191,7 +191,7 @@ mod tests {
         );
         // Pure template alone (no edit) must also parse — proves the
         // commented form is valid TOML on its own.
-        customized.push_str("\n");
+        customized.push('\n');
 
         let tmp = tempdir().unwrap();
         let project_path = tmp.path().join("config.toml");

@@ -510,7 +510,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn search_nodes_seeded_index_returns_results() {
-        use crate::server::index_map::IndexHandle;
         use crate::server::tantivy_handle::{
             IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
         };

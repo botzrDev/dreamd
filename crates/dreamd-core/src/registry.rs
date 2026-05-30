@@ -72,7 +72,7 @@ mod tests {
     fn write_registry(entries: &[&str]) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
         if entries.is_empty() {
-            write!(f, "projects = []\n").unwrap();
+            writeln!(f, "projects = []").unwrap();
         } else {
             for root in entries {
                 writeln!(f, "[[projects]]").unwrap();
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn malformed_toml_returns_err() {
         let mut f = NamedTempFile::new().unwrap();
-        write!(f, "this is not valid toml ][[\n").unwrap();
+        writeln!(f, "this is not valid toml ][[").unwrap();
         let result = resolve_project(f.path(), std::path::Path::new("/any"));
         assert!(
             result.is_err(),

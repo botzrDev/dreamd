@@ -348,8 +348,10 @@ mod tests {
 
     #[test]
     fn auto_mode_rejected() {
-        let mut cfg = Config::default();
-        cfg.dream_cycle_mode = DreamCycleMode::Auto;
+        let cfg = Config {
+            dream_cycle_mode: DreamCycleMode::Auto,
+            ..Default::default()
+        };
         assert!(
             check_dream_mode(&cfg).is_err(),
             "auto mode must be rejected by check_dream_mode"
