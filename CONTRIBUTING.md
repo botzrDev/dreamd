@@ -29,6 +29,13 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
+Install the pre-commit hook once per clone. It mirrors CI by running `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` before every commit, so formatting and clippy drift is caught locally instead of turning CI red:
+
+```bash
+# Install the pre-commit hook (one-time, per clone)
+git config core.hooksPath .githooks
+```
+
 CI runs the same checks across Linux, macOS, and Windows. PRs must be green before merge.
 
 ## Pull requests
