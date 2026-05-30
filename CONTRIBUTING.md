@@ -47,7 +47,7 @@ We follow a loose conventional-commits style. Prefixes we use: `feat:`, `fix:`, 
 ```
 feat(api): add POST /api/v1/dream (DR-104)
 fix(io): fdatasync before returning 201 from /learn (DR-211)
-docs: clarify salience formula derivation
+docs: clarify scoring formula derivation
 ```
 
 ### Developer Certificate of Origin (DCO)
@@ -65,7 +65,7 @@ The `Signed-off-by:` trailer certifies that you wrote the code or have the right
 Some decisions in the implementation are not negotiable without re-reading the PRD and the threat model — for example:
 
 - All JSONL appends go through a single coordinator with `sync_data` before returning 201.
-- Salience is computed at query time, never indexed.
+- Relevance is computed at query time, never indexed.
 - The dream cycle uses a write-ahead log; destructive ops are restartable.
 - The local API binds to a Unix socket with `SO_PEERCRED`-based auth on Unix, and to `127.0.0.1` with a bearer token on Windows.
 
