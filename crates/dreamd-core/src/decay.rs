@@ -364,8 +364,8 @@ mod tests {
         // 30 old + unpinned: last 2 chars = 'A' + crockford[i].
         // 'A' as the 25th char distinguishes old from young.
         let mut events: Vec<AgentLearning> = Vec::new();
-        for i in 0..30usize {
-            let c = crockford[i]; // 0..30 all fit within 32
+        // 0..30 all fit within 32
+        for &c in crockford.iter().take(30) {
             let raw = format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{c}");
             let id = EventId::parse(&raw).expect("old event id");
             events.push(make_learning(id, OLD_TS, false));

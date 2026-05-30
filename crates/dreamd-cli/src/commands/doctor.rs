@@ -88,8 +88,10 @@ mod tests {
 
     #[test]
     fn doctor_output_auto_mode_warning() {
-        let mut cfg = Config::default();
-        cfg.dream_cycle_mode = DreamCycleMode::Auto;
+        let cfg = Config {
+            dream_cycle_mode: DreamCycleMode::Auto,
+            ..Default::default()
+        };
         let mut buf = Vec::new();
         let ok = run(&cfg, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");

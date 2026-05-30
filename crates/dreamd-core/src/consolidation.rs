@@ -669,7 +669,7 @@ mod tests {
         let root = AgentRoot::new(&dir);
         // 3 events 1, 2, 5 days ago — all within the 7-day window.
         let events = vec![
-            make_event_at(0, "rust::borrow", NOW_SEC - 1 * 86400),
+            make_event_at(0, "rust::borrow", NOW_SEC - 86400),
             make_event_at(1, "rust::borrow", NOW_SEC - 2 * 86400),
             make_event_at(2, "rust::borrow", NOW_SEC - 5 * 86400),
         ];
@@ -705,7 +705,7 @@ mod tests {
         let root = AgentRoot::new(&dir);
         // 2 events within 7 days + 1 beyond 30 days = neither window hits threshold.
         let events = vec![
-            make_event_at(0, "py::async", NOW_SEC - 1 * 86400),
+            make_event_at(0, "py::async", NOW_SEC - 86400),
             make_event_at(1, "py::async", NOW_SEC - 3 * 86400),
             make_event_at(2, "py::async", NOW_SEC - 31 * 86400),
         ];
