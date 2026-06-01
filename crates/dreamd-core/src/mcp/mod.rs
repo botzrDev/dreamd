@@ -340,7 +340,7 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// harness logs capture which project store is in use.
 ///
 /// NOTE: X-Agent-Root injection into JSON-RPC params is deferred.
-// DEFERRED(WEG-77): inject X-Agent-Root into forwarded JSON-RPC messages by
+// DEFERRED(WEG-259): inject X-Agent-Root into forwarded JSON-RPC messages by
 // parsing each line, adding `"_meta": {"x-agent-root": "<path>"}` to params,
 // and re-serialising before forwarding to the socket. For now we do a raw
 // byte-copy pass-through.
