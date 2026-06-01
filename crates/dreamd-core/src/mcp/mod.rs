@@ -6,15 +6,23 @@
 //! memory provider.
 //!
 //! Start-up logic:
-//!   1. Try to connect to the dreamd daemon socket (Phase 2 bridge path).
-//!      If the daemon is running, forward raw JSON-RPC stdio→socket→stdio.
+//!   1. If the dreamd daemon socket is reachable (Phase 2), serve the same MCP
+//!      tool surface over stdio but back each tool call with an HTTP-over-UDS
+//!      client to the daemon (`Backend::Remote`) so memory is shared across
+//!      every harness pointed at the same daemon.
 //!   2. If the daemon is not running, fall back to an in-process MCP server
-//!      that answers tool calls directly (Phase 1 fallback path).
+//!      that answers tool calls directly (Phase 1 fallback, `Backend::Local`).
 //!
-//! The Phase 1 fallback tools are live: `search_nodes` performs real recall
-//! (WEG-78) and `append_node` writes through the coordinator (WEG-79).
+//! Both paths expose identical tools: `search_nodes` performs recall (WEG-78)
+//! and `append_node` writes the learning durably (WEG-79).
 
 use std::path::{Path, PathBuf};
+
+// Phase 2 Remote backend (Unix only) — HTTP-over-UDS client deps.
+#[cfg(unix)]
+use bytes::Bytes;
+#[cfg(unix)]
+use http_body_util::{BodyExt, Full};
 
 use dreamd_protocol::{AgentLearning, EventId};
 use rmcp::handler::server::wrapper::Parameters;
@@ -25,7 +33,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::coordinator::MemoryCoordinatorMsg;
-use crate::layout::{DaemonHome, LayoutError};
+use crate::layout::DaemonHome;
 use crate::privacy::DR413_DISCLOSURE;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
@@ -83,49 +91,90 @@ pub struct AppendNodeParams {
 // MCP server struct
 // ---------------------------------------------------------------------------
 
-/// In-process MCP server (Phase 1 fallback when the daemon is not running).
+/// Backing store for a [`MemoryMcpServer`].
 ///
-/// When the daemon socket is reachable the server process instead acts as a
-/// transparent bridge (Phase 2); this struct is only instantiated in the
-/// fallback path.
+/// `Local` / `LocalReadOnly` / `Empty` are the Phase 1 in-process paths.
+/// `Remote` is the Phase 2 path: each tool call is proxied to the running
+/// daemon over an HTTP-over-UDS client (WEG-259) so memory is shared across
+/// harnesses pointed at the same daemon.
+#[derive(Clone)]
+enum Backend {
+    /// Phase 1: local in-process coordinator (durable writes + reads via the
+    /// shared Tantivy handle).
+    Local {
+        agent_root: AgentRoot,
+        coordinator_tx: mpsc::Sender<MemoryCoordinatorMsg>,
+    },
+    /// Phase 1 read-only: agent root known but no coordinator (search only).
+    LocalReadOnly { agent_root: AgentRoot },
+    /// No `.agent/` found — recall returns empty results; append errors.
+    Empty,
+    /// Phase 2: HTTP-over-UDS to the running daemon. `agent_root_header` is the
+    /// canonicalized project-root string sent as the `X-Agent-Root` header
+    /// (matches `resolve_project`'s server-side canonical lookup).
+    #[cfg(unix)]
+    Remote {
+        sock_path: PathBuf,
+        agent_root_header: String,
+    },
+}
+
+/// MCP server exposing the `search_nodes` / `append_node` tool pair over an
+/// in-process ([`Backend::Local`]) or daemon-backed ([`Backend::Remote`])
+/// store.
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     // Used by the #[tool_router] macro-generated dispatch code; the Rust
     // dead-code pass does not see macro-generated usage, hence the allow.
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<MemoryMcpServer>,
-    agent_root: Option<AgentRoot>,
-    coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
+    backend: Backend,
 }
 
 #[tool_router]
 impl MemoryMcpServer {
-    /// Create a new in-process memory MCP server with no agent root.
+    /// Create a new in-process memory MCP server with no agent root
+    /// ([`Backend::Empty`]).
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
-            agent_root: None,
-            coordinator_tx: None,
+            backend: Backend::Empty,
         }
     }
 
-    /// Create a new in-process memory MCP server bound to a specific agent root.
+    /// Create a read-only in-process server bound to a specific agent root
+    /// ([`Backend::LocalReadOnly`]).
     pub fn with_agent_root(root: AgentRoot) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            agent_root: Some(root),
-            coordinator_tx: None,
+            backend: Backend::LocalReadOnly { agent_root: root },
         }
     }
 
-    /// Create a new in-process memory MCP server bound to an agent root and a
-    /// live coordinator channel. Used by the Phase 1 fallback when the daemon
-    /// is not running.
+    /// Create an in-process server bound to an agent root and a live
+    /// coordinator channel ([`Backend::Local`]). Used by the Phase 1 fallback
+    /// when the daemon is not running.
     pub fn with_coordinator(root: AgentRoot, tx: mpsc::Sender<MemoryCoordinatorMsg>) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            agent_root: Some(root),
-            coordinator_tx: Some(tx),
+            backend: Backend::Local {
+                agent_root: root,
+                coordinator_tx: tx,
+            },
+        }
+    }
+
+    /// Create a daemon-backed server ([`Backend::Remote`]): tool calls are
+    /// proxied to the running daemon over HTTP-over-UDS. `agent_root_header`
+    /// must be the canonicalized project-root string (see `run_mcp_server`).
+    #[cfg(unix)]
+    pub fn with_remote(sock_path: PathBuf, agent_root_header: String) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            backend: Backend::Remote {
+                sock_path,
+                agent_root_header,
+            },
         }
     }
 
@@ -144,21 +193,40 @@ impl MemoryMcpServer {
         use crate::server::http::{RecallMeta, RecallResponse, RecallResultJson};
         use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
-        let k = p.k.unwrap_or(5) as usize;
+        let k = p.k.unwrap_or(5);
         let query = p.query;
 
-        let root = match &self.agent_root {
-            Some(r) => r.clone(),
-            None => {
-                // No agent root discovered — return empty results.
+        // Resolve the read path. Local/LocalReadOnly read the on-disk Tantivy
+        // index; Empty short-circuits to empty results; Remote proxies to the
+        // daemon over HTTP-over-UDS.
+        let root = match &self.backend {
+            Backend::Local { agent_root, .. } | Backend::LocalReadOnly { agent_root } => {
+                agent_root.clone()
+            }
+            Backend::Empty => {
                 let resp = RecallResponse { results: vec![] };
                 let json = serde_json::to_string(&resp)
                     .unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
                 return Ok(CallToolResult::success(vec![Content::text(json)]));
             }
+            Backend::Remote {
+                sock_path,
+                agent_root_header,
+            } => {
+                let req = build_recall_request(&query, k, agent_root_header)?;
+                let (status, body) = send_remote(sock_path, req).await?;
+                if status.is_success() {
+                    // The daemon already returns the canonical {"results":[...]}
+                    // shape; forward it verbatim.
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    return Ok(CallToolResult::success(vec![Content::text(text)]));
+                }
+                return Err(map_remote_status_error(status, &body));
+            }
         };
 
-        // Open (or reuse) the Tantivy index for this agent root.
+        // Local read path. Open (or reuse) the Tantivy index for this root.
+        let k = k as usize;
         let handle = match TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE) {
             Ok(h) => h,
             Err(e) => {
@@ -222,79 +290,94 @@ impl MemoryMcpServer {
         &self,
         Parameters(p): Parameters<AppendNodeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tx = match self.coordinator_tx.as_ref() {
-            Some(tx) => tx,
-            None => {
-                return Err(McpError::internal_error(
-                    "coordinator unavailable: no agent root found",
-                    None,
-                ));
+        match &self.backend {
+            Backend::Local { coordinator_tx, .. } => {
+                // Validate skill_action: trim → lowercase → collapse whitespace →
+                // replace spaces with `_` → charset [a-z0-9_:.-] → ≤ 256 bytes.
+                // Same rules as post_learn in server/http.rs.
+                let lowercased = p.skill_action.trim().to_lowercase();
+                let sa: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
+                if sa.is_empty() {
+                    return Err(McpError::invalid_request(
+                        "invalid skill_action: empty after normalisation",
+                        None,
+                    ));
+                }
+                if sa.len() > 256 {
+                    return Err(McpError::invalid_request(
+                        "invalid skill_action: exceeds 256 bytes",
+                        None,
+                    ));
+                }
+                if sa
+                    .bytes()
+                    .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-'))
+                {
+                    return Err(McpError::invalid_request(
+                        "invalid skill_action: contains characters outside [a-z0-9_:.-]",
+                        None,
+                    ));
+                }
+
+                let timestamp = chrono::Utc::now();
+                let learning = AgentLearning {
+                    schema_version: "1.0.0".to_string(),
+                    id: EventId::parse("evt_00000000000000000000000000").unwrap(),
+                    timestamp,
+                    pain: p.pain.unwrap_or(5.0) as f32,
+                    importance: p.importance.unwrap_or(5.0) as f32,
+                    pinned: false,
+                    skill_action: sa,
+                    source_harness: p.source_harness,
+                    content: p.content,
+                };
+
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                coordinator_tx
+                    .send(MemoryCoordinatorMsg::AppendLearning {
+                        learning,
+                        client_dedup_key: p.client_dedup_key,
+                        response_tx: resp_tx,
+                    })
+                    .await
+                    .map_err(|_| McpError::internal_error("coordinator unavailable", None))?;
+
+                let outcome = resp_rx
+                    .await
+                    .map_err(|_| McpError::internal_error("coordinator dropped", None))?
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let json = serde_json::json!({
+                    "id": outcome.id.to_string(),
+                    "timestamp": timestamp.to_rfc3339(),
+                    "deduplicated": outcome.deduplicated,
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string(&json)
+                        .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string()),
+                )]))
             }
-        };
-
-        // Validate skill_action: trim → lowercase → collapse whitespace →
-        // replace spaces with `_` → charset [a-z0-9_:.-] → ≤ 256 bytes.
-        // Same rules as post_learn in server/http.rs.
-        let lowercased = p.skill_action.trim().to_lowercase();
-        let sa: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
-        if sa.is_empty() {
-            return Err(McpError::invalid_request(
-                "invalid skill_action: empty after normalisation",
+            Backend::LocalReadOnly { .. } | Backend::Empty => Err(McpError::internal_error(
+                "coordinator unavailable: no agent root found",
                 None,
-            ));
+            )),
+            #[cfg(unix)]
+            Backend::Remote {
+                sock_path,
+                agent_root_header,
+            } => {
+                let req = build_learn_request(&p, agent_root_header)?;
+                let (status, body) = send_remote(sock_path, req).await?;
+                if status.is_success() {
+                    // The daemon already returns {"id","timestamp","deduplicated"};
+                    // forward it verbatim.
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    Ok(CallToolResult::success(vec![Content::text(text)]))
+                } else {
+                    Err(map_remote_status_error(status, &body))
+                }
+            }
         }
-        if sa.len() > 256 {
-            return Err(McpError::invalid_request(
-                "invalid skill_action: exceeds 256 bytes",
-                None,
-            ));
-        }
-        if sa
-            .bytes()
-            .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-'))
-        {
-            return Err(McpError::invalid_request(
-                "invalid skill_action: contains characters outside [a-z0-9_:.-]",
-                None,
-            ));
-        }
-
-        let timestamp = chrono::Utc::now();
-        let learning = AgentLearning {
-            schema_version: "1.0.0".to_string(),
-            id: EventId::parse("evt_00000000000000000000000000").unwrap(),
-            timestamp,
-            pain: p.pain.unwrap_or(5.0) as f32,
-            importance: p.importance.unwrap_or(5.0) as f32,
-            pinned: false,
-            skill_action: sa,
-            source_harness: p.source_harness,
-            content: p.content,
-        };
-
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        tx.send(MemoryCoordinatorMsg::AppendLearning {
-            learning,
-            client_dedup_key: p.client_dedup_key,
-            response_tx: resp_tx,
-        })
-        .await
-        .map_err(|_| McpError::internal_error("coordinator unavailable", None))?;
-
-        let outcome = resp_rx
-            .await
-            .map_err(|_| McpError::internal_error("coordinator dropped", None))?
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let json = serde_json::json!({
-            "id": outcome.id.to_string(),
-            "timestamp": timestamp.to_rfc3339(),
-            "deduplicated": outcome.deduplicated,
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&json)
-                .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string()),
-        )]))
     }
 }
 
@@ -314,7 +397,7 @@ impl Default for MemoryMcpServer {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 bridge (Unix only — daemon socket is UDS)
+// Phase 2 Remote backend (Unix only — daemon socket is UDS)
 // ---------------------------------------------------------------------------
 
 /// Resolve the path to the daemon Unix socket.
@@ -331,52 +414,136 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
     Ok(daemon_home.socket_path())
 }
 
-/// Forward JSON-RPC stdio → daemon socket → stdout (Phase 2 bridge).
-///
-/// Wires stdin → socket-write half and socket-read half → stdout using
-/// two concurrent copy tasks. Runs until either direction reaches EOF.
-///
-/// The agent root (found via `AgentRoot::discover`) is logged to stderr so
-/// harness logs capture which project store is in use.
-///
-/// NOTE: X-Agent-Root injection into JSON-RPC params is deferred.
-// DEFERRED(WEG-259): inject X-Agent-Root into forwarded JSON-RPC messages by
-// parsing each line, adding `"_meta": {"x-agent-root": "<path>"}` to params,
-// and re-serialising before forwarding to the socket. For now we do a raw
-// byte-copy pass-through.
+/// Percent-encode a query-string value (RFC 3986 unreserved set passes
+/// through; everything else becomes `%XX`). Inlined rather than pulling a
+/// URL-encoding crate — WEG-259 deliberately adds only hyper / http-body-util
+/// / bytes as new deps.
 #[cfg(unix)]
-async fn run_bridge(stream: tokio::net::UnixStream, cwd: &Path) -> Result<(), McpRunError> {
-    // Log which agent root (if any) this bridge session is bound to.
-    match AgentRoot::discover(cwd) {
-        Ok(root) => {
-            eprintln!(
-                "dreamd mcp: bridge connected — agent root: {}",
-                root.project_root().display()
-            );
-        }
-        Err(LayoutError::NotFound) => {
-            eprintln!(
-                "dreamd mcp: bridge connected — no .agent/ found in ancestry of {}",
-                cwd.display()
-            );
+fn percent_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &b in value.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
         }
     }
+    out
+}
 
-    let (mut sock_read, mut sock_write) = tokio::io::split(stream);
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+/// Build `GET /api/v1/recall?q=<url-encoded>&k=<k>` with the `X-Agent-Root`
+/// header. Pure (no socket, no async) so it can be unit-tested directly.
+#[cfg(unix)]
+fn build_recall_request(
+    query: &str,
+    k: u32,
+    agent_root_header: &str,
+) -> Result<hyper::Request<Full<Bytes>>, McpError> {
+    let uri = format!("/api/v1/recall?q={}&k={k}", percent_encode_query(query));
+    hyper::Request::builder()
+        .method(hyper::Method::GET)
+        .uri(uri)
+        .header(hyper::header::HOST, "localhost")
+        .header("x-agent-root", agent_root_header)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| McpError::internal_error(format!("build recall request failed: {e}"), None))
+}
 
-    // Drive both copy directions concurrently; exit when either side closes.
-    tokio::select! {
-        r = tokio::io::copy(&mut stdin, &mut sock_write) => {
-            r?;
-        }
-        r = tokio::io::copy(&mut sock_read, &mut stdout) => {
-            r?;
-        }
+/// Build `POST /api/v1/learn` with `X-Agent-Root`, `Content-Type:
+/// application/json`, an optional `X-Client-Dedup-Key`, and a JSON body that
+/// deserializes as [`AgentLearning`] (the shape `post_learn` expects). The
+/// daemon mints the real `id` and re-normalises `skill_action`, so we send a
+/// placeholder id and the raw skill_action. Pure: unit-tested directly.
+#[cfg(unix)]
+fn build_learn_request(
+    params: &AppendNodeParams,
+    agent_root_header: &str,
+) -> Result<hyper::Request<Full<Bytes>>, McpError> {
+    let learning = AgentLearning {
+        schema_version: "1.0.0".to_string(),
+        id: EventId::parse("evt_00000000000000000000000000")
+            .expect("static placeholder EventId is valid"),
+        timestamp: chrono::Utc::now(),
+        pain: params.pain.unwrap_or(5.0) as f32,
+        importance: params.importance.unwrap_or(5.0) as f32,
+        pinned: false,
+        skill_action: params.skill_action.clone(),
+        source_harness: params.source_harness.clone(),
+        content: params.content.clone(),
+    };
+    let body = serde_json::to_vec(&learning)
+        .map_err(|e| McpError::internal_error(format!("serialize learning failed: {e}"), None))?;
+
+    let mut builder = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri("/api/v1/learn")
+        .header(hyper::header::HOST, "localhost")
+        .header("x-agent-root", agent_root_header)
+        .header(hyper::header::CONTENT_TYPE, "application/json");
+    if let Some(key) = params.client_dedup_key.as_deref() {
+        builder = builder.header("x-client-dedup-key", key);
     }
+    builder
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|e| McpError::internal_error(format!("build learn request failed: {e}"), None))
+}
 
-    Ok(())
+/// Map a non-success daemon HTTP status to an [`McpError`] per the WEG-259
+/// error table. Never panics.
+#[cfg(unix)]
+fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> McpError {
+    let body_str = String::from_utf8_lossy(body);
+    match status.as_u16() {
+        400 => McpError::invalid_request(format!("invalid X-Agent-Root: {body_str}"), None),
+        404 => McpError::invalid_request(
+            format!("project not registered with daemon — run dreamd init: {body_str}"),
+            None,
+        ),
+        413 => McpError::invalid_request("learning exceeds size limit", None),
+        415 => McpError::invalid_request("content-type rejected (defensive)", None),
+        _ => McpError::internal_error(format!("daemon error {status}: {body_str}"), None),
+    }
+}
+
+/// Open a fresh HTTP-over-UDS connection to the daemon, send one request, and
+/// collect the response into `(status, body)`. Per-call connect (no pooling) —
+/// MCP tool calls are infrequent; the WEG-78-A "fresh handle per call"
+/// rationale applies. Connection / handshake / I/O failures map to
+/// `internal_error`.
+#[cfg(unix)]
+async fn send_remote(
+    sock_path: &Path,
+    req: hyper::Request<Full<Bytes>>,
+) -> Result<(hyper::StatusCode, Bytes), McpError> {
+    use hyper::client::conn::http1;
+    use hyper_util::rt::TokioIo;
+
+    let stream = tokio::net::UnixStream::connect(sock_path)
+        .await
+        .map_err(|e| McpError::internal_error(format!("daemon connect failed: {e}"), None))?;
+    // TokioIo wrap is required: a raw UnixStream does not implement hyper's IO
+    // trait (WEG-72-B drift entry).
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = http1::handshake(io)
+        .await
+        .map_err(|e| McpError::internal_error(format!("daemon handshake failed: {e}"), None))?;
+    // Drive the connection in the background until the stream closes.
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| McpError::internal_error(format!("daemon request failed: {e}"), None))?;
+    let status = resp.status();
+    let body = resp
+        .collect()
+        .await
+        .map_err(|e| McpError::internal_error(format!("daemon response read failed: {e}"), None))?
+        .to_bytes();
+    Ok((status, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -385,12 +552,13 @@ async fn run_bridge(stream: tokio::net::UnixStream, cwd: &Path) -> Result<(), Mc
 
 /// Start the MCP server process.
 ///
-/// Phase 2 (bridge, Unix only): if the daemon socket is reachable, forward
-/// stdio transparently to the daemon and return when the session ends.
+/// Phase 2 (Remote, Unix only): if the daemon socket is reachable, serve the
+/// MCP tool surface over stdio backed by an HTTP-over-UDS client to the daemon
+/// ([`MemoryMcpServer::with_remote`]) and return when the session ends.
 ///
-/// Phase 1 (fallback): if the daemon is not running (or on Windows where
-/// UDS bridging is deferred to DR-121), serve MCP tool calls in-process
-/// using [`MemoryMcpServer`].
+/// Phase 1 (fallback): if the daemon is not running (or on Windows where the
+/// UDS path is deferred to DR-121), serve MCP tool calls in-process using
+/// [`MemoryMcpServer`].
 ///
 /// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
 /// is the first invocation in a directory that has no `.agent/` store yet.
@@ -405,14 +573,39 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     // is deferred so we still need the path for the log message).
     let sock_path = resolve_sock_path()?;
 
-    // Phase 2 (Unix only): try to connect to the running daemon over UDS.
-    // The daemon socket is a Unix domain socket; this path is intentionally
-    // absent on Windows until DR-121 (TCP fallback) ships.
+    // Phase 2 (Unix only): if the daemon is reachable over UDS, serve the MCP
+    // tool surface over stdio backed by an HTTP-over-UDS Remote client. The
+    // daemon socket is a Unix domain socket; this path is intentionally absent
+    // on Windows until DR-121 (TCP fallback) ships.
     #[cfg(unix)]
     match tokio::net::UnixStream::connect(&sock_path).await {
-        Ok(stream) => {
-            // Daemon is running — act as a transparent bridge.
-            return run_bridge(stream, cwd).await;
+        Ok(_) => {
+            // The connect only probes reachability; each tool call opens its
+            // own short-lived connection. Derive the X-Agent-Root header from
+            // the discovered project root, canonicalized to match
+            // resolve_project's server-side lookup (registry roots are stored
+            // canonicalized — see registry.rs). No `.agent/` in ancestry → send
+            // the cwd; Remote calls will 404, which is the correct
+            // "not registered" signal.
+            let agent_root_header: String = match AgentRoot::discover(cwd) {
+                Ok(root) => std::fs::canonicalize(root.project_root())
+                    .unwrap_or_else(|_| root.project_root().to_path_buf())
+                    .to_string_lossy()
+                    .into_owned(),
+                Err(_) => cwd.to_string_lossy().into_owned(),
+            };
+            eprintln!(
+                "dreamd mcp: daemon reachable at {} — serving Phase 2 (Remote backend), agent root: {agent_root_header}",
+                sock_path.display()
+            );
+            let svc = MemoryMcpServer::with_remote(sock_path, agent_root_header)
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            svc.waiting()
+                .await
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            return Ok(());
         }
         Err(_) => {
             // Daemon not running — fall through to Phase 1 in-process server.
@@ -661,6 +854,303 @@ mod tests {
             parsed["deduplicated"],
             serde_json::json!(false),
             "first append must not be deduplicated"
+        );
+    }
+
+    // ── WEG-259: Phase 2 Remote backend (HTTP-over-UDS) ──────────────────────
+
+    /// Unit: `build_recall_request` sets GET, the percent-encoded URI, and the
+    /// `X-Agent-Root` header. Pure — no socket, no async.
+    #[cfg(unix)]
+    #[test]
+    fn test_build_recall_request_sets_correct_uri_method_and_header() {
+        let req = build_recall_request("rust tokio", 5, "/home/u/project").expect("build");
+        assert_eq!(req.method(), hyper::Method::GET);
+        assert_eq!(
+            req.uri().to_string(),
+            "/api/v1/recall?q=rust%20tokio&k=5",
+            "query must be percent-encoded"
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-agent-root")
+                .and_then(|v| v.to_str().ok()),
+            Some("/home/u/project")
+        );
+    }
+
+    /// Unit: `build_learn_request` sets POST, `Content-Type: application/json`,
+    /// `X-Agent-Root`, `X-Client-Dedup-Key`, and a body that round-trips
+    /// through `AgentLearning`. `#[tokio::test]` only to collect the in-memory
+    /// body — there is no socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_build_learn_request_sets_correct_method_content_type_and_header() {
+        let params = AppendNodeParams {
+            content: "body content".to_string(),
+            source_harness: "claude-code".to_string(),
+            skill_action: "rust.cargo.test".to_string(),
+            pain: Some(7.0),
+            importance: Some(8.0),
+            client_dedup_key: Some("dedup-1".to_string()),
+        };
+        let req = build_learn_request(&params, "/home/u/project").expect("build");
+
+        assert_eq!(req.method(), hyper::Method::POST);
+        assert_eq!(req.uri().to_string(), "/api/v1/learn");
+        assert_eq!(
+            req.headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-agent-root")
+                .and_then(|v| v.to_str().ok()),
+            Some("/home/u/project")
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-client-dedup-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("dedup-1")
+        );
+
+        let body = req.into_body().collect().await.expect("collect").to_bytes();
+        let parsed: AgentLearning =
+            serde_json::from_slice(&body).expect("body round-trips as AgentLearning");
+        assert_eq!(parsed.skill_action, "rust.cargo.test");
+        assert_eq!(parsed.source_harness, "claude-code");
+        assert_eq!(parsed.content, "body content");
+    }
+
+    /// Spawn an in-process daemon over UDS for the Remote integration tests.
+    /// `with_coordinator` controls whether append writes are durable (real
+    /// coordinator) or whether only read paths are exercised.
+    #[cfg(unix)]
+    async fn spawn_test_daemon(
+        agent_root: &AgentRoot,
+        registry_path: std::path::PathBuf,
+        sock_path: &std::path::Path,
+        with_coordinator: bool,
+    ) {
+        use crate::config::Config;
+        use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
+        use crate::server::uds_server::{bind_api_socket, serve_uds};
+        use crate::server::{build_router, AppState};
+
+        let supervisor = if with_coordinator {
+            Supervisor::start(agent_root, COORDINATOR_CHANNEL_CAPACITY, None)
+                .expect("start supervisor")
+        } else {
+            Supervisor::for_backpressure_test().0
+        };
+        let state = AppState::new(
+            registry_path,
+            supervisor,
+            Config::default(),
+            ProjectIndexMap::new(ProjectIndexMapConfig::default()),
+            nix::unistd::Uid::current().as_raw(),
+        );
+        let router = build_router(state);
+        let listener = bind_api_socket(sock_path).expect("bind api socket");
+        tokio::spawn(async move {
+            serve_uds(listener, router).await.ok();
+        });
+        // Let the accept loop start before the first client connect.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    /// Write a single-project registry pointing at `canonical_root`.
+    #[cfg(unix)]
+    fn write_registry(registry_path: &std::path::Path, canonical_root: &str) {
+        std::fs::write(
+            registry_path,
+            format!("[[projects]]\nroot = \"{canonical_root}\"\n"),
+        )
+        .expect("write registry");
+    }
+
+    /// Integration: search_nodes over the Remote backend returns daemon results.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_search_nodes_round_trips_via_uds() {
+        use crate::server::tantivy_handle::{
+            IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
+        };
+        use chrono::{DateTime, Utc};
+        use tokio::sync::oneshot;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        // Seed one learning into the on-disk Tantivy index, then release the
+        // writer so the daemon's index_map can open its own handle.
+        {
+            let handle = TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE).expect("open");
+            let tx = handle.sender();
+            let id = EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FA0").expect("id");
+            let learning = AgentLearning {
+                schema_version: "1.0.0".to_string(),
+                id: id.clone(),
+                timestamp: DateTime::parse_from_rfc3339("2026-05-22T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                pain: 7.0,
+                importance: 8.0,
+                pinned: false,
+                skill_action: "rust.tokio".to_string(),
+                source_harness: "test-harness".to_string(),
+                content: "rust async tokio channel".to_string(),
+            };
+            tx.send(IndexerMsg::Append {
+                event_id: id,
+                learning,
+            })
+            .await
+            .expect("append");
+            let (ack_tx, ack_rx) = oneshot::channel();
+            tx.send(IndexerMsg::Flush { ack: ack_tx })
+                .await
+                .expect("flush send");
+            ack_rx.await.expect("flush ack").expect("flush ok");
+            drop(tx);
+            handle.shutdown().await.expect("shutdown");
+        }
+
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, false).await;
+
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        let result = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "rust tokio async".to_string(),
+                k: Some(5),
+            }))
+            .await
+            .expect("search_nodes ok");
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content present");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+        assert!(
+            !results.is_empty(),
+            "remote search must return results; got: {parsed:?}"
+        );
+        assert!(
+            results[0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("tokio"),
+            "top result content must match seeded learning; got: {parsed:?}"
+        );
+    }
+
+    /// Integration: append_node over the Remote backend writes durably and the
+    /// daemon mints the EventId.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_append_node_round_trips_via_uds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, true).await;
+
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        let result = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "remote append content".to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust.remote".to_string(),
+                pain: Some(6.0),
+                importance: Some(7.0),
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok");
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content present");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert!(
+            parsed["id"].as_str().unwrap_or("").starts_with("evt_"),
+            "id must be daemon-minted; got: {parsed:?}"
+        );
+        assert!(
+            parsed["timestamp"].as_str().is_some(),
+            "timestamp must be present; got: {parsed:?}"
+        );
+        assert_eq!(
+            parsed["deduplicated"],
+            serde_json::json!(false),
+            "first append must not be deduplicated"
+        );
+
+        // The learning must be durably on disk in the episodic JSONL.
+        let jsonl = std::fs::read_to_string(root.episodic_jsonl()).expect("read jsonl");
+        let lines: Vec<&str> = jsonl.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "exactly one learning persisted; got: {jsonl:?}"
+        );
+        let record: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("record is valid json");
+        assert_eq!(record["content"].as_str().unwrap(), "remote append content");
+        assert_eq!(record["skill_action"].as_str().unwrap(), "rust.remote");
+    }
+
+    /// Integration: an unregistered agent root yields a 404 from the daemon,
+    /// which the Remote backend surfaces as `invalid_request` (not a dropped
+    /// connection).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_unregistered_root_returns_invalid_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        // registry.toml is never written → resolve_project returns Ok(None) → 404.
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        spawn_test_daemon(&root, registry_path, &sock_path, false).await;
+
+        let server =
+            MemoryMcpServer::with_remote(sock_path, canonical.to_string_lossy().into_owned());
+        let err = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "anything".to_string(),
+                k: Some(3),
+            }))
+            .await
+            .expect_err("unregistered root must error");
+
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "404 must map to invalid_request; got: {err:?}"
+        );
+        assert!(
+            err.message.contains("not registered"),
+            "message must mention the project is not registered; got: {}",
+            err.message
         );
     }
 }
