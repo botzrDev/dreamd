@@ -14,9 +14,11 @@ is sent in --no-llm mode. Users working with sensitive
 codebases should use --no-llm or a local model via Ollama.
 The personal/ layer is excluded from LLM calls unless
 --share-personal is passed.
-See docs/security.md#privacy-disclosure for details.";
+See https://github.com/botzrDev/dreamd/blob/main/SECURITY.md
+for details.";
 
-pub const PRIVACY_DISCLOSURE_LINK: &str = "docs/security.md#privacy-disclosure";
+pub const PRIVACY_DISCLOSURE_LINK: &str =
+    "https://github.com/botzrDev/dreamd/blob/main/SECURITY.md";
 
 #[cfg(test)]
 mod tests {
