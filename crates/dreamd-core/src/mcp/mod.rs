@@ -11,8 +11,8 @@
 //!   2. If the daemon is not running, fall back to an in-process MCP server
 //!      that answers tool calls directly (Phase 1 fallback path).
 //!
-//! The Phase 1 tools are placeholders today; real recall/learn wiring lands
-//! in WEG-78 and WEG-79 respectively.
+//! The Phase 1 fallback tools are live: `search_nodes` performs real recall
+//! (WEG-78) and `append_node` writes through the coordinator (WEG-79).
 
 use std::path::{Path, PathBuf};
 
@@ -340,7 +340,7 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// harness logs capture which project store is in use.
 ///
 /// NOTE: X-Agent-Root injection into JSON-RPC params is deferred.
-// TODO(WEG-77): inject X-Agent-Root into forwarded JSON-RPC messages by
+// DEFERRED(WEG-77): inject X-Agent-Root into forwarded JSON-RPC messages by
 // parsing each line, adding `"_meta": {"x-agent-root": "<path>"}` to params,
 // and re-serialising before forwarding to the socket. For now we do a raw
 // byte-copy pass-through.
