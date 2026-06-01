@@ -298,3 +298,20 @@ jobs:
           $sizeMB = [math]::Round($sizeBytes / 1MB, 2)
           Write-Output "Windows binary (unstripped): $sizeMB MB ($sizeBytes bytes)"
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows binary size: $sizeMB MB (unstripped)"
+
+  # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
+  notify-failure:
+    name: Notify on main CI failure
+    needs: [lint, test, size-gate, tarball-sentinel]
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Post failure to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"🔴 dreamd CI failed on main — ${GITHUB_SHA::8} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$SLACK_WEBHOOK_URL"
