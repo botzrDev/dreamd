@@ -5,8 +5,10 @@ Node shim for the dreamd MCP server. Downloads the right prebuilt binary for you
 ## Install
 
 ```sh
-npx @dataprime1/dreamd-mcp
-# or shorthand (if npm shorthand is claimed):
+# 1. Scaffold .agent/ into your project
+npx dreamd-mcp init
+
+# 2. Point Claude Code, Cursor, or any MCP-aware harness at the server
 npx dreamd-mcp
 ```
 
