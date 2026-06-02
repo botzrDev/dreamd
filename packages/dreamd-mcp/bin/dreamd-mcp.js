@@ -104,6 +104,7 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
 
 async function main() {
   const args = process.argv.slice(2);
+  const dreamdArgs = args[0] === 'init' ? args : ['mcp', ...args];
 
   // DREAMD_BIN override: skip download, exec directly
   if (process.env.DREAMD_BIN) {
@@ -115,7 +116,7 @@ async function main() {
         process.stderr.write('[dreamd-mcp] WARNING: DREAMD_BIN set — skipping sha256 verification for custom build\n');
       }
     }
-    execFileSync(overridePath, ['mcp', ...args], { stdio: 'inherit' });
+    execFileSync(overridePath, dreamdArgs, { stdio: 'inherit' });
     return;
   }
 
@@ -150,7 +151,7 @@ async function main() {
   // Verify sha256 before every exec (not just on download)
   verifyBinary(binaryPath, binaryEntry.sha256);
 
-  execFileSync(binaryPath, ['mcp', ...args], { stdio: 'inherit' });
+  execFileSync(binaryPath, dreamdArgs, { stdio: 'inherit' });
 }
 
 main().catch((err) => {
