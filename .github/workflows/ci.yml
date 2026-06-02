@@ -299,6 +299,80 @@ jobs:
           Write-Output "Windows binary (unstripped): $sizeMB MB ($sizeBytes bytes)"
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows binary size: $sizeMB MB (unstripped)"
 
+  # ── Test coverage (report-only, no gate) ─────────────────────────────────────
+  # cargo-llvm-cov over the workspace; uploads the HTML + lcov report as a build
+  # artifact and writes the per-file summary to the job summary. Report-only:
+  # never fails the build. Soft warnings fire below the 90% target and the 85%
+  # floor. Reuses scripts/coverage.sh so local and CI measure the same surface
+  # (same tests/bin/ ignore regex). To promote the 85% floor to a blocking gate,
+  # uncomment the `exit 1` in the "Summarize + threshold warnings" step.
+  coverage:
+    name: Test coverage (report-only)
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
+
+      - name: Generate coverage report (html + lcov)
+        run: scripts/coverage.sh
+
+      - name: Summarize + threshold warnings
+        run: |
+          IGNORE_RE='tests/bin/'
+          SUMMARY=$(cargo llvm-cov report --summary-only --ignore-filename-regex "$IGNORE_RE")
+          LINE_COV=$(cargo llvm-cov report --json --summary-only --ignore-filename-regex "$IGNORE_RE" | jq '.data[0].totals.lines.percent')
+          PRETTY=$(printf '%.2f' "$LINE_COV")
+          echo "Total line coverage: ${PRETTY}%"
+          {
+            echo "### Test coverage — ${PRETTY}% lines"
+            echo ''
+            echo '```'
+            echo "$SUMMARY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          WARN_FLOOR=90.0
+          HARD_FLOOR=85.0
+          below_warn=$(awk -v c="$LINE_COV" -v w="$WARN_FLOOR" 'BEGIN { print (c + 0 < w + 0) ? 1 : 0 }')
+          below_hard=$(awk -v c="$LINE_COV" -v h="$HARD_FLOOR" 'BEGIN { print (c + 0 < h + 0) ? 1 : 0 }')
+          if [ "$below_hard" -eq 1 ]; then
+            echo "::warning::Coverage ${PRETTY}% is below the 85% floor — report-only, not failing the build."
+            # exit 1   # ← uncomment to promote the 85% floor to a blocking gate
+          elif [ "$below_warn" -eq 1 ]; then
+            echo "::warning::Coverage ${PRETTY}% is below the 90% soft target."
+          fi
+
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            target/coverage/html
+            target/coverage/lcov.info
+          retention-days: 14
+
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
   notify-failure:
     name: Notify on main CI failure
