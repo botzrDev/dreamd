@@ -42,7 +42,8 @@ function sha256File(filePath) {
 
 function verifyBinary(binaryPath, expectedSha256) {
   if (expectedSha256 === '0000000000000000000000000000000000000000000000000000000000000000') {
-    process.stderr.write('[dreamd-mcp] WARNING: manifest contains placeholder sha256 — skipping verification (pre-release build)\n');
+    // Pre-release placeholder — verification intentionally skipped.
+    // Replace with real hashes in manifest.json when release binaries are cut (v0.1 launch).
     return;
   }
   const actual = sha256File(binaryPath);
