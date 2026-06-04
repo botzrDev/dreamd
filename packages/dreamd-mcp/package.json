@@ -1,6 +1,6 @@
 {
-  "name": "@dataprime1/dreamd-mcp",
-  "version": "0.1.0",
+  "name": "dreamd-mcp",
+  "version": "0.1.0-rc.1",
   "description": "npx shim for dreamd MCP server — downloads the right prebuilt Rust binary for your OS/arch",
   "bin": {
     "dreamd-mcp": "bin/dreamd-mcp.js"

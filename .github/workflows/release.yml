@@ -24,31 +24,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # asset_name matches the npx shim's platform target (see
+          # packages/dreamd-mcp/bin/dreamd-mcp.js getPlatformTarget); the shim
+          # downloads `<asset_name>.tar.gz` and extracts the `dreamd` binary.
           # Linux (GNU)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: dreamd
-            asset_name: dreamd-linux-x86_64
-          # Linux (musl — fully static)
+            asset_name: linux-x86_64
+          # Linux (musl — fully static; not consumed by the shim, kept as an extra)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact_name: dreamd
-            asset_name: dreamd-linux-x86_64-musl
+            asset_name: linux-x86_64-musl
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: dreamd
-            asset_name: dreamd-macos-x86_64
+            asset_name: darwin-x86_64
           # macOS Apple Silicon
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact_name: dreamd
-            asset_name: dreamd-macos-aarch64
-          # Windows
+            asset_name: darwin-aarch64
+          # Windows (deferred per Q6; asset name kept consistent with the shim)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact_name: dreamd.exe
-            asset_name: dreamd-windows-x86_64.exe
+            asset_name: windows-x86_64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -94,17 +97,20 @@ jobs:
             exit 1
           fi
 
-      - name: Rename binary for upload
+      - name: Package tarball
         shell: bash
         run: |
-          SRC=target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          cp "$SRC" "${{ matrix.asset_name }}"
+          # Tarball contains the binary at its root named exactly `dreamd`
+          # (`dreamd.exe` on Windows) — the shim extracts it and runs it directly.
+          tar -czf "${{ matrix.asset_name }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" \
+            "${{ matrix.artifact_name }}"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: ${{ matrix.asset_name }}.tar.gz
+          path: ${{ matrix.asset_name }}.tar.gz
           if-no-files-found: error
 
   # ── Publish to GitHub Releases ────────────────────────────────────────────────

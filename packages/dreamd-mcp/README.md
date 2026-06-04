@@ -1,4 +1,4 @@
-# @dataprime1/dreamd-mcp
+# dreamd-mcp
 
 Node shim for the dreamd MCP server. Downloads the right prebuilt binary for your OS/arch and starts the MCP server.
 
