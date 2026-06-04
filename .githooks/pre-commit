@@ -1,15 +1,17 @@
 #!/bin/sh
-# Pre-commit hook — rustfmt + clippy gate (WEG-35 / DR-007).
+# Pre-commit hook — rustfmt gate (WEG-35 / DR-007).
 #
-# Mirrors the CI lint checks so formatting / clippy drift is caught locally
-# before it can turn main red (recurrence fix for WEG-255). Commands are kept
-# byte-identical to .github/workflows/ci.yml.
+# fmt is near-instant, so it stays on every commit (recurrence fix for
+# WEG-255: catches formatting drift before it can turn main red).
+#
+# The clippy gate lives in .githooks/pre-push, NOT here: clippy keeps a
+# separate check-style artifact set from cargo build/run/test, so it
+# cold-compiles the dependency tree (~60s) and blocks on rust-analyzer's
+# target-dir lock. Push happens far less often than commit, and still gates
+# before anything reaches CI. Command kept byte-identical to ci.yml.
 #
 # Installed per clone via:  git config core.hooksPath .githooks
 set -eu
 
 echo "pre-commit: cargo fmt --all -- --check"
 cargo fmt --all -- --check
-
-echo "pre-commit: cargo clippy --all-targets --all-features -- -D warnings"
-cargo clippy --all-targets --all-features -- -D warnings

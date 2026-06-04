@@ -2,4 +2,18 @@
 //
 // For a full list of overridable settings, and general information on folder-specific settings,
 // see the documentation: https://zed.dev/docs/configuring-zed#settings-files
-{}
+{
+  // Give rust-analyzer its own build directory (target/rust-analyzer) so its
+  // checkOnSave runs don't hold the target-dir lock that the git hooks' cargo
+  // invocations need. Eliminates "Blocking waiting for file lock on build
+  // directory" stalls during commit/push.
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "targetDir": true
+        }
+      }
+    }
+  }
+}
