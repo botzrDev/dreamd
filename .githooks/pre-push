@@ -1,0 +1,17 @@
+#!/bin/sh
+# Pre-push hook — clippy gate (WEG-35 / DR-007).
+#
+# Mirrors the CI lint check so clippy drift is caught locally before it can
+# turn main red (recurrence fix for WEG-255). Moved here from pre-commit:
+# clippy keeps a separate check-style artifact set from cargo build/run/test,
+# so it cold-compiles the dependency tree (~60s) and contends with
+# rust-analyzer's target-dir lock — too costly to run on every commit. Pushes
+# are infrequent and happen when editing has settled, and this still gates
+# before code reaches the remote/CI. Command kept byte-identical to
+# .github/workflows/ci.yml.
+#
+# Installed per clone via:  git config core.hooksPath .githooks
+set -eu
+
+echo "pre-push: cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
