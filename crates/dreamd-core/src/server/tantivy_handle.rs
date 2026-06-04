@@ -199,6 +199,16 @@ impl TantivyIndexHandle {
                     last_indexed_id: latest_committed.clone(),
                 },
             )?;
+            // The reader was created before this replay commit and uses the
+            // default `ReloadPolicy::OnCommitWithDelay`, so the first query
+            // after open would otherwise see a stale (pre-replay) view until
+            // the background reload fires. Force a synchronous reload so recall
+            // reflects the replayed tail the moment `open()` returns — this is
+            // the cross-harness read-after-open case (a fresh process indexing
+            // a prior process's append). Steady-state cadence commits from
+            // `run_indexer` are still picked up by OnCommitWithDelay. (WEG-264
+            // Defect 1.)
+            reader.reload().map_err(tantivy_to_index)?;
         }
 
         // Build steady-state cluster counts: pass-1 already counted the
@@ -1391,6 +1401,50 @@ mod tests {
             TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open handle");
         // Confirm reader() returns without panic and produces a usable searcher.
         let _searcher = handle.reader().searcher();
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-264 Defect 1 — fresh handle's reader reflects the open-time replay
+    // -----------------------------------------------------------------------
+
+    /// Regression: a process that opens a `TantivyIndexHandle` and is the
+    /// first to index a JSONL record must see that record on its *first* query
+    /// through `reader()`. Before the WEG-264 fix the reader was created
+    /// pre-commit with `ReloadPolicy::OnCommitWithDelay` and never reloaded on
+    /// the production path, so the open-time replay commit was invisible until
+    /// some later process re-opened the index. This reproduces the
+    /// cross-harness demo where agent #2 is the first process to index agent
+    /// #1's append.
+    #[tokio::test]
+    async fn fresh_handle_reader_sees_replayed_events_without_reload() {
+        let dir = unique_tmpdir("fresh-reader-replay");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+
+        // Simulate a prior process's durable append already on disk.
+        prime_jsonl(
+            &dir,
+            &[sample_learning(
+                make_event_id('0'),
+                "rust.build.zlorp-aarch64",
+                "pass --features ring-prebuilt on aarch64",
+            )],
+        );
+
+        // A *new* process opens the handle and queries immediately — no
+        // explicit flush, no manual reader.reload().
+        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open");
+        let count = handle
+            .reader()
+            .searcher()
+            .search(&AllQuery, &tantivy::collector::Count)
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "freshly opened reader must reflect the open-time replay commit"
+        );
+
         handle.shutdown().await.expect("shutdown");
     }
 
