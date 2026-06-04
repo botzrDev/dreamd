@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 const zlib = require('zlib');
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.0-rc.1';
 const MANIFEST = require('../manifest.json');
 
 function getPlatformTarget() {
