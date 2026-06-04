@@ -44,7 +44,7 @@ If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteret
 
 ## Status
 
-**v0.1 in active development — targeting 2026-07-07.** Sprint 3 in progress; 27 tickets shipped to date. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+**v0.1 in active development — targeting 2026-07-07.** Sprint 3 in progress; Sprints 1–2 shipped. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
 
 ⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
@@ -116,7 +116,7 @@ To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTR
 | Layer | Status |
 |---|---|
 | `SPEC.md` v0.1-draft | Drafted |
-| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress — Sprint 2 of 6 |
+| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress — Sprint 3 of 6 |
 | MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Subcommand built; npx distribution lands ahead of v0.1 |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Not started |
