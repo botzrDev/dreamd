@@ -3,6 +3,7 @@
 #![cfg(unix)]
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::{load_config, DreamCycleMode};
 use crate::layout::{AgentRoot, DaemonHome};
@@ -10,7 +11,7 @@ use crate::server::build_router;
 use crate::server::http::AppState;
 use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
-use crate::server::tantivy_handle::TantivyIndexHandle;
+use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 use crate::server::uds_server::{bind_api_socket, serve_uds};
 
 /// Failure modes surfaced by [`run_watch`].
@@ -26,6 +27,8 @@ pub enum WatchError {
     Io(#[from] std::io::Error),
     #[error("config load: {0}")]
     Config(String),
+    #[error("index: {0}")]
+    Index(#[from] crate::server::index_map::IndexError),
 }
 
 /// Boot a per-project daemon in the foreground, binding `~/.agent/dreamd.sock`,
@@ -49,8 +52,19 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
         ));
     }
 
-    // 3. Boot supervisor against the project root.
-    let supervisor = Supervisor::start(&agent_root, COORDINATOR_CHANNEL_CAPACITY, None)?;
+    // 3. Open the project index up front and wire it as the coordinator's live
+    //    indexer (the "Option B" hand-off documented in tantivy_handle.rs). The
+    //    same handle is pinned into AppState below so recall reads exactly what
+    //    appends write — one handle, one Tantivy writer (WEG-264 Defect 2).
+    let primary_handle = Arc::new(TantivyIndexHandle::open(
+        &agent_root,
+        DEFAULT_COMMIT_CADENCE,
+    )?);
+    let supervisor = Supervisor::start(
+        &agent_root,
+        COORDINATOR_CHANNEL_CAPACITY,
+        Some(primary_handle.sender()),
+    )?;
 
     // 4. Compose AppState. daemon_uid is this process's UID — peer_uid_middleware
     //    (WEG-72 / DR-407) rejects any connection whose peer UID differs.
@@ -64,7 +78,12 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
     let registry_path = daemon_home.registry_toml();
     let index_map = ProjectIndexMap::<TantivyIndexHandle>::new(ProjectIndexMapConfig::default());
     let daemon_uid = nix::unistd::Uid::current().as_raw();
-    let state = AppState::new(registry_path, supervisor, config, index_map, daemon_uid);
+    // Pin under the canonical project root: `resolve_project` canonicalizes
+    // every X-Agent-Root lookup, so recall/dream must match on the same form.
+    let primary_root = std::fs::canonicalize(agent_root.project_root())
+        .unwrap_or_else(|_| agent_root.project_root().to_path_buf());
+    let state = AppState::new(registry_path, supervisor, config, index_map, daemon_uid)
+        .with_primary(primary_root, primary_handle);
     let router = build_router(state);
 
     // 5. Bind socket + serve. bind_api_socket handles stale-socket recovery.

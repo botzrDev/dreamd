@@ -9,7 +9,7 @@
 //! Out of scope here: TraceLayer (WEG-144), TCP binding (WEG-73),
 //! TantivyIndexHandle::reader (WEG-69).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Extension, Json, Query, State};
@@ -22,6 +22,7 @@ use crate::config::Config;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
 use crate::redaction::redact;
 use crate::registry::ProjectEntry;
+use crate::server::index_map::IndexError;
 use crate::server::lifecycle::CoordinatorSendError;
 use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 
@@ -49,6 +50,13 @@ pub struct PeerUid(pub u32);
 /// `daemon_uid` — UID of the process that started the daemon. Used by
 /// `peer_uid_middleware` (WEG-72 / DR-407) to reject connections from other
 /// users. Set to `nix::unistd::Uid::current().as_raw()` at startup.
+///
+/// `primary` — the pinned per-project Tantivy handle for the daemon's booted
+/// project (WEG-264 Defect 2). When set, recall and dream for this exact
+/// (canonicalized) project root use this handle instead of `index_map`, so the
+/// coordinator's live appends and the recall reader share **one** index — and
+/// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
+/// Never evicted. `None` outside the daemon (Phase 1, tests).
 #[derive(Clone)]
 pub struct AppState {
     pub registry_path: PathBuf,
@@ -56,6 +64,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
     pub daemon_uid: u32,
+    pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
 }
 
 impl AppState {
@@ -72,7 +81,47 @@ impl AppState {
             config: Arc::new(config),
             index_map: Arc::new(Mutex::new(index_map)),
             daemon_uid,
+            primary: None,
         }
+    }
+
+    /// Pin `handle` as the primary index for `root` (a canonicalized project
+    /// root, matching the canonical form `resolve_project` returns). Called
+    /// only by `run_watch`.
+    pub fn with_primary(mut self, root: PathBuf, handle: Arc<TantivyIndexHandle>) -> Self {
+        self.primary = Some((root, handle));
+        self
+    }
+
+    /// Resolve the live index handle for `root` and run `f` against it.
+    ///
+    /// If `root` is the daemon's pinned primary project, `f` runs against that
+    /// shared handle (no lock, never evicted — the coordinator feeds it and
+    /// recall reads it). Otherwise the handle is looked up (or lazily opened)
+    /// in `index_map`. `f` does cheap, non-blocking work only — clone the
+    /// `IndexReader` or the indexer `Sender` and return it; never hold the
+    /// returned value's work across the `index_map` mutex.
+    fn with_index_handle<T>(
+        &self,
+        root: &Path,
+        f: impl FnOnce(&TantivyIndexHandle) -> T,
+    ) -> Result<T, IndexError> {
+        if let Some((primary_root, handle)) = self.primary.as_ref() {
+            if primary_root.as_path() == root {
+                return Ok(f(handle.as_ref()));
+            }
+        }
+        let mut map = self
+            .index_map
+            .lock()
+            .map_err(|_| IndexError("index map lock poisoned".to_string()))?;
+        let handle = map.get_or_open(root, |r| {
+            TantivyIndexHandle::open(
+                &crate::layout::AgentRoot::new(r),
+                crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
+            )
+        })?;
+        Ok(f(handle))
     }
 }
 
@@ -189,18 +238,14 @@ async fn post_dream(
     // Escape pattern: clone the mpsc::Sender while holding the lock, release lock,
     // then send PruneDecayedEvents and await response (no lock held across .await).
     if !decay_result.decayed_ids.is_empty() {
-        let sender = {
-            let mut map = match state.index_map.lock() {
-                Ok(guard) => guard,
-                Err(_) => return error_500("index map mutex poisoned"),
-            };
-            match map.get_or_open(std::path::Path::new(&entry.root), |path| {
-                crate::server::tantivy_handle::TantivyIndexHandle::open(
-                    &crate::layout::AgentRoot::new(path),
-                    crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
-                )
-            }) {
-                Ok(handle) => handle.sender(),
+        // Route to the same handle recall/append use (pinned primary for the
+        // daemon's project, else index_map) so the dream cycle and the live
+        // indexer never open two IndexWriters on one index dir (WEG-264
+        // Defect 2). sender is Clone (mpsc::Sender), so no lock is held across
+        // the await below.
+        let sender =
+            match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.sender()) {
+                Ok(s) => s,
                 Err(e) => {
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -208,8 +253,7 @@ async fn post_dream(
                     )
                         .into_response()
                 }
-            }
-        }; // Mutex released here — sender is Clone (mpsc::Sender)
+            };
 
         let (tx, rx) = oneshot::channel();
         if sender
@@ -292,25 +336,16 @@ async fn get_recall(
     let k = params.k.unwrap_or(5);
     let now_sec = chrono::Utc::now().timestamp();
 
-    // Lock, clone the reader, release the lock before calling recall().
-    // IndexReader is Clone (Arc-wrapped); holding the Mutex across the
-    // Tantivy search would block every concurrent request for its duration.
-    let reader = {
-        let mut map = match state.index_map.lock() {
-            Ok(guard) => guard,
-            Err(_) => return error_500("index map lock poisoned"),
-        };
-        let root_path = std::path::Path::new(&entry.root);
-        match map.get_or_open(root_path, |root| {
-            crate::server::TantivyIndexHandle::open(
-                &crate::layout::AgentRoot::new(root),
-                crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
-            )
-        }) {
-            Ok(handle) => handle.reader().clone(),
+    // Resolve the reader for this project: the pinned primary handle when this
+    // is the daemon's booted project (so recall sees the coordinator's live
+    // appends — WEG-264 Defect 2), else a lazily-opened index_map handle.
+    // IndexReader is Clone (Arc-backed); we clone it so the index_map mutex is
+    // never held across the Tantivy search.
+    let reader =
+        match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {
+            Ok(r) => r,
             Err(e) => return error_500(&format!("index open failed: {e}")),
-        }
-    }; // lock released here
+        };
 
     let (_, schema_fields) = crate::index::build_schema();
 
@@ -629,6 +664,7 @@ mod tests {
             config: Arc::new(config),
             index_map: Arc::new(Mutex::new(index_map)),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
+            primary: None,
         }
     }
 
@@ -646,6 +682,7 @@ mod tests {
                 ProjectIndexMapConfig::default(),
             ))),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
+            primary: None,
         }
     }
 
@@ -1031,6 +1068,7 @@ mod tests {
                 ProjectIndexMapConfig::default(),
             ))),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
+            primary: None,
         };
         let router = build_router(state);
 
@@ -1315,6 +1353,7 @@ mod tests {
                 ProjectIndexMapConfig::default(),
             ))),
             daemon_uid: wrong_uid,
+            primary: None,
         };
         let router = build_router(state);
 
@@ -1641,5 +1680,107 @@ mod tests {
             !lessons_path.exists(),
             "LESSONS.md must not be created when JSONL is empty"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-264 Defect 2 — daemon shares one index handle between append + recall
+    // -----------------------------------------------------------------------
+
+    /// The daemon wires the coordinator's `indexer_tx` to the *same*
+    /// `TantivyIndexHandle` that recall reads (the pinned primary). A learning
+    /// appended through the coordinator therefore becomes visible to recall
+    /// within the commit-cadence window (WEG-201 C13) — no second handle, no
+    /// stale empty reader. Before WEG-264 Defect 2, `run_watch` booted the
+    /// coordinator with `indexer_tx = None` and recall opened a *separate*
+    /// handle via `index_map`, so live appends never reached the recall reader.
+    #[tokio::test]
+    async fn daemon_primary_handle_shares_index_between_append_and_recall() {
+        use crate::server::tantivy_handle::TantivyIndexHandle;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
+
+        // Short cadence so the cadence commit fires well inside the poll window
+        // (production uses 5 s; the read-after-write window is a feature, not a
+        // bug — WEG-201 C13).
+        let primary = Arc::new(
+            TantivyIndexHandle::open(&agent_root, Duration::from_millis(100))
+                .expect("open primary handle"),
+        );
+        // Coordinator is wired to the SAME handle's indexer.
+        let supervisor = Supervisor::start(&agent_root, 8, Some(primary.sender()))
+            .expect("start supervisor with indexer");
+
+        let registry_path = dir.path().join("registry.toml");
+        write_registry(&registry_path, &canonical_root.to_string_lossy());
+        let state = AppState::new(
+            registry_path,
+            supervisor,
+            Config::default(),
+            ProjectIndexMap::new(ProjectIndexMapConfig::default()),
+            nix::unistd::Uid::current().as_raw(),
+        )
+        .with_primary(canonical_root.clone(), primary);
+
+        // Append a learning through the coordinator (durable JSONL + indexer).
+        let learning = AgentLearning {
+            schema_version: "1.0".to_string(),
+            id: EventId::parse(&format!("evt_{SAMPLE_ULID}")).unwrap(),
+            timestamp: DateTime::parse_from_rfc3339("2026-06-04T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            pain: 7.0,
+            importance: 8.0,
+            pinned: false,
+            skill_action: "rust.build.zlorp".to_string(),
+            source_harness: "claude-code".to_string(),
+            content: "zlorp aarch64 needs the ring-prebuilt feature".to_string(),
+        };
+        let (tx, rx) = oneshot::channel();
+        state
+            .supervisor
+            .try_send(MemoryCoordinatorMsg::AppendLearning {
+                learning,
+                client_dedup_key: None,
+                response_tx: tx,
+            })
+            .await
+            .expect("send append");
+        rx.await.expect("recv append").expect("append ok");
+
+        // Recall via the pinned primary handle must surface the row within the
+        // cadence window. Poll — do NOT assert instantaneously (WEG-201 C13).
+        let (_, schema_fields) = crate::index::build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reader = state
+                .with_index_handle(&canonical_root, |h| h.reader().clone())
+                .expect("resolve primary handle");
+            let results = crate::recall(
+                &reader,
+                &schema_fields,
+                "zlorp aarch64 ring-prebuilt",
+                5,
+                None,
+                now_sec,
+            )
+            .expect("recall");
+            if let Some(top) = results.first() {
+                assert!(
+                    top.content.contains("ring-prebuilt"),
+                    "recall returned a row but not the expected content: {:?}",
+                    top.content
+                );
+                return; // success
+            }
+            if Instant::now() >= deadline {
+                panic!("recall did not surface the appended row within the cadence window");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
