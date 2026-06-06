@@ -8,6 +8,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+### Changed
+
+## [0.1.0-rc.1] - 2026-06-05
+
+### Added
+
 - `dreamd watch` — foreground daemon mode (Unix; SIGINT/SIGTERM-graceful shutdown).
 - `dreamd dream` — deterministic dream cycle CLI (`--dry` preview; `--auto` hidden flag; deterministic-only path always available without network).
 - `dreamd reset workspace` — re-scaffolds `working/WORKSPACE.md` to its initial state.

@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# Stays at 0.0.0 through development; bumped to 0.1.0 at release (DR-009).
-version = "0.0.0"
+# RC: 0.1.0-rc.1. GA drops the -rc.N pre-release suffix (DR-009).
+version = "0.1.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

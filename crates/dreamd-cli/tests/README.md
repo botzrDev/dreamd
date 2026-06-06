@@ -34,7 +34,7 @@ Snapshots 4–5 (`VERSION_SHORT` const, `render_long()` fn) carry compile-time v
 
 Filters are applied via `insta::with_settings!({ filters => vec![...] }, { assert_snapshot!(...) })` so the snapshot file stores the redacted form. The `\S+` patterns also capture the `"unknown"` sentinel that tarball builds (no `.git/`) produce — so source-tarball builds pass the same snapshots, no special handling needed.
 
-**Locked literals — review carefully on mismatch:** `dreamd 0.0.0`, `schema:1.0` / `schema:  1.0`, every field label (`commit:`, `built:`, `target:`, `schema:`, `build:`), and the multi-line column alignment. Drift in any of these is a real change to the WEG-18 install-debug contract, not snapshot noise.
+**Locked literals — review carefully on mismatch:** `dreamd 0.1.0-rc.1`, `schema:1.0` / `schema:  1.0`, every field label (`commit:`, `built:`, `target:`, `schema:`, `build:`), and the multi-line column alignment. Drift in any of these is a real change to the WEG-18 install-debug contract, not snapshot noise.
 
 ## In-process bind, not subprocess
 
