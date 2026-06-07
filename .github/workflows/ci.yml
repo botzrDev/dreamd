@@ -155,6 +155,47 @@ jobs:
           echo "### Binary size gate" >> "$GITHUB_STEP_SUMMARY"
           echo "Stripped size: **${SIZE_MB} MB** (limit: 15 MB)" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Idle RSS gate (NFR-1: daemon < 30 MB at idle) ─────────────────────────────
+  idle-rss-gate:
+    name: Idle-RSS gate (< 30 MB, Linux)
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-idle-rss-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-idle-rss-
+
+      - name: Build release binary
+        run: cargo build --release -p dreamd
+
+      - name: Run idle-RSS measurement
+        id: rss
+        run: |
+          MB=$(scripts/idle-rss.sh)
+          echo "rss_mb=$MB" >> "$GITHUB_OUTPUT"
+
+      - name: Write step summary
+        if: always()
+        run: |
+          MB="${{ steps.rss.outputs.rss_mb }}"
+          {
+            echo "### Idle-RSS gate"
+            echo "Daemon idle VmRSS: **${MB} MB** (limit: 30 MB, NFR-1, Linux only)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ── Tarball-build sentinel check (WEG-18) ────────────────────────────────────
   # Simulates `cargo install dreamd` from a crates.io tarball (no `.git/`).
   # vergen-gitcl with default `fail_on_error=false` emits `VERGEN_IDEMPOTENT_OUTPUT`
@@ -376,7 +417,7 @@ jobs:
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
   notify-failure:
     name: Notify on main CI failure
-    needs: [lint, test, size-gate, tarball-sentinel]
+    needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
