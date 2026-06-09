@@ -706,6 +706,14 @@ mod tests {
     }
 
     fn write_registry(registry_path: &std::path::Path, root: &str) {
+        // Stored roots must be canonicalized to match `resolve_project`, which
+        // canonicalizes the query path (registry.rs:53). On macOS a tempdir lives
+        // under /var → /private/var (a symlink), so a raw tempdir path stored here
+        // never matches the canonicalized query and every request 404s. This is
+        // identity on Linux (tempdirs aren't symlinked), so it only changes macOS.
+        let canonical =
+            std::fs::canonicalize(root).unwrap_or_else(|_| std::path::PathBuf::from(root));
+        let root = canonical.to_string_lossy();
         std::fs::write(registry_path, format!("[[projects]]\nroot = \"{root}\"\n")).unwrap();
     }
 

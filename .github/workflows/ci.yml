@@ -74,7 +74,12 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          # Pin the version: an unpinned tool silently floats its config schema
+          # (a newer release rejected the old `unmatched` key with zero code
+          # change). 0.19.x bundles rustsec >= 0.31, which is required to parse
+          # CVSS-4.0 advisories (older cargo-deny errors on RUSTSEC-2026-0023).
+          # Bump deliberately, not implicitly.
+          tool: cargo-deny@0.19.8
 
       - name: Check licenses and advisories
         run: cargo deny check
@@ -88,6 +93,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Windows daemon support (DR-121) is deferred to v0.1.1: the server/mcp
+    # modules are unix-only (UDS / SO_PEERCRED), so dreamd-core does not yet
+    # compile on Windows. Keep Windows in the matrix for visibility but make it
+    # non-gating until DR-121 lands — mirroring the informational Windows
+    # binary-size job. Linux + macOS remain hard gates.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     permissions:
       contents: read
     steps:
