@@ -106,7 +106,7 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 ## Repo conventions
 
 - License: Apache-2.0 (DR-009).
-- Public-facing names and accounts: see [[dreamd-surface-area]] and [[npm-account]].
+- Public-facing names and accounts: see [[dreamd-surface-area]] and [[npm-account]]. **npm publish** = account `dataprime1`, passkey 2FA, package `dreamd-mcp` (**unscoped** — not `@dataprime1/...`; WEG-270), interactive publish only (no CI automation for npm yet).
 - `context/`, `.claude/`, `assignments/`, and `docs/` are **gitignored on purpose** — local working notes, PM-side spec docs (`WEG-X.v2.md`), and end-state architecture docs.
 - Story IDs in commits/PRs follow `DR-XXX`. WEG-IDs are Linear tracking surface; they appear in branch names (`dataprimecan/weg-NN-...`) but not commit messages.
 - **Austin holds the git commit gate.** PM session never runs `git stash/add/commit/push`. See [[dreamd-linear-workflow-+-assignment-tracking-contract]] for the full operating contract.
@@ -159,6 +159,7 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 
 **HTTP / API**
 - **Axum's `Json<T>` extractor returns 415 (not 501 or 422) when `Content-Type: application/json` is absent.** The content-type check is enforced at the framework level, not in handler code. Tests hitting `/api/v1/learn` without the header must assert 415. WEG-68-A tripwire. → [[axum-json-extractor-415-missing-content-type]]
+- **`skill_action` charset is validated in the MCP append handler: segments `[a-z0-9_]+` joined by `::`, total ≤256 bytes.** The handler normalizes trim → lowercase → spaces-to-underscore, then rejects anything outside the charset — slashes, hyphens, and single colons are rejected. Test with valid keys like `rust::borrow_checker`, never `rust/borrow-checker`. Complements the cluster-split rule ([[skill-action-cluster-split-double-colon]]). → [[skill-action-charset]]
 
 **Actor / concurrency**
 - **`&mut self` in the coordinator run loop IS the exclusivity guarantee.** No `Mutex<File>` inside the actor. "Mutex" in DR-103 means the coordinator is the serialization point, not that a `Mutex` type is used. → [[actor-mut-self-is-the-lock]]
@@ -173,7 +174,11 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 
 **Index / Tantivy**
 - **Never unlink `.tantivy-writer.lock` or `.tantivy-meta.lock` on startup or recovery.** Tantivy 0.26 uses advisory `fs4` flock — the kernel releases the lock when the holder dies; the on-disk file is a marker, not the gate. `IndexWriter::new()` opens cleanly after SIGKILL. Removing a still-held lock file would break a live writer. Lock-file cleanup, if ever needed, belongs behind a manual repair flag. → [[tantivy-lock-file-no-rm-on-startup]]
-- **`TantivyIndexHandle::open()` allocates a 50 MB `IndexWriter` even for read-only callers.** Phase 1 `search_nodes` opens a fresh handle per call — acceptable only because calls are infrequent and Phase 2 replaces this path with the daemon bridge. Do not copy this pattern for high-frequency or latency-sensitive callers. WEG-78-A tripwire. → [[tantivy-index-handle-open-allocates-writer]]
+- **`TantivyIndexHandle::open()` allocates a 50 MB `IndexWriter` even for read-only callers.** Phase 1 `search_nodes` opens a fresh handle per call — acceptable only because calls are infrequent and Phase 2 replaces this path with the daemon bridge. Do not copy this pattern for high-frequency or latency-sensitive callers. WEG-78-A tripwire. → [[tantivy-index-handle-open-allocates-writer]] (a.k.a. [[phase1-search-nodes-fresh-handle]] — Phase 2 replaces this with the shared daemon handle)
+
+**Platform / cross-OS**
+- **macOS canonicalizes `/var`→`/private/var`; tests that build paths under `std::env::temp_dir()` must `std::fs::canonicalize()` before storing or comparing.** A raw tempdir root misses equality/`resolve_project` lookups on macOS (404s in HTTP/registry tests), and it's invisible in Linux dev. Same root cause — macOS path length — surfaces as **`sun_path` overflow** when a long `$TMPDIR` prefix exceeds the UDS `sockaddr_un` limit (fixed `10e099b`). → [[registry-tests-need-canonical-stored-root]]
+- **Windows `error[E0432]: unresolved import crate::server` is not a one-line fix.** `Supervisor` + `COORDINATOR_CHANNEL_CAPACITY` live behind `#[cfg(unix)]` but are referenced unconditionally in the `mcp/mod.rs` Phase 1 fallback; the real fix relocates those symbols. Deferred to v0.1.1 (WEG-135); `ci.yml` carries `continue-on-error` for the Windows leg so it doesn't gate green. → [[windows-compile-deferred-dr121]]
 
 **Spec / process**
 - **Session-internal summary counts are not source of truth.** When counting tasks/tests/items across any session report, count the table directly. Never trust the report's internal summary number, even from a careful-looking report. If the table and summary disagree, the table wins. WEG-25 spike synthesis tripwire (summary said 51/51 + 11/11; tables showed 50/50 + 10/10). → [[session-internal-counts-are-not-source-of-truth]]
@@ -182,3 +187,4 @@ When changing index, scoring, or hot-path code, run `cargo bench` (criterion, DR
 - **"CI is green" is a claim about a remote system — verify against the live run at pre-flight.** A local `cargo test`/`fmt`/`clippy` pass is not evidence the matrix (Ubuntu+macOS+Windows + size-gate + tarball-sentinel) is green. Check `gh run view`, not a local pass, before queuing or signing off an AC that asserts CI state. Same pre-flight family as the dep/epoch checks. → [[ci-green-ac-preflight-against-live-run]]
 - **A red `main` with no notification is invisible — CI must push a failure signal, and the signal's secrets must exist.** Passive dashboard state doesn't get watched. WEG-257 added a `notify-failure` job (`ci.yml:303`) that curls `secrets.SLACK_WEBHOOK_URL` — but the job is inert until the secret is provisioned (`gh secret set SLACK_WEBHOOK_URL …`). A notify job with no secret is itself a silent gap. → [[main-red-needs-a-signal]]
 - **Planned tooling/CI/infra stories can silently not ship — verify by artifact existence, not behavior.** Tooling work has no user-facing signal of its absence (unlike a feature), so it drifts from "planned" to "assumed done." Grep the workflow/file (`grep notify-failure ci.yml`, `cat rust-toolchain.toml`) rather than assuming the ticket landed. → [[planned-tooling-stories-can-silently-not-ship]]
+- **`NEXT.md` drifts past shipped work — re-read and prune it at session open.** Items completed in a prior session linger and cause the PM to re-queue already-closed work. Treat `NEXT.md` like any churned surface ([[card-quotes-stale-before-state-on-churned-surface]]): re-derive against Linear + the working tree before acting on a carried-forward list. (This very fold is an instance — 3 of 8 "pending" entries were already in this file.) → [[next-md-can-drift-past-shipped-work]]
