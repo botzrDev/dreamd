@@ -16,8 +16,8 @@ The intended end-state architecture lives in `context/PRD.md` and `context/AGILE
 **Backlog (post-v0.1, surfaced by recording-prep dry run 2026-05-18):**
 - `WEG-204` — `dreamd init`: surface project-root sentinel requirement in user-facing copy (Low / `epic-8-cli-lifecycle`)
 
-**Known gap (no ticket confirmed — surfaced 2026-06-01):**
-- **`run_watch` boots with `indexer_tx = None`** (`crates/dreamd-core/src/server/watch.rs:53`). Daemon writes `AGENT_LEARNINGS.jsonl` but never feeds Tantivy, so live `dreamd mcp` `search_nodes` returns empty. Pre-existing (WEG-88 / DR-702), **not** a WEG-259 bug — the remote recall path itself is correct (proven against a seeded index). File a ticket if none exists. → [[run-watch-indexer-tx-none]]
+**Resolved gap (was open 2026-06-01 → fixed WEG-264, 2026-06-04):**
+- **`run_watch` indexer wiring — RESOLVED.** Live cross-harness `search_nodes` recall now works on both paths (re-verified 2026-06-05, HEAD `37ec09b`). Phase 2 daemon wires `Some(primary_handle.sender())` (`crates/dreamd-core/src/server/watch.rs:63`) and pins one Tantivy handle so recall reads what appends write (`fcf3799`); Phase 1 in-process fallback deliberately stays `None` (`crates/dreamd-core/src/mcp/mod.rs:630`) because `search_nodes` fresh-opens a handle that replays the JSONL + `reader.reload()`s on each call (`crates/dreamd-core/src/server/tantivy_handle.rs:184/211`, `6734e72`). The earlier note (indexer `None` at `watch.rs:53`, recall empty) is stale — kept here only as the diagnosis trail. → [[run-watch-indexer-tx-none]]
 
 ## What dreamd is
 

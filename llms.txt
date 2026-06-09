@@ -22,4 +22,4 @@
 
 ## Package
 
-- [npm: @dataprime1/dreamd-mcp](https://www.npmjs.com/package/@dataprime1/dreamd-mcp): `npx @dataprime1/dreamd-mcp` — downloads the right prebuilt binary, no Rust required
+- [npm: dreamd-mcp](https://www.npmjs.com/package/dreamd-mcp): `npx dreamd-mcp` — downloads the right prebuilt binary, no Rust required
