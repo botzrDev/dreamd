@@ -24,7 +24,7 @@ not an ambient capture product, not a Python framework SDK.
                              collector, episodic store, dream cycle WAL.
   crates/dreamd-cli/         CLI binary: init, mcp, watch, dream, doctor, version.
   crates/dreamd-protocol/    Shared types: AgentLearning, EventId, HTTP schemas.
-  packages/dreamd-mcp/       Node.js npx shim (@dataprime1/dreamd-mcp). Downloads
+  packages/dreamd-mcp/       Node.js npx shim (dreamd-mcp). Downloads
                              prebuilt binary — no Rust required at runtime.
   adapters/claude-code/      .mcp.json.example for Claude Code users.
   adapters/cursor/           .mcp.json.example + .cursor/rules/dreamd-recall.mdc.

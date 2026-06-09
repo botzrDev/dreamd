@@ -187,7 +187,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git. You can `cat`, `gr
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "@dataprime1/dreamd-mcp"]
+      "args": ["-y", "dreamd-mcp"]
     }
   }
 }

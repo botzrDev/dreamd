@@ -2,7 +2,7 @@
 
 ## What this does
 
-Wires `@dataprime1/dreamd-mcp` as a stdio MCP server that Cursor spawns automatically, and activates the `dreamd-recall` agent rule when you work in a project with a `.agent/` folder. No background daemon required.
+Wires `dreamd-mcp` as a stdio MCP server that Cursor spawns automatically, and activates the `dreamd-recall` agent rule when you work in a project with a `.agent/` folder. No background daemon required.
 
 ## MCP config
 

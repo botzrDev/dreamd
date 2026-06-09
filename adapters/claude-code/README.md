@@ -2,7 +2,7 @@
 
 ## What this does
 
-Wires `@dataprime1/dreamd-mcp` as a stdio MCP server that Claude Code spawns automatically. No background daemon required.
+Wires `dreamd-mcp` as a stdio MCP server that Claude Code spawns automatically. No background daemon required.
 
 ## Project-level config (recommended)
 

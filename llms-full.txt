@@ -30,8 +30,8 @@ read and write via MCP, without any of them needing to know the others exist.
 
 ### No Rust required (v0.1 path)
 
-  npx @dataprime1/dreamd-mcp init   # scaffold .agent/ in your project
-  npx @dataprime1/dreamd-mcp        # start the MCP server (stdio)
+  npx dreamd-mcp init   # scaffold .agent/ in your project
+  npx dreamd-mcp        # start the MCP server (stdio)
 
 Supported: Linux x86_64/aarch64, macOS x86_64/aarch64. Node >= 18 required.
 Windows arrives in v0.1.1.
@@ -52,7 +52,7 @@ Windows arrives in v0.1.1.
     "mcpServers": {
       "dreamd": {
         "command": "npx",
-        "args": ["-y", "@dataprime1/dreamd-mcp"]
+        "args": ["-y", "dreamd-mcp"]
       }
     }
   }
@@ -161,5 +161,5 @@ v0.1.1: semantic/embedding recall, Windows, LLM-assisted dream cycle, Homebrew/c
 
   Repo:    https://github.com/botzrDev/dreamd
   SPEC.md: https://github.com/botzrDev/dreamd/blob/main/SPEC.md
-  npm:     https://www.npmjs.com/package/@dataprime1/dreamd-mcp
+  npm:     https://www.npmjs.com/package/dreamd-mcp
   License: Apache-2.0
