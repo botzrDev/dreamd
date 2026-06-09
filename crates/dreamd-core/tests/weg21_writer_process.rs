@@ -42,10 +42,16 @@ fn unique_tmp_dir(tag: &str) -> PathBuf {
 fn first_process_binds_socket_and_second_forwards_through_it() {
     let scratch = unique_tmp_dir("twoproc");
     let project_root = scratch.join("project");
-    let daemon_home = scratch.join("agent-home");
     std::fs::create_dir_all(&project_root).unwrap();
-    std::fs::create_dir_all(&daemon_home).unwrap();
-    let socket = daemon_home.join("dreamd.sock");
+
+    // macOS caps UDS sun_path at 104 bytes; its $TMPDIR is the long
+    // /private/var/folders/<…>/T/ prefix, so nesting our unique dir +
+    // agent-home/dreamd.sock under it overflows the limit (Linux is 108 +
+    // $TMPDIR=/tmp, so this only bites macOS CI). Bind the socket under a
+    // short, dedicated tempdir; the project tree has no path-length limit and
+    // stays under `scratch`. `sock_dir` must outlive the test.
+    let sock_dir = tempfile::tempdir().expect("socket tempdir");
+    let socket = sock_dir.path().join("dreamd.sock");
 
     // Spawn writer; pipe stdout so we can read its BIND_OK readiness signal.
     let mut writer = Command::new(helper_bin())
@@ -74,7 +80,17 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
             break;
         }
     }
-    assert!(bound, "writer never signaled BIND_OK; got {line:?}");
+    if !bound {
+        // Surface the writer's stderr so a bind failure (e.g. a macOS
+        // sun_path overflow) isn't swallowed behind an empty stdout.
+        let _ = writer.kill();
+        let mut err = String::new();
+        if let Some(mut es) = writer.stderr.take() {
+            use std::io::Read;
+            let _ = es.read_to_string(&mut err);
+        }
+        panic!("writer never signaled BIND_OK; stdout={line:?}; stderr={err}");
+    }
     assert!(socket.exists(), "writer must create the socket file");
 
     // Run client to completion.
