@@ -4,7 +4,8 @@
 [licenses]
 # Licenses that are allowed for all dependencies.
 # dreamd is Apache-2.0; these permissive licenses are compatible.
-unmatched = "allow"
+# (No `unmatched` key: current cargo-deny rejects it as unknown, and
+# deny-by-default for any license outside `allow` is exactly the intent.)
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -19,13 +20,25 @@ allow = [
     "CC0-1.0",
     "Zlib",
 ]
+
+# Per-crate license exceptions (reviewed; deliberately NOT in the global allow
+# list so each stays auditable). option-ext (transitive via dirs → dirs-sys,
+# used for ~/.agent path resolution) is MPL-2.0 — OSI-approved weak, file-level
+# copyleft. As an unmodified linked dependency it imposes no copyleft on
+# dreamd's Apache-2.0 code; MPL obligations are per-file and trigger only on
+# modifying the MPL-licensed source itself, which we do not.
+exceptions = [
+    { name = "option-ext", allow = ["MPL-2.0"] },
+]
+
 # Reject any dependency whose license is not in the allow list above.
 # (cargo-deny now denies unlicensed and copyleft dependencies by default)
 
 [bans]
 # Deny multiple versions of the same crate to avoid dependency bloat.
 multiple-versions = "warn"
-# Deny wildcard dependencies.
+# Deny wildcard dependencies. (Internal path deps each carry an explicit
+# `version` — required for crates.io publish — so they are not wildcards.)
 wildcards = "deny"
 
 [advisories]
