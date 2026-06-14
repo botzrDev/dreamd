@@ -2,6 +2,7 @@
 # See CLAUDE.md "Repo conventions" for rationale.
 context/
 .claude/
+.uveddi/
 
 # Docs are deployed/tracked separately; canonical source lives in-crate
 # or as standalone markdown committed elsewhere. Gitignored to keep the
