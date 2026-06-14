@@ -326,6 +326,7 @@ jobs:
     name: Binary size (Windows, informational)
     runs-on: windows-latest
     needs: lint
+    continue-on-error: true          # Windows daemon deferred (DR-121); informational only
     permissions:
       contents: read
     steps:

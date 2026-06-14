@@ -20,6 +20,7 @@ jobs:
     name: Build ${{ matrix.target }}
     permissions:
       contents: read
+    continue-on-error: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
     strategy:
       fail-fast: false
       matrix:
