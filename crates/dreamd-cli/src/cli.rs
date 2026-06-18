@@ -106,6 +106,12 @@ pub struct McpArgs {
     /// Hard-lock dream cycle to manual-only mode (overrides config.toml).
     #[arg(long)]
     pub manual_only: bool,
+    /// Override the project root used for agent-root discovery.
+    /// Required when the IDE launches the MCP server from a non-project CWD
+    /// (e.g. Cursor's global ~/.cursor/mcp.json). Must be an absolute path to
+    /// the directory that contains `.agent/`.
+    #[arg(long, value_name = "PATH")]
+    pub project_root: Option<PathBuf>,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -276,7 +282,13 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let mut config = match load_config(&cwd) {
+            // --project-root overrides CWD-based agent-root discovery. Required when
+            // an IDE launches the MCP server from a non-project CWD.
+            let effective_root = match args.project_root {
+                Some(p) => p,
+                None => cwd,
+            };
+            let mut config = match load_config(&effective_root) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("dreamd: error — {e}");
@@ -291,7 +303,7 @@ pub fn run() -> ExitCode {
                 eprintln!("dreamd: error — {msg}");
                 std::process::exit(1);
             }
-            commands::mcp::run(&cwd)
+            commands::mcp::run(&effective_root)
         }
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => {

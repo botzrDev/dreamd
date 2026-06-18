@@ -54,6 +54,11 @@ fn snapshot_dream_help() {
 }
 
 #[test]
+fn snapshot_mcp_help() {
+    assert_snapshot!("mcp_help", subcommand_help("mcp"));
+}
+
+#[test]
 fn snapshot_version_help() {
     assert_snapshot!("version_help", subcommand_help("version"));
 }
