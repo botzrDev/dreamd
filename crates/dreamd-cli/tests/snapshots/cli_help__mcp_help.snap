@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"mcp\")"
+---
+Start the MCP server (bridges to daemon if running, otherwise in-process)
+
+Usage: mcp [OPTIONS]
+
+Options:
+      --manual-only
+          Hard-lock dream cycle to manual-only mode (overrides config.toml)
+
+      --project-root <PATH>
+          Override the project root used for agent-root discovery. Required when the IDE launches the MCP server from a non-project CWD (e.g. Cursor's global ~/.cursor/mcp.json). Must be an absolute path to the directory that contains `.agent/`
+
+  -h, --help
+          Print help
