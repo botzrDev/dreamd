@@ -104,18 +104,20 @@ The *dream cycle* is the consolidation pass that turns `episodic/` into `semanti
 
 **Promotion.** A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
 
-**Output format.** The dream cycle writes to `semantic/LESSONS.md`. Each promoted cluster produces one lesson with the following shape:
+**Output format.** The dream cycle writes to `semantic/LESSONS.md`. The file MUST begin with a YAML frontmatter block followed by one lesson block per promoted cluster:
 
 ```
-## <skill_action>
-
-<lesson body>
-
 ---
-*Sources:* `<id>`, `<id>`, `<id>`
+last_updated: "<ISO 8601 timestamp>"
+prompt_version: "<string>"
+cluster_key: "<skill_action>"
+---
+<!-- dreamd:lesson id="<id>" cluster="<skill_action>" -->
+<lesson body>
+<!-- /dreamd:lesson -->
 ```
 
-The `## <skill_action>` header MUST be the cluster's full `skill_action` string. The trailing `*Sources:*` line MUST list every `id` cited by the lesson, comma-separated, each wrapped in backticks. Implementations MAY add additional formatting between the lesson body and the `*Sources:*` line provided the line itself appears verbatim and is the lesson's final line.
+The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the cycle run), `prompt_version` (implementation-defined; use `"deterministic-only"` for the network-free fallback), and `cluster_key` (the promoted cluster's full `skill_action` string). The `<!-- dreamd:lesson -->` opening tag MUST carry an `id` attribute set to the exemplar event's `id` and a `cluster` attribute set to the cluster's full `skill_action` string. The closing `<!-- /dreamd:lesson -->` tag MUST appear on its own line immediately after the lesson body. Implementations MAY emit multiple lesson blocks (one per promoted cluster) separated by blank lines.
 
 **Distillation modes.** An implementation MAY use an LLM to author the lesson body. An implementation MUST also support a deterministic, network-free fallback. In deterministic mode, the lesson body is the `content` of the highest-`pain` event in the cluster (ties broken by highest `importance`, then by lowest `id`). Implementations MAY use richer deterministic strategies (extractive summarization, template merging) provided they remain pure functions of the input.
 

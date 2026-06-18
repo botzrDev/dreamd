@@ -117,7 +117,7 @@ To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTR
 |---|---|
 | `SPEC.md` v0.1-draft | Drafted |
 | Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress — Sprint 3 of 6 |
-| MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Subcommand built; npx distribution lands ahead of v0.1 |
+| MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.1` on npm |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Not started |
 

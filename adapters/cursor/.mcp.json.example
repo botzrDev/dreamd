@@ -6,3 +6,15 @@
     }
   }
 }
+
+// For global ~/.cursor/mcp.json (where Cursor may not set CWD to your project),
+// add --project-root so the MCP server finds the right .agent/ store:
+//
+// {
+//   "mcpServers": {
+//     "dreamd": {
+//       "command": "npx",
+//       "args": ["-y", "dreamd-mcp", "--project-root", "/absolute/path/to/project"]
+//     }
+//   }
+// }

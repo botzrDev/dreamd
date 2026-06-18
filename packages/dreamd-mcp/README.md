@@ -12,7 +12,7 @@ npx dreamd-mcp init
 npx dreamd-mcp
 ```
 
-No Rust installation required. Supports Linux x86_64/aarch64, macOS x86_64/aarch64.
+No Rust installation required. Supports Linux x86_64, macOS x86_64/aarch64.
 
 ## Override
 
