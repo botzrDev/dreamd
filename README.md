@@ -97,6 +97,29 @@ npx dreamd-mcp
 
 Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
 
+### Running
+
+`dreamd mcp` (and `npx dreamd-mcp`) automatically connect to a shared daemon when one is running, and fall back to a standalone in-process server when one isn't. That daemon is the **single serialized writer** to your memory.
+
+For a single agent — or several agents used one at a time — the standalone server is safe. If you point **several agents at the same project simultaneously**, start one daemon per machine so every agent's writes route through the same process:
+
+```bash
+dreamd watch     # one shared writer; mcp clients auto-route through it
+```
+
+Two standalone servers writing at the same instant are independent writers, and a concurrent append can interleave. The daemon removes that edge.
+
+**Crash-safe by design.** Kill the daemon mid-write and your agents keep working (they fall back to in-process); an append made while it's down is durable and replayed cleanly on the next start — stale socket and all — with no torn or partial records.
+
+### What dreamd writes
+
+Running dreamd touches two places, and nothing else:
+
+- **Your repo: `.agent/`.** `dreamd init` scaffolds it in the project root. This is your memory, and it's meant to be **committed and shared** — that's the point. `init` also appends one line to `.gitignore` (`/.agent/.dreamd/`) so the local index and daemon state stay out of version control. `init` is idempotent: re-running on an existing store is a no-op and never overwrites your files.
+- **Your home: `~/.agent/`.** A global `registry.toml` (which projects have a store) and, while the daemon runs, the `dreamd.sock` Unix socket. That's the entire global footprint. dreamd does not touch `~/.claude`, `~/.cursor`, `~/.config`, or any other tool's configuration. The socket is created `0600` and scoped to your user account — see [`SECURITY.md`](./SECURITY.md).
+
+To unregister a project, run `dreamd init --uninstall-project`: it removes the project's entry from the global registry and leaves your `.agent/` files in place.
+
 ### Privacy
 
 When LLM mode is enabled in v0.1.1, entries above the relevance threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. See [`SECURITY.md`](./SECURITY.md) for the threat model and disclosure policy.
