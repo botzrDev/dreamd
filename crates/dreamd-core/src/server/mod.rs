@@ -24,6 +24,7 @@
 pub mod http;
 pub mod index_map;
 pub mod lifecycle;
+pub mod supervisor_map;
 pub mod tantivy_handle;
 pub mod uds;
 pub mod uds_server;
@@ -34,6 +35,7 @@ pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,
 };
+pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
 pub use tantivy_handle::{IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 pub use uds::{bind_writer_socket, try_connect_existing, SocketGuard, UdsBindError};
 #[cfg(unix)]
