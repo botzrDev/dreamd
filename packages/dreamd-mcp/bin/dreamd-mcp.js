@@ -12,6 +12,55 @@ const zlib = require('zlib');
 const VERSION = '0.1.0-rc.1';
 const MANIFEST = require('../manifest.json');
 
+// Native `dreamd` subcommands. KEEP IN SYNC with the clap `Command` enum in
+// crates/dreamd-cli/src/cli.rs — adding a `dreamd` subcommand without adding it
+// here silently routes `npx dreamd-mcp <newcmd>` to `dreamd mcp <newcmd>`.
+const DREAMD_SUBCOMMANDS = new Set([
+  'init', 'watch', 'doctor', 'dream', 'reset', 'version', 'mcp',
+]);
+
+// A recognized first token is forwarded to `dreamd` verbatim; a bare invocation
+// (no args -> args[0] === undefined) or an unrecognized token defaults to
+// `dreamd mcp` so IDEs spawning `npx dreamd-mcp` get the MCP server over stdio.
+function resolveDreamdArgs(args) {
+  return DREAMD_SUBCOMMANDS.has(args[0]) ? args : ['mcp', ...args];
+}
+
+// Leading top-level flags the shim answers itself (no binary download). Only the
+// FIRST token counts: `npx dreamd-mcp init --help` still routes to the binary.
+// We handle these in the shim rather than forwarding because `dreamd mcp <flag>`
+// is a clap error, and the native `dreamd --help` prints `dreamd` usage — wrong
+// invocation for an npx user.
+function topLevelFlag(args) {
+  if (args[0] === '--version' || args[0] === '-V') return 'version';
+  if (args[0] === '--help' || args[0] === '-h') return 'help';
+  return null;
+}
+
+const HELP_TEXT = `dreamd-mcp — npx shim for the dreamd MCP server
+
+Usage:
+  npx dreamd-mcp [<command> [args...]]
+
+With no command, starts the MCP server over stdio — the invocation MCP-aware
+IDEs (Claude Code, Cursor, ...) spawn. A recognized command is forwarded
+verbatim to the native dreamd binary:
+  ${[...DREAMD_SUBCOMMANDS].sort().join(', ')}
+
+Examples:
+  npx dreamd-mcp            start the MCP server (IDE invocation)
+  npx dreamd-mcp init       scaffold .agent/ into the current project
+  npx dreamd-mcp watch      start the shared daemon (one serialized writer)
+  npx dreamd-mcp version    print the dreamd binary's full build info
+
+Options:
+  -V, --version            print the dreamd-mcp version
+  -h, --help               print this help
+
+Environment:
+  DREAMD_BIN=<path>        run a local dreamd build instead of downloading
+`;
+
 function getPlatformTarget() {
   const { platform, arch } = process;
   if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
@@ -105,7 +154,18 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const dreamdArgs = args[0] === 'init' ? args : ['mcp', ...args];
+
+  // Leading --version/--help are answered here without touching the binary.
+  switch (topLevelFlag(args)) {
+    case 'version':
+      process.stdout.write(`dreamd-mcp ${VERSION}\n`);
+      return;
+    case 'help':
+      process.stdout.write(HELP_TEXT);
+      return;
+  }
+
+  const dreamdArgs = resolveDreamdArgs(args);
 
   // DREAMD_BIN override: skip download, exec directly
   if (process.env.DREAMD_BIN) {
@@ -155,7 +215,11 @@ async function main() {
   execFileSync(binaryPath, dreamdArgs, { stdio: 'inherit' });
 }
 
-main().catch((err) => {
-  process.stderr.write(`[dreamd-mcp] Fatal error: ${err.message}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`[dreamd-mcp] Fatal error: ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = { resolveDreamdArgs, topLevelFlag };

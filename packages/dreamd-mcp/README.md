@@ -16,7 +16,7 @@ No Rust installation required. Supports Linux x86_64, macOS x86_64/aarch64.
 
 ## Running several agents at once
 
-`npx dreamd-mcp` auto-connects to a shared daemon if one is running, and otherwise runs a standalone in-process server. Sequential use across tools is safe. If you point **several agents at the same project simultaneously**, start one shared `dreamd watch` daemon per machine (the native `dreamd` binary) so every agent routes through a single serialized writer. See the [project README](https://github.com/botzrDev/dreamd#running) for the full footprint and crash-safety notes.
+`npx dreamd-mcp` auto-connects to a shared daemon if one is running, and otherwise runs a standalone in-process server. Sequential use across tools is safe. If you point **several agents at the same project simultaneously**, start one shared daemon per machine with `npx dreamd-mcp watch` (or the native `dreamd watch`) so every agent routes through a single serialized writer. See the [project README](https://github.com/botzrDev/dreamd#running) for the full footprint and crash-safety notes.
 
 ## Override
 
