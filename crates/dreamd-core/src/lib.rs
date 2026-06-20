@@ -7,6 +7,9 @@
 //! than building strings.
 
 pub mod autobiography;
+/// HTTP-over-UDS client for CLI → daemon proxying (WEG-271 fast-follow).
+#[cfg(unix)]
+pub mod client;
 pub mod collector;
 pub mod config;
 pub mod consolidation;

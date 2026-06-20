@@ -58,13 +58,17 @@ pub enum CoordinatorError {
     /// map to HTTP 413.
     #[error("payload too large: {size} bytes exceeds {max} byte limit")]
     PayloadTooLarge { size: usize, max: usize },
+    /// Consolidation or decay failed during a [`MemoryCoordinatorMsg::RunDreamCycle`]
+    /// (WEG-271). Carries the underlying error's display string — caller maps
+    /// to HTTP 500.
+    #[error("dream cycle: {0}")]
+    DreamCycle(String),
 }
 
 /// Messages accepted by the coordinator actor.
 ///
 /// `#[non_exhaustive]` keeps the enum forward-compatible: WEG-50 / later
-/// tickets will add `Query`, `RunDreamCycle`, etc. without breaking
-/// downstream `match` arms.
+/// tickets will add `Query`, etc. without breaking downstream `match` arms.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum MemoryCoordinatorMsg {
@@ -81,6 +85,20 @@ pub enum MemoryCoordinatorMsg {
         client_dedup_key: Option<String>,
         response_tx: oneshot::Sender<Result<AppendOutcome, CoordinatorError>>,
     },
+    /// Run a deterministic dream cycle (consolidation + decay) against the
+    /// coordinator's own project root, then reopen the append fd (WEG-271).
+    ///
+    /// Both consolidation and decay can replace `AGENT_LEARNINGS.jsonl` by
+    /// atomic rename, which orphans the coordinator's long-lived fd. Routing
+    /// the cycle through the actor lets the handler reopen `self.file` so
+    /// subsequent appends land on the live inode. `now_sec` / `cycle_date` are
+    /// supplied by the caller (the HTTP handler) so the cycle stays
+    /// wall-clock-free and deterministic in tests.
+    RunDreamCycle {
+        now_sec: i64,
+        cycle_date: String,
+        response_tx: oneshot::Sender<Result<crate::decay::DecayResult, CoordinatorError>>,
+    },
     /// Gracefully drain the channel and exit the run loop.
     Shutdown { response_tx: oneshot::Sender<()> },
 }
@@ -88,6 +106,14 @@ pub enum MemoryCoordinatorMsg {
 /// Single mutable owner of `AGENT_LEARNINGS.jsonl`.
 pub struct MemoryCoordinator {
     file: File,
+    /// Path to `AGENT_LEARNINGS.jsonl`. Needed to reopen `file` after a dream
+    /// cycle replaces the file by atomic rename (WEG-271) — otherwise the fd
+    /// would point at an orphaned inode and subsequent appends would be lost.
+    jsonl_path: PathBuf,
+    /// The project root this coordinator owns. The dream cycle (consolidation +
+    /// decay) runs against this root. Distinct from `agent_root_key`, which is
+    /// canonicalized for idempotency keying — do NOT use the key for the cycle.
+    agent_root: AgentRoot,
     rx: mpsc::Receiver<MemoryCoordinatorMsg>,
     /// Canonicalized AgentRoot path — half of the idempotency LRU key.
     /// Falls back to the un-canonicalized path if canonicalization fails
@@ -154,6 +180,8 @@ impl MemoryCoordinator {
 
         Ok(Self {
             file,
+            jsonl_path: jsonl_path.to_path_buf(),
+            agent_root: AgentRoot::new(agent_root),
             rx,
             agent_root_key,
             idempotency: LruCache::new(cap),
@@ -173,6 +201,14 @@ impl MemoryCoordinator {
                     response_tx,
                 } => {
                     let result = self.handle_append(learning, client_dedup_key);
+                    let _ = response_tx.send(result);
+                }
+                MemoryCoordinatorMsg::RunDreamCycle {
+                    now_sec,
+                    cycle_date,
+                    response_tx,
+                } => {
+                    let result = self.handle_run_dream_cycle(now_sec, &cycle_date);
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -243,6 +279,35 @@ impl MemoryCoordinator {
             id: event_id,
             deduplicated: false,
         })
+    }
+
+    /// WEG-271: run the deterministic dream cycle, then reopen the append fd.
+    ///
+    /// `run_deterministic_dream_cycle` (on cluster promotion) and
+    /// `run_decay_pruner` (on prune) each replace `AGENT_LEARNINGS.jsonl` by
+    /// atomic rename, leaving `self.file` pointing at an orphaned inode. We
+    /// reopen unconditionally after both run so the next append lands on the
+    /// live inode regardless of whether either step actually rewrote the file.
+    /// The cycle writes a well-formed file via atomic rename, so no
+    /// `truncate_malformed_tail` scan is needed on reopen.
+    fn handle_run_dream_cycle(
+        &mut self,
+        now_sec: i64,
+        cycle_date: &str,
+    ) -> Result<crate::decay::DecayResult, CoordinatorError> {
+        crate::consolidation::run_deterministic_dream_cycle(&self.agent_root, now_sec)
+            .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+        let decay = crate::decay::run_decay_pruner(&self.agent_root, now_sec, cycle_date)
+            .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+
+        self.file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.jsonl_path)?;
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(decay)
     }
 
     #[cfg(unix)]

@@ -19,6 +19,10 @@ pub enum DreamCliError {
     Decay(DecayError),
     Index(String),
     Io(std::io::Error),
+    /// HTTP 409 from the daemon — a cycle is already running for this project.
+    DaemonInProgress,
+    /// The daemon proxy failed (transport, or a non-404/409 daemon status).
+    DaemonProxy(String),
 }
 
 impl fmt::Display for DreamCliError {
@@ -28,6 +32,10 @@ impl fmt::Display for DreamCliError {
             Self::Decay(e) => write!(f, "decay error: {e}"),
             Self::Index(s) => write!(f, "index error: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::DaemonInProgress => {
+                write!(f, "a dream cycle is already running for this project (daemon)")
+            }
+            Self::DaemonProxy(s) => write!(f, "daemon proxy error: {s}"),
         }
     }
 }
@@ -37,7 +45,7 @@ impl std::error::Error for DreamCliError {
         match self {
             Self::DreamCycle(e) => Some(e),
             Self::Decay(e) => Some(e),
-            Self::Index(_) => None,
+            Self::Index(_) | Self::DaemonInProgress | Self::DaemonProxy(_) => None,
             Self::Io(e) => Some(e),
         }
     }
@@ -55,6 +63,17 @@ pub fn run(
     out: &mut impl Write,
     no_commit: bool,
 ) -> Result<(), DreamCliError> {
+    // WEG-271 fast-follow: if a daemon owns this project, proxy the cycle to it
+    // (one writer). --no-commit always runs in-process (determinism / commit
+    // semantics the HTTP API can't express).
+    #[cfg(unix)]
+    if !no_commit {
+        if let Some(decided) = try_proxy_to_daemon(project_root, out)? {
+            return Ok(decided); // daemon ran it (409 already surfaced as Err)
+        }
+        // None → no daemon for this project; fall through to in-process.
+    }
+
     let agent_root = AgentRoot::new(project_root);
 
     // Clock read for the cycle — both values derive from it. The core threads
@@ -114,6 +133,36 @@ pub fn run(
         "dream cycle complete ({decayed_count} events decayed, {kept_count} kept)",
     )?;
     Ok(())
+}
+
+/// Attempt to proxy the cycle to a running daemon over the UDS.
+///
+/// `Ok(Some(()))` → the daemon ran it (caller returns success). `Ok(None)` →
+/// no daemon owns this project (socket unresolved, unreachable, or 404
+/// not-registered); the caller runs the in-process cycle. `Err(..)` → a 409
+/// (cycle already running) or a genuine proxy failure; the caller must NOT run
+/// in-process (that would race the coordinator).
+#[cfg(unix)]
+fn try_proxy_to_daemon(
+    project_root: &Path,
+    out: &mut impl Write,
+) -> Result<Option<()>, DreamCliError> {
+    use dreamd_core::client::{proxy_dream_cycle, resolve_daemon_socket, DreamProxyOutcome};
+
+    let Some(sock) = resolve_daemon_socket() else {
+        return Ok(None);
+    };
+    let outcome = tokio::runtime::Runtime::new()?
+        .block_on(proxy_dream_cycle(&sock, project_root))
+        .map_err(|e| DreamCliError::DaemonProxy(e.to_string()))?;
+    match outcome {
+        DreamProxyOutcome::Ran => {
+            writeln!(out, "dream cycle complete (via daemon)")?;
+            Ok(Some(()))
+        }
+        DreamProxyOutcome::InProgress => Err(DreamCliError::DaemonInProgress),
+        DreamProxyOutcome::NotReachable | DreamProxyOutcome::ProjectNotRegistered => Ok(None),
+    }
 }
 
 /// Resolve the dream-cycle clock.

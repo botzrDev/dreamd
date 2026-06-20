@@ -164,9 +164,10 @@ pub fn build_router(state: AppState) -> axum::Router {
 ///
 /// Runs a full deterministic dream cycle for the resolved project root:
 ///   1. 409 guard: reject if `state.json` shows `"in_progress"`.
-///   2. `run_deterministic_dream_cycle` — cluster engine + LESSONS.md write.
-///   3. `run_decay_pruner` — JSONL prune + snapshot write.
-///   4. If any events decayed, send `PruneDecayedEvents` to the Tantivy indexer.
+///   2. Dispatch `RunDreamCycle` to the coordinator (WEG-271) — it runs
+///      consolidation (cluster engine + LESSONS.md) then decay (JSONL prune +
+///      snapshot), and reopens its append fd after the cycle's atomic rename.
+///   3. If any events decayed, send `PruneDecayedEvents` to the Tantivy indexer.
 ///
 /// Returns 200 `{"status":"ok"}` on success.
 async fn post_dream(
@@ -213,25 +214,40 @@ async fn post_dream(
         crate::autobiography::check_dirty_at_cycle_start(std::path::Path::new(&entry.root))
             .unwrap_or_default();
 
-    // Consolidation + LESSONS.md write.
-    if let Err(e) = crate::consolidation::run_deterministic_dream_cycle(&agent_root, now_sec) {
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response();
+    // WEG-271: route consolidation + decay through the coordinator so its
+    // long-lived append fd is reopened after the cycle's atomic rename(s).
+    // Running the rewrites inline here would orphan that fd and silently drop
+    // every subsequent POST /learn. The coordinator runs its own root's cycle.
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let msg = MemoryCoordinatorMsg::RunDreamCycle {
+        now_sec,
+        cycle_date: cycle_date.clone(),
+        response_tx: resp_tx,
+    };
+    match state.supervisor.try_send(msg).await {
+        Ok(()) => {}
+        Err(CoordinatorSendError::Full) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, HeaderValue::from_static("1"))],
+                axum::Json(serde_json::json!({ "error": "coordinator busy, retry" })),
+            )
+                .into_response();
+        }
+        Err(CoordinatorSendError::Closed) => {
+            return error_500("coordinator unavailable");
+        }
     }
-
-    // Decay pruner — JSONL prune + snapshot write.
-    let decay_result = match crate::decay::run_decay_pruner(&agent_root, now_sec, &cycle_date) {
-        Ok(r) => r,
-        Err(e) => {
+    let decay_result = match resp_rx.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({"error": e.to_string()})),
             )
                 .into_response()
         }
+        Err(_) => return error_500("coordinator dropped dream-cycle response"),
     };
 
     // Tantivy prune — only if any events decayed.
@@ -1596,7 +1612,9 @@ mod tests {
         )
         .unwrap();
 
-        let state = make_test_state(registry_path);
+        // Real coordinator: the dream cycle now routes through it (WEG-271),
+        // so the mock backpressure supervisor would reject the dispatch.
+        let state = make_real_state(dir.path(), registry_path);
         let router = build_router(state);
 
         let req = with_peer_uid(
@@ -1649,7 +1667,7 @@ mod tests {
 
     /// T3 — Empty JSONL: POST /api/v1/dream → 200, LESSONS.md NOT created.
     ///
-    /// `run_deterministic_dream_cycle` early-returns when the JSONL is empty
+    /// The consolidation cluster engine early-returns when the JSONL is empty
     /// (no promoted clusters), so LESSONS.md is never written.
     #[tokio::test]
     async fn dream_empty_jsonl_returns_200_no_lessons_md() {
@@ -1665,7 +1683,8 @@ mod tests {
         std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
         std::fs::write(&jsonl_path, b"").unwrap();
 
-        let state = make_test_state(registry_path);
+        // Real coordinator: the dream cycle now routes through it (WEG-271).
+        let state = make_real_state(dir.path(), registry_path);
         let router = build_router(state);
 
         let req = with_peer_uid(
@@ -1687,6 +1706,119 @@ mod tests {
         assert!(
             !lessons_path.exists(),
             "LESSONS.md must not be created when JSONL is empty"
+        );
+    }
+
+    /// T4 — Regression (WEG-271): a dream cycle must not orphan the
+    /// coordinator's append fd. After the cycle replaces AGENT_LEARNINGS.jsonl
+    /// by atomic rename, a subsequent POST /learn must land on the live inode
+    /// (the file at the path), not the unlinked inode the stale fd points at.
+    ///
+    /// Learning #1 is dated > 90 days in the past so the decay pruner archives
+    /// it and rewrites the JSONL via rename — that rename is precisely what
+    /// orphaned the fd pre-fix. (A single fresh learning would NOT decay and
+    /// would trigger no rename, so the bug would not reproduce.) Learning #2 is
+    /// appended after the cycle; pre-fix it was written to the orphaned inode
+    /// and never appeared in the on-disk file.
+    #[tokio::test]
+    async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
+        let (dir, root_str, router) = real_router_with_dir();
+        let agent_root = AgentRoot::new(dir.path());
+        // The dream cycle's WAL writes under .agent/.dreamd/.
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+
+        // Learning #1 — timestamp > 90 days old so the decay pruner archives it,
+        // forcing the rewrite-by-rename that orphans the coordinator fd.
+        let body1 = serde_json::json!({
+            "schema_version": "1.0.0",
+            "id": format!("evt_{SAMPLE_ULID}"),
+            "timestamp": "2020-01-01T00:00:00Z",
+            "pain": 5.0,
+            "importance": 5.0,
+            "skill_action": "rust.regression",
+            "source_harness": "test-harness",
+            "content": "first-learning-pre-dream"
+        });
+        let resp1 = router
+            .clone()
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", &root_str)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body1).unwrap()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+
+        // Dream cycle — decay archives learning #1 and renames the JSONL.
+        let dream_resp = router
+            .clone()
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/dream")
+                    .header("x-agent-root", &root_str)
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(dream_resp.status(), StatusCode::OK);
+
+        // Confirm a rename actually happened (so this test really exercises the
+        // bug): the decayed record was archived to a snapshot file.
+        let snapshots: Vec<_> = std::fs::read_dir(agent_root.snapshots_dir())
+            .expect("snapshots dir exists after decay")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "decay must have archived learning #1 (proves the JSONL was renamed)"
+        );
+
+        // Learning #2 — appended AFTER the cycle. The marker is distinctive and
+        // redaction-safe.
+        const MARKER: &str = "second-learning-after-dream-marker";
+        let body2 = serde_json::json!({
+            "schema_version": "1.0.0",
+            "id": format!("evt_{SAMPLE_ULID}"),
+            "timestamp": "2026-06-19T12:00:00Z",
+            "pain": 5.0,
+            "importance": 5.0,
+            "skill_action": "rust.regression",
+            "source_harness": "test-harness",
+            "content": MARKER
+        });
+        let resp2 = router
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", &root_str)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body2).unwrap()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::CREATED);
+
+        // The on-disk JSONL (live inode at the path) must contain learning #2.
+        // Pre-fix the coordinator's stale fd wrote it to the orphaned inode, so
+        // the path's file did not contain the marker.
+        let on_disk =
+            std::fs::read_to_string(agent_root.episodic_jsonl()).expect("read live JSONL");
+        assert!(
+            on_disk.contains(MARKER),
+            "learning #2 must be in the live JSONL after a dream cycle (fd not orphaned); \
+             on-disk contents: {on_disk:?}"
         );
     }
 
