@@ -33,7 +33,10 @@ impl fmt::Display for DreamCliError {
             Self::Index(s) => write!(f, "index error: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::DaemonInProgress => {
-                write!(f, "a dream cycle is already running for this project (daemon)")
+                write!(
+                    f,
+                    "a dream cycle is already running for this project (daemon)"
+                )
             }
             Self::DaemonProxy(s) => write!(f, "daemon proxy error: {s}"),
         }
