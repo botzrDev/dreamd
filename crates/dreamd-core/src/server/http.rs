@@ -24,6 +24,7 @@ use crate::redaction::redact;
 use crate::registry::ProjectEntry;
 use crate::server::index_map::IndexError;
 use crate::server::lifecycle::CoordinatorSendError;
+use crate::server::supervisor_map::SupervisorMap;
 use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 
 /// Peer UID injected at connection-accept time by `serve_uds`.
@@ -38,8 +39,10 @@ pub struct PeerUid(pub u32);
 /// `registry_path` — path to `~/.agent/registry.toml`. Per-request
 /// middleware calls `resolve_project(&state.registry_path, agent_root)`.
 ///
-/// `supervisor` — owned by the process entry point; handlers call
-/// `state.supervisor.try_send(msg)` for coordinator dispatch.
+/// `supervisor` — the boot project's coordinator (the project `run_watch`
+/// started for `primary.0`). Handlers no longer dispatch to it directly; they
+/// call [`AppState::resolve_supervisor`], which returns this for the pinned
+/// boot project and a lazily-started per-root coordinator otherwise.
 ///
 /// `config` — layered runtime config loaded at startup.
 ///
@@ -57,6 +60,13 @@ pub struct PeerUid(pub u32);
 /// coordinator's live appends and the recall reader share **one** index — and
 /// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
 /// Never evicted. `None` outside the daemon (Phase 1, tests).
+///
+/// `supervisor_map` — lazily-started, LRU + idle-evicting per-project
+/// coordinators for every registered root that is NOT the pinned boot project
+/// (WEG-272). `resolve_supervisor` consults this so a `POST /learn` /
+/// `POST /dream` for project B appends to B's JSONL instead of misfiling into
+/// the boot project's. Only engaged when `primary` is `Some` (the daemon);
+/// `None`/Phase-1/test states route everything to `supervisor`.
 #[derive(Clone)]
 pub struct AppState {
     pub registry_path: PathBuf,
@@ -65,6 +75,7 @@ pub struct AppState {
     pub index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
     pub daemon_uid: u32,
     pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
+    pub supervisor_map: Arc<Mutex<SupervisorMap>>,
 }
 
 impl AppState {
@@ -82,6 +93,7 @@ impl AppState {
             index_map: Arc::new(Mutex::new(index_map)),
             daemon_uid,
             primary: None,
+            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         }
     }
 
@@ -122,6 +134,54 @@ impl AppState {
             )
         })?;
         Ok(f(handle))
+    }
+
+    /// Resolve the coordinator that owns `root` (WEG-272).
+    ///
+    /// * `primary` is `None` (Phase 1 / tests, single project) → the boot
+    ///   `state.supervisor`. Preserves every existing single-coordinator test.
+    /// * `root` IS the pinned boot project → the boot `state.supervisor`.
+    /// * otherwise → a lazily-started, idle-reaped per-root coordinator from
+    ///   `supervisor_map`, wired to that root's index handle so its appends
+    ///   index into the same handle recall and dream read.
+    ///
+    /// Lock order is always `supervisor_map` AFTER `index_map`: we resolve the
+    /// indexer `Sender` first (releasing `index_map`'s lock) and only then lock
+    /// `supervisor_map`. No other path locks `index_map` while holding
+    /// `supervisor_map`, so there is no deadlock — and, because this fn is
+    /// synchronous, no lock is ever held across an `.await`.
+    ///
+    /// Returns the SAME `Arc<Supervisor>` for repeated calls on one live root,
+    /// so two writers never open the same `AGENT_LEARNINGS.jsonl` (DR-103).
+    fn resolve_supervisor(&self, root: &Path) -> Result<Arc<Supervisor>, IndexError> {
+        match self.primary.as_ref() {
+            // No pinned project → single-coordinator behaviour (every test).
+            None => return Ok(self.supervisor.clone()),
+            // The request targets the pinned boot project → its coordinator.
+            Some((boot_root, _)) if boot_root.as_path() == root => {
+                return Ok(self.supervisor.clone());
+            }
+            Some(_) => {}
+        }
+
+        // Non-boot root: wire the per-root coordinator to the per-root indexer
+        // (the same handle recall/dream use) so its appends become searchable.
+        // Resolve + release index_map's lock BEFORE locking supervisor_map.
+        let indexer_tx = self.with_index_handle(root, |h| h.sender())?;
+
+        let mut map = self
+            .supervisor_map
+            .lock()
+            .map_err(|_| IndexError("supervisor map lock poisoned".to_string()))?;
+        let agent_root = crate::layout::AgentRoot::new(root);
+        map.get_or_start(root, || {
+            Supervisor::start(
+                &agent_root,
+                crate::server::COORDINATOR_CHANNEL_CAPACITY,
+                Some(indexer_tx),
+            )
+        })
+        .map_err(|e| IndexError(format!("supervisor start failed: {e}")))
     }
 }
 
@@ -218,13 +278,21 @@ async fn post_dream(
     // long-lived append fd is reopened after the cycle's atomic rename(s).
     // Running the rewrites inline here would orphan that fd and silently drop
     // every subsequent POST /learn. The coordinator runs its own root's cycle.
+    // WEG-272: route the cycle to the coordinator that OWNS this project root,
+    // not the boot coordinator — otherwise project B's dream cycle would run
+    // against (and prune) the boot project's JSONL.
+    let supervisor = match state.resolve_supervisor(std::path::Path::new(&entry.root)) {
+        Ok(s) => s,
+        Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
+    };
+
     let (resp_tx, resp_rx) = oneshot::channel();
     let msg = MemoryCoordinatorMsg::RunDreamCycle {
         now_sec,
         cycle_date: cycle_date.clone(),
         response_tx: resp_tx,
     };
-    match state.supervisor.try_send(msg).await {
+    match supervisor.try_send(msg).await {
         Ok(()) => {}
         Err(CoordinatorSendError::Full) => {
             return (
@@ -515,7 +583,14 @@ async fn post_learn(
     // Step 4 — capture timestamp before `learning` is moved (Option A).
     let timestamp = learning.timestamp.to_rfc3339();
 
-    // Step 5 — build and dispatch.
+    // Step 5 — resolve the coordinator that OWNS this project root (WEG-272),
+    // then build and dispatch. Routing on `project.root` is what keeps a
+    // `POST /learn` for project B out of the boot project's JSONL.
+    let supervisor = match state.resolve_supervisor(std::path::Path::new(&project.root)) {
+        Ok(s) => s,
+        Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
+    };
+
     let (resp_tx, resp_rx) = oneshot::channel();
     let msg = MemoryCoordinatorMsg::AppendLearning {
         learning,
@@ -523,7 +598,7 @@ async fn post_learn(
         response_tx: resp_tx,
     };
 
-    match state.supervisor.try_send(msg).await {
+    match supervisor.try_send(msg).await {
         Ok(()) => {}
         Err(CoordinatorSendError::Full) => {
             return (
@@ -681,6 +756,7 @@ mod tests {
             index_map: Arc::new(Mutex::new(index_map)),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
             primary: None,
+            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         }
     }
 
@@ -699,6 +775,7 @@ mod tests {
             ))),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
             primary: None,
+            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         }
     }
 
@@ -1093,6 +1170,7 @@ mod tests {
             ))),
             daemon_uid: nix::unistd::Uid::current().as_raw(),
             primary: None,
+            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         };
         let router = build_router(state);
 
@@ -1378,6 +1456,7 @@ mod tests {
             ))),
             daemon_uid: wrong_uid,
             primary: None,
+            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         };
         let router = build_router(state);
 
@@ -1922,5 +2001,249 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // WEG-272 — per-project Supervisor routing (stop misfiling B into A)
+    // -----------------------------------------------------------------------
+
+    /// Build a daemon-shaped state with TWO registered projects: the pinned
+    /// boot project A (real coordinator + pinned primary index, short commit
+    /// cadence) and a second project B reachable only via `supervisor_map`
+    /// routing. Mirrors how `run_watch` composes the daemon. Returns
+    /// `(dir_a, dir_b, canonical_a, canonical_b, state)`; keep both dirs alive.
+    fn make_routing_state() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        AppState,
+    ) {
+        use crate::server::tantivy_handle::TantivyIndexHandle;
+        use std::time::Duration;
+
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let canonical_a = std::fs::canonicalize(dir_a.path()).unwrap();
+        let canonical_b = std::fs::canonicalize(dir_b.path()).unwrap();
+
+        // Registry holds BOTH canonical roots (canonicalized to match the
+        // middleware's resolve_project lookup).
+        let registry_path = dir_a.path().join("registry.toml");
+        let body = format!(
+            "[[projects]]\nroot = \"{}\"\n[[projects]]\nroot = \"{}\"\n",
+            canonical_a.to_string_lossy(),
+            canonical_b.to_string_lossy(),
+        );
+        std::fs::write(&registry_path, body).unwrap();
+
+        // Boot project A: pinned primary handle (short cadence so the daemon's
+        // own recall path stays fast) + a real coordinator wired to it.
+        let agent_root_a = AgentRoot::new(canonical_a.clone());
+        let primary = Arc::new(
+            TantivyIndexHandle::open(&agent_root_a, Duration::from_millis(100))
+                .expect("open primary handle for A"),
+        );
+        let supervisor = Supervisor::start(&agent_root_a, 8, Some(primary.sender()))
+            .expect("start A coordinator");
+
+        let state = AppState::new(
+            registry_path,
+            supervisor,
+            Config::default(),
+            ProjectIndexMap::new(ProjectIndexMapConfig::default()),
+            nix::unistd::Uid::current().as_raw(),
+        )
+        .with_primary(canonical_a.clone(), primary);
+
+        (dir_a, dir_b, canonical_a, canonical_b, state)
+    }
+
+    /// Headline AC: a `POST /learn` for project B appends to B's JSONL, leaves
+    /// the boot project A's JSONL untouched, and recall(B) surfaces it.
+    /// Before WEG-272 the append misfiled into A's JSONL (the live data-loss
+    /// bug: dispatch went to the boot coordinator regardless of `entry.root`).
+    #[tokio::test]
+    async fn learn_routes_to_owning_project_not_boot() {
+        use crate::server::tantivy_handle::IndexerMsg;
+
+        let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
+        let router = build_router(state.clone());
+
+        const MARKER: &str = "routed distinctive marker for project bee";
+        let body = sample_body("rust.routing", MARKER);
+        let resp = router
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", canonical_b.to_str().unwrap())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "append to B must succeed"
+        );
+
+        // (1) The record landed in B's JSONL.
+        let b_jsonl = std::fs::read_to_string(AgentRoot::new(canonical_b.clone()).episodic_jsonl())
+            .expect("B's JSONL must exist after a routed append");
+        assert!(
+            b_jsonl.contains(MARKER),
+            "B's JSONL must contain the routed learning; got: {b_jsonl:?}"
+        );
+
+        // (2) Project A's JSONL is untouched — this is the misfiling bug's tell.
+        let a_jsonl = std::fs::read_to_string(AgentRoot::new(canonical_a.clone()).episodic_jsonl())
+            .unwrap_or_default();
+        assert!(
+            !a_jsonl.contains(MARKER),
+            "the boot project A's JSONL must NOT contain B's learning; got: {a_jsonl:?}"
+        );
+
+        // (3) recall(B) surfaces it. The coordinator forwarded IndexerMsg::Append
+        // before the 201, so a Flush on B's indexer is FIFO-ordered after it;
+        // flush + reload makes the assertion deterministic (no cadence wait).
+        let b_sender = state
+            .with_index_handle(&canonical_b, |h| h.sender())
+            .expect("resolve B index sender");
+        let (ack_tx, ack_rx) = oneshot::channel();
+        b_sender
+            .send(IndexerMsg::Flush { ack: ack_tx })
+            .await
+            .expect("send flush to B indexer");
+        ack_rx.await.expect("flush ack").expect("flush ok");
+
+        let b_reader = state
+            .with_index_handle(&canonical_b, |h| h.reader().clone())
+            .expect("resolve B reader");
+        b_reader.reload().expect("reload B reader to latest commit");
+
+        let (_, schema_fields) = crate::index::build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let results =
+            crate::recall(&b_reader, &schema_fields, MARKER, 5, None, now_sec).expect("recall B");
+        assert!(
+            results
+                .iter()
+                .any(|r| r.content.contains("distinctive marker")),
+            "recall(B) must return the routed learning; got {} results",
+            results.len()
+        );
+    }
+
+    /// A `POST /learn` for the pinned boot project A still routes to the boot
+    /// coordinator (`state.supervisor`) and lands in A's JSONL — and must NOT
+    /// spin up a `supervisor_map` entry. This preserves the single-coordinator
+    /// behaviour every pre-WEG-272 test relied on.
+    #[tokio::test]
+    async fn learn_to_boot_root_uses_primary_supervisor() {
+        let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
+        let router = build_router(state.clone());
+
+        const MARKER: &str = "boot project alpha learning marker";
+        let body = sample_body("rust.boot", MARKER);
+        let resp = router
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", canonical_a.to_str().unwrap())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let a_jsonl = std::fs::read_to_string(AgentRoot::new(canonical_a.clone()).episodic_jsonl())
+            .expect("A's JSONL must exist");
+        assert!(
+            a_jsonl.contains(MARKER),
+            "boot append must land in A's JSONL"
+        );
+
+        // The boot project uses state.supervisor — routing must NOT create a
+        // per-root coordinator for it.
+        assert_eq!(
+            state.supervisor_map.lock().unwrap().len(),
+            0,
+            "boot-project routing must not populate supervisor_map"
+        );
+    }
+
+    /// Idempotency is per-coordinator (each owns its own LRU keyed by its
+    /// canonical root), so the SAME dedup key sent to A and to B yields two
+    /// distinct records — no cross-project collision — while a repeat on B is
+    /// still deduplicated within B.
+    #[tokio::test]
+    async fn dedup_key_does_not_collide_across_projects() {
+        let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
+        let router = build_router(state);
+
+        async fn post_with_key(
+            router: &axum::Router,
+            root: &str,
+            key: &str,
+            content: &str,
+        ) -> serde_json::Value {
+            let body = serde_json::json!({
+                "schema_version": "1.0.0",
+                "id": format!("evt_{SAMPLE_ULID}"),
+                "timestamp": "2026-05-20T12:00:00Z",
+                "pain": 5.0,
+                "importance": 5.0,
+                "skill_action": "rust.dedup",
+                "source_harness": "test-harness",
+                "content": content
+            });
+            let resp = router
+                .clone()
+                .into_service()
+                .oneshot(with_peer_uid(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/learn")
+                        .header("x-agent-root", root)
+                        .header("content-type", "application/json")
+                        .header("x-client-dedup-key", key)
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            body_json(resp).await
+        }
+
+        let a = post_with_key(&router, canonical_a.to_str().unwrap(), "shared-key", "to A").await;
+        let b = post_with_key(&router, canonical_b.to_str().unwrap(), "shared-key", "to B").await;
+        let b2 = post_with_key(
+            &router,
+            canonical_b.to_str().unwrap(),
+            "shared-key",
+            "to B again",
+        )
+        .await;
+
+        assert_ne!(
+            a["id"], b["id"],
+            "same dedup key on different projects must NOT collide (per-coordinator LRU)"
+        );
+        assert_eq!(a["deduplicated"], false, "first A append is fresh");
+        assert_eq!(b["deduplicated"], false, "first B append is fresh");
+        assert_eq!(b["id"], b2["id"], "repeat on B must dedup within B");
+        assert_eq!(
+            b2["deduplicated"], true,
+            "second B append is flagged deduplicated"
+        );
     }
 }
