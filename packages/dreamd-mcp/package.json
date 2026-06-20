@@ -6,6 +6,9 @@
   "bin": {
     "dreamd-mcp": "bin/dreamd-mcp.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "bin/",
     "manifest.json",

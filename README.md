@@ -104,7 +104,8 @@ Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the 
 For a single agent — or several agents used one at a time — the standalone server is safe. If you point **several agents at the same project simultaneously**, start one daemon per machine so every agent's writes route through the same process:
 
 ```bash
-dreamd watch     # one shared writer; mcp clients auto-route through it
+dreamd watch         # native binary
+npx dreamd-mcp watch # same daemon, no Rust install
 ```
 
 Two standalone servers writing at the same instant are independent writers, and a concurrent append can interleave. The daemon removes that edge.
