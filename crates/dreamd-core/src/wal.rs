@@ -49,11 +49,21 @@ pub enum WalError {
     Io(#[from] std::io::Error),
     #[error("WAL parse: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("no .agent/ store at {0} — refusing to scaffold a phantom store; run `dreamd init`")]
+    NoAgentStore(PathBuf),
 }
 
 /// Write a fresh WAL and set state.json to "in_progress".
 /// `_now_sec` is caller-provided for testability.
 pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError> {
+    // WEG-281 — never conjure a store. begin_cycle may create the `.dreamd/`
+    // subdir, but only under an EXISTING `.agent/`. If `.agent/` is absent the
+    // caller resolved the wrong root (or skipped discovery); error rather than
+    // create_dir_all a phantom empty store. Last line of defense behind the
+    // cli.rs discover gate.
+    if !agent_root.agent_dir().exists() {
+        return Err(WalError::NoAgentStore(agent_root.agent_dir()));
+    }
     let wal = DreamWal {
         schema_version: "1.0".to_string(),
         intents: Vec::new(),
@@ -322,6 +332,27 @@ mod tests {
             started.as_ref().unwrap().contains('T'),
             "expected ISO date with time, got {:?}",
             started
+        );
+    }
+
+    #[test]
+    fn begin_cycle_refuses_missing_agent_store() {
+        // A bare tmpdir with no `.agent/` — begin_cycle must error rather than
+        // scaffold a phantom store. Do NOT use `setup_root` (it pre-creates
+        // `.dreamd/`); we need the un-set-up dir.
+        let dir = unique_tmpdir("no-agent-store");
+        fs::create_dir_all(&dir).unwrap();
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        let err = begin_cycle(&root, NOW_SEC).unwrap_err();
+        assert!(
+            matches!(err, WalError::NoAgentStore(_)),
+            "expected NoAgentStore, got {err:?}",
+        );
+        assert!(
+            !dir.join(".agent").exists(),
+            ".agent/ must not be created when begin_cycle refuses",
         );
     }
 
