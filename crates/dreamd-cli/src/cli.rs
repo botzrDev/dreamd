@@ -149,6 +149,27 @@ pub fn check_dream_mode(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the existing `.agent/` store for a post-init command, walking up
+/// from `cwd`. On a miss, print a pointer to `dreamd init` (stderr) and return
+/// the exit code the caller must propagate.
+///
+/// This is the *find* resolver (`AgentRoot::discover`), shared by `dream` and
+/// `doctor`. `init` uses its own sentinel walk because it *creates* a store;
+/// these commands *find* one. Walking up means `dreamd dream` from a project
+/// subdirectory operates on the project's store, and an uninitialized dir
+/// errors instead of silently scaffolding an empty `.agent/`.
+fn discover_store_or_exit(
+    cwd: &std::path::Path,
+) -> Result<dreamd_core::layout::AgentRoot, ExitCode> {
+    dreamd_core::layout::AgentRoot::discover(cwd).map_err(|_| {
+        eprintln!(
+            "dreamd: no .agent/ store found in {} or any parent directory — run `dreamd init` first.",
+            cwd.display()
+        );
+        ExitCode::from(2)
+    })
+}
+
 /// Parse CLI args and dispatch to the matching subcommand handler.
 ///
 /// Returns [`ExitCode`] directly so `main` stays a one-liner.
@@ -182,7 +203,10 @@ pub fn run() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let agent_root = dreamd_core::layout::AgentRoot::new(&cwd);
+            let agent_root = match discover_store_or_exit(&cwd) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
             let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
@@ -230,7 +254,15 @@ pub fn run() -> ExitCode {
                 eprintln!("dreamd: {msg}");
                 return ExitCode::from(2);
             }
-            match commands::dream::run(&cwd, &mut std::io::stdout(), args.no_commit) {
+            let agent_root = match discover_store_or_exit(&cwd) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            match commands::dream::run(
+                agent_root.project_root(),
+                &mut std::io::stdout(),
+                args.no_commit,
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("dreamd: {e}");

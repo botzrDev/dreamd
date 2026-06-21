@@ -221,6 +221,13 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
             line: 0,
             source: je,
         },
+        // `append_intent` early-returns Ok when no WAL exists, so it never
+        // yields NoAgentStore (only `begin_cycle` guards on the store). Mapped
+        // explicitly — no wildcard — to keep the match exhaustive (WEG-281).
+        e @ crate::wal::WalError::NoAgentStore(_) => ConsolidationError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            e.to_string(),
+        )),
     })?;
     write_atomic(&jsonl_path, out.as_bytes())?;
     Ok(())
@@ -722,6 +729,11 @@ mod tests {
         let dir = unique_tmpdir("dc-empty");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
+        // Scaffold a real (empty) `.agent/` store. Previously this test relied
+        // on begin_cycle's create_dir_all to conjure `.agent/`; WEG-281 makes
+        // begin_cycle refuse a missing store, so the test sets one up — empty
+        // JSONL still exercises the no-promotion path.
+        write_jsonl(&root, &[]);
         run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
         assert!(!root.lessons_md().exists());
     }
