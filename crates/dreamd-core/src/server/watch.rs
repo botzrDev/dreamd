@@ -5,6 +5,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio::signal::unix::{signal, SignalKind};
+
 use crate::config::{load_config, DreamCycleMode};
 use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::build_router;
@@ -35,7 +37,8 @@ pub enum WatchError {
 /// and block until SIGINT/SIGTERM. Called by `dreamd watch`.
 ///
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard →
-/// boot Supervisor → compose AppState → bind socket → serve until Ctrl-C.
+/// boot Supervisor → compose AppState → bind socket → serve until a shutdown
+/// signal (SIGINT/SIGTERM), then unlink the socket.
 pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
     // 1. Discover project root from cwd.
     let agent_root = AgentRoot::discover(cwd)
@@ -96,18 +99,31 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
         agent_root.project_root().display(),
     );
 
-    // 6. Serve until SIGINT. select! exits cleanly on Ctrl-C; the Supervisor
-    //    drops at end of scope, which drains the coordinator channel.
-    tokio::select! {
-        result = serve_uds(listener, router) => {
-            result?;
-        }
+    // 6. Serve until SIGINT or SIGTERM. A service manager (systemd/launchd)
+    //    stops the daemon with SIGTERM, so both signals must reach the cleanup
+    //    below; the Supervisor drops at end of scope, draining the coordinator
+    //    channel.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let outcome = tokio::select! {
+        result = serve_uds(listener, router) => result,
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("dreamd watch: shutdown requested, exiting");
+            tracing::info!("dreamd watch: SIGINT received, shutting down");
+            Ok(())
         }
-    }
+        _ = sigterm.recv() => {
+            tracing::info!("dreamd watch: SIGTERM received, shutting down");
+            Ok(())
+        }
+    };
 
-    Ok(())
+    // Unlink the socket on every shutdown path — SIGINT, SIGTERM, or a serve
+    // error. Best-effort: the next bind would recover a stale socket anyway
+    // (bind_socket_raw), but a service-managed daemon stopped via SIGTERM must
+    // not leave ~/.agent/dreamd.sock behind (WEG-268). The full coordinator/
+    // indexer drain is WEG-283 (v0.1.1) — out of scope here.
+    let _ = std::fs::remove_file(&sock_path);
+
+    outcome.map_err(WatchError::from)
 }
 
 #[cfg(test)]

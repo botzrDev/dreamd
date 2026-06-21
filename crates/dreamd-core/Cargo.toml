@@ -123,6 +123,14 @@ insta = { workspace = true }
 # linked into any release artifact. WEG-41 will properly integrate tantivy
 # (likely behind a feature) once the indexing module lands.
 
+[target.'cfg(unix)'.dev-dependencies]
+# WEG-268 regression test delivers SIGTERM to a running `dreamd watch` via
+# `nix::sys::signal::kill`. The `signal` feature is NOT enabled on the
+# production nix dep above (process/fs/user only), so it's a unix-only dev-dep:
+# Cargo unifies it into the test build without widening the shipped binary's
+# nix surface. Unix-only; Windows lifecycle is WEG-135.
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+
 # WEG-21 integration test spawns two helper processes and asserts the first
 # binds the socket as writer-process while the second connects as client. The
 # helper is compiled only when tests run; not shipped in any release artifact.
@@ -138,6 +146,16 @@ doc = false
 [[bin]]
 name = "tantivy_spike"
 path = "tests/bin/tantivy_spike.rs"
+test = false
+bench = false
+doc = false
+
+# WEG-268 regression test spawns this helper, waits for it to bind the UDS
+# socket, then delivers SIGTERM and asserts the socket is unlinked. Runs the
+# real `run_watch`; compiled only when tests run, never shipped.
+[[bin]]
+name = "weg268_watch_helper"
+path = "tests/bin/weg268_watch_helper.rs"
 test = false
 bench = false
 doc = false
