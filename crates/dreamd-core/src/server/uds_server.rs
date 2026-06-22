@@ -7,8 +7,8 @@
 
 #![cfg(unix)]
 
-use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use crate::server::lifecycle::ServerError;
@@ -26,10 +26,14 @@ use crate::server::uds::bind_socket_raw;
 /// the socket's existence. Defense-in-depth per DR-101 §Security.
 pub fn bind_api_socket(path: &Path) -> Result<tokio::net::UnixListener, ServerError> {
     if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-            fs::set_permissions(parent, Permissions::from_mode(0o700))?;
-        }
+        // Atomic: mkdir each component WITH mode 0700 in one syscall, closing the
+        // create-then-chmod window where the dir briefly existed at the umask mode.
+        // recursive(true) is idempotent (no-op if present) and does NOT retro-chmod
+        // an existing dir — we must not silently downgrade an existing 0755 ~/.agent/.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
     }
     let listener = bind_socket_raw(path)?;
     listener.set_nonblocking(true)?;
@@ -79,6 +83,7 @@ pub async fn serve_uds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener as StdUnixListener;
 
     #[tokio::test]
@@ -91,6 +96,23 @@ mod tests {
         let meta = fs::metadata(&sock_path).expect("socket file should exist");
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket perms should be 0600, got {:o}", mode);
+    }
+
+    #[tokio::test]
+    async fn bind_api_socket_parent_dir_has_0700_perms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // `subdir` does NOT exist before the call — forces a real mkdir.
+        let sock_path = dir.path().join("subdir").join("dreamd.sock");
+
+        let _listener = bind_api_socket(&sock_path).expect("bind should succeed");
+
+        let parent = sock_path.parent().unwrap();
+        let mode = fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "parent dir perms should be 0700, got {:o}",
+            mode
+        );
     }
 
     #[tokio::test]
