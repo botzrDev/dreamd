@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 
+/// Schema version for daemon state (`state.json`). Versions independently of
+/// the record schema (`dreamd_protocol::RECORD_SCHEMA_VERSION`).
+pub const STATE_SCHEMA_VERSION: &str = "1.0";
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "operation", content = "payload")]
 pub enum WalIntent {
@@ -65,7 +69,7 @@ pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError
         return Err(WalError::NoAgentStore(agent_root.agent_dir()));
     }
     let wal = DreamWal {
-        schema_version: "1.0".to_string(),
+        schema_version: STATE_SCHEMA_VERSION.to_string(),
         intents: Vec::new(),
     };
     let json = serde_json::to_string_pretty(&wal)?;
@@ -193,7 +197,8 @@ fn update_state_json(
     cycle_at: Option<&str>,
 ) -> Result<(), WalError> {
     let daemon_version = env!("CARGO_PKG_VERSION");
-    let schema_version = read_schema_version(agent_root).unwrap_or_else(|| "1.0".to_string());
+    let schema_version =
+        read_schema_version(agent_root).unwrap_or_else(|| STATE_SCHEMA_VERSION.to_string());
     let state = serde_json::json!({
         "schema_version": schema_version,
         "daemon_version": daemon_version,
