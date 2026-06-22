@@ -24,7 +24,7 @@ use bytes::Bytes;
 #[cfg(unix)]
 use http_body_util::{BodyExt, Full};
 
-use dreamd_protocol::{AgentLearning, EventId};
+use dreamd_protocol::{AgentLearning, EventId, SkillAction, RECORD_SCHEMA_VERSION};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
@@ -76,7 +76,7 @@ pub struct AppendNodeParams {
     pub content: String,
     /// The agent harness that produced this learning (e.g. "claude-code").
     pub source_harness: String,
-    /// Clustering key describing the skill or action domain (e.g. "rust/borrow-checker").
+    /// Clustering key describing the skill or action domain (e.g. "rust::borrow_checker").
     pub skill_action: String,
     /// Pain score 0–10: how disruptive was this if not known?
     pub pain: Option<f64>,
@@ -292,42 +292,38 @@ impl MemoryMcpServer {
     ) -> Result<CallToolResult, McpError> {
         match &self.backend {
             Backend::Local { coordinator_tx, .. } => {
-                // Validate skill_action: trim → lowercase → collapse whitespace →
-                // replace spaces with `_` → charset [a-z0-9_:.-] → ≤ 256 bytes.
-                // Same rules as post_learn in server/http.rs.
-                let lowercased = p.skill_action.trim().to_lowercase();
-                let sa: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
-                if sa.is_empty() {
-                    return Err(McpError::invalid_request(
-                        "invalid skill_action: empty after normalisation",
-                        None,
-                    ));
+                // Validate skill_action via the single SkillAction parser
+                // (same rules as post_learn in server/http.rs).
+                let skill_action = SkillAction::parse(&p.skill_action)
+                    .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
+
+                // Range-check scores BEFORE unwrap_or default (parse, don't clamp).
+                if let Some(pain) = p.pain {
+                    if !(0.0..=10.0).contains(&pain) {
+                        return Err(McpError::invalid_request(
+                            "pain must be in 0.0..=10.0",
+                            None,
+                        ));
+                    }
                 }
-                if sa.len() > 256 {
-                    return Err(McpError::invalid_request(
-                        "invalid skill_action: exceeds 256 bytes",
-                        None,
-                    ));
-                }
-                if sa
-                    .bytes()
-                    .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-'))
-                {
-                    return Err(McpError::invalid_request(
-                        "invalid skill_action: contains characters outside [a-z0-9_:.-]",
-                        None,
-                    ));
+                if let Some(importance) = p.importance {
+                    if !(0.0..=10.0).contains(&importance) {
+                        return Err(McpError::invalid_request(
+                            "importance must be in 0.0..=10.0",
+                            None,
+                        ));
+                    }
                 }
 
                 let timestamp = chrono::Utc::now();
                 let learning = AgentLearning {
-                    schema_version: "1.0.0".to_string(),
+                    schema_version: RECORD_SCHEMA_VERSION.to_string(),
                     id: EventId::parse("evt_00000000000000000000000000").unwrap(),
                     timestamp,
                     pain: p.pain.unwrap_or(5.0) as f32,
                     importance: p.importance.unwrap_or(5.0) as f32,
                     pinned: false,
-                    skill_action: sa,
+                    skill_action: skill_action.into_string(),
                     source_harness: p.source_harness,
                     content: p.content,
                 };
@@ -827,7 +823,7 @@ mod tests {
             .append_node(Parameters(AppendNodeParams {
                 content: "test content".to_string(),
                 source_harness: "test-harness".to_string(),
-                skill_action: "rust.test".to_string(),
+                skill_action: "rust::test".to_string(),
                 pain: Some(6.0),
                 importance: Some(7.0),
                 client_dedup_key: None,
@@ -855,6 +851,47 @@ mod tests {
             serde_json::json!(false),
             "first append must not be deduplicated"
         );
+    }
+
+    /// WEG-275: the `Backend::Local` ingress rejects a dotted/slashed
+    /// `skill_action` (tightened charset) and an out-of-range score via
+    /// `invalid_request` — both validated before the coordinator is touched.
+    #[tokio::test]
+    async fn append_node_rejects_invalid_skill_action_and_score() {
+        use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let supervisor =
+            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let server = MemoryMcpServer::with_coordinator(root, supervisor.sender());
+
+        // Dotted skill_action — rejected by the tightened charset.
+        let dotted = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "c".to_string(),
+                source_harness: "test".to_string(),
+                skill_action: "rust.tokio".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await;
+        assert!(dotted.is_err(), "dotted skill_action must be rejected");
+
+        // Out-of-range pain — rejected before the unwrap_or default.
+        let bad_pain = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "c".to_string(),
+                source_harness: "test".to_string(),
+                skill_action: "rust::tokio".to_string(),
+                pain: Some(1e9),
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await;
+        assert!(bad_pain.is_err(), "out-of-range pain must be rejected");
     }
 
     // ── WEG-259: Phase 2 Remote backend (HTTP-over-UDS) ──────────────────────
@@ -889,7 +926,7 @@ mod tests {
         let params = AppendNodeParams {
             content: "body content".to_string(),
             source_harness: "claude-code".to_string(),
-            skill_action: "rust.cargo.test".to_string(),
+            skill_action: "rust::cargo::test".to_string(),
             pain: Some(7.0),
             importance: Some(8.0),
             client_dedup_key: Some("dedup-1".to_string()),
@@ -920,7 +957,7 @@ mod tests {
         let body = req.into_body().collect().await.expect("collect").to_bytes();
         let parsed: AgentLearning =
             serde_json::from_slice(&body).expect("body round-trips as AgentLearning");
-        assert_eq!(parsed.skill_action, "rust.cargo.test");
+        assert_eq!(parsed.skill_action, "rust::cargo::test");
         assert_eq!(parsed.source_harness, "claude-code");
         assert_eq!(parsed.content, "body content");
     }
@@ -1075,7 +1112,7 @@ mod tests {
             .append_node(Parameters(AppendNodeParams {
                 content: "remote append content".to_string(),
                 source_harness: "test-harness".to_string(),
-                skill_action: "rust.remote".to_string(),
+                skill_action: "rust::remote".to_string(),
                 pain: Some(6.0),
                 importance: Some(7.0),
                 client_dedup_key: None,
@@ -1114,7 +1151,7 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_str(lines[0]).expect("record is valid json");
         assert_eq!(record["content"].as_str().unwrap(), "remote append content");
-        assert_eq!(record["skill_action"].as_str().unwrap(), "rust.remote");
+        assert_eq!(record["skill_action"].as_str().unwrap(), "rust::remote");
     }
 
     /// Integration: an unregistered agent root yields a 404 from the daemon,

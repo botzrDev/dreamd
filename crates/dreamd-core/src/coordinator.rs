@@ -22,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use dreamd_protocol::{AgentLearning, EventId};
+use dreamd_protocol::{AgentLearning, EventId, RECORD_SCHEMA_VERSION};
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 use ulid::Ulid;
@@ -244,6 +244,11 @@ impl MemoryCoordinator {
         let event_id =
             EventId::parse(&minted_raw).expect("freshly minted ULID always parses as EventId");
         learning.id = event_id.clone();
+
+        // Server-stamp schema_version on every durable write. Closes the HTTP
+        // client-trust gap (WEG-275): post_learn never re-stamped, so a client
+        // could persist any value. Both ingress paths route through here.
+        learning.schema_version = RECORD_SCHEMA_VERSION.to_string();
 
         // Write protocol (WEG-7 AC): serialize → ensure trailing \n →
         // 4 KiB check → write_all → sync_data → LRU insert.

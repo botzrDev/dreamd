@@ -77,6 +77,79 @@ impl<'de> Deserialize<'de> for EventId {
     }
 }
 
+/// Schema version stamped onto every persisted episodic record.
+pub const RECORD_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Validated clustering key: lowercase `[a-z0-9_]` segments joined by `::`,
+/// e.g. `rust::borrow_checker`. The dream cycle splits on `::` to sub-cluster.
+///
+/// Unlike [`EventId`], this is a **parse-only boundary validator** — it is NOT
+/// a serde field on [`AgentLearning`] (that field stays `String` so existing
+/// dotted records and hand-edited files read back without error). Construct via
+/// [`parse`] at API ingress, then store the inner `String`.
+///
+/// [`parse`]: SkillAction::parse
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillAction(String);
+
+/// Reason a `SkillAction::parse` call rejected its input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillActionParseError {
+    reason: &'static str,
+}
+
+impl fmt::Display for SkillActionParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid skill_action: {}", self.reason)
+    }
+}
+
+impl std::error::Error for SkillActionParseError {}
+
+impl SkillAction {
+    /// Normalise then validate: trim → lowercase → collapse interior
+    /// whitespace → spaces→`_` → split on `::` → each segment non-empty and
+    /// `[a-z0-9_]+` → rejoin with `::`. Total ≤ 256 bytes.
+    pub fn parse(s: &str) -> Result<Self, SkillActionParseError> {
+        let lowercased = s.trim().to_lowercase();
+        let normalised: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
+        if normalised.is_empty() {
+            return Err(SkillActionParseError {
+                reason: "empty after normalisation",
+            });
+        }
+        if normalised.len() > 256 {
+            return Err(SkillActionParseError {
+                reason: "exceeds 256 bytes",
+            });
+        }
+        for seg in normalised.split("::") {
+            if seg.is_empty() {
+                return Err(SkillActionParseError {
+                    reason: "empty segment (stray ':' or leading/trailing '::')",
+                });
+            }
+            if !seg
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+            {
+                return Err(SkillActionParseError {
+                    reason: "segment contains characters outside [a-z0-9_]",
+                });
+            }
+        }
+        Ok(Self(normalised))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// Central episodic event record written to `AGENT_LEARNINGS.jsonl`.
 ///
 /// Serialized as one JSON line per entry. The coordinator mints the [`EventId`]
@@ -102,9 +175,10 @@ pub struct AgentLearning {
     /// always `false` in v0.1. Forward-compat slot for v0.2.
     #[serde(default)]
     pub pinned: bool,
-    /// Dotted skill path used as the clustering key (e.g., `"rust.cargo.test"`).
-    /// The dream cycle groups learnings by this prefix when consolidating into
-    /// `LESSONS.md`.
+    /// Validated clustering key (e.g., `"rust::borrow_checker"`). The dream
+    /// cycle splits this on `::` to sub-cluster when consolidating into
+    /// `LESSONS.md`. Validated at ingress via [`SkillAction`]; stays `String`
+    /// here so existing dotted records read back without error.
     pub skill_action: String,
     /// Which AI harness produced this learning (e.g., `"claude-code"`,
     /// `"cursor"`, `"opencode"`). Used for provenance tracking and
@@ -171,7 +245,7 @@ mod tests {
             pain: 7.5,
             importance: 8.25,
             pinned: true,
-            skill_action: "rust.cargo.test".to_string(),
+            skill_action: "rust::cargo::test".to_string(),
             source_harness: "claude-code".to_string(),
             content: "round-trip body".to_string(),
         };
@@ -180,5 +254,38 @@ mod tests {
         let decoded: AgentLearning = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(original, decoded);
         assert_eq!(decoded.id, id);
+    }
+
+    #[test]
+    fn skill_action_accepts_valid() {
+        assert_eq!(
+            SkillAction::parse("rust::tokio").unwrap().as_str(),
+            "rust::tokio"
+        );
+        assert_eq!(SkillAction::parse("rust").unwrap().as_str(), "rust");
+        assert_eq!(
+            SkillAction::parse("rust::borrow_checker").unwrap().as_str(),
+            "rust::borrow_checker"
+        );
+    }
+
+    #[test]
+    fn skill_action_normalises_case_and_whitespace() {
+        assert_eq!(
+            SkillAction::parse("  Rust Tokio  ").unwrap().as_str(),
+            "rust_tokio"
+        );
+    }
+
+    #[test]
+    fn skill_action_rejects_invalid() {
+        assert!(SkillAction::parse("rust.tokio").is_err());
+        assert!(SkillAction::parse("rust/borrow-checker").is_err());
+        assert!(SkillAction::parse("rust::").is_err());
+        assert!(SkillAction::parse("::rust").is_err());
+        assert!(SkillAction::parse("rust:tokio").is_err());
+        assert!(SkillAction::parse("").is_err());
+        assert!(SkillAction::parse("   ").is_err());
+        assert!(SkillAction::parse(&"a".repeat(257)).is_err());
     }
 }

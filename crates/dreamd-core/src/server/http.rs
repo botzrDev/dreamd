@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{Extension, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, SkillAction};
 use tokio::sync::oneshot;
 
 use crate::config::Config;
@@ -558,24 +558,20 @@ async fn post_learn(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    // Step 2 — normalise + validate skill_action.
-    // Order: trim → lowercase → collapse interior whitespace → replace spaces
-    // with `_` → validate charset [a-z0-9_:.-] and ≤ 256 bytes.
-    let lowercased = learning.skill_action.trim().to_lowercase();
-    let sa: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
-    if sa.is_empty() {
-        return error_400("invalid skill_action: empty after normalisation");
+    // Step 2 — validate skill_action via the single SkillAction parser.
+    let skill_action = match SkillAction::parse(&learning.skill_action) {
+        Ok(sa) => sa,
+        Err(e) => return error_400(&e.to_string()),
+    };
+    learning.skill_action = skill_action.into_string();
+
+    // Step 2b — range-check scores (parse, don't clamp).
+    if !(0.0..=10.0).contains(&learning.pain) {
+        return error_400("pain must be in 0.0..=10.0");
     }
-    if sa.len() > 256 {
-        return error_400("invalid skill_action: exceeds 256 bytes");
+    if !(0.0..=10.0).contains(&learning.importance) {
+        return error_400("importance must be in 0.0..=10.0");
     }
-    if sa
-        .bytes()
-        .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-'))
-    {
-        return error_400("invalid skill_action: contains characters outside [a-z0-9_:.-]");
-    }
-    learning.skill_action = sa;
 
     // Step 3 — redact content. opt-out is Config.redaction only (D2).
     learning.content = redact(&learning.content, state.config.redaction);
@@ -952,7 +948,7 @@ mod tests {
     async fn learn_valid_body_returns_201() {
         let (_dir, root_str, router) = real_router_with_dir();
 
-        let body = sample_body("rust.cargo.test", "learned something useful");
+        let body = sample_body("rust::cargo::test", "learned something useful");
         let req = with_peer_uid(
             Request::builder()
                 .method("POST")
@@ -982,7 +978,7 @@ mod tests {
     async fn learn_invalid_skill_action_returns_400() {
         let (_dir, root_str, router) = mock_router_with_dir();
 
-        // `!` is outside [a-z0-9_:.-]
+        // `!` is outside [a-z0-9_]
         let body = sample_body("rust!invalid", "body");
         let req = with_peer_uid(
             Request::builder()
@@ -1001,11 +997,11 @@ mod tests {
     #[tokio::test]
     async fn learn_skill_action_normalised() {
         // Uppercase letters and leading/trailing whitespace must be normalised
-        // before validation. "  Rust.Cargo.TEST  " → "rust.cargo.test".
+        // before validation. "  Rust::Cargo::TEST  " → "rust::cargo::test".
         let (dir, root_str, router) = real_router_with_dir();
         let agent_root = AgentRoot::new(dir.path());
 
-        let body = sample_body("  Rust.Cargo.TEST  ", "normalisation test");
+        let body = sample_body("  Rust::Cargo::TEST  ", "normalisation test");
         let req = with_peer_uid(
             Request::builder()
                 .method("POST")
@@ -1027,7 +1023,10 @@ mod tests {
         let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
         let record: serde_json::Value =
             serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
-        assert_eq!(record["skill_action"].as_str().unwrap(), "rust.cargo.test");
+        assert_eq!(
+            record["skill_action"].as_str().unwrap(),
+            "rust::cargo::test"
+        );
     }
 
     #[tokio::test]
@@ -1061,7 +1060,7 @@ mod tests {
         let state = make_real_state(dir.path(), registry_path);
         let router = build_router(state);
 
-        let body = sample_body("rust.test", "dedup content");
+        let body = sample_body("rust::test", "dedup content");
         let body_bytes = serde_json::to_vec(&body).unwrap();
 
         let req1 = with_peer_uid(
@@ -1115,7 +1114,7 @@ mod tests {
         let router = build_router(state);
 
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let body = sample_body("rust.test", &format!("key is {secret}"));
+        let body = sample_body("rust::test", &format!("key is {secret}"));
         let req = with_peer_uid(
             Request::builder()
                 .method("POST")
@@ -1174,7 +1173,7 @@ mod tests {
         };
         let router = build_router(state);
 
-        let body = sample_body("rust.test", "will not land");
+        let body = sample_body("rust::test", "will not land");
         let req = with_peer_uid(
             Request::builder()
                 .method("POST")
@@ -1207,7 +1206,7 @@ mod tests {
         let router = build_router(state);
 
         // 5 KiB content guarantees the serialized line exceeds MAX_LEARNING_LINE_BYTES.
-        let body = sample_body("rust.test", &"x".repeat(5 * 1024));
+        let body = sample_body("rust::test", &"x".repeat(5 * 1024));
         let req = with_peer_uid(
             Request::builder()
                 .method("POST")
@@ -1220,6 +1219,115 @@ mod tests {
 
         let resp = router.into_service().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ── WEG-275: tightened charset, score range-check, server-stamped schema ──
+
+    /// The tightened charset rejects `.`, `-`, and `/` (all were previously
+    /// accepted as `[a-z0-9_:.-]`); now only `[a-z0-9_]` segments joined by `::`.
+    #[tokio::test]
+    async fn learn_dotted_or_slashed_skill_action_returns_400() {
+        let (_dir, root_str, router) = mock_router_with_dir();
+
+        for bad in ["rust.tokio", "rust/borrow-checker"] {
+            let body = sample_body(bad, "body");
+            let req = with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", &root_str)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            );
+            let resp = router.clone().into_service().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{bad:?} must be rejected by the tightened charset"
+            );
+        }
+    }
+
+    /// `pain` / `importance` outside `0.0..=10.0` are rejected (not clamped).
+    #[tokio::test]
+    async fn learn_score_out_of_range_returns_400() {
+        let (_dir, root_str, router) = mock_router_with_dir();
+
+        for (pain, importance) in [(-3.0, 5.0), (1e9, 5.0), (5.0, -1.0), (5.0, 11.0)] {
+            let body = serde_json::json!({
+                "schema_version": "1.0.0",
+                "id": format!("evt_{SAMPLE_ULID}"),
+                "timestamp": "2026-05-20T12:00:00Z",
+                "pain": pain,
+                "importance": importance,
+                "skill_action": "rust::test",
+                "source_harness": "test-harness",
+                "content": "out of range"
+            });
+            let req = with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", &root_str)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            );
+            let resp = router.clone().into_service().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "pain={pain} importance={importance} must be rejected"
+            );
+        }
+    }
+
+    /// The coordinator server-stamps `schema_version`: a client-supplied value
+    /// is overwritten with `RECORD_SCHEMA_VERSION` on the durable write. This
+    /// closes the HTTP client-trust gap (post_learn never re-stamped).
+    #[tokio::test]
+    async fn learn_server_stamps_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("registry.toml");
+        let root_str = dir.path().to_str().unwrap();
+        write_registry(&registry_path, root_str);
+
+        let state = make_real_state(dir.path(), registry_path);
+        let agent_root = AgentRoot::new(dir.path());
+        let router = build_router(state);
+
+        let body = serde_json::json!({
+            "schema_version": "9.9",
+            "id": format!("evt_{SAMPLE_ULID}"),
+            "timestamp": "2026-05-20T12:00:00Z",
+            "pain": 5.0,
+            "importance": 5.0,
+            "skill_action": "rust::test",
+            "source_harness": "test-harness",
+            "content": "stamp me"
+        });
+        let req = with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/learn")
+                .header("x-agent-root", root_str)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        );
+
+        let resp = router.into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            record["schema_version"].as_str().unwrap(),
+            "1.0.0",
+            "client-supplied schema_version must be server-stamped"
+        );
     }
 
     // ── WEG-69: GET /api/v1/recall tests ─────────────────────────────────────
@@ -1814,7 +1922,7 @@ mod tests {
             "timestamp": "2020-01-01T00:00:00Z",
             "pain": 5.0,
             "importance": 5.0,
-            "skill_action": "rust.regression",
+            "skill_action": "rust::regression",
             "source_harness": "test-harness",
             "content": "first-learning-pre-dream"
         });
@@ -1870,7 +1978,7 @@ mod tests {
             "timestamp": "2026-06-19T12:00:00Z",
             "pain": 5.0,
             "importance": 5.0,
-            "skill_action": "rust.regression",
+            "skill_action": "rust::regression",
             "source_harness": "test-harness",
             "content": MARKER
         });
@@ -2071,7 +2179,7 @@ mod tests {
         let router = build_router(state.clone());
 
         const MARKER: &str = "routed distinctive marker for project bee";
-        let body = sample_body("rust.routing", MARKER);
+        let body = sample_body("rust::routing", MARKER);
         let resp = router
             .into_service()
             .oneshot(with_peer_uid(
@@ -2148,7 +2256,7 @@ mod tests {
         let router = build_router(state.clone());
 
         const MARKER: &str = "boot project alpha learning marker";
-        let body = sample_body("rust.boot", MARKER);
+        let body = sample_body("rust::boot", MARKER);
         let resp = router
             .into_service()
             .oneshot(with_peer_uid(
@@ -2201,7 +2309,7 @@ mod tests {
                 "timestamp": "2026-05-20T12:00:00Z",
                 "pain": 5.0,
                 "importance": 5.0,
-                "skill_action": "rust.dedup",
+                "skill_action": "rust::dedup",
                 "source_harness": "test-harness",
                 "content": content
             });
