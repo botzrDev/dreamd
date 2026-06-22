@@ -7,7 +7,7 @@
 //! itself survives crash. Windows lands in v0.1.1 — see `docs/windows.md`.
 //!
 //! Single-writer assumption holds: every mutation in v0.1 funnels through the
-//! `MemoryCoordinator` (CLAUDE.md "Load-bearing engineering decisions" §1), so
+//! `MemoryCoordinator` (ARCHITECTURE.md "Load-bearing engineering decisions" §1), so
 //! a fixed `.tmp` neighbour name is acceptable.
 
 use std::fs::{self, File};

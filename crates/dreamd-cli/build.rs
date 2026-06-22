@@ -3,7 +3,7 @@
 //! Bakes compile-time metadata (git SHA, build date, target triple) into env
 //! vars via `vergen-gitcl` so `commands::version` can assemble version strings
 //! as `const` values. See the drift catalog entry "vergen-gitcl
-//! `fail_on_error(false)` emits sentinels" in CLAUDE.md.
+//! `fail_on_error(false)` emits sentinels" in ARCHITECTURE.md.
 
 use vergen_gitcl::{BuildBuilder, CargoBuilder, Emitter, GitclBuilder, RustcBuilder};
 

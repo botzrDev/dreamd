@@ -153,7 +153,7 @@ impl SkillAction {
 /// Central episodic event record written to `AGENT_LEARNINGS.jsonl`.
 ///
 /// Serialized as one JSON line per entry. The coordinator mints the [`EventId`]
-/// at write time; any `id` on an inbound learning is overwritten (CLAUDE.md
+/// at write time; any `id` on an inbound learning is overwritten (ARCHITECTURE.md
 /// "Load-bearing engineering decisions" section 1).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentLearning {

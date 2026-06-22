@@ -31,6 +31,7 @@ not an ambient capture product, not a Python framework SDK.
   SPEC.md                    Implementation-agnostic spec for the .agent/ convention.
   CONTRIBUTING.md            Dev setup, PR workflow, DCO sign-off requirement.
   SECURITY.md                Threat model and disclosure policy.
+  ARCHITECTURE.md            Load-bearing engineering decisions for contributors.
 
 ---
 
@@ -86,8 +87,7 @@ every request. Do not bind to TCP without `--insecure`.
 ## Schema
 
 Every persisted record carries `schema_version: "1.0.0"`. Before changing the schema,
-add a `dreamd migrate` path. `skill_action` is the dream-cycle clustering key — always
-`::` -separated, language-first (e.g. `rust::error_handling::axum_rejection`).
+add a `dreamd migrate` path (not yet implemented). `skill_action` is the dream-cycle clustering key — segments match `[a-z0-9_]`, joined by `::`, language-first (e.g. `rust::error_handling::axum_rejection`).
 
 ---
 

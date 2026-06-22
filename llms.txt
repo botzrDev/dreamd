@@ -10,6 +10,8 @@
 
 - [README](https://github.com/botzrDev/dreamd/blob/main/README.md): Overview, install, and quick start
 - [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): `.agent/` folder layout, JSON schema, salience formula, dream-cycle contract
+- [SKILL.md](https://github.com/botzrDev/dreamd/blob/main/SKILL.md): Agent memory skill — MCP tool usage, `skill_action` naming, session patterns
+- [ARCHITECTURE.md](https://github.com/botzrDev/dreamd/blob/main/ARCHITECTURE.md): Engineering invariants for the reference implementation
 - [AGENTS.md](https://github.com/botzrDev/dreamd/blob/main/AGENTS.md): Project context for coding agents working in this repo
 - [CONTRIBUTING.md](https://github.com/botzrDev/dreamd/blob/main/CONTRIBUTING.md): Dev setup and contribution guide
 - [SECURITY.md](https://github.com/botzrDev/dreamd/blob/main/SECURITY.md): Threat model and disclosure policy

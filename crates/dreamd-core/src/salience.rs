@@ -3,10 +3,10 @@
 //! Pure function consumed by the DR-203 tantivy collector, the DR-703
 //! `--explain` formatter, the DR-313 dream-cycle deterministic ranker, and
 //! the DR-309 decay-threshold check. Storing the score is intentionally
-//! avoided (CLAUDE.md decision #2): `age_days` drifts every day, which would
+//! avoided (ARCHITECTURE.md decision #2): `age_days` drifts every day, which would
 //! force a nightly re-index. Recomputing on every hit keeps the index static.
 //!
-//! Formula is locked verbatim by CLAUDE.md decision #2 and PRD FR-4.2 — do
+//! Formula is locked verbatim by ARCHITECTURE.md decision #2 and PRD FR-4.2 — do
 //! not refactor the arithmetic shape (e.g., do not factor out `/ 10.0`) so
 //! that `--explain` output reads the same as the spec.
 

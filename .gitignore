@@ -1,5 +1,4 @@
 # Local-only working notes and PM-side spec docs, not repo artifacts.
-# See CLAUDE.md "Repo conventions" for rationale.
 context/
 .claude/
 .uveddi/
@@ -13,5 +12,8 @@ docs/
 /target
 # Local task/spec assignment files, not repo artifacts
 /assignments
+# Local dev .agent/ stores (examples/ carry their own fixtures)
+/.agent/
+
 # Per-project daemon state (config.toml, state.json); local-only
 /.agent/.dreamd/

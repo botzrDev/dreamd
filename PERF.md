@@ -1,8 +1,7 @@
 # dreamd — Performance Baseline
 
 CI enforces the limits below. This file records the last measured values.
-**CI does not auto-commit this file** — Austin holds the commit gate. Update manually
-after each significant build change.
+**CI does not auto-commit this file** — update manually after each significant build change.
 
 ## Idle daemon RSS (NFR-1)
 
@@ -21,7 +20,7 @@ ticket — phys_footprint accounting is not comparable to VmRSS).
 | ------- | -------- | ----------------------- |
 | < 15 MB | see CI   | `size-gate` (CI, Linux) |
 
-## Recall latency (DR-208, not yet measured)
+## Recall latency
 
 | Metric          | Target  | Measured | Gate                         |
 | --------------- | ------- | -------- | ---------------------------- |

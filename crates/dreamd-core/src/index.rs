@@ -4,7 +4,7 @@
 //! disk, or implement `IndexHandle`. Those responsibilities belong to WEG-42
 //! (`TantivyIndexHandle`) and the indexer that lives in `dreamd-core::server`.
 //!
-//! Key invariant (CLAUDE.md decision #2): **no indexed score field.** All four
+//! Key invariant (ARCHITECTURE.md decision #2): **no indexed score field.** All four
 //! salience inputs (`pain`, `importance`, `recurrence`, `timestamp_sec`) are
 //! stored as FastFields and reweighted at query time by `collector::recall`.
 //! Do NOT add an indexed `score` field without re-reading DR-202 §4.2 and
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 
 /// On-disk index schema version. Bump only with a matching `dreamd
-/// migrate` path (see CLAUDE.md "Schema versioning is mandatory").
+/// migrate` path (see ARCHITECTURE.md "Schema versioning is mandatory").
 ///
 /// WEG-49 (DR-210) is the startup gate that compares this constant to
 /// the value carried on the per-project index manifest and refuses to
@@ -113,7 +113,7 @@ pub struct SchemaFields {
 /// Build the canonical dreamd Tantivy schema.
 ///
 /// See PRD Tech Schemas §3.1 and PRD Part IV §4 for the field list.
-/// CLAUDE.md load-bearing decision #2 binds the salience-at-query-time
+/// ARCHITECTURE.md load-bearing decision #2 binds the salience-at-query-time
 /// invariant — no indexed score field, only FastFields the collector
 /// reads at query time.
 pub fn build_schema() -> (Schema, SchemaFields) {

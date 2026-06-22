@@ -96,7 +96,7 @@ Returns 201 after `fdatasync`. The write is durable before the response arrives.
 ## `skill_action` naming rules
 
 Format: `language::domain::specific`  
-Charset: `[a-z0-9_:.-]` — **slashes are rejected and will error.**
+Charset: `[a-z0-9_]` segments joined by `::` — dots, hyphens, and slashes are rejected.
 
 ```
 rust::error_handling::axum_rejection
@@ -187,7 +187,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git. You can `cat`, `gr
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp"]
+      "args": ["dreamd-mcp@0.1.0-rc.1"]
     }
   }
 }
@@ -195,6 +195,6 @@ All files are UTF-8 plaintext. `.agent/` is checked into git. You can `cat`, `gr
 
 Add to `.mcp.json` in your project root (Claude Code) or your harness's equivalent config file.
 
-No Rust required. Node ≥ 18. Supported: Linux x86_64/aarch64, macOS x86_64/aarch64.
+No Rust required. Node ≥ 18. Prebuilt binaries: linux-x86_64, darwin-x86_64, darwin-aarch64.
 
 Repo: https://github.com/botzrDev/dreamd

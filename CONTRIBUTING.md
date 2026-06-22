@@ -29,7 +29,7 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-Install the pre-commit hook once per clone. It mirrors CI by running `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` before every commit, so formatting and clippy drift is caught locally instead of turning CI red:
+Install the git hooks once per clone. The pre-commit hook runs `cargo fmt --all -- --check` on every commit; the pre-push hook runs clippy before code reaches the remote. This catches formatting and lint drift locally instead of turning CI red:
 
 ```bash
 # Install the pre-commit hook (one-time, per clone)
@@ -45,7 +45,7 @@ CI runs the same checks across Linux, macOS, and Windows. PRs must be green befo
 3. Keep PRs focused. One concern per PR. If you find yourself bundling, split it.
 4. Update [`CHANGELOG.md`](./CHANGELOG.md) under `## [Unreleased]` for any user-visible change.
 5. Update tests. New behavior gets new tests; bug fixes get regression tests.
-6. Run `cargo fmt --check && cargo clippy -- -D warnings && cargo test` locally before pushing.
+6. Run `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test` locally before pushing.
 
 ### Commit messages
 
@@ -74,9 +74,9 @@ Some decisions in the implementation are not negotiable without re-reading the P
 - All JSONL appends go through a single coordinator with `sync_data` before returning 201.
 - Relevance is computed at query time, never indexed.
 - The dream cycle uses a write-ahead log; destructive ops are restartable.
-- The local API binds to a Unix socket with `SO_PEERCRED`-based auth on Unix, and to `127.0.0.1` with a bearer token on Windows.
+- The local API binds to a Unix socket with `SO_PEERCRED`-based auth on Unix/macOS at v0.1. Windows bearer-token auth is deferred to v0.1.1.
 
-If your PR touches any of these areas, please call it out in the description and link the relevant section of [`CLAUDE.md`](./CLAUDE.md) (or, post-v0.1, the architecture doc that supersedes it).
+If your PR touches any of these areas, please call it out in the description and link the relevant section of [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Snapshot tests (insta)
 

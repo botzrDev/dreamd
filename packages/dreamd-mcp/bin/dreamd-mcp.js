@@ -58,16 +58,14 @@ Options:
   -h, --help               print this help
 
 Environment:
-  DREAMD_BIN=<path>        run a local dreamd build instead of downloading
+  DREAMD_BIN=<path>        dev-only: run a local build (skips sha256 verification)
 `;
 
 function getPlatformTarget() {
   const { platform, arch } = process;
   if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
-  if (platform === 'linux' && arch === 'arm64') return 'linux-aarch64';
   if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
   if (platform === 'darwin' && arch === 'arm64') return 'darwin-aarch64';
-  if (platform === 'win32' && arch === 'x64') return 'windows-x86_64';
   return null;
 }
 
@@ -90,11 +88,6 @@ function sha256File(filePath) {
 }
 
 function verifyBinary(binaryPath, expectedSha256) {
-  if (expectedSha256 === '0000000000000000000000000000000000000000000000000000000000000000') {
-    // Pre-release placeholder — verification intentionally skipped.
-    // Replace with real hashes in manifest.json when release binaries are cut (v0.1 launch).
-    return;
-  }
   const actual = sha256File(binaryPath);
   if (actual !== expectedSha256) {
     process.stderr.write(`[dreamd-mcp] sha256 mismatch!\n  expected: ${expectedSha256}\n  actual:   ${actual}\n`);
@@ -167,17 +160,13 @@ async function main() {
 
   const dreamdArgs = resolveDreamdArgs(args);
 
-  // DREAMD_BIN override: skip download, exec directly
+  // DREAMD_BIN override: dev-only — skip download and sha256 verification
   if (process.env.DREAMD_BIN) {
-    const overridePath = process.env.DREAMD_BIN;
-    const target = getPlatformTarget();
-    if (target && MANIFEST.binaries[target]) {
-      const expected = MANIFEST.binaries[target].sha256;
-      if (expected !== '0000000000000000000000000000000000000000000000000000000000000000') {
-        process.stderr.write('[dreamd-mcp] WARNING: DREAMD_BIN set — skipping sha256 verification for custom build\n');
-      }
-    }
-    execFileSync(overridePath, dreamdArgs, { stdio: 'inherit' });
+    process.stderr.write(
+      '[dreamd-mcp] WARNING: DREAMD_BIN set — skipping sha256 verification. ' +
+      'Use only for local development builds.\n'
+    );
+    execFileSync(process.env.DREAMD_BIN, dreamdArgs, { stdio: 'inherit' });
     return;
   }
 
@@ -185,7 +174,7 @@ async function main() {
   if (!target) {
     process.stderr.write(
       `No prebuilt binary for ${process.platform}/${process.arch}. Install via:\n` +
-      `  cargo install dreamd\n` +
+      `  cargo install --path crates/dreamd-cli\n` +
       `Then set DREAMD_BIN=/path/to/dreamd and re-run.\n`
     );
     process.exit(1);
@@ -195,7 +184,7 @@ async function main() {
   if (!binaryEntry) {
     process.stderr.write(
       `No prebuilt binary for ${target}. Install via:\n` +
-      `  cargo install dreamd\n` +
+      `  cargo install --path crates/dreamd-cli\n` +
       `Then set DREAMD_BIN=/path/to/dreamd and re-run.\n`
     );
     process.exit(1);
