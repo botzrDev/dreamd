@@ -185,6 +185,14 @@ pub fn uninstall_project(
     let serialized =
         toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
     write_atomic(&registry_path, serialized.as_bytes())?;
+    // Defense-in-depth: registry.toml lists every registered project root.
+    // 0600 even though ~/.agent/ is already 0700. Unix-only; Windows perms are
+    // deferred to v0.1.1 / DR-121.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&registry_path, std::fs::Permissions::from_mode(0o600))?;
+    }
 
     if !quiet {
         writeln!(out, "unregistered .agent/ from ~/.agent/registry.toml")?;
@@ -216,6 +224,14 @@ fn register_project(daemon_home: &Path, project_root: &Path) -> Result<(), InitE
     let serialized =
         toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
     write_atomic(&registry_path, serialized.as_bytes())?;
+    // Defense-in-depth: registry.toml lists every registered project root.
+    // 0600 even though ~/.agent/ is already 0700. Unix-only; Windows perms are
+    // deferred to v0.1.1 / DR-121.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&registry_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

@@ -146,3 +146,37 @@ fn quiet_uninstall_produces_no_output() {
         "quiet mode must produce no output, got: {stdout:?}"
     );
 }
+
+/// M4 (DR-421): registry.toml must be 0600 after a register write.
+#[cfg(unix)]
+#[test]
+fn register_project_registry_file_has_0600_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let (daemon_home, _project) = register_project();
+    let registry = dreamd_core::DaemonHome::new(daemon_home.path()).registry_toml();
+    let mode = std::fs::metadata(&registry).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "registry perms after register should be 0600, got {:o}",
+        mode
+    );
+}
+
+/// M4 (DR-421): uninstall rewrites registry.toml via write_atomic — perms must survive.
+#[cfg(unix)]
+#[test]
+fn uninstall_project_registry_file_keeps_0600_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let (daemon_home, project) = register_project();
+    let registry = dreamd_core::DaemonHome::new(daemon_home.path()).registry_toml();
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    init::uninstall_project(project.path(), daemon_home.path(), true, &mut out, &mut err)
+        .expect("uninstall ok");
+    let mode = std::fs::metadata(&registry).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "registry perms after uninstall should stay 0600, got {:o}",
+        mode
+    );
+}
