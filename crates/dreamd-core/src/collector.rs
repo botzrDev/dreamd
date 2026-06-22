@@ -1,7 +1,7 @@
 //! WEG-43 / DR-203 — custom BM25 × salience collector.
 //!
 //! Tantivy's built-in `TopDocs` collector ranks by BM25 alone. dreamd needs
-//! BM25 _multiplied by_ a query-time salience score (CLAUDE.md decision #2,
+//! BM25 _multiplied by_ a query-time salience score (ARCHITECTURE.md decision #2,
 //! PRD FR-4.2), so the score is never indexed. This module implements the
 //! [`Collector`]/[`SegmentCollector`] pair that fetches the four salience
 //! fastfields per matching doc, reweights the score with [`salience`], and

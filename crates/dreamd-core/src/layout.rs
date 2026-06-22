@@ -109,7 +109,7 @@ impl AgentRoot {
 
     /// `<project>/.agent/episodic/AGENT_LEARNINGS.jsonl` — the canonical
     /// append-only event log. All writes go through the coordinator
-    /// (see CLAUDE.md "Load-bearing engineering decisions" §1).
+    /// (see ARCHITECTURE.md "Load-bearing engineering decisions" §1).
     pub fn episodic_jsonl(&self) -> PathBuf {
         self.episodic_dir().join("AGENT_LEARNINGS.jsonl")
     }
@@ -217,7 +217,7 @@ impl DaemonHome {
     }
 
     /// `~/.agent/dreamd.sock` — unix domain socket the daemon binds.
-    /// Permissions must be `0600` (DR-101 / CLAUDE.md §5).
+    /// Permissions must be `0600` (DR-101 / ARCHITECTURE.md §5).
     pub fn socket_path(&self) -> PathBuf {
         self.home.join("dreamd.sock")
     }

@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 # Dep-discipline policy: protocol owns the parse/validate boundary only.
 # Deps stay locked to serde + chrono. ULID minting lives in dreamd-core.
-# See CLAUDE.md drift catalog entry "dreamd-protocol deps stay locked".
+# See ARCHITECTURE.md drift catalog entry "dreamd-protocol deps stay locked".
 serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 

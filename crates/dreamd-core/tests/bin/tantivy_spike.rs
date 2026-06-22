@@ -32,7 +32,7 @@ const WRITER_HEAP_BYTES: usize = 50_000_000;
 const PLACEHOLDER_EVENT_ID: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 // ---------------------------------------------------------------------------
-// Schema (matches CLAUDE.md "Load-bearing engineering decisions" §2)
+// Schema (matches ARCHITECTURE.md "Load-bearing engineering decisions" §2)
 // ---------------------------------------------------------------------------
 
 /// Local schema field cache matching the production `SchemaFields` layout in

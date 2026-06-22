@@ -3,7 +3,7 @@
 Top-3 results by `final_score = bm25 * salience` for the two demo
 queries, on the index produced by `dreamd-core::index::build_schema`
 (content field = `TEXT | STORED`, default tokenizer — no stemming).
-Salience uses the formula from CLAUDE.md decision #2:
+Salience uses the formula from ARCHITECTURE.md decision #2:
 
 ```
 salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + recurrence))

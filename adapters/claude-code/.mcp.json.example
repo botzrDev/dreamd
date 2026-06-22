@@ -2,7 +2,7 @@
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp"]
+      "args": ["dreamd-mcp@0.1.0-rc.1"]
     }
   }
 }

@@ -8,9 +8,12 @@ Wires `dreamd-mcp` as a stdio MCP server that Cursor spawns automatically, and a
 
 Start `dreamd watch` in your project before opening Cursor. The daemon handles back-to-back searches correctly and keeps the index fresh. Without it, the MCP server runs in Phase 1 in-process mode, which works for single queries but can fail on rapid consecutive `search_nodes` calls.
 
+If you point **several agents at the same project simultaneously**, start one shared daemon per machine so every agent routes through a single serialized writer:
+
 ```bash
 cd ~/your-project
 dreamd watch &
+# or: npx dreamd-mcp@0.1.0-rc.1 watch &
 ```
 
 Then open Cursor. The MCP server detects the running daemon automatically and routes through it.
@@ -19,18 +22,7 @@ Then open Cursor. The MCP server detects the running daemon automatically and ro
 
 **Project-level (recommended):** paste the contents of `.mcp.json.example` into your project's `.cursor/mcp.json` (or merge the `mcpServers` block into an existing one). Cursor picks this up automatically on next session start.
 
-**Global config (`~/.cursor/mcp.json`):** add `--project-root` so the MCP server knows which project's `.agent/` to use regardless of the CWD Cursor sets at launch:
-
-```json
-{
-  "mcpServers": {
-    "dreamd": {
-      "command": "npx",
-      "args": ["-y", "dreamd-mcp", "--project-root", "/absolute/path/to/your-project"]
-    }
-  }
-}
-```
+**Global config (`~/.cursor/mcp.json`):** use `.mcp.json.global.example` — it adds `--project-root` so the MCP server knows which project's `.agent/` to use regardless of the CWD Cursor sets at launch.
 
 Alternatively, add it via Cursor Settings → Tools & Integrations.
 
@@ -42,6 +34,6 @@ Copy `.cursor/rules/dreamd-recall.mdc` into your project's `.cursor/rules/` dire
 
 Restart Cursor or open a new agent session to confirm the `dreamd` server appears in the MCP tools list with `append_node` and `search_nodes` tools visible.
 
-## Companion skill (Claude Code)
+## Companion skill
 
-If you also use Claude Code on this project, the equivalent skill is at `.claude/skills/dreamd-recall/SKILL.md`. Both adapters write to the same `.agent/` folder — learnings are shared across harnesses.
+Usage conventions for `append_node`, `search_nodes`, `skill_action` naming, and session activation are in [`../../SKILL.md`](../../SKILL.md). Both adapters write to the same `.agent/` folder — learnings are shared across harnesses.

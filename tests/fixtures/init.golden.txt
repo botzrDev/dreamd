@@ -6,12 +6,8 @@ initialized .agent/.dreamd/state.json
 appended .gitignore (1 entry: .agent/.dreamd/)
 registered .agent/ in ~/.agent/registry.toml
 
-dreamd: first run — When LLM mode is enabled, the content
-of AGENT_LEARNINGS.jsonl entries above the relevance
-threshold is sent to the configured LLM provider. No data
-is sent in --no-llm mode. Users working with sensitive
-codebases should use --no-llm or a local model via Ollama.
-The personal/ layer is excluded from LLM calls unless
---share-personal is passed.
+dreamd: first run — v0.1 makes no network calls. All memory
+operations are local-only on your machine. LLM-assisted dream
+cycles and cloud providers are planned for v0.1.1.
 See https://github.com/botzrDev/dreamd/blob/main/SECURITY.md
 for details.

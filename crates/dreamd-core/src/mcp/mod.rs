@@ -32,9 +32,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::layout::DaemonHome;
 use crate::privacy::DR413_DISCLOSURE;
+use crate::redaction::redact;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
 
@@ -291,7 +293,10 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<AppendNodeParams>,
     ) -> Result<CallToolResult, McpError> {
         match &self.backend {
-            Backend::Local { coordinator_tx, .. } => {
+            Backend::Local {
+                agent_root,
+                coordinator_tx,
+            } => {
                 // Validate skill_action via the single SkillAction parser
                 // (same rules as post_learn in server/http.rs).
                 let skill_action = SkillAction::parse(&p.skill_action)
@@ -315,6 +320,11 @@ impl MemoryMcpServer {
                     }
                 }
 
+                let config = load_config(agent_root.project_root()).map_err(|e| {
+                    McpError::internal_error(format!("config load failed: {e}"), None)
+                })?;
+                let content = redact(&p.content, config.redaction);
+
                 let timestamp = chrono::Utc::now();
                 let learning = AgentLearning {
                     schema_version: RECORD_SCHEMA_VERSION.to_string(),
@@ -325,7 +335,7 @@ impl MemoryMcpServer {
                     pinned: false,
                     skill_action: skill_action.into_string(),
                     source_harness: p.source_harness,
-                    content: p.content,
+                    content,
                 };
 
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -850,6 +860,45 @@ mod tests {
             parsed["deduplicated"],
             serde_json::json!(false),
             "first append must not be deduplicated"
+        );
+    }
+
+    /// MCP Phase 1 `append_node` must redact secrets before persist (mirrors
+    /// `server/http.rs::learn_content_redacted`).
+    #[tokio::test]
+    async fn append_node_content_redacted() {
+        use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let supervisor =
+            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let server = MemoryMcpServer::with_coordinator(root.clone(), supervisor.sender());
+
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        server
+            .append_node(Parameters(AppendNodeParams {
+                content: format!("key is {secret}"),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust::test".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok");
+
+        let jsonl = std::fs::read_to_string(root.episodic_jsonl()).expect("read jsonl");
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("one line")).expect("parse record");
+        assert!(
+            !record["content"].as_str().unwrap().contains(secret),
+            "secret must not appear on disk after redaction"
+        );
+        assert!(
+            record["content"].as_str().unwrap().contains("[REDACTED]"),
+            "REDACTED marker must be present"
         );
     }
 

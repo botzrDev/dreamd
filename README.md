@@ -37,14 +37,14 @@ No re-explaining. No re-pasting. No "as I mentioned before."
 |---|---|
 | A portable memory format (`.agent/`) checked into your repo | A vector database |
 | A reference MCP server for reading and writing it | A knowledge graph engine |
-| Local-first by default -- zero network calls without `--llm` | A hosted SaaS |
+| Local-first by default — zero network calls in v0.1 | A hosted SaaS |
 | One source of truth across every coding agent you use | A replacement for `AGENTS.md` or `SKILL.md` |
 
 If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteretes/cognee). If you need a single-file portable memory capsule, use [Memvid](https://github.com/Olow304/memvid). dreamd does the one thing they don't: makes your memory follow you between coding agents.
 
 ## Status
 
-**v0.1 in active development — targeting 2026-07-07.** Sprint 3 in progress; Sprints 1–2 shipped. The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path lands ahead of v0.1. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+**v0.1 in active development — targeting 2026-07-07.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.1`. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
 
 ⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
@@ -60,9 +60,7 @@ Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
 
 _Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
 
-> **Read-after-write visibility:** up to `commit_cadence_seconds` (default 5s). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
-
-Users who need tighter freshness can lower the commit cadence at the cost of higher index churn. User-facing config lands in v0.1.1; the cadence is a constructor argument today.
+> **Read-after-write visibility:** up to 5 seconds (the index commit cadence). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected. The cadence is fixed at 5 seconds in v0.1 and is not user-configurable.
 
 ## Getting started
 
@@ -75,7 +73,7 @@ git clone https://github.com/botzrDev/dreamd.git
 cd dreamd
 cargo install --path crates/dreamd-cli
 
-# Then in any project:
+# Then in a project with a repo root sentinel (.git, Cargo.toml, package.json, or pyproject.toml):
 cd ~/your-project
 dreamd init      # scaffold .agent/
 dreamd mcp       # speak MCP over stdio -- point Claude Code, Cursor, etc. at this
@@ -85,17 +83,15 @@ Requires Rust stable. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full de
 
 ### v0.1 install path
 
-*Landing ahead of 2026-07-07.*
-
 ```bash
-# scaffold .agent/ into the current project
-npx dreamd-mcp init
+# scaffold .agent/ into the current project (requires a repo root sentinel)
+npx dreamd-mcp@0.1.0-rc.1 init
 
 # point Claude Code, Cursor, or any MCP-aware harness at the server
-npx dreamd-mcp
+npx dreamd-mcp@0.1.0-rc.1
 ```
 
-Distribution: npm (primary). Cargo and Homebrew paths arrive in v0.1.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
+`dreamd-mcp@0.1.0-rc.1` is on npm. Cargo and Homebrew paths arrive in v0.1.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
 
 ### Running
 
@@ -140,7 +136,7 @@ To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTR
 | Layer | Status |
 |---|---|
 | `SPEC.md` v0.1-draft | Drafted |
-| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress — Sprint 3 of 6 |
+| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
 | MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.1` on npm |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Not started |

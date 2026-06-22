@@ -19,10 +19,14 @@ When you discover something worth remembering, call `append_node` with:
 - `client_dedup_key` *(optional)*: first 60 chars of content, lowercased, spaces → underscores
 
 ## Session activation
-At session start, call `GET /api/v1/preferences` over the Unix socket once:
+At session start, call `search_nodes` with the current task description as the query (preferred — works with or without the daemon).
+
+If the daemon is running and you need user preferences from `personal/`, you may call `GET /api/v1/preferences` over the Unix socket with the required `X-Agent-Root` header:
 
 ```
-curl --unix-socket ~/.agent/dreamd.sock http://localhost/api/v1/preferences
+curl --unix-socket ~/.agent/dreamd.sock \
+  -H "X-Agent-Root: /absolute/path/to/your-project/.agent" \
+  http://localhost/api/v1/preferences
 ```
 
 Read the `body` field. If non-empty, use it to calibrate `pain` and `importance` values. If the daemon is not running, skip silently.
