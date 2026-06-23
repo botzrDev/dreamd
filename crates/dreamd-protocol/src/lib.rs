@@ -1,3 +1,12 @@
+//! Shared serde types for the dreamd HTTP API and on-disk JSONL records.
+//!
+//! This crate is the **parse/validate boundary** for wire and disk shapes:
+//! [`EventId`], [`SkillAction`], and [`AgentLearning`]. It intentionally
+//! depends only on `serde` and `chrono` — ULID minting and coordinator logic
+//! live in `dreamd-core`.
+
+#![deny(missing_docs)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -17,7 +26,7 @@ const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventId(String);
 
-/// Reason an `EventId::parse` call rejected its input.
+/// Reason an [`EventId::parse`] call rejected its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventIdParseError {
     reason: &'static str,
@@ -53,6 +62,7 @@ impl EventId {
         Ok(Self(s.to_owned()))
     }
 
+    /// Borrow the canonical `evt_<ULID>` string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -92,7 +102,7 @@ pub const RECORD_SCHEMA_VERSION: &str = "1.0.0";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillAction(String);
 
-/// Reason a `SkillAction::parse` call rejected its input.
+/// Reason a [`SkillAction::parse`] call rejected its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActionParseError {
     reason: &'static str,
@@ -141,10 +151,12 @@ impl SkillAction {
         Ok(Self(normalised))
     }
 
+    /// Borrow the validated, normalized clustering key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume and return the inner `String` for storage on [`AgentLearning`].
     pub fn into_string(self) -> String {
         self.0
     }
@@ -153,12 +165,11 @@ impl SkillAction {
 /// Central episodic event record written to `AGENT_LEARNINGS.jsonl`.
 ///
 /// Serialized as one JSON line per entry. The coordinator mints the [`EventId`]
-/// at write time; any `id` on an inbound learning is overwritten (ARCHITECTURE.md
-/// "Load-bearing engineering decisions" section 1).
+/// at write time; any `id` on an inbound learning is overwritten.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentLearning {
     /// Forward-compatible schema tag. Always `"1.0.0"` in v0.1; bump requires
-    /// a `dreamd migrate` path (DR-009).
+    /// a `dreamd migrate` path.
     pub schema_version: String,
     /// Daemon-assigned event identifier (`evt_` + 26-char ULID). Overwritten
     /// by the coordinator on every append; callers may pass a placeholder.
@@ -169,23 +180,19 @@ pub struct AgentLearning {
     /// Higher values surface the learning more aggressively in recall.
     pub pain: f32,
     /// 0.0..=10.0 estimated long-term relevance. Feeds the salience formula
-    /// together with `pain` and age decay (SPEC.md section 4).
+    /// together with `pain` and age decay.
     pub importance: f32,
-    /// Sticky flag: pinned learnings survive dream-cycle pruning. Reserved;
-    /// always `false` in v0.1. Forward-compat slot for v0.2.
+    /// Sticky flag: pinned learnings survive dream-cycle pruning.
     #[serde(default)]
     pub pinned: bool,
-    /// Validated clustering key (e.g., `"rust::borrow_checker"`). The dream
-    /// cycle splits this on `::` to sub-cluster when consolidating into
-    /// `LESSONS.md`. Validated at ingress via [`SkillAction`]; stays `String`
-    /// here so existing dotted records read back without error.
+    /// Validated clustering key (e.g., `"rust::borrow_checker"`). Validated at
+    /// ingress via [`SkillAction`]; stored as `String` for backward compatibility.
     pub skill_action: String,
     /// Which AI harness produced this learning (e.g., `"claude-code"`,
-    /// `"cursor"`, `"opencode"`). Used for provenance tracking and
-    /// cross-harness dedup.
+    /// `"cursor"`, `"cline"`). Used for provenance and cross-harness dedup.
     pub source_harness: String,
     /// Free-text body of the learning. Subject to the 4 KiB per-line hard cap
-    /// enforced by the coordinator (`MAX_LEARNING_LINE_BYTES`).
+    /// enforced by the coordinator.
     pub content: String,
 }
 
@@ -201,7 +208,6 @@ mod tests {
         let raw = format!("evt_{SAMPLE_ULID}");
         let id = EventId::parse(&raw).expect("parse");
         assert_eq!(id.as_str(), raw);
-        // JSON round-trip exercises both Serialize and Deserialize.
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{raw}\""));
         let back: EventId = serde_json::from_str(&json).unwrap();
@@ -221,7 +227,6 @@ mod tests {
 
     #[test]
     fn event_id_rejects_non_crockford_chars() {
-        // Lowercase, plus I/L/O/U are not in the alphabet.
         assert!(EventId::parse("evt_01arz3ndektsv4rrffq69g5fav").is_err());
         assert!(EventId::parse("evt_IIIIIIIIIIIIIIIIIIIIIIIIII").is_err());
     }

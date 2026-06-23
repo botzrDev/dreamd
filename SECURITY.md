@@ -36,14 +36,35 @@ At v0.1, the daemon enforces:
 
 - **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected.
 
-Additional enforcement landing in v0.1.1:
+**Planned for v0.1.1** (not in v0.1 binaries):
 
-- **Windows:** binds to `127.0.0.1` on an ephemeral port and requires a bearer token written to `~/.agent/auth.json` protected by Windows ACLs.
-- **TCP binding to non-localhost is refused unless `--insecure` is passed**, which is intended only for ephemeral test environments.
-- **The `personal/` layer is excluded from any network call (LLM or otherwise) unless the user opts in with `--share-personal`.**
-- **LLM cost cap.** Token usage is estimated before each dream-cycle call; if the estimate exceeds `$0.10` the cycle aborts and falls back to deterministic mode. A `--no-llm` mode always works without network.
+- **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
+- **TCP binding to non-localhost** refused unless `--insecure` is passed (test environments only).
+- **`personal/` LLM exclusion** unless `--share-personal` is passed.
+- **LLM cost cap** ($0.10/cycle) with deterministic fallback.
 
-An expanded threat model — lesson-injection analysis, privacy disclosure, and untrusted-input caps — is planned for a future release.
+### Same-user-cross-project surface (accepted for v0.1)
+
+Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS, any process running as the user can target any registered project. Peer-credential auth verifies **same user**, not same project. If code runs as the user, it can already read project files directly. v0.2 may add per-project tokens or per-project sockets.
+
+## Lesson-injection surface
+
+`LESSONS.md` and `PREFERENCES.md` are plain files on disk. Any process running as the user can write to them and influence agent recall — the standard agent-memory threat model, not a dreamd-specific bypass.
+
+- dreamd does not filter "malicious" lesson content (unsolved problem; false confidence).
+- Users should treat `.agent/` like shell rc files: review with `git diff` if the repo is committed.
+- The redaction scrubber (below) targets **secret leakage**, not prompt injection.
+
+## Privacy and redaction (v0.1)
+
+**v0.1 makes no network calls.** LLM-assisted dream cycles are v0.1.1. No `AGENT_LEARNINGS.jsonl` content leaves the device in v0.1.
+
+On every `POST /api/v1/learn`, a pattern scrubber runs **before persistence** (on by default; disable with `redaction = false` in config). It redacts AWS keys, bearer tokens, `sk-…` patterns, and common `*_KEY=` assignments — logging `redaction_hits` but not rejecting the request.
+
+## Untrusted-input caps
+
+- **`PREFERENCES.md`:** 16 KB read cap; responses may include `X-Dreamd-Truncated: true` and `X-Dreamd-Original-Size`.
+- Caps address DoS and token cost, not injection.
 
 ## Environment variables
 

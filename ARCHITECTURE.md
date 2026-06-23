@@ -4,6 +4,69 @@ Engineering invariants for the reference implementation. Read this before changi
 
 For the on-disk memory contract (folder layout, JSON schema, scoring formula), see [`SPEC.md`](./SPEC.md). For the threat model, see [`SECURITY.md`](./SECURITY.md).
 
+## System context
+
+```mermaid
+flowchart LR
+    subgraph agents [AI coding agents]
+        CC[Claude Code]
+        CU[Cursor]
+        CL[Cline]
+    end
+
+    subgraph dreamd [dreamd]
+        MCP[MCP server\nsearch_nodes / append_node]
+        DAE[daemon\ndreamd watch]
+    end
+
+    subgraph fs [Filesystem]
+        AG[".agent/\n(JSONL + LESSONS.md)"]
+        HOME["~/.agent/\nregistry + socket"]
+    end
+
+    CC & CU & CL -->|stdio MCP| MCP
+    MCP -->|HTTP over UDS| DAE
+    MCP -.->|Phase 1 fallback| AG
+    DAE --> AG
+    DAE --> HOME
+```
+
+## Container diagram
+
+```mermaid
+flowchart TB
+    subgraph cli [dreamd-cli]
+        INIT[init]
+        WATCH[watch]
+        DREAM[dream]
+        MCPCLI[mcp]
+    end
+
+    subgraph core [dreamd-core]
+        COORD[MemoryCoordinator]
+        HTTP[HTTP /api/v1]
+        IDX[Tantivy index]
+        WAL[WAL + dream cycle]
+        MCPSRV[MCP tools]
+    end
+
+    subgraph proto [dreamd-protocol]
+        TYPES[AgentLearning / EventId]
+    end
+
+    subgraph shim [dreamd-mcp npm]
+        NPX[npx shim]
+    end
+
+    NPX --> cli
+    cli --> core
+    core --> proto
+    HTTP --> COORD
+    MCPSRV --> HTTP
+    COORD --> IDX
+    WAL --> COORD
+```
+
 ## Crate layout
 
 | Crate | Role |
@@ -14,6 +77,40 @@ For the on-disk memory contract (folder layout, JSON schema, scoring formula), s
 | `packages/dreamd-mcp` | Node.js shim (`npx dreamd-mcp`) that downloads the prebuilt binary. |
 
 State management is an **actor model**: a single `MemoryCoordinator` task owns mutable state. Do not introduce parallel writers to JSONL or the index — every mutation goes through the coordinator. `&mut self` on the run loop is the exclusivity guarantee (no `Mutex<File>` inside the actor).
+
+## Data flow: `append_node` → disk + index
+
+Tracing one learning from MCP ingress to durable storage:
+
+| Step | Module | What happens |
+|---|---|---|
+| 1 | `mcp/mod.rs` | `append_node` tool receives params; builds `AgentLearning` |
+| 2 | `mcp/mod.rs` | Phase 2: HTTP `POST /learn` over UDS; Phase 1: local coordinator |
+| 3 | `server/http.rs` | `post_learn` — validate `skill_action`, redact, dispatch |
+| 4 | `coordinator.rs` | Mint `EventId`, stamp schema, `write_all` + `sync_data` to JSONL |
+| 5 | `server/tantivy_handle.rs` | Indexer actor appends document; 5 s commit cadence |
+| 6 | `episodic/AGENT_LEARNINGS.jsonl` | Durable line on disk (source of truth) |
+
+Recall path: `search_nodes` → `GET /recall` → `recall()` + `SalienceCollector` (`salience.rs`, `collector.rs`) → ranked JSON.
+
+## Search sequence
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant MCP as MCP server
+    participant HTTP as HTTP /api/v1
+    participant Coord as Coordinator
+    participant Tan as Tantivy
+
+    Agent->>MCP: search_nodes(query, k)
+    MCP->>HTTP: GET /recall?q=&k=
+    HTTP->>Tan: BM25 search
+    Tan-->>HTTP: candidate doc IDs
+    HTTP->>HTTP: salience per hit
+    HTTP-->>MCP: results JSON
+    MCP-->>Agent: ranked learnings
+```
 
 ## Load-bearing decisions
 
@@ -51,6 +148,23 @@ Indexing is incremental (5-second commit cadence), never a nightly rebuild.
 
 Before any destructive op (replacing `LESSONS.md`, pruning JSONL), write `dream_in_progress.wal` with `WalIntent` entries (`ReplaceSemanticMemory`, `PruneEpisodicMemory`, `Commit`). On startup, if the WAL exists, run compensating cleanup before serving traffic. `.agent/` must be either pre- or post-cycle, never mid-cycle.
 
+```mermaid
+sequenceDiagram
+    participant CLI as dreamd dream / POST /dream
+    participant WAL as dream_in_progress.wal
+    participant Cycle as consolidation + decay
+    participant FS as LESSONS.md + JSONL
+
+    CLI->>WAL: begin_cycle (in_progress)
+    CLI->>Cycle: cluster + promote
+    Cycle->>WAL: append ReplaceSemanticMemory intent
+    Cycle->>FS: atomic rename LESSONS.md
+    Cycle->>WAL: append PruneEpisodicMemory intent
+    Cycle->>FS: atomic rename JSONL
+    Cycle->>WAL: Commit
+    WAL->>WAL: delete WAL, mark complete
+```
+
 ### 4. Local API security
 
 - **Unix (v0.1):** HTTP binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request validates the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); mismatched UIDs are rejected.
@@ -73,17 +187,16 @@ Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` 
 
 ## HTTP API
 
-All endpoints are JSON over `/api/v1`:
+All endpoints are JSON over `/api/v1` on the Unix domain socket. Full reference: [`docs/http-api.md`](./docs/http-api.md).
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/learn` | Append episodic event; 201 after `fdatasync` |
+| `POST` | `/learn` | Append episodic event; 201 after `sync_data` |
 | `GET` | `/recall?q=&k=` | BM25 × salience search |
-| `POST` | `/dream` | Manual cycle trigger (202, async) |
+| `POST` | `/dream` | Synchronous cycle; 200 `{"status":"ok"}` |
 | `GET` | `/preferences` | User preferences from `personal/` |
-| `POST` | `/migrate` | Schema migration (not yet implemented) |
 
-Requests that target a project store must include the `X-Agent-Root` header with the canonical path to the project's `.agent/` directory.
+Requests that target a project store must include the `X-Agent-Root` header with the **canonical project root path** (parent of `.agent/`, registered in `~/.agent/registry.toml`).
 
 ## MCP topology
 
@@ -102,3 +215,16 @@ For multiple agents writing to the same project simultaneously, run one `dreamd 
 | Recall P99 cold at 10k | < 50 ms |
 
 Run `cargo bench -p dreamd-core` when changing index, scoring, or hot-path code.
+
+## Source map (common edits)
+
+| Concern | Path |
+|---|---|
+| Coordinator / JSONL | `crates/dreamd-core/src/coordinator.rs` |
+| HTTP handlers | `crates/dreamd-core/src/server/http.rs` |
+| Daemon boot | `crates/dreamd-core/src/server/watch.rs` |
+| MCP tools | `crates/dreamd-core/src/mcp/mod.rs` |
+| Dream cycle | `crates/dreamd-core/src/consolidation.rs`, `decay.rs`, `wal.rs` |
+| Salience | `crates/dreamd-core/src/salience.rs` |
+| Wire types | `crates/dreamd-protocol/src/lib.rs` |
+| CLI | `crates/dreamd-cli/src/cli.rs` |

@@ -1,4 +1,23 @@
-//! `run_watch` — foreground daemon entry point (WEG-88 / DR-702).
+//! Foreground daemon: `dreamd watch` (WEG-88 / DR-702).
+//!
+//! ## Actor topology
+//!
+//! ```text
+//! run_watch
+//!   ├─ Supervisor (boot project) ──► MemoryCoordinator actor
+//!   │     └─ indexer_tx ──► TantivyIndexHandle (pinned "primary")
+//!   ├─ AppState.supervisor_map ──► lazy per-project Supervisors (WEG-272)
+//!   ├─ AppState.index_map ──► lazy Tantivy handles for non-boot projects
+//!   └─ serve_uds ──► HTTP router (peer UID + X-Agent-Root middleware)
+//! ```
+//!
+//! The **primary handle** is handed off at boot so the coordinator's live appends
+//! and recall/dream read the same Tantivy index (one `IndexWriter` per dir).
+//!
+//! ## Signal handling
+//!
+//! Blocks until SIGINT (`ctrl_c`) or SIGTERM, then unlinks `~/.agent/dreamd.sock`.
+//! Coordinator drain on shutdown is best-effort in v0.1.
 
 #![cfg(unix)]
 

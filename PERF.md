@@ -24,8 +24,8 @@ ticket — phys_footprint accounting is not comparable to VmRSS).
 
 | Metric          | Target  | Measured | Gate                         |
 | --------------- | ------- | -------- | ---------------------------- |
-| P50 warm at 10k | < 5 ms  | TBD      | `cargo bench -p dreamd-core` |
-| P99 cold at 10k | < 50 ms | TBD      | `cargo bench -p dreamd-core` |
+| P50 warm at 10k | < 5 ms  | ~0.31 ms (see README) | `cargo bench -p dreamd-core` |
+| P99 cold at 10k | < 50 ms | TBD                   | `cargo bench -p dreamd-core` |
 
 ---
 

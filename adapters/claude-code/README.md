@@ -1,30 +1,60 @@
 # dreamd — Claude Code adapter
 
-## What this does
+Quickstart for wiring `dreamd-mcp` into Claude Code.
 
-Wires `dreamd-mcp` as a stdio MCP server that Claude Code spawns automatically.
+## 1. Init the project store
 
-## Project-level config (recommended)
+```bash
+cd ~/your-project
+npx dreamd-mcp@0.1.0-rc.1 init
+```
 
-For per-project memory, paste the contents of `.mcp.json.example` into `.mcp.json` at your project root. Claude Code picks this up automatically on next session start.
+## 2. MCP config
 
-## User-level config
+**Project-level (recommended):** copy [`.mcp.json.example`](./.mcp.json.example) to `.mcp.json` at your project root.
 
-For memory shared across all projects, paste the `mcpServers` block into `~/.claude/settings.json`. Create the file if it doesn't exist; merge into the existing `mcpServers` object if it does.
+**User-level (all projects):** merge the `mcpServers` block into `~/.claude/settings.json`.
 
-## Multi-agent setups
+```json
+{
+  "mcpServers": {
+    "dreamd": {
+      "command": "npx",
+      "args": ["dreamd-mcp@0.1.0-rc.1"]
+    }
+  }
+}
+```
 
-For a single agent — or several agents used one at a time — the standalone MCP server is safe. If you point **several agents at the same project simultaneously**, start one shared daemon per machine:
+## 3. Start the daemon (multi-agent setups)
+
+For a single agent, the in-process MCP server is sufficient. If **several agents write to the same project simultaneously**, start one shared daemon:
 
 ```bash
 dreamd watch
 # or: npx dreamd-mcp@0.1.0-rc.1 watch
 ```
 
-## Reload
+## 4. Reload Claude Code
 
-Restart Claude Code or run `/mcp` to confirm the `dreamd` server appears as connected.
+Restart Claude Code or run `/mcp`. Confirm `dreamd` appears connected with `search_nodes` and `append_node`.
 
-## Companion skill
+## 5. Verify
 
-Usage conventions for `append_node`, `search_nodes`, `skill_action` naming, required fields, and session activation are in [`../../SKILL.md`](../../SKILL.md).
+In Claude Code, ask:
+
+> Search dreamd memory for anything about error handling in this project.
+
+**Expect:** The agent calls `search_nodes` and returns ranked results (or an empty list on a fresh store).
+
+To log a learning:
+
+> Remember that we use `thiserror` for library errors and `anyhow` only in binaries.
+
+**Expect:** `append_node` returns `{"id":"evt_…","timestamp":"…","deduplicated":false}` and a new line in `.agent/episodic/AGENT_LEARNINGS.jsonl`.
+
+## Companion docs
+
+- Tool naming and `skill_action` conventions: [`SKILL.md`](../../SKILL.md)
+- Full tutorial: [`GUIDE.md`](../../GUIDE.md)
+- Cursor adapter (same `.agent/` folder): [`../cursor/README.md`](../cursor/README.md)

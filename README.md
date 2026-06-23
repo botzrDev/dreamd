@@ -5,48 +5,86 @@
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
 [![Status](https://img.shields.io/badge/v0.1-in%20progress-orange.svg)](#v01-progress)
 
-**Same memory in every IDE.**
+**Same memory in every IDE.** Local-first memory layer for AI coding agents — one `.agent/` folder, every harness.
 
-dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a .agent/ folder in your repo. Every coding agent you use reads and writes to it.
+---
 
-Every coding agent ships its own memory format. dreamd is what they could share.
+## Install
 
-AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+### npm (recommended)
 
-## The moment it earns its name
-
-```text
-~/project $ npx dreamd-mcp init
-
-# In Claude Code, Tuesday afternoon:
-you   ▸ axum keeps blowing up when I unwrap in route handlers
-claude▸ filed under rust::error_handling::axum_rejection
-
-# In Cursor, Friday morning, fresh session:
-you   ▸ why is this build failing?
-cursor▸ You're unwrapping in a route handler. dreamd has a
-        lesson from Tuesday -- axum needs IntoResponse on
-        custom Error types. Try `?` and a typed error.
+```bash
+npx dreamd-mcp@0.1.0-rc.1 init    # scaffold .agent/ in your project
+npx dreamd-mcp@0.1.0-rc.1         # MCP server (stdio)
 ```
 
-No re-explaining. No re-pasting. No "as I mentioned before."
+Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
-## What dreamd is -- and isn't
+### Cargo
 
-| dreamd is | dreamd isn't |
-|---|---|
-| A portable memory format (`.agent/`) checked into your repo | A vector database |
-| A reference MCP server for reading and writing it | A knowledge graph engine |
-| Local-first by default — zero network calls in v0.1 | A hosted SaaS |
-| One source of truth across every coding agent you use | A replacement for `AGENTS.md` or `SKILL.md` |
+```bash
+cargo install --path crates/dreamd-cli   # from a clone
+# or, when published: cargo install dreamd
+```
 
-If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteretes/cognee). If you need a single-file portable memory capsule, use [Memvid](https://github.com/Olow304/memvid). dreamd does the one thing they don't: makes your memory follow you between coding agents.
+### From source
 
-## Status
+```bash
+git clone https://github.com/botzrDev/dreamd.git
+cd dreamd
+cargo install --path crates/dreamd-cli
+```
 
-**v0.1 in active development — targeting 2026-07-07.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`, plus the HTTP API (`POST /api/v1/learn`, `GET /api/v1/recall`, `POST /api/v1/dream`, `GET /api/v1/preferences`) on a Unix domain socket. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.1`. Linux and macOS. See [`SPEC.md`](./SPEC.md) for the conformance contract and [`CONTRIBUTING.md`](./CONTRIBUTING.md) to propose changes.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 
-⭐ **Star and Watch this repo** to be notified when v0.1 lands.
+---
+
+## Quick start (< 30 seconds)
+
+```bash
+cd ~/your-project          # must contain a repo root sentinel
+npx dreamd-mcp@0.1.0-rc.1 init
+
+# Terminal 1 — shared daemon (recommended for multiple agents)
+dreamd watch
+
+# Terminal 2 — point your harness at the MCP server
+npx dreamd-mcp@0.1.0-rc.1
+```
+
+In Claude Code, Cursor, or Cline: ask the agent to search memory for something you just learned. It calls `search_nodes` over MCP and recalls prior context.
+
+Verify the store:
+
+```bash
+cat .agent/episodic/AGENT_LEARNINGS.jsonl
+dreamd doctor
+```
+
+Adapter-specific setup: [adapters/claude-code](./adapters/claude-code/README.md) · [adapters/cursor](./adapters/cursor/README.md)
+
+---
+
+## What dreamd writes
+
+| Location | Contents | Commit? |
+|---|---|---|
+| `<project>/.agent/` | Episodic JSONL, semantic lessons, personal prefs | **Yes** — this is your shared memory |
+| `<project>/.agent/.dreamd/` | Local index, daemon state, config template | No — gitignored by `init` |
+| `~/.agent/registry.toml` | Which projects have a store | No |
+| `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
+
+`dreamd init` is idempotent. To unregister a project: `dreamd init --uninstall-project`.
+
+---
+
+## Architecture (one paragraph)
+
+Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence). The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
+
+Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md)
+
+---
 
 ## Performance
 
@@ -60,94 +98,58 @@ Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
 
 _Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
 
-> **Read-after-write visibility:** up to 5 seconds (the index commit cadence). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected. The cadence is fixed at 5 seconds in v0.1 and is not user-configurable.
+> **Read-after-write visibility:** up to 5 seconds (the index commit cadence). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
 
-## Getting started
+---
 
-### Try it today (from source)
+## Documentation
 
-While v0.1 finishes baking, build the daemon locally:
+| Doc | What |
+|---|---|
+| [GUIDE.md](./GUIDE.md) | 20-minute tutorial walkthrough |
+| [docs/README.md](./docs/README.md) | Full documentation index |
+| [docs/http-api.md](./docs/http-api.md) | REST API over Unix socket |
+| [docs/configuration.md](./docs/configuration.md) | TOML config and env vars |
+| [docs/troubleshooting.md](./docs/troubleshooting.md) | FAQ — common failures |
+| [docs/glossary.md](./docs/glossary.md) | Domain terms |
+| [docs/ci.md](./docs/ci.md) | CI pipeline and local reproduction |
+| [SPEC.md](./SPEC.md) | On-disk contract |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Engineering decisions |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup and RFC process |
+| [SECURITY.md](./SECURITY.md) | Threat model |
+| [docs/marketing.md](./docs/marketing.md) | Product story and positioning |
 
-```bash
-git clone https://github.com/botzrDev/dreamd.git
-cd dreamd
-cargo install --path crates/dreamd-cli
+---
 
-# Then in a project with a repo root sentinel (.git, Cargo.toml, package.json, or pyproject.toml):
-cd ~/your-project
-dreamd init      # scaffold .agent/
-dreamd mcp       # speak MCP over stdio -- point Claude Code, Cursor, etc. at this
-```
+## Status
 
-Requires Rust stable. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full dev setup.
+**v0.1 in active development — targeting 2026-07-07.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.1`. Linux and macOS.
 
-### v0.1 install path
+⭐ **Star and Watch this repo** to be notified when v0.1 lands.
 
-```bash
-# scaffold .agent/ into the current project (requires a repo root sentinel)
-npx dreamd-mcp@0.1.0-rc.1 init
+### v0.1 progress
 
-# point Claude Code, Cursor, or any MCP-aware harness at the server
-npx dreamd-mcp@0.1.0-rc.1
-```
+| Layer | Status |
+|---|---|
+| `SPEC.md` v0.1-draft | Drafted |
+| Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
+| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.1` on npm |
+| CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
+| Conformance test suite | Not started |
 
-`dreamd-mcp@0.1.0-rc.1` is on npm. Cargo and Homebrew paths arrive in v0.1.1. See the [v0.1 milestone](https://github.com/botzrDev/dreamd/milestones).
-
-### Running
-
-`dreamd mcp` (and `npx dreamd-mcp`) automatically connect to a shared daemon when one is running, and fall back to a standalone in-process server when one isn't. That daemon is the **single serialized writer** to your memory.
-
-For a single agent — or several agents used one at a time — the standalone server is safe. If you point **several agents at the same project simultaneously**, start one daemon per machine so every agent's writes route through the same process:
-
-```bash
-dreamd watch         # native binary
-npx dreamd-mcp watch # same daemon, no Rust install
-```
-
-Two standalone servers writing at the same instant are independent writers, and a concurrent append can interleave. The daemon removes that edge.
-
-**Crash-safe by design.** Kill the daemon mid-write and your agents keep working (they fall back to in-process); an append made while it's down is durable and replayed cleanly on the next start — stale socket and all — with no torn or partial records.
-
-### What dreamd writes
-
-Running dreamd touches two places, and nothing else:
-
-- **Your repo: `.agent/`.** `dreamd init` scaffolds it in the project root. This is your memory, and it's meant to be **committed and shared** — that's the point. `init` also appends one line to `.gitignore` (`/.agent/.dreamd/`) so the local index and daemon state stay out of version control. `init` is idempotent: re-running on an existing store is a no-op and never overwrites your files.
-- **Your home: `~/.agent/`.** A global `registry.toml` (which projects have a store) and, while the daemon runs, the `dreamd.sock` Unix socket. That's the entire global footprint. dreamd does not touch `~/.claude`, `~/.cursor`, `~/.config`, or any other tool's configuration. The socket is created `0600` and scoped to your user account — see [`SECURITY.md`](./SECURITY.md).
-
-To unregister a project, run `dreamd init --uninstall-project`: it removes the project's entry from the global registry and leaves your `.agent/` files in place.
-
-### Privacy
-
-When LLM mode is enabled in v0.1.1, entries above the relevance threshold may be sent to the configured provider. The `personal/` layer is excluded unless you explicitly opt in. v0.1 makes no network calls. See [`SECURITY.md`](./SECURITY.md) for the threat model and disclosure policy.
+---
 
 ## Platforms
 
 v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
 
-## Spec
-
-The on-disk layout, JSON schema, scoring formula, and dream-cycle contract are defined in [`SPEC.md`](./SPEC.md). The spec is implementation-agnostic — `dreamd` is one implementation, not the only one.
-
-To propose a change to the spec, open an issue prefixed with `[RFC]`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-## v0.1 progress
-
-| Layer | Status |
-|---|---|
-| `SPEC.md` v0.1-draft | Drafted |
-| Reference implementation (`dreamd` daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
-| MCP server (`dreamd mcp` subcommand + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.1` on npm |
-| CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
-| Conformance test suite | Not started |
+---
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development setup, commit conventions (`DR-XXX` story IDs), DCO sign-off policy, and the RFC process.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, commit conventions, DCO sign-off, and the RFC process.
 
-By participating in this project you agree to abide by the [Code of Conduct](./CODE_OF_CONDUCT.md).
-
-To report a security issue, see [SECURITY.md](./SECURITY.md). Do not open a public issue for vulnerabilities.
+By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). To report a security issue, see [SECURITY.md](./SECURITY.md) — do not open a public issue for vulnerabilities.
 
 ## License
 

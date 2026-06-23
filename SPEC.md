@@ -102,6 +102,20 @@ final_score = bm25 * salience
 
 The *dream cycle* is the consolidation pass that turns `episodic/` into `semantic/`. Inputs: the JSONL log plus per-cluster recurrence counts.
 
+```mermaid
+flowchart TD
+    A[Read AGENT_LEARNINGS.jsonl] --> B[Cluster by skill_action]
+    B --> C{recurrence ≥ threshold?}
+    C -->|yes| D[Promote to LESSONS.md]
+    C -->|no| E[Skip promotion]
+    D --> F[Pin exemplar events]
+    E --> G[Decay pruner]
+    F --> G
+    G --> H[Archive stale unpinned to snapshots/]
+    H --> I[Update recurrence_counts.json]
+    I --> J[WAL commit + cleanup]
+```
+
 **Promotion.** A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
 
 **Output format.** The dream cycle writes to `semantic/LESSONS.md`. The file MUST begin with a YAML frontmatter block followed by one lesson block per promoted cluster:

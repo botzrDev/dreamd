@@ -1,3 +1,10 @@
+# dreamd — LLM-oriented index (llms.txt)
+#
+# Purpose: Curated link list for AI crawlers and tools that consume llms.txt.
+# Audience: External LLMs discovering the project (not the in-repo AGENTS.md).
+# Regenerate: Edit manually when top-level docs change; no automated script yet.
+# Full text bundle: see llms-full.txt (concatenated excerpts).
+
 # dreamd
 
 > dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a

@@ -1,39 +1,57 @@
 # dreamd — Cursor adapter
 
-## What this does
+Quickstart for wiring `dreamd-mcp` into Cursor with the optional recall agent rule.
 
-Wires `dreamd-mcp` as a stdio MCP server that Cursor spawns automatically, and activates the `dreamd-recall` agent rule when you work in a project with a `.agent/` folder.
-
-## Recommended setup: run the daemon first
-
-Start `dreamd watch` in your project before opening Cursor. The daemon handles back-to-back searches correctly and keeps the index fresh. Without it, the MCP server runs in Phase 1 in-process mode, which works for single queries but can fail on rapid consecutive `search_nodes` calls.
-
-If you point **several agents at the same project simultaneously**, start one shared daemon per machine so every agent routes through a single serialized writer:
+## 1. Init the project store
 
 ```bash
 cd ~/your-project
+npx dreamd-mcp@0.1.0-rc.1 init
+```
+
+## 2. Start the daemon (recommended)
+
+```bash
 dreamd watch &
 # or: npx dreamd-mcp@0.1.0-rc.1 watch &
 ```
 
-Then open Cursor. The MCP server detects the running daemon automatically and routes through it.
+Without a daemon, MCP runs in-process (Phase 1). That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
 
-## MCP config
+## 3. MCP config
 
-**Project-level (recommended):** paste the contents of `.mcp.json.example` into your project's `.cursor/mcp.json` (or merge the `mcpServers` block into an existing one). Cursor picks this up automatically on next session start.
+**Project-level (recommended):** copy [`.mcp.json.example`](./.mcp.json.example) into `.cursor/mcp.json`.
 
-**Global config (`~/.cursor/mcp.json`):** use `.mcp.json.global.example` — it adds `--project-root` so the MCP server knows which project's `.agent/` to use regardless of the CWD Cursor sets at launch.
+**Global (`~/.cursor/mcp.json`):** use [`.mcp.json.global.example`](./.mcp.json.global.example) — adds `--project-root` for non-project CWD launches.
 
-Alternatively, add it via Cursor Settings → Tools & Integrations.
+Or: Cursor Settings → Tools & Integrations → add MCP server.
 
-## Agent rule
+## 4. Agent rule (optional)
 
-Copy `.cursor/rules/dreamd-recall.mdc` into your project's `.cursor/rules/` directory. Cursor will offer it to the agent automatically when context matches.
+Copy [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) to your project's `.cursor/rules/`. Cursor offers it when context matches.
 
-## Reload
+## 5. Reload Cursor
 
-Restart Cursor or open a new agent session to confirm the `dreamd` server appears in the MCP tools list with `append_node` and `search_nodes` tools visible.
+Open a new agent session. Confirm `dreamd` in the MCP tools list with `append_node` and `search_nodes`.
 
-## Companion skill
+Stderr from the MCP server should show `Phase 2 (Remote backend)` when the daemon is running.
 
-Usage conventions for `append_node`, `search_nodes`, `skill_action` naming, and session activation are in [`../../SKILL.md`](../../SKILL.md). Both adapters write to the same `.agent/` folder — learnings are shared across harnesses.
+## 6. Verify
+
+Ask the agent:
+
+> What has dreamd remembered about this codebase?
+
+**Expect:** `search_nodes` with your task as the query; results include `score` and `content`.
+
+To append:
+
+> Log a learning: we pin dependency versions in the workspace `Cargo.toml`.
+
+**Expect:** `append_node` with `source_harness: "cursor"` (required — omitting it causes a deserialization error).
+
+## Companion docs
+
+- [`SKILL.md`](../../SKILL.md) — shared conventions with Claude Code
+- [`GUIDE.md`](../../GUIDE.md) — full walkthrough including multi-harness
+- [`../claude-code/README.md`](../claude-code/README.md) — same `.agent/` folder, different harness

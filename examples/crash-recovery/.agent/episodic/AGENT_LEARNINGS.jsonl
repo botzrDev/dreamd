@@ -1,0 +1,3 @@
+{"schema_version":"1.0.0","id":"evt_00000000000000000000000001","timestamp":"2026-06-01T12:00:00Z","pain":5.0,"importance":5.0,"pinned":false,"skill_action":"rust::test","source_harness":"test","content":"valid line before interrupted prune"}
+{"schema_version":"1.0.0","id":"evt_00000000000000000000000002","timestamp":"2026-06-02T12:00:00Z","pain":6.0,"importance":6.0,"pinned":false,"skill_action":"rust::test","source_harness":"test","content":"second valid line"}
+{"schema_version":"1.0.0","id":"evt_00000000000000000000000003","timestamp":"2026-06-03T12:00:00Z","pain":7.0,"importance":7.0,"pinned":false,"skill_action":"rust::test","source_harness":"test","content":"TORN — no closing brace or newline

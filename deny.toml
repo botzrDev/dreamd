@@ -47,6 +47,15 @@ wildcards = "deny"
 unmaintained = "workspace"
 yanked = "deny"
 
+# No per-advisory `ignore` entries as of 2026-06-23. When adding one, document:
+#   - RUSTSEC ID and crate version
+#   - Why the risk is accepted (no fix path, false positive, dev-only, etc.)
+#   - Review date and planned removal
+# Example:
+# ignore = [
+#   { id = "RUSTSEC-XXXX-NNNN", reason = "transitive via foo; fixed in bar 2.0 (blocked on MSRV)" },
+# ]
+
 [sources]
 # Only allow crates from crates.io and your own git repositories.
 unknown-registry = "deny"

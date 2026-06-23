@@ -1,4 +1,21 @@
-//! Handler for `dreamd dream` — runs the deterministic dream cycle.
+//! `dreamd dream` — deterministic dream cycle from the CLI.
+//!
+//! ## Execution modes
+//!
+//! 1. **Daemon proxy** (default on Unix when `dreamd watch` owns the project):
+//!    `POST /api/v1/dream` over the UDS. Returns early on HTTP 409 (cycle in progress).
+//! 2. **In-process** (no daemon, or `--no-commit`): runs consolidation + decay locally.
+//!
+//! ## WAL protocol
+//!
+//! The in-process path delegates to `run_deterministic_dream_cycle`, which writes
+//! [`dream_in_progress.wal`](dreamd_core::wal::DreamWal) before destructive steps.
+//! `--no-commit` skips the git autobiography commit but still runs the full cycle.
+//!
+//! ## `--dry` contract
+//!
+//! Not implemented in v0.1 — `cli.rs` rejects `--dry` with exit code 2. Ships v0.1.1
+//! as a preview-only pass that prints planned promotions/prunes without writing.
 
 use std::fmt;
 use std::io::Write;

@@ -220,16 +220,18 @@ pub fn build_router(state: AppState) -> axum::Router {
     router.with_state(state)
 }
 
-/// `POST /api/v1/dream` — DR-404 / WEG-70.
+/// `POST /api/v1/dream` — run a full deterministic dream cycle.
 ///
-/// Runs a full deterministic dream cycle for the resolved project root:
-///   1. 409 guard: reject if `state.json` shows `"in_progress"`.
-///   2. Dispatch `RunDreamCycle` to the coordinator (WEG-271) — it runs
-///      consolidation (cluster engine + LESSONS.md) then decay (JSONL prune +
-///      snapshot), and reopens its append fd after the cycle's atomic rename.
-///   3. If any events decayed, send `PruneDecayedEvents` to the Tantivy indexer.
+/// # Headers
+/// * `X-Agent-Root` (required) — canonical project root path (registered in `registry.toml`)
 ///
-/// Returns 200 `{"status":"ok"}` on success.
+/// # Responses
+/// * `200` — `{"status":"ok"}` cycle completed
+/// * `409` — `{"error":"dream cycle in progress"}` WAL guard
+/// * `403` — peer UID mismatch ([`peer_uid_middleware`])
+/// * `404` — project not registered ([`agent_root_middleware`])
+/// * `503` — coordinator busy (`Retry-After: 1`)
+/// * `500` — coordinator, WAL, or indexer failure
 async fn post_dream(
     State(state): State<AppState>,
     Extension(entry): Extension<crate::registry::ProjectEntry>,
@@ -412,6 +414,17 @@ pub(crate) struct RecallMeta {
     pub(crate) recurrence: u64,
 }
 
+/// `GET /api/v1/recall` — BM25 × salience search over the project index.
+///
+/// # Headers
+/// * `X-Agent-Root` (required)
+///
+/// # Query
+/// * `q` (required) — search string
+/// * `k` (optional, default `5`) — max results
+///
+/// # Response (`200`)
+/// `{"results":[{"score","bm25","salience","source","content","metadata":{…}}]}`
 async fn get_recall(
     State(state): State<AppState>,
     Extension(entry): Extension<crate::registry::ProjectEntry>,
@@ -470,12 +483,15 @@ async fn get_recall(
     }
 }
 
-/// `GET /api/v1/preferences` — DR-115.
+/// `GET /api/v1/preferences` — read `.agent/personal/PREFERENCES.md`.
 ///
-/// Returns the contents of `.agent/personal/PREFERENCES.md` for the
-/// resolved project root.  Absent file → 200 with `body: ""`.
-/// Files exceeding `PREFERENCES_SIZE_CAP` are truncated and annotated
-/// with `X-Dreamd-Truncated: true` / `X-Dreamd-Original-Size: <n>`.
+/// # Headers
+/// * `X-Agent-Root` (required)
+///
+/// # Response (`200`)
+/// `{"body":"<markdown>","last_modified":"<rfc3339>|null"}`
+///
+/// Files over 16 KiB are truncated; see `X-Dreamd-Truncated` / `X-Dreamd-Original-Size`.
 async fn get_preferences(
     State(_state): State<AppState>,
     Extension(entry): Extension<ProjectEntry>,
@@ -539,11 +555,21 @@ async fn get_preferences(
     (axum::http::StatusCode::OK, headers, axum::Json(body)).into_response()
 }
 
-/// `POST /api/v1/learn` — DR-402.
+/// `POST /api/v1/learn` — append one episodic learning durably.
 ///
-/// Flow: validate `X-Agent-Root` (middleware) → extract dedup key →
-/// normalise + validate `skill_action` → redact content → dispatch to
-/// the coordinator → 201 on durable write, or the appropriate error code.
+/// # Headers
+/// * `X-Agent-Root` (required)
+/// * `Content-Type: application/json` (required)
+/// * `X-Client-Dedup-Key` (optional) — idempotency key scoped per project
+///
+/// # Body
+/// [`AgentLearning`] JSON; inbound `id` and `schema_version` are server-stamped.
+///
+/// # Responses
+/// * `201` — `{"id","timestamp","deduplicated"}`
+/// * `400` — invalid `skill_action` or score out of `0.0..=10.0`
+/// * `413` — serialized line exceeds cap
+/// * `503` — coordinator busy (`Retry-After: 1`)
 async fn post_learn(
     State(state): State<AppState>,
     Extension(project): Extension<ProjectEntry>,
@@ -629,13 +655,14 @@ async fn post_learn(
     }
 }
 
-/// Extract and validate `X-Agent-Root` on every request under `/api/v1`.
+/// Validate `X-Agent-Root` and resolve the project via `registry.toml`.
 ///
-/// * Missing or non-UTF-8 header → 400 Bad Request, JSON error body.
-/// * `resolve_project` returns `Err` (malformed registry TOML) → 500.
-/// * `resolve_project` returns `Ok(None)` (root not registered) → 404.
-/// * `resolve_project` returns `Ok(Some(entry))` → inserts
-///   `Extension(entry)` and calls `next.run(req)`.
+/// Inserts [`ProjectEntry`] into request extensions on success.
+///
+/// # Errors
+/// * `400` — header missing or non-UTF-8
+/// * `404` — path not registered
+/// * `500` — registry read/parse failure
 pub async fn agent_root_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     mut req: axum::extract::Request,
@@ -664,12 +691,13 @@ pub async fn agent_root_middleware(
     }
 }
 
-/// Enforce daemon-owner-only access by comparing the peer UID (injected at
-/// connection-accept time by `serve_uds`) to `state.daemon_uid`.
+/// Enforce daemon-owner-only access via peer UID from `SO_PEERCRED`.
 ///
-/// * Peer UID matches daemon UID → pass through to the next layer.
-/// * Peer UID present but wrong → 403 Forbidden, with a tracing warn.
-/// * No `PeerUid` extension (e.g., a non-UDS path or test without injection) → 403.
+/// The UDS accept loop injects [`PeerUid`] before the HTTP stack runs.
+/// Compares against [`AppState::daemon_uid`] set at `run_watch` startup.
+///
+/// # Errors
+/// * `403` — UID mismatch or extension missing
 #[cfg(unix)]
 pub async fn peer_uid_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,

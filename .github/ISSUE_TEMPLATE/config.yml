@@ -1,4 +1,11 @@
 blank_issues_enabled: false
+
+# Choose a template when opening an issue:
+#   - Bug report — reproducible defect in dreamd (version, OS, steps required)
+#   - RFC — spec or API change; title must be prefixed [RFC] per CONTRIBUTING.md
+# For security vulnerabilities use the Security advisory link below (not a public issue).
+# For questions and ideas use Discussions (not issues).
+
 contact_links:
   - name: Security vulnerability
     url: https://github.com/botzrDev/dreamd/security/advisories/new
