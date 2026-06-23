@@ -78,6 +78,23 @@ Some decisions in the implementation are not negotiable without re-reading the P
 
 If your PR touches any of these areas, please call it out in the description and link the relevant section of [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
+## Documentation
+
+When your change affects behavior users or contributors see, update the matching doc:
+
+| You changed… | Update… |
+|---|---|
+| HTTP API, headers, status codes | [`docs/http-api.md`](./docs/http-api.md) |
+| Config keys, env vars | [`docs/configuration.md`](./docs/configuration.md) |
+| CLI flags or subcommands | Run `scripts/generate-man.sh`; update [`GUIDE.md`](./GUIDE.md) if workflow changes |
+| MCP tools or adapter setup | [`SKILL.md`](./SKILL.md), relevant `adapters/*/README.md` |
+| On-disk schema or dream cycle | [`SPEC.md`](./SPEC.md) (via RFC for breaking changes) |
+| Engineering invariants | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
+| CI jobs or local repro | [`docs/ci.md`](./docs/ci.md) |
+| User-visible release notes | [`CHANGELOG.md`](./CHANGELOG.md) under `## [Unreleased]` |
+
+Add new top-level docs to [`docs/README.md`](./docs/README.md). Story ID legend: [`STORY_IDS.md`](./STORY_IDS.md).
+
 ## Snapshot tests (insta)
 
 ### CLI snapshots (help text)

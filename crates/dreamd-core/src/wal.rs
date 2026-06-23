@@ -31,9 +31,16 @@ pub enum WalIntent {
     Commit,
 }
 
+/// On-disk write-ahead log for an in-flight dream cycle.
+///
+/// Serialized to `.agent/.dreamd/dream_in_progress.wal`. Each [`WalIntent`]
+/// records a destructive step before it executes so crash recovery can unwind
+/// partial work. Deleted after a successful [`commit_cycle`](crate::wal::commit_cycle).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DreamWal {
+    /// Daemon state schema version (independent of episodic `schema_version`).
     pub schema_version: String,
+    /// Ordered list of intents recorded this cycle.
     pub intents: Vec<WalIntent>,
 }
 

@@ -1,0 +1,1 @@
+{"schema_version":"1.0.0","id":"evt_00000000000000000000000001","timestamp":"2026-06-20T12:00:00Z","pain":6.0,"importance":7.0,"pinned":false,"skill_action":"rust::api::handler_errors","source_harness":"claude-code","content":"Alpha project only: use typed errors in Axum handlers."}

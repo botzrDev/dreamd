@@ -57,6 +57,8 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// Stable lowercase layer name stored in the Tantivy `layer` field and
+    /// returned as `source` in recall JSON (`"episodic"` or `"semantic"`).
     pub const fn as_str(self) -> &'static str {
         match self {
             Layer::Episodic => "episodic",

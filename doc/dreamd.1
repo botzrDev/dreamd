@@ -1,0 +1,41 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dreamd 1  "dreamd " 
+.SH NAME
+dreamd \- Portable memory layer for AI coding agents
+.SH SYNOPSIS
+\fBdreamd\fR [\fB\-V\fR|\fB\-\-version\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+Portable memory layer for AI coding agents
+.SH OPTIONS
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version information
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+dreamd\-doctor(1)
+Run health checks and print status (dream\-cycle mode, etc.)
+.TP
+dreamd\-dream(1)
+Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+.TP
+dreamd\-init(1)
+Scaffold per\-project .agent/ store and register it with the daemon
+.TP
+dreamd\-mcp(1)
+Start the MCP server (bridges to daemon if running, otherwise in\-process)
+.TP
+dreamd\-reset(1)
+Reset scratch state (DR\-113). Today only `workspace` is supported
+.TP
+dreamd\-watch(1)
+Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+.TP
+dreamd\-version(1)
+Print structured version information (semver, commit, build date, target, schema)
+.TP
+dreamd\-help(1)
+Print this message or the help of the given subcommand(s)

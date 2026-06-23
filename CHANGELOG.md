@@ -8,7 +8,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Documentation Phase 0–4: `docs/http-api.md`, `docs/configuration.md`, `docs/ci.md`, `docs/troubleshooting.md`, `docs/glossary.md`, `GUIDE.md`, `docs/marketing.md`, `STORY_IDS.md`, expanded adapter READMEs (Claude Code, Cursor, Cline), three new examples (`crash-recovery`, `pinned-events`, `cross-project`), Mermaid diagrams in `ARCHITECTURE.md` and `SPEC.md`, `doc/dreamd.1` man page, `#![deny(missing_docs)]` on `dreamd-protocol`.
+
 ### Changed
+
+- `README.md` restructured for install/quick start; marketing narrative moved to `docs/marketing.md`.
+- `SECURITY.md` expanded with lesson-injection, privacy, and input-cap sections (merged from `docs/security.md`).
+- `docs/security.md` now redirects to canonical `SECURITY.md`.
+- `docs/production_schedule.md` is canonical; `docs/video-schedule.md` redirects (removed Antigravity harness drift).
 
 ## [0.1.0-rc.1] - 2026-06-22
 

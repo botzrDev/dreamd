@@ -1,0 +1,1 @@
+{"schema_version":"1.0.0","id":"evt_00000000000000000000000001","timestamp":"2026-06-21T12:00:00Z","pain":5.0,"importance":6.0,"pinned":false,"skill_action":"typescript::react::use_effect_deps","source_harness":"cursor","content":"Beta project only: include all reactive values in useEffect dependency arrays."}

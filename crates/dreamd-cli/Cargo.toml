@@ -12,6 +12,11 @@ readme.workspace = true
 name = "dreamd"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate_man"
+path = "src/bin/generate_man.rs"
+doc = false
+
 [lints]
 workspace = true
 
@@ -19,6 +24,7 @@ workspace = true
 dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.1" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.2"
 const_format = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

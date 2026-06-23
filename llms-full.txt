@@ -1,4 +1,9 @@
 # dreamd — Full Documentation for LLMs
+#
+# Purpose: Long-form context bundle for AI tools (larger than llms.txt).
+# Audience: External LLMs needing install, API, and architecture context.
+# Regenerate: Update manually when README, SPEC, or GUIDE change materially.
+# Index: see llms.txt for the short link list.
 
 ## What dreamd is
 
