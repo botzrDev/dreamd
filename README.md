@@ -52,7 +52,7 @@ dreamd watch
 npx dreamd-mcp@0.1.0-rc.2
 ```
 
-In Claude Code, Cursor, or Cline: ask the agent to search memory for something you just learned. It calls `search_nodes` over MCP and recalls prior context.
+In Claude Code, Cursor, or Cline (experimental): ask the agent to search memory for something you just learned. It calls `search_nodes` over MCP and recalls prior context.
 
 Verify the store:
 

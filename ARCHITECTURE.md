@@ -169,7 +169,7 @@ sequenceDiagram
 
 - **Unix (v0.1):** HTTP binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request validates the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); mismatched UIDs are rejected.
 - **Windows:** bearer-token auth on `127.0.0.1` — deferred to v0.1.1.
-- TCP binding to non-localhost is refused unless `--insecure` is passed.
+- TCP binding to non-localhost will be refused unless `--insecure` is passed — deferred to v0.1.1.
 
 ### 5. MCP tool names
 
