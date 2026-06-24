@@ -27,7 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # (`tokio::time::interval` + `MissedTickBehavior::Skip`). Multi-threaded
 # runtime still lives in the consuming CLI crate.
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros", "time", "net", "io-util", "signal"] }
-dreamd-protocol = { path = "../dreamd-protocol", version = "0.1.0-rc.1" }
+dreamd-protocol = { path = "../dreamd-protocol", version = "0.1.0-rc.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

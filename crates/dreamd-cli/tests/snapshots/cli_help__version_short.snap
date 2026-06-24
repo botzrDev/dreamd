@@ -3,4 +3,4 @@ source: crates/dreamd-cli/tests/cli_help.rs
 assertion_line: 65
 expression: VERSION_SHORT
 ---
-dreamd 0.1.0-rc.1 ([sha] build:[date] target:[target] schema:1.0)
+dreamd 0.1.0-rc.2 ([sha] build:[date] target:[target] schema:1.0)

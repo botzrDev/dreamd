@@ -6,6 +6,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.2] - 2026-06-24
+
 ### Added
 
 - Documentation Phase 0–4: `docs/http-api.md`, `docs/configuration.md`, `docs/ci.md`, `docs/troubleshooting.md`, `docs/glossary.md`, `GUIDE.md`, `docs/marketing.md`, `STORY_IDS.md`, expanded adapter READMEs (Claude Code, Cursor, Cline), three new examples (`crash-recovery`, `pinned-events`, `cross-project`), Mermaid diagrams in `ARCHITECTURE.md` and `SPEC.md`, `doc/dreamd.1` man page, `#![deny(missing_docs)]` on `dreamd-protocol`.

@@ -21,7 +21,7 @@ doc = false
 workspace = true
 
 [dependencies]
-dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.1" }
+dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.2" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"

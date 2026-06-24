@@ -6,10 +6,10 @@ Node shim for the dreamd MCP server. Downloads the right prebuilt binary for you
 
 ```sh
 # 1. Scaffold .agent/ into your project
-npx dreamd-mcp@0.1.0-rc.1 init
+npx dreamd-mcp@0.1.0-rc.2 init
 
 # 2. Point Claude Code, Cursor, or any MCP-aware harness at the server
-npx dreamd-mcp@0.1.0-rc.1
+npx dreamd-mcp@0.1.0-rc.2
 ```
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).

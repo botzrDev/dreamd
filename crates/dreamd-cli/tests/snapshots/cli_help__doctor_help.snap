@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"doctor\")"
+---
+Run health checks and print status (dream-cycle mode, etc.)
+
+Usage: doctor
+
+Options:
+  -h, --help
+          Print help

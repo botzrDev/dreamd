@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"watch\")"
+---
+Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+
+Usage: watch
+
+Options:
+  -h, --help
+          Print help
