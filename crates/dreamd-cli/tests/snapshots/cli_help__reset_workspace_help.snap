@@ -1,0 +1,14 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"reset\", \"workspace\")"
+---
+Clear working/WORKSPACE.md back to its initial scaffold contents
+
+Usage: workspace [OPTIONS]
+
+Options:
+      --yes
+          Skip the confirmation prompt
+
+  -h, --help
+          Print help
