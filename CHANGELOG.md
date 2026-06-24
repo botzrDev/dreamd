@@ -40,7 +40,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Recurrence sidecar at `semantic/recurrence_counts.json`; per-`skill_action` cluster counts drive promotion and the salience formula.
 - Privacy disclosure printed on first run in any directory without an existing `.agent/` store.
 - `npx dreamd-mcp` Node.js shim for zero-install MCP server distribution.
-- Agent output redaction: high-entropy strings matching common token patterns are stripped from `content` before append on the HTTP API and MCP daemon-bridge (Phase 2) paths.
+- Agent output redaction: high-entropy strings matching common token patterns are stripped from `content` before append on every path — the HTTP `POST /api/v1/learn` endpoint and the MCP `append_node` tool, both Phase 1 (in-process) and Phase 2 (daemon bridge).
 - Criterion benchmark suite for recall latency (`cargo bench -p dreamd-core`).
 - `rmcp 1.7.0` (MCP spec 2025-11-25) added as workspace dependency; consumed by `dreamd mcp` subcommand.
 - GitHub Actions CI/CD pipeline: lint, test, cross-platform build, binary size gate (NFR-2), DCO sign-off check.

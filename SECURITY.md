@@ -8,7 +8,7 @@ Email `austin@botzr.com` with the subject line `dreamd security: <short descript
 
 - A description of the issue and its impact.
 - Steps to reproduce, or a proof-of-concept.
-- The version, OS, and any relevant configuration (`--insecure`, custom socket paths, etc.).
+- The version, OS, and any relevant configuration (custom socket paths, etc.).
 - Whether you are willing to be credited.
 
 You should receive an acknowledgement within 5 business days. We aim to provide an initial assessment within 10 business days and a fix or mitigation timeline within 30 days, depending on severity.
@@ -82,5 +82,5 @@ Do not set these in shared shells, CI secrets, or harness configs you did not au
 Issues we do **not** consider security vulnerabilities:
 
 - Denial-of-service from a local user with the same UID as the daemon (they can already do anything the daemon can).
-- Any issue requiring `--insecure` on a trusted network.
+- Any issue requiring the planned v0.1.1 `--insecure` test mode on a trusted network.
 - Bugs in third-party AI agents or MCP clients that consume the API.
