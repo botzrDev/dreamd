@@ -129,6 +129,13 @@ jobs:
         with:
           path: dist/
 
+      - name: Regenerate dreamd-mcp manifest (binary sha256)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          chmod +x scripts/update-mcp-manifest.sh
+          scripts/update-mcp-manifest.sh "$VERSION" dist
+          cat packages/dreamd-mcp/manifest.json
+
       - name: Generate SHA-256 checksums
         run: |
           find dist/ -maxdepth 2 -type f | sort | xargs sha256sum > checksums.txt
@@ -176,5 +183,6 @@ jobs:
           files: |
             dist/**/*
             checksums.txt
+            packages/dreamd-mcp/manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

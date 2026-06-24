@@ -8,6 +8,7 @@ Node.js tests for the `npx dreamd-mcp` entrypoint (`bin/dreamd-mcp.js`).
 |---|---|
 | `route.test.js` | Subcommand routing (`init`, `watch`, `mcp`, passthrough to binary) |
 | `security.test.js` | Download redirect allowlist, tar path traversal guards |
+| `manifest.test.js` | `manifest.json` version + per-platform sha256 (no placeholders) |
 
 ## Run
 
