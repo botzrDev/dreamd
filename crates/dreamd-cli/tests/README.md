@@ -4,7 +4,7 @@
 
 - `init_golden.rs` — byte-exact stdout fixtures for `dreamd init` (first run + re-run + no-project-root).
 - `version_output.rs` — subprocess regression checks for `--version` / `version` (vergen sentinel leak guard).
-- `cli_help.rs` — WEG-20 (DR-803) **in-process** snapshot tests for every published CLI surface (`--help` for top-level and each subcommand: `init`, `dream`, `mcp`, `doctor`, `watch`, `reset`, `version`, plus the `--version` and `version` byte-exact format contract from WEG-18).
+- `cli_help.rs` — WEG-20 (DR-803) **in-process** snapshot tests for every published CLI surface (`--help` for top-level and each subcommand: `init`, `dream`, `mcp`, `doctor`, `watch`, `reset`, `reset workspace`, `version`, plus the `--version` and `version` byte-exact format contract from WEG-18).
 
 ## Snapshot workflow (`cli_help.rs`)
 
@@ -22,9 +22,9 @@ A pending change writes a `*.snap.new` file next to the existing `*.snap`. `carg
 
 ## What the redaction filters mask
 
-Snapshots 1–8 (the `--help` snapshots) capture clap-generated text. It's fully deterministic across machines and builds; no filters are applied.
+Snapshots 1–9 (the `--help` snapshots) capture clap-generated text. It's fully deterministic across machines and builds; no filters are applied.
 
-Snapshots 9–10 (`VERSION_SHORT` const, `render_long()` fn) carry compile-time vergen metadata that drifts per build:
+Snapshots 10–11 (`VERSION_SHORT` const, `render_long()` fn) carry compile-time vergen metadata that drifts per build:
 
 | Field    | Real value example         | Redacted to    |
 | -------- | -------------------------- | -------------- |

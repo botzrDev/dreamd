@@ -1,13 +1,12 @@
 //! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
 //!
-//! Ten snapshots, all bound directly to in-process symbols (no subprocess):
-//!   1. `dreamd --help`          — top-level clap help.
-//!   2–8. subcommand `--help`    — init, dream, mcp, doctor, watch, reset, version.
-//!   9. `dreamd --version`       — `VERSION_SHORT` const (WEG-18 contract).
-//!  10. `dreamd version`         — `render_long()` fn (WEG-18 contract).
+//! Eleven snapshots, all bound directly to in-process symbols (no subprocess):
+//! top-level `--help`, each subcommand `--help` (init, dream, mcp, doctor, watch,
+//! reset, version), nested `reset workspace --help`, plus the WEG-18 version
+//! output contract (`VERSION_SHORT` and `render_long()`).
 //!
-//! Snapshots 1–8 are deterministic clap output and use no filters. Snapshots
-//! 9–10 carry vergen-baked SHA/date/triple that drift per-build; they go
+//! Help snapshots are deterministic clap output and use no filters. Version
+//! output snapshots carry vergen-baked SHA/date/triple that drift per-build; they go
 //! through `with_settings!({ filters => ... }, ...)` to redact those fields.
 //! The `\S+` patterns capture the `unknown` tarball-build sentinel identically
 //! to real values, so source-tarball builds (renamed `.git`) pass unchanged.
@@ -33,6 +32,17 @@ fn subcommand_help(name: &str) -> String {
         .color(ColorChoice::Never)
         .find_subcommand_mut(name)
         .unwrap_or_else(|| panic!("subcommand {name:?} missing from Cli builder"))
+        .render_long_help()
+        .to_string()
+}
+
+fn nested_subcommand_help(parent: &str, child: &str) -> String {
+    Cli::command()
+        .color(ColorChoice::Never)
+        .find_subcommand_mut(parent)
+        .unwrap_or_else(|| panic!("subcommand {parent:?} missing from Cli builder"))
+        .find_subcommand_mut(child)
+        .unwrap_or_else(|| panic!("subcommand {child:?} missing under {parent:?}"))
         .render_long_help()
         .to_string()
 }
@@ -70,6 +80,14 @@ fn snapshot_watch_help() {
 #[test]
 fn snapshot_reset_help() {
     assert_snapshot!("reset_help", subcommand_help("reset"));
+}
+
+#[test]
+fn snapshot_reset_workspace_help() {
+    assert_snapshot!(
+        "reset_workspace_help",
+        nested_subcommand_help("reset", "workspace")
+    );
 }
 
 #[test]
