@@ -73,7 +73,7 @@ The MCP shim and client honor two overrides. Both assume a trusted local environ
 | Variable | Effect | Risk |
 |---|---|---|
 | `DREAMD_SOCK` | Overrides the Unix socket path used by MCP Phase 2 to reach the daemon (default `~/.agent/dreamd.sock`). | Redirects MCP traffic to an attacker-controlled socket that impersonates the daemon API. |
-| `DREAMD_BIN` | Skips hash verification and runs the specified binary instead of the shim-downloaded release artifact. | Runs arbitrary code with the privileges of the MCP server process. Intended for local development only. |
+| `DREAMD_BIN` | Skips hash verification and runs the specified binary instead of the shim-downloaded release artifact. Refused unless `DREAMD_BIN_ALLOW_UNVERIFIED=1` is also set to confirm the bypass. | Runs arbitrary code with the privileges of the MCP server process. Intended for local development only. |
 
 Do not set these in shared shells, CI secrets, or harness configs you did not author. The reference implementation does not read them from project config files.
 
