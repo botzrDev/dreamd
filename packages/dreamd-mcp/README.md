@@ -20,7 +20,7 @@ No Rust installation required. Prebuilt binaries are available for **Linux x86_6
 
 ## Override (development only)
 
-Set `DREAMD_BIN=/path/to/dreamd` to skip download and use a local build instead of the cached release binary.
+Set `DREAMD_BIN=/path/to/dreamd` to skip download and use a local build instead of the cached release binary. Because this bypasses sha256 verification, you must also set `DREAMD_BIN_ALLOW_UNVERIFIED=1` to confirm — `DREAMD_BIN` on its own is refused.
 
 **Warning:** when `DREAMD_BIN` is set, sha256 verification is skipped. Use this only for local development — never point production MCP configs at an unverified binary.
 
@@ -29,6 +29,7 @@ Build from source:
 ```sh
 cargo install --path crates/dreamd-cli
 export DREAMD_BIN=~/.cargo/bin/dreamd
+export DREAMD_BIN_ALLOW_UNVERIFIED=1
 npx dreamd-mcp
 ```
 
