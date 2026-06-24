@@ -2,7 +2,7 @@
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["dreamd-mcp@0.1.0-rc.1", "--project-root", "/absolute/path/to/your-project"]
+      "args": ["dreamd-mcp@0.1.0-rc.2", "--project-root", "/absolute/path/to/your-project"]
     }
   }
 }

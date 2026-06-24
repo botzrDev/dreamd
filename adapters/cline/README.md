@@ -9,7 +9,7 @@ Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) 
 ```bash
 cd ~/your-project
 dreamd init
-# or: npx dreamd-mcp@0.1.0-rc.1 init
+# or: npx dreamd-mcp@0.1.0-rc.2 init
 ```
 
 Cline must open a project that already has `.agent/`. Without it, `append_node` errors with `coordinator unavailable: no agent root found`.
@@ -31,7 +31,7 @@ Copy [`.mcp.json.example`](./.mcp.json.example) into Cline's MCP settings file.
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp@0.1.0-rc.1"],
+      "args": ["-y", "dreamd-mcp@0.1.0-rc.2"],
       "disabled": false,
       "autoApprove": []
     }

@@ -22,7 +22,7 @@ test('rejects look-alike and foreign hosts (suffix match, not substring)', () =>
 test('validateRedirect accepts a normal github -> githubusercontent hop', () => {
   const ok = validateRedirect(
     'https://release-assets.githubusercontent.com/x/y',
-    'https://github.com/botzrDev/dreamd/releases/download/v0.1.0-rc.1/linux-x86_64.tar.gz',
+    'https://github.com/botzrDev/dreamd/releases/download/v0.1.0-rc.2/linux-x86_64.tar.gz',
   );
   assert.match(ok, /^https:\/\/release-assets\.githubusercontent\.com\//);
 });

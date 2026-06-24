@@ -1,14 +1,13 @@
 //! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
 //!
-//! Five snapshots, all bound directly to in-process symbols (no subprocess):
-//!   1. `dreamd --help`         — top-level clap help.
-//!   2. `dreamd init --help`    — init subcommand help.
-//!   3. `dreamd version --help` — version subcommand help.
-//!   4. `dreamd --version`      — `VERSION_SHORT` const (WEG-18 contract).
-//!   5. `dreamd version`        — `render_long()` fn (WEG-18 contract).
+//! Ten snapshots, all bound directly to in-process symbols (no subprocess):
+//!   1. `dreamd --help`          — top-level clap help.
+//!   2–8. subcommand `--help`    — init, dream, mcp, doctor, watch, reset, version.
+//!   9. `dreamd --version`       — `VERSION_SHORT` const (WEG-18 contract).
+//!  10. `dreamd version`         — `render_long()` fn (WEG-18 contract).
 //!
-//! Snapshots 1–3 are deterministic clap output and use no filters. Snapshots
-//! 4–5 carry vergen-baked SHA/date/triple that drift per-build; they go
+//! Snapshots 1–8 are deterministic clap output and use no filters. Snapshots
+//! 9–10 carry vergen-baked SHA/date/triple that drift per-build; they go
 //! through `with_settings!({ filters => ... }, ...)` to redact those fields.
 //! The `\S+` patterns capture the `unknown` tarball-build sentinel identically
 //! to real values, so source-tarball builds (renamed `.git`) pass unchanged.
@@ -56,6 +55,21 @@ fn snapshot_dream_help() {
 #[test]
 fn snapshot_mcp_help() {
     assert_snapshot!("mcp_help", subcommand_help("mcp"));
+}
+
+#[test]
+fn snapshot_doctor_help() {
+    assert_snapshot!("doctor_help", subcommand_help("doctor"));
+}
+
+#[test]
+fn snapshot_watch_help() {
+    assert_snapshot!("watch_help", subcommand_help("watch"));
+}
+
+#[test]
+fn snapshot_reset_help() {
+    assert_snapshot!("reset_help", subcommand_help("reset"));
 }
 
 #[test]

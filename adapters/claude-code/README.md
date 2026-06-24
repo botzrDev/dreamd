@@ -6,7 +6,7 @@ Quickstart for wiring `dreamd-mcp` into Claude Code.
 
 ```bash
 cd ~/your-project
-npx dreamd-mcp@0.1.0-rc.1 init
+npx dreamd-mcp@0.1.0-rc.2 init
 ```
 
 ## 2. MCP config
@@ -20,7 +20,7 @@ npx dreamd-mcp@0.1.0-rc.1 init
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["dreamd-mcp@0.1.0-rc.1"]
+      "args": ["dreamd-mcp@0.1.0-rc.2"]
     }
   }
 }
@@ -32,7 +32,7 @@ For a single agent, the in-process MCP server is sufficient. If **several agents
 
 ```bash
 dreamd watch
-# or: npx dreamd-mcp@0.1.0-rc.1 watch
+# or: npx dreamd-mcp@0.1.0-rc.2 watch
 ```
 
 ## 4. Reload Claude Code

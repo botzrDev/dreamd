@@ -14,7 +14,7 @@ Pick one path:
 
 ```bash
 # npm (no Rust required)
-npx dreamd-mcp@0.1.0-rc.1 --version
+npx dreamd-mcp@0.1.0-rc.2 --version
 
 # cargo (from a clone)
 cargo install --path crates/dreamd-cli
@@ -152,7 +152,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 Terminal 3 — MCP bridges to the daemon automatically:
 
 ```bash
-npx dreamd-mcp@0.1.0-rc.1
+npx dreamd-mcp@0.1.0-rc.2
 ```
 
 Stderr should show `Phase 2 (Remote backend)` when the daemon is reachable.
@@ -216,5 +216,5 @@ ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 | HTTP API details | [docs/http-api.md](./docs/http-api.md) |
 | Configuration | [docs/configuration.md](./docs/configuration.md) |
 | Architecture | [ARCHITECTURE.md](./ARCHITECTURE.md) |
-| Troubleshooting (Phase 4) | coming in `docs/troubleshooting.md` |
+| Troubleshooting | [docs/troubleshooting.md](./docs/troubleshooting.md) |
 | Runnable fixtures | [examples/README.md](./examples/README.md) |
