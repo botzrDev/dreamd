@@ -1,14 +1,14 @@
 {
-  "version": "0.1.0-rc.2",
-  "binaries": {
-    "linux-x86_64": {
-      "sha256": "PENDING_RC2_BUILD"
-    },
-    "darwin-x86_64": {
-      "sha256": "PENDING_RC2_BUILD"
-    },
-    "darwin-aarch64": {
-      "sha256": "PENDING_RC2_BUILD"
+    "version": "0.1.0-rc.2",
+    "binaries": {
+        "linux-x86_64": {
+            "sha256": "b38a1d2e1e00d704a639c3a360d98110682b17c8bc398fb7e1f7e51fa7ccbb93"
+        },
+        "darwin-x86_64": {
+            "sha256": "737e027dc4ff548a2f483535a389807606a83f98856c849d4e1c463722682a67"
+        },
+        "darwin-aarch64": {
+            "sha256": "205e4b17bcfce07102798cbc7ab52f53f6ff68bb7483915fdfa21278f457f4ee"
+        }
     }
-  }
 }
