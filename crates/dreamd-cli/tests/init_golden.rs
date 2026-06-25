@@ -11,7 +11,7 @@
 //!
 //! Any change to `init.rs` stdout text, ordering, or whitespace must update the
 //! golden fixtures AND coordinate with the Clip A beat-sheet
-//! (`context/video-scripts/clip-a/`).
+//! (`context/video/scripts/clip-a/`).
 
 use std::process::Command;
 

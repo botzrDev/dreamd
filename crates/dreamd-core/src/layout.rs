@@ -10,7 +10,7 @@
 //!   the unix socket, registry, auth token, and log. Never lives inside a
 //!   project store.
 //!
-//! See `context/PRD.md` Part III §1 + Part IV §1.
+//! See `context/planning/PRD.md` Part III §1 + Part IV §1.
 
 use std::path::{Path, PathBuf};
 

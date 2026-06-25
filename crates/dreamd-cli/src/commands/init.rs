@@ -3,7 +3,7 @@
 //! Output is byte-locked against `tests/fixtures/init.golden.txt` and
 //! `tests/fixtures/init.rerun.golden.txt`. Any change to stdout text, ordering,
 //! or whitespace must be coordinated with the Clip A beat-sheet
-//! (`context/video-scripts/clip-a/`). Em-dashes are U+2014 (3 bytes).
+//! (`context/video/scripts/clip-a/`). Em-dashes are U+2014 (3 bytes).
 
 use std::fs;
 use std::io::{Read, Write};
