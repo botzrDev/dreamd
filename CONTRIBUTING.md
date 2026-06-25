@@ -69,7 +69,7 @@ The `Signed-off-by:` trailer certifies that you wrote the code or have the right
 
 ## Load-bearing engineering decisions
 
-Some decisions in the implementation are not negotiable without re-reading the PRD and the threat model — for example:
+Some decisions in the implementation are not negotiable without re-reading SPEC.md and the threat model — for example:
 
 - All JSONL appends go through a single coordinator with `sync_data` before returning 201.
 - Relevance is computed at query time, never indexed.

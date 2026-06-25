@@ -68,3 +68,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
+
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.2...HEAD
+[0.1.0-rc.2]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.1...v0.1.0-rc.2
+[0.1.0-rc.1]: https://github.com/botzrDev/dreamd/releases/tag/v0.1.0-rc.1
