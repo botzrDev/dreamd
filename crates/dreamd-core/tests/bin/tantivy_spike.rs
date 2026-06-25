@@ -3,7 +3,7 @@
 //!
 //! NOT a shipping binary. Tantivy is a dev-dep only; this binary is excluded
 //! from `test`, `bench`, and `doc` in `Cargo.toml`. Its single purpose is to
-//! produce numbers for `docs/spikes/tantivy-indexwriter.md` so we can decide
+//! produce numbers for `context/spikes/tantivy-indexwriter.md` so we can decide
 //! GO / ESCALATE on WEG-41.
 //!
 //! Modes (selected by argv[1]):

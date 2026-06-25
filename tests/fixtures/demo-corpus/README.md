@@ -30,7 +30,7 @@ reel.
 ## Provenance
 
 Engineering provenance, tuning rationale, and the per-entry justification
-notes live in `docs/demo-corpus.md` (gitignored — local-only).
+notes live in `context/video/demo-corpus.md` (gitignored — local-only).
 
 ## Recurrence note
 

@@ -2,7 +2,7 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Adapter config is documented; full Cline UI spike is tracked in [`docs/spikes/dr-014-cline-mcp.md`](../../docs/spikes/dr-014-cline-mcp.md). Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.1.
+> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.1.
 
 ## 1. Init the project store
 
@@ -98,5 +98,4 @@ See [`SKILL.md`](../../SKILL.md) for `skill_action` naming (`rust::error_handlin
 
 ## Companion docs
 
-- Spike notes: [`docs/spikes/dr-014-cline-mcp.md`](../../docs/spikes/dr-014-cline-mcp.md)
 - [`GUIDE.md`](../../GUIDE.md) — section 6 (multi-harness)
