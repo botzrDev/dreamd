@@ -56,6 +56,9 @@ pub enum McpRunError {
     /// Home directory could not be resolved.
     #[error("could not determine home directory")]
     NoHome,
+    /// `DREAMD_SOCK` was set to a relative path.
+    #[error("DREAMD_SOCK is not an absolute path: {0}")]
+    InvalidSockPath(PathBuf),
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +416,11 @@ impl Default for MemoryMcpServer {
 /// 2. `DaemonHome::new(~/.agent).socket_path()`.
 fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
     if let Some(v) = std::env::var_os("DREAMD_SOCK") {
-        return Ok(PathBuf::from(v));
+        let path = PathBuf::from(v);
+        if !path.is_absolute() {
+            return Err(McpRunError::InvalidSockPath(path));
+        }
+        return Ok(path);
     }
     let home = dirs::home_dir().ok_or(McpRunError::NoHome)?;
     let daemon_home = DaemonHome::new(home.join(".agent"));
@@ -665,6 +672,29 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes the two `resolve_sock_path` tests, which both mutate the
+    /// process-global `DREAMD_SOCK` env var. Without this, Rust's parallel
+    /// in-process test runner races them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_sock_path_relative_env_returns_error() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("DREAMD_SOCK", "relative/path.sock");
+        let result = resolve_sock_path();
+        std::env::remove_var("DREAMD_SOCK");
+        assert!(matches!(result, Err(McpRunError::InvalidSockPath(_))));
+    }
+
+    #[test]
+    fn resolve_sock_path_absolute_env_passes() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("DREAMD_SOCK", "/tmp/test.sock");
+        let result = resolve_sock_path();
+        std::env::remove_var("DREAMD_SOCK");
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/test.sock"));
+    }
 
     /// Create a tempdir with the minimal `.agent/episodic/` layout so that
     /// `AgentRoot::discover` and `TantivyIndexHandle::open` both succeed.
