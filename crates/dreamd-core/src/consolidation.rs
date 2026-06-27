@@ -19,7 +19,7 @@ use crate::index::{ClusterCount, RecurrenceSidecar};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
-use crate::salience::salience;
+use crate::salience::{salience_with_context, RecurrenceContext};
 use crate::wal::{self, WalError, WalIntent};
 
 #[derive(Debug, thiserror::Error)]
@@ -132,11 +132,11 @@ pub fn run_cluster_engine(
         .map(|(cluster_key, indices)| {
             let cluster_events: Vec<AgentLearning> =
                 indices.iter().map(|&i| events[i].clone()).collect();
-            let recurrence = cluster_events.len() as u64;
+            let recurrence = RecurrenceContext::dream_cycle(cluster_events.len());
             let salience_sum = cluster_events
                 .iter()
                 .map(|e| {
-                    salience(
+                    salience_with_context(
                         now_sec,
                         e.timestamp.timestamp(),
                         e.pain as f64,
@@ -314,22 +314,23 @@ pub fn run_deterministic_dream_cycle(
 }
 
 fn pick_exemplar(events: &[AgentLearning], now_sec: i64) -> &AgentLearning {
+    let recurrence = RecurrenceContext::dream_cycle(events.len());
     events
         .iter()
         .max_by(|a, b| {
-            let sa = salience(
+            let sa = salience_with_context(
                 now_sec,
                 a.timestamp.timestamp(),
                 a.pain as f64,
                 a.importance as f64,
-                events.len() as u64,
+                recurrence,
             );
-            let sb = salience(
+            let sb = salience_with_context(
                 now_sec,
                 b.timestamp.timestamp(),
                 b.pain as f64,
                 b.importance as f64,
-                events.len() as u64,
+                recurrence,
             );
             sa.partial_cmp(&sb)
                 .unwrap_or(std::cmp::Ordering::Equal)

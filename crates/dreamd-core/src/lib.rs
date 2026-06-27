@@ -26,6 +26,7 @@ pub mod privacy;
 pub mod redaction;
 pub mod registry;
 pub mod salience;
+pub use salience::{salience_with_context, RecurrenceContext};
 pub mod wal;
 
 pub use collector::{recall, RecallResult, SalienceCollector};

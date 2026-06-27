@@ -25,7 +25,7 @@ use tantivy::schema::{TantivyDocument, Value};
 use tantivy::{Index, IndexReader};
 
 use dreamd_core::index::{build_schema, Layer, SchemaFields};
-use dreamd_core::salience::salience;
+use dreamd_core::salience::{salience_with_context, RecurrenceContext};
 use dreamd_core::{recall, RecallResult};
 
 /// Reference clock from EXPECTED.md §Reference clock: 2026-06-02T12:00:00Z.
@@ -146,12 +146,12 @@ fn bm25_by_content(
 /// decomposition check). Inputs flow: index FastFields → SalienceCollector
 /// → RecallResult → here → `salience()` → assert.
 fn recompute_salience(r: &RecallResult) -> f64 {
-    salience(
+    salience_with_context(
         NOW_SEC,
         r.timestamp_sec as i64,
         r.pain,
         r.importance,
-        r.recurrence,
+        RecurrenceContext::recall(r.recurrence),
     )
 }
 

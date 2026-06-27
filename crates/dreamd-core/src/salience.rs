@@ -9,6 +9,71 @@
 //! Formula is locked verbatim by ARCHITECTURE.md decision #2 and PRD FR-4.2 — do
 //! not refactor the arithmetic shape (e.g., do not factor out `/ 10.0`) so
 //! that `--explain` output reads the same as the spec.
+//!
+//! [`RecurrenceContext`] centralizes per-phase recurrence policy. Per SPEC.md,
+//! `recurrence` is not an event field — each consumer derives the `u64` fed
+//! into [`salience`] separately. Bugs in call-site policy (index-time
+//! staleness vs live cluster size vs decay conservatism) are invisible to
+//! [`salience`] unit tests; they surface here instead.
+
+/// Phase-specific recurrence input for query-time salience.
+///
+/// Each variant documents what "recurrence" means for that consumer. Callers
+/// MUST use the constructor matching their phase — do not pass raw `u64` values
+/// into [`salience_with_context`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecurrenceContext {
+    /// Recall / `--explain`: Tantivy `recurrence` fastfield at index time.
+    ///
+    /// Bounded staleness — older docs in a cluster may carry a lower count than
+    /// the live cluster size until the dream-cycle sidecar re-indexes them.
+    RecallIndexFastfield(u64),
+    /// Dream-cycle cluster ranking: live member count of the promoted cluster.
+    DreamCycleClusterSize(usize),
+    /// Decay pruner: recurrence cannot rescue records older than 90 days, so
+    /// pass 0 conservatively (see [`crate::decay::DECAY_SALIENCE_THRESHOLD`]).
+    Decay,
+}
+
+impl RecurrenceContext {
+    /// Recurrence from the Tantivy index fastfield (bounded staleness).
+    #[must_use]
+    pub const fn recall(index_fastfield: u64) -> Self {
+        Self::RecallIndexFastfield(index_fastfield)
+    }
+
+    /// Recurrence from the live promoted-cluster member count.
+    #[must_use]
+    pub const fn dream_cycle(cluster_size: usize) -> Self {
+        Self::DreamCycleClusterSize(cluster_size)
+    }
+
+    /// Conservative recurrence for the decay pruner (always 0).
+    #[must_use]
+    pub const fn decay() -> Self {
+        Self::Decay
+    }
+
+    fn as_u64(self) -> u64 {
+        match self {
+            Self::RecallIndexFastfield(n) => n,
+            Self::DreamCycleClusterSize(n) => n as u64,
+            Self::Decay => 0,
+        }
+    }
+}
+
+/// Compute salience with an explicit per-phase recurrence policy.
+#[must_use]
+pub fn salience_with_context(
+    now: i64,
+    ts: i64,
+    pain: f64,
+    importance: f64,
+    recurrence: RecurrenceContext,
+) -> f64 {
+    salience(now, ts, pain, importance, recurrence.as_u64())
+}
 
 /// Compute the salience score for an episodic record at query time.
 ///
@@ -26,7 +91,7 @@ pub fn salience(now: i64, ts: i64, pain: f64, importance: f64, recurrence: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::salience;
+    use super::{salience, salience_with_context, RecurrenceContext};
 
     const NOW: i64 = 1_700_000_000;
     const DAY: i64 = 86_400;
@@ -123,5 +188,131 @@ mod tests {
         let s = salience(NOW, NOW, 5.0, 7.0, 9);
         let expected = 1.0 * 0.5 * 0.7 * (1.0 + 10.0_f64.ln());
         assert!((s - expected).abs() < 1e-12, "expected {expected}, got {s}");
+    }
+
+    #[test]
+    fn recurrence_context_maps_each_phase() {
+        let zero_rec = salience(NOW, NOW - DAY, 5.0, 5.0, 0);
+        assert_eq!(
+            salience_with_context(NOW, NOW - DAY, 5.0, 5.0, RecurrenceContext::recall(0)),
+            zero_rec,
+        );
+        assert_eq!(
+            salience_with_context(NOW, NOW - DAY, 5.0, 5.0, RecurrenceContext::dream_cycle(0)),
+            zero_rec,
+        );
+        assert_eq!(
+            salience_with_context(NOW, NOW - DAY, 5.0, 5.0, RecurrenceContext::decay()),
+            zero_rec,
+        );
+        let seven_rec = salience(NOW, NOW - DAY, 5.0, 5.0, 7);
+        assert_eq!(
+            salience_with_context(NOW, NOW - DAY, 5.0, 5.0, RecurrenceContext::recall(7)),
+            seven_rec,
+        );
+        assert_eq!(
+            salience_with_context(NOW, NOW - DAY, 5.0, 5.0, RecurrenceContext::dream_cycle(7)),
+            seven_rec,
+        );
+    }
+
+    /// Same numeric recurrence must yield identical scores across recall and
+    /// dream-cycle policies — ranking stays predictable when the index is fresh.
+    #[test]
+    fn recall_and_dream_cycle_agree_when_recurrence_matches() {
+        let ts = NOW - DAY;
+        let pain = 6.0;
+        let importance = 8.0;
+        let count = 5_u64;
+
+        let recall_score = salience_with_context(
+            NOW,
+            ts,
+            pain,
+            importance,
+            RecurrenceContext::recall(count),
+        );
+        let dream_score = salience_with_context(
+            NOW,
+            ts,
+            pain,
+            importance,
+            RecurrenceContext::dream_cycle(count as usize),
+        );
+        assert_eq!(recall_score, dream_score);
+    }
+
+    /// Decay policy is strictly conservative: recurrence=0 never inflates a
+    /// score relative to recall/dream-cycle with recurrence > 0.
+    #[test]
+    fn decay_policy_never_inflates_relative_to_positive_recurrence() {
+        let ts = NOW - 91 * DAY;
+        let pain = 8.0;
+        let importance = 9.0;
+
+        let decay_score = salience_with_context(
+            NOW,
+            ts,
+            pain,
+            importance,
+            RecurrenceContext::decay(),
+        );
+        let recall_score = salience_with_context(
+            NOW,
+            ts,
+            pain,
+            importance,
+            RecurrenceContext::recall(100),
+        );
+        assert!(
+            decay_score <= recall_score,
+            "decay ({decay_score}) must not exceed recall with recurrence=100 ({recall_score})"
+        );
+    }
+
+    /// Cross-phase ranking on a fixed corpus: when index fastfields match live
+    /// cluster sizes, recall and dream-cycle order events identically.
+    #[test]
+    fn cross_phase_ranking_consistent_when_staleness_absent() {
+        // Three events, same cluster size (3), distinct pain for tie-breaking.
+        let events = [(5.0, 5.0), (7.0, 5.0), (3.0, 5.0)];
+        let cluster_size = 3_usize;
+        let ts = NOW - DAY;
+
+        let mut recall_scores: Vec<(f64, f64)> = events
+            .iter()
+            .map(|&(pain, importance)| {
+                let s = salience_with_context(
+                    NOW,
+                    ts,
+                    pain,
+                    importance,
+                    RecurrenceContext::recall(cluster_size as u64),
+                );
+                (pain, s)
+            })
+            .collect();
+        recall_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let mut dream_scores: Vec<(f64, f64)> = events
+            .iter()
+            .map(|&(pain, importance)| {
+                let s = salience_with_context(
+                    NOW,
+                    ts,
+                    pain,
+                    importance,
+                    RecurrenceContext::dream_cycle(cluster_size),
+                );
+                (pain, s)
+            })
+            .collect();
+        dream_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        assert_eq!(
+            recall_scores.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            dream_scores.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            "recall and dream-cycle must rank identically when recurrence matches"
+        );
     }
 }

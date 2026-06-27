@@ -24,7 +24,7 @@ use tantivy::{DocAddress, DocId, IndexReader, Score, SegmentOrdinal, SegmentRead
 use crate::index::{
     Layer, SchemaFields, IMPORTANCE_FIELD, PAIN_FIELD, RECURRENCE_FIELD, TIMESTAMP_SEC_FIELD,
 };
-use crate::salience::salience;
+use crate::salience::{salience_with_context, RecurrenceContext};
 
 /// One hydrated result from a salience-scored recall query. Score is
 /// `f64` to preserve precision for the upcoming `--explain` formatter
@@ -110,7 +110,13 @@ impl SegmentCollector for SalienceSegmentCollector {
         // Capture bm25 and salience before multiplying — after the product they are
         // unrecoverable (0*anything=0; needed for the --explain formatter, DR-703).
         let bm25 = score as f64;
-        let sal = salience(self.now_sec, ts, p, imp, rec);
+        let sal = salience_with_context(
+            self.now_sec,
+            ts,
+            p,
+            imp,
+            RecurrenceContext::recall(rec),
+        );
         let final_score = bm25 * sal;
 
         let entry = Reverse(ScoredDoc {
