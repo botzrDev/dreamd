@@ -631,6 +631,32 @@ async fn recall_missing_q_param_returns_400() {
 }
 
 #[tokio::test]
+async fn health_reports_fresh_empty_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_test_state(registry_path);
+    let router = build_router(state);
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/health")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["index"]["stale"], serde_json::json!(false));
+    assert_eq!(json["index"]["unindexed_count"], serde_json::json!(0));
+}
+
+#[tokio::test]
 async fn recall_empty_index_returns_empty_results() {
     let dir = tempfile::tempdir().unwrap();
     let registry_path = dir.path().join("registry.toml");

@@ -82,6 +82,57 @@ pub(crate) const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 /// Relative directory holding the per-project Tantivy index segments.
 pub(crate) const INDEX_DIR_NAME: &str = "index";
 
+/// v0.1 index-vs-JSONL contract surface (WEG-42 / DR-202).
+///
+/// Compares the JSONL tail against `index_progress.json`. `stale == true` when
+/// the episodic log has committed events the index watermark has not caught up
+/// to yet — including the normal ≤[`DEFAULT_COMMIT_CADENCE`] window after a
+/// live append, channel-saturation drops (`try_send` → `Full`), or a crash
+/// between JSONL `sync_data` and the next Tantivy commit. JSONL durability is
+/// WAL-backed; index freshness is best-effort and heals on the next
+/// `TantivyIndexHandle::open` replay (or when the indexer commits the backlog).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IndexFreshness {
+    /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
+    /// (lexicographic `EventId` order), or when JSONL has events but the
+    /// watermark is absent.
+    pub stale: bool,
+    /// `id` of the last well-formed JSONL record, if any.
+    pub jsonl_tail_id: Option<String>,
+    /// `last_indexed_id` from `index_progress.json`, if present.
+    pub last_indexed_id: Option<String>,
+    /// Count of JSONL events strictly after the watermark (0 when fresh).
+    pub unindexed_count: usize,
+}
+
+/// Assess on-disk index freshness for `agent_root` without opening Tantivy.
+///
+/// Operators and `GET /api/v1/health` use this to detect recall lag relative to
+/// the JSONL source of truth. Does not consult the live indexer channel.
+pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, IndexError> {
+    let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
+    let progress = read_progress(&progress_path)?;
+    let watermark = progress.last_indexed_id.as_deref();
+
+    let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
+    let jsonl_tail_id = events.last().map(|ev| ev.id.as_str().to_owned());
+    let unindexed_count = events
+        .iter()
+        .filter(|ev| match watermark {
+            Some(last) => ev.id.as_str() > last,
+            None => true,
+        })
+        .count();
+    let stale = unindexed_count > 0;
+
+    Ok(IndexFreshness {
+        stale,
+        jsonl_tail_id,
+        last_indexed_id: progress.last_indexed_id,
+        unindexed_count,
+    })
+}
+
 /// Crash-recovery watermark recording the daemon-assigned `EventId` of the
 /// most recently committed document. Lives at
 /// `<agent_root>/.dreamd/index_progress.json`. Reads on startup;
@@ -566,17 +617,23 @@ fn add_document(
 // Replay (two-pass)
 // ---------------------------------------------------------------------------
 
+fn read_jsonl_bytes(jsonl_path: &Path) -> Result<Vec<u8>, IndexError> {
+    match std::fs::read(jsonl_path) {
+        Ok(b) => Ok(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(IndexError(format!("read jsonl: {e}"))),
+    }
+}
+
+fn read_jsonl_events(jsonl_path: &Path) -> Result<Vec<AgentLearning>, IndexError> {
+    Ok(parse_jsonl_until_torn(&read_jsonl_bytes(jsonl_path)?))
+}
+
 fn replay_two_pass(
     jsonl_path: &Path,
     last_indexed_id: Option<&str>,
 ) -> Result<(HashMap<String, u32>, Vec<AgentLearning>), IndexError> {
-    let bytes = match std::fs::read(jsonl_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((HashMap::new(), Vec::new()));
-        }
-        Err(e) => return Err(IndexError(format!("read jsonl: {e}"))),
-    };
+    let bytes = read_jsonl_bytes(jsonl_path)?;
 
     // Pass 1: build final cluster counts by walking every well-formed line.
     let pass1 = parse_jsonl_until_torn(&bytes);
@@ -685,6 +742,7 @@ mod tests {
     use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
     use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
     use chrono::{DateTime, Utc};
+    use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tantivy::query::AllQuery;
@@ -1662,5 +1720,204 @@ mod tests {
         // handle type, not the drain guarantee.
         map.close_all();
         assert_eq!(map.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.1 index-vs-JSONL contract — assess + replay healing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assess_index_freshness_ok_when_watermark_matches_tail() {
+        let dir = unique_tmpdir("fresh-ok");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id = make_event_id('A');
+        prime_jsonl(&dir, &[sample_learning(id.clone(), "rust.test", "one")]);
+        let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+        write_progress(
+            &progress_path,
+            &IndexProgress {
+                last_indexed_id: Some(id.as_str().to_owned()),
+            },
+        )
+        .unwrap();
+
+        let report = assess_index_freshness(&agent_root).expect("assess");
+        assert!(!report.stale, "watermark at tail must be fresh: {report:?}");
+        assert_eq!(report.unindexed_count, 0);
+    }
+
+    #[test]
+    fn assess_index_freshness_stale_when_jsonl_ahead_of_watermark() {
+        let dir = unique_tmpdir("fresh-stale");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id_a = make_event_id('A');
+        let id_b = make_event_id('B');
+        prime_jsonl(
+            &dir,
+            &[
+                sample_learning(id_a.clone(), "rust.test", "older"),
+                sample_learning(id_b.clone(), "rust.test", "newer"),
+            ],
+        );
+        let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
+        std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+        write_progress(
+            &progress_path,
+            &IndexProgress {
+                last_indexed_id: Some(id_a.as_str().to_owned()),
+            },
+        )
+        .unwrap();
+
+        let report = assess_index_freshness(&agent_root).expect("assess");
+        assert!(report.stale, "jsonl tail ahead of watermark: {report:?}");
+        assert_eq!(report.unindexed_count, 1);
+        assert_eq!(report.jsonl_tail_id.as_deref(), Some(id_b.as_str()));
+    }
+
+    #[tokio::test]
+    async fn startup_replay_heals_jsonl_index_divergence() {
+        let dir = unique_tmpdir("replay-heal");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id_a = make_event_id('A');
+        let id_b = make_event_id('B');
+
+        // Index event A through the normal open path.
+        prime_jsonl(&dir, &[sample_learning(id_a.clone(), "rust.test", "first")]);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open baseline");
+        handle.shutdown().await.expect("shutdown baseline");
+
+        // Simulate crash after JSONL sync_data but before indexer caught up:
+        // append B directly to the episodic log while watermark still at A.
+        let jsonl_path = agent_root.episodic_jsonl();
+        let mut line = serde_json::to_string(&sample_learning(
+            id_b.clone(),
+            "rust.test",
+            "second",
+        ))
+        .unwrap();
+        line.push('\n');
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+
+        let before = assess_index_freshness(&agent_root).expect("assess before");
+        assert!(before.stale, "pre-replay must be stale: {before:?}");
+        assert_eq!(before.unindexed_count, 1);
+
+        let handle2 =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open replay");
+        handle2.shutdown().await.expect("shutdown replay");
+
+        let after = assess_index_freshness(&agent_root).expect("assess after");
+        assert!(!after.stale, "post-replay must be fresh: {after:?}");
+        assert_eq!(count_docs(&agent_root), 2, "A from first open + B from replay");
+    }
+
+    #[tokio::test]
+    async fn channel_saturation_stale_recall_until_restart_replay() {
+        let dir = unique_tmpdir("chan-full-recall");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let handle =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open index");
+        let real_tx = handle.sender();
+
+        // Capacity 1, pre-filled — coordinator try_send will drop the next Append.
+        let (idx_tx, _idx_rx) = mpsc::channel::<IndexerMsg>(1);
+        idx_tx
+            .send(IndexerMsg::Append {
+                event_id: make_event_id('Z'),
+                learning: sample_learning(make_event_id('Z'), "rust.test", "filler"),
+            })
+            .await
+            .unwrap();
+
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        let coord = MemoryCoordinator::open_at(
+            &agent_root.episodic_jsonl(),
+            agent_root.project_root(),
+            coord_rx,
+            Some(idx_tx),
+        )
+        .expect("open coord");
+        let coord_handle = tokio::spawn(coord.run());
+
+        let unique = "channel_saturation_marker_token";
+        let (resp_tx, resp_rx) = oneshot::channel();
+        coord_tx
+            .send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(make_event_id('0'), "rust.test", unique),
+                client_dedup_key: None,
+                response_tx: resp_tx,
+            })
+            .await
+            .expect("send append");
+        resp_rx
+            .await
+            .expect("recv")
+            .expect("append must succeed when indexer channel is full");
+
+        let (sh_tx, sh_rx) = oneshot::channel();
+        coord_tx
+            .send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
+            .await
+            .unwrap();
+        sh_rx.await.unwrap();
+        coord_handle.await.unwrap();
+
+        let stale = assess_index_freshness(&agent_root).expect("assess");
+        assert!(stale.stale, "dropped indexer msg must leave index stale");
+
+        let (_, fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let misses = crate::recall(
+            handle.reader(),
+            &fields,
+            unique,
+            5,
+            None,
+            now_sec,
+        )
+        .expect("recall before replay");
+        assert!(
+            misses.is_empty(),
+            "recall must miss unindexed append after channel saturation"
+        );
+
+        drop(real_tx);
+        handle.shutdown().await.expect("shutdown first handle");
+
+        let handle2 =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("reopen replay");
+        handle2.reader().reload().expect("reload after replay");
+        let hits = crate::recall(
+            handle2.reader(),
+            &fields,
+            unique,
+            5,
+            None,
+            now_sec,
+        )
+        .expect("recall after replay");
+        assert!(
+            !hits.is_empty(),
+            "startup replay must make saturated append searchable"
+        );
+
+        let fresh = assess_index_freshness(&agent_root).expect("assess after");
+        assert!(!fresh.stale, "replay must heal freshness: {fresh:?}");
+
+        handle2.shutdown().await.expect("shutdown");
     }
 }

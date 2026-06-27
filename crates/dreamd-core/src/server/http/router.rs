@@ -3,7 +3,7 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use super::handlers::{get_preferences, get_recall, post_dream, post_learn};
+use super::handlers::{get_health, get_preferences, get_recall, post_dream, post_learn};
 use super::state::AppState;
 
 /// Peer UID injected at connection-accept time by `serve_uds`.
@@ -19,6 +19,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/learn", axum::routing::post(post_learn))
         .route("/api/v1/recall", axum::routing::get(get_recall))
         .route("/api/v1/preferences", axum::routing::get(get_preferences))
+        .route("/api/v1/health", axum::routing::get(get_health))
         .route("/api/v1/dream", axum::routing::post(post_dream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

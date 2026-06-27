@@ -148,6 +148,8 @@ Indexing is incremental (5-second commit cadence), never a nightly rebuild.
 
 Before any destructive op (replacing `LESSONS.md`, pruning JSONL), write `dream_in_progress.wal` with `WalIntent` entries (`ReplaceSemanticMemory`, `PruneEpisodicMemory`, `Commit`). On startup, if the WAL exists, run compensating cleanup before serving traffic. `.agent/` must be either pre- or post-cycle, never mid-cycle.
 
+**v0.1 scope:** WAL protects JSONL, `LESSONS.md`, and recurrence sidecar writes only. Tantivy index mutations are **not** WAL-protected.
+
 ```mermaid
 sequenceDiagram
     participant CLI as dreamd dream / POST /dream
@@ -165,27 +167,48 @@ sequenceDiagram
     WAL->>WAL: delete WAL, mark complete
 ```
 
-### 4. Local API security
+### 4. Index freshness vs JSONL durability (v0.1 contract)
+
+`episodic/AGENT_LEARNINGS.jsonl` is the source of truth. The Tantivy index is a derived, best-effort recall cache.
+
+| Layer | Durability | Recovery |
+|---|---|---|
+| JSONL append | `write_all` + `sync_data` before HTTP 201 | `truncate_malformed_tail` on coordinator open |
+| Dream cycle | WAL before destructive ops | `recover_on_startup` |
+| Tantivy index | 5 s commit cadence; coordinator → indexer `try_send` (drops on `Full`) | Startup two-pass replay in `TantivyIndexHandle::open` |
+
+**Coordinator → indexer hand-off.** After each durable JSONL append, the coordinator `try_send`s `IndexerMsg::Append` on a bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`). On `TrySendError::Full`, the message is logged and dropped — the append still succeeds. On `Closed`, the sender is dropped and live indexing stops until restart.
+
+**Bounded recall staleness.** The indexer commits on a wall-clock cadence (default 5 s). Between append and commit, `index_progress.json` lags the JSONL tail; recall may miss very recent events for up to one commit window. Channel saturation or a crash between JSONL `sync_data` and the next Tantivy commit can extend that lag until the next `TantivyIndexHandle::open` replay.
+
+**Observable signal.** `assess_index_freshness(agent_root)` compares the JSONL tail to `index_progress.json` and reports `stale`, `unindexed_count`, and both IDs. Surfaces at:
+
+- `GET /api/v1/health` (per project, requires `X-Agent-Root`)
+- `dreamd doctor` (`index_freshness:` line)
+
+**Healing.** `TantivyIndexHandle::open` replays every JSONL event whose `EventId` is strictly greater than the on-disk watermark. `add_document` is idempotent; replay re-does at most one commit window after crash. v0.1.1 may add indexer backpressure instead of drop-on-full.
+
+### 5. Local API security
 
 - **Unix (v0.1):** HTTP binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request validates the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); mismatched UIDs are rejected.
 - **Windows:** bearer-token auth on `127.0.0.1` — deferred to v0.1.1.
 - TCP binding to non-localhost will be refused unless `--insecure` is passed — deferred to v0.1.1.
 
-### 5. MCP tool names
+### 6. MCP tool names
 
 The MCP server exposes `search_nodes` (→ `GET /api/v1/recall`) and `append_node` (→ `POST /api/v1/learn`). These names match the Anthropic reference memory server intentionally — do not rename.
 
 `npx dreamd-mcp` is the primary v0.1 distribution surface.
 
-### 6. Schema versioning
+### 7. Schema versioning
 
 Every persisted episodic record carries `schema_version: "1.0.0"`; daemon `state.json` carries `schema_version: "1.0"` (independent version streams). Add a `dreamd migrate` path before changing either version.
 
-### 7. `unsafe` policy
+### 8. `unsafe` policy
 
 Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` override for `detach_double_fork` only, with an explicit SAFETY contract. Do not widen the downgrade.
 
-### 8. Observability
+### 9. Observability
 
 `dreamd_core::observability::init_tracing` installs the process-wide `tracing` subscriber once, at the top of `cli::run()` before subcommand dispatch — the facade and its macro callsites already exist crate-wide, so this baseline is what makes them emit. Two layers:
 
@@ -203,6 +226,7 @@ All endpoints are JSON over `/api/v1` on the Unix domain socket. Full reference:
 | `POST` | `/learn` | Append episodic event; 201 after `sync_data` |
 | `GET` | `/recall?q=&k=` | BM25 × salience search |
 | `POST` | `/dream` | Synchronous cycle; 200 `{"status":"ok"}` |
+| `GET` | `/health` | Index freshness vs JSONL tail |
 | `GET` | `/preferences` | User preferences from `personal/` |
 
 Requests that target a project store must include the `X-Agent-Root` header with the **canonical project root path** (parent of `.agent/`, registered in `~/.agent/registry.toml`).

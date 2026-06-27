@@ -6,10 +6,9 @@
 //! before the daemon serves traffic.
 //!
 //! v0.1 WAL covers JSONL + LESSONS.md + recurrence sidecar writes only.
-//! NOTE: Tantivy index mutations are NOT WAL-protected in v0.1.
-//! The divergence-and-doctor model applies: if a cycle crashes after Tantivy
-//! commits but before JSONL/LESSONS.md, recall may return stale results until
-//! `dreamd doctor --repair` rebuilds the index from JSONL.
+//! Tantivy index mutations are NOT WAL-protected in v0.1 — see
+//! [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index freshness contract) and
+//! [`assess_index_freshness`](crate::server::tantivy_handle::assess_index_freshness).
 
 use std::path::PathBuf;
 
