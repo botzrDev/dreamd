@@ -54,7 +54,9 @@ impl LearnIngress {
     }
 
     /// Range-check an optional score before applying the MCP default (parse, don't clamp).
-    pub fn validate_optional_importance(importance: Option<f64>) -> Result<(), LearnValidationError> {
+    pub fn validate_optional_importance(
+        importance: Option<f64>,
+    ) -> Result<(), LearnValidationError> {
         if let Some(importance) = importance {
             if !(0.0..=10.0).contains(&importance) {
                 return Err(LearnValidationError::ImportanceOutOfRange);
