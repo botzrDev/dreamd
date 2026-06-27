@@ -236,7 +236,7 @@ async fn post_dream(
     State(state): State<AppState>,
     Extension(entry): Extension<crate::registry::ProjectEntry>,
 ) -> impl IntoResponse {
-    use crate::server::tantivy_handle::IndexerMsg;
+    use crate::dream_cycle::{self, IndexBackend, PostPhaseOptions};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::oneshot;
 
@@ -247,14 +247,12 @@ async fn post_dream(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
-        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-        .format("%Y-%m-%d")
-        .to_string();
+    let cycle_date = dream_cycle::cycle_date_from_now_sec(now_sec);
 
     // 409 guard: reject concurrent cycles.
-    match crate::wal::read_last_cycle_status(&agent_root) {
-        Ok(status) if status == "in_progress" => {
+    match dream_cycle::ensure_not_in_progress(&agent_root) {
+        Ok(()) => {}
+        Err(dream_cycle::DreamCycleError::InProgress) => {
             return (
                 axum::http::StatusCode::CONFLICT,
                 axum::Json(serde_json::json!({"error": "dream cycle in progress"})),
@@ -268,7 +266,6 @@ async fn post_dream(
             )
                 .into_response();
         }
-        Ok(_) => {}
     }
 
     // WEG-63 — capture dirty state BEFORE the cycle runs.
@@ -320,62 +317,35 @@ async fn post_dream(
         Err(_) => return error_500("coordinator dropped dream-cycle response"),
     };
 
-    // Tantivy prune — only if any events decayed.
-    // Escape pattern: clone the mpsc::Sender while holding the lock, release lock,
-    // then send PruneDecayedEvents and await response (no lock held across .await).
-    if !decay_result.decayed_ids.is_empty() {
-        // Route to the same handle recall/append use (pinned primary for the
-        // daemon's project, else index_map) so the dream cycle and the live
-        // indexer never open two IndexWriters on one index dir (WEG-264
-        // Defect 2). sender is Clone (mpsc::Sender), so no lock is held across
-        // the await below.
-        let sender =
-            match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.sender()) {
-                Ok(s) => s,
-                Err(e) => {
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                        .into_response()
-                }
-            };
+    // Index + autobiography — owned by dream_cycle orchestration.
+    let index_sender =
+        match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.sender()) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        };
 
-        let (tx, rx) = oneshot::channel();
-        if sender
-            .send(IndexerMsg::PruneDecayedEvents {
-                event_ids: decay_result.decayed_ids,
-                response: tx,
-            })
-            .await
-            .is_err()
-        {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "indexer channel closed"})),
-            )
-                .into_response();
-        }
-        if let Err(e) = rx.await.unwrap_or(Err(crate::server::index_map::IndexError(
-            "indexer dropped response".to_string(),
-        ))) {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
-    }
-
-    // WEG-63 — autobiography commit. Best-effort: failures are logged but
-    // do not turn the cycle into a 500.
-    if let Err(e) =
-        crate::autobiography::commit_cycle(&agent_root, &cycle_date, &dirty_at_cycle_start)
+    if let Err(e) = dream_cycle::run_post_phases(PostPhaseOptions {
+        agent_root: &agent_root,
+        project_root: std::path::Path::new(&entry.root),
+        cycle_date: &cycle_date,
+        decay_result: &decay_result,
+        dirty_at_cycle_start: &dirty_at_cycle_start,
+        commit_autobiography: true,
+        index: IndexBackend::Sender(index_sender),
+    })
+    .await
     {
-        tracing::error!(
-            error = %e,
-            "autobiography commit failed (dream cycle still succeeded)"
-        );
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
 
     (

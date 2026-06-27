@@ -300,10 +300,9 @@ impl MemoryCoordinator {
         now_sec: i64,
         cycle_date: &str,
     ) -> Result<crate::decay::DecayResult, CoordinatorError> {
-        crate::consolidation::run_deterministic_dream_cycle(&self.agent_root, now_sec)
-            .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
-        let decay = crate::decay::run_decay_pruner(&self.agent_root, now_sec, cycle_date)
-            .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+        let decay =
+            crate::dream_cycle::run_filesystem_phases(&self.agent_root, now_sec, cycle_date)
+                .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
 
         self.file = OpenOptions::new()
             .read(true)
