@@ -1,8 +1,8 @@
 //! Lazy-started, LRU + idle-evicting map of per-project coordinators.
 //!
-//! Mirrors [`crate::server::ProjectIndexMap`] but for [`Supervisor`]. Two
-//! deliberate differences from the index map:
-//!   * `last_used` is tracked by the map itself — a [`Supervisor`] carries none.
+//! Thin adapter over [`crate::server::project_resource_map::ProjectResourceMap`]
+//! for [`Supervisor`]. Two deliberate differences from the index map:
+//!   * `last_used` is tracked by the map entry — a [`Supervisor`] carries none.
 //!   * eviction reaps a coordinator by **dropping** its `Arc<Supervisor>`; we
 //!     never call the async `Supervisor::shutdown` from this map (it consumes
 //!     `self` and would have to be awaited under the std `Mutex`, which is
@@ -18,44 +18,51 @@
 //! returns the SAME `Arc` for repeated calls on a live root — the no-double-start
 //! invariant the unit tests guard with `Arc::ptr_eq`.
 
-use std::path::{Path, PathBuf};
+use std::convert::Infallible;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::server::lifecycle::{ServerError, Supervisor};
+use crate::server::project_resource_map::{
+    ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig,
+};
 
 /// Lifecycle parameters for a [`SupervisorMap`]. Defaults match
 /// [`crate::server::index_map::ProjectIndexMapConfig`] so a project's coordinator
 /// and its index handle reap on the same cadence.
-#[derive(Debug, Clone)]
-pub struct SupervisorMapConfig {
-    pub capacity: usize,
-    pub idle_timeout: Duration,
+pub type SupervisorMapConfig = ProjectResourceMapConfig;
+
+struct SupervisorEntry {
+    supervisor: Arc<Supervisor>,
+    last_used: Instant,
 }
 
-impl Default for SupervisorMapConfig {
-    fn default() -> Self {
-        Self {
-            capacity: 10,
-            idle_timeout: Duration::from_secs(30 * 60),
-        }
+impl ProjectMapResource for SupervisorEntry {
+    type ReleaseError = Infallible;
+
+    fn last_used(&self) -> Instant {
+        self.last_used
+    }
+
+    fn release(self) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    fn touch(&mut self) {
+        self.last_used = Instant::now();
     }
 }
 
 /// Lazy-started, LRU + idle-evicting map of per-project [`Supervisor`]s.
 pub struct SupervisorMap {
-    config: SupervisorMapConfig,
-    /// MRU at the back. `(canonical root, supervisor, last_used)`. A `Vec`
-    /// (not `LruCache`) because the cap is small (~10) and idle eviction has to
-    /// walk every entry anyway — same shape as `ProjectIndexMap`.
-    entries: Vec<(PathBuf, Arc<Supervisor>, Instant)>,
+    inner: ProjectResourceMap<SupervisorEntry>,
 }
 
 impl SupervisorMap {
     pub fn new(config: SupervisorMapConfig) -> Self {
         Self {
-            config,
-            entries: Vec::new(),
+            inner: ProjectResourceMap::new(config),
         }
     }
 
@@ -65,11 +72,11 @@ impl SupervisorMap {
 
     /// Number of live coordinators currently held.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner.is_empty()
     }
 
     /// Return the coordinator for `root`, starting it via `start` on a miss.
@@ -83,41 +90,19 @@ impl SupervisorMap {
     where
         F: FnOnce() -> Result<Supervisor, ServerError>,
     {
-        // Reap idle coordinators up front so a slow caller can't keep a stale
-        // coordinator (and its open JSONL fd) alive merely by having opened it.
-        self.evict_idle();
-
-        if let Some(idx) = self.entries.iter().position(|(p, _, _)| p == root) {
-            // LRU touch: move the live entry to the back and refresh last_used.
-            let mut entry = self.entries.remove(idx);
-            entry.2 = Instant::now();
-            let sup = entry.1.clone();
-            self.entries.push(entry);
-            return Ok(sup);
-        }
-
-        // Miss path: make room (drop LRU front → reap), then start.
-        while self.entries.len() >= self.config.capacity {
-            // Dropping the front entry drops its `Arc<Supervisor>`; if no
-            // in-flight handler holds a clone, the coordinator drains and exits.
-            self.entries.remove(0);
-        }
-
-        let sup = Arc::new(start()?);
-        self.entries
-            .push((root.to_path_buf(), sup.clone(), Instant::now()));
-        Ok(sup)
+        let entry = self.inner.get_or_insert(root, |_| {
+            Ok::<SupervisorEntry, ServerError>(SupervisorEntry {
+                supervisor: Arc::new(start()?),
+                last_used: Instant::now(),
+            })
+        })?;
+        Ok(entry.supervisor.clone())
     }
 
     /// Reap every entry whose `last_used` is older than `idle_timeout` by
     /// dropping its `Arc<Supervisor>`. Returns the number reaped.
     pub fn evict_idle(&mut self) -> usize {
-        let Some(cutoff) = Instant::now().checked_sub(self.config.idle_timeout) else {
-            return 0;
-        };
-        let before = self.entries.len();
-        self.entries.retain(|(_, _, last)| *last >= cutoff);
-        before - self.entries.len()
+        self.inner.evict_idle()
     }
 }
 
@@ -125,6 +110,7 @@ impl SupervisorMap {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// A start closure that counts invocations and hands back a no-op
     /// supervisor (channel + detached no-op task — see
