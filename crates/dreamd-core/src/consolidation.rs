@@ -6,8 +6,8 @@
 //!
 //! `apply_pin_unpin` rewrites `AGENT_LEARNINGS.jsonl` with all `pinned` flags
 //! cleared then re-set for IDs cited in the freshly-written `LESSONS.md`.
-//! Called by WEG-61 after `write_lessons_file`; not safe to call before
-//! `LESSONS.md` exists (succeeds silently if absent).
+//! Called by WEG-61 after `write_lessons_file`, before `commit_cycle`; not safe
+//! to call before `LESSONS.md` exists (succeeds silently if absent).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -177,7 +177,8 @@ pub fn run_cluster_engine(
 /// Clear all `pinned` flags on episodic entries, then re-pin only those cited
 /// in the freshly-written `LESSONS.md`.
 ///
-/// Called by WEG-61 (DR-308) after `write_lessons_file`. Returns `Ok` without
+/// Called by WEG-61 (DR-308) after `write_lessons_file`, while the dream-cycle
+/// WAL is still open (before [`wal::commit_cycle`]). Returns `Ok` without
 /// mutations if `LESSONS.md` or the JSONL is absent.
 pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError> {
     let lessons_path = agent_root.lessons_md();
@@ -303,9 +304,11 @@ pub fn run_deterministic_dream_cycle(
     std::fs::create_dir_all(agent_root.semantic_dir())?;
     lessons::write_lessons_file(&lessons_path, &lessons_file)?;
 
-    wal::commit_cycle(agent_root, now_sec)?;
-
+    // Pin/unpin rewrites JSONL — must run before commit_cycle so
+    // `append_intent(PruneEpisodicMemory)` lands in the active WAL.
     apply_pin_unpin(agent_root)?;
+
+    wal::commit_cycle(agent_root, now_sec)?;
 
     Ok(())
 }
@@ -809,6 +812,153 @@ mod tests {
             !root.wal_path().exists(),
             "WAL must be deleted after commit"
         );
+    }
+
+    #[test]
+    fn deterministic_cycle_pin_unpin_recorded_in_wal_before_commit() {
+        let dir = unique_tmpdir("dc-wal-pin");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
+            .map(|i| make_event(i as u32, "rust::types", false))
+            .collect();
+        write_jsonl(&root, &events);
+
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        let cluster_output = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert!(!cluster_output.promoted.is_empty());
+
+        let top_cluster = cluster_output
+            .promoted
+            .iter()
+            .max_by(|a, b| {
+                a.salience_sum
+                    .partial_cmp(&b.salience_sum)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        let exemplar = pick_exemplar(&top_cluster.events, NOW_SEC);
+        let lessons = vec![Lesson {
+            id: exemplar.id.as_str().to_string(),
+            content: exemplar.content.clone(),
+            pinned: false,
+        }];
+
+        let lessons_path = root.lessons_md();
+        let temp_path = lessons_path
+            .with_extension("tmp")
+            .to_string_lossy()
+            .into_owned();
+        wal::append_intent(
+            &root,
+            WalIntent::ReplaceSemanticMemory {
+                temp_file_path: temp_path,
+            },
+        )
+        .unwrap();
+
+        let last_updated = DateTime::<Utc>::from_timestamp(NOW_SEC, 0).unwrap_or_default();
+        let lessons_file = LessonsFile {
+            last_updated,
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: top_cluster.cluster_key.clone(),
+            lessons,
+        };
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        lessons::write_lessons_file(&lessons_path, &lessons_file).unwrap();
+
+        apply_pin_unpin(&root).unwrap();
+
+        let wal: crate::wal::DreamWal =
+            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
+        assert!(
+            wal.intents
+                .iter()
+                .any(|i| matches!(i, WalIntent::PruneEpisodicMemory { .. })),
+            "pin/unpin must append PruneEpisodicMemory while WAL is active"
+        );
+        assert!(
+            !wal.intents.contains(&WalIntent::Commit),
+            "commit must not precede pin/unpin"
+        );
+
+        wal::commit_cycle(&root, NOW_SEC).unwrap();
+        assert!(!root.wal_path().exists());
+    }
+
+    #[test]
+    fn recover_mid_pin_unpin_preserves_jsonl_when_tmp_survives() {
+        let dir = unique_tmpdir("recover-pin");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        fs::create_dir_all(root.dreamd_dir()).unwrap();
+
+        let events = vec![
+            make_event(0, "rust::types", true),
+            make_event(1, "rust::types", false),
+            make_event(2, "rust::types", false),
+        ];
+        write_jsonl(&root, &events);
+        let original_bytes = fs::read(root.episodic_jsonl()).unwrap();
+
+        let lessons_path = root.lessons_md();
+        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
+        write_lessons_file(
+            &lessons_path,
+            &LessonsFile {
+                last_updated: fixed_ts(),
+                prompt_version: "deterministic-only".to_string(),
+                cluster_key: "rust::types".to_string(),
+                lessons: vec![Lesson {
+                    id: test_id(2).as_str().to_string(),
+                    content: "exemplar".to_string(),
+                    pinned: false,
+                }],
+            },
+        )
+        .unwrap();
+
+        let jsonl_tmp = root.episodic_jsonl().with_extension("tmp");
+        fs::write(&jsonl_tmp, b"partial pin/unpin rewrite\n").unwrap();
+
+        let lessons_tmp = lessons_path.with_extension("tmp");
+        let wal = crate::wal::DreamWal {
+            schema_version: "1.0".to_string(),
+            intents: vec![
+                WalIntent::ReplaceSemanticMemory {
+                    temp_file_path: lessons_tmp.to_string_lossy().into_owned(),
+                },
+                WalIntent::PruneEpisodicMemory {
+                    temp_file_path: jsonl_tmp.to_string_lossy().into_owned(),
+                },
+            ],
+        };
+        fs::write(
+            root.wal_path(),
+            serde_json::to_string_pretty(&wal).unwrap().as_bytes(),
+        )
+        .unwrap();
+        fs::write(
+            root.state_json(),
+            br#"{"schema_version":"1.0","last_dream_cycle_status":"in_progress"}"#,
+        )
+        .unwrap();
+
+        let outcome = wal::recover_if_needed(&root, NOW_SEC).unwrap();
+        assert!(
+            matches!(outcome, crate::wal::RecoveryOutcome::Recovered { .. }),
+            "incomplete pin/unpin cycle must be recoverable"
+        );
+        assert!(!jsonl_tmp.exists(), ".tmp from pin/unpin must be cleaned up");
+        assert_eq!(
+            fs::read(root.episodic_jsonl()).unwrap(),
+            original_bytes,
+            "JSONL must be unchanged when pin/unpin rename never completed"
+        );
+
+        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        assert!(updated[0].pinned, "pre-cycle pin state must survive recovery");
+        assert!(!updated[2].pinned, "partial rewrite must not have landed");
     }
 
     #[test]
