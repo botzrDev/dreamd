@@ -1,6 +1,6 @@
 //! WEG-65 / DR-313 — Snapshot tests for deterministic dream-cycle output.
 //!
-//! Runs `run_deterministic_dream_cycle` against a frozen 7-event JSONL corpus
+//! Runs [`dream_cycle::run_filesystem_phases`] against a frozen 7-event JSONL corpus
 //! and pins the three output files: LESSONS.md, recurrence_counts.json, state.json.
 //!
 //! NOW_SEC = 1_747_137_600 (2025-05-13T12:00:00Z) — fixed clock; no wall-time calls.
@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dreamd_core::consolidation::run_deterministic_dream_cycle;
+use dreamd_core::dream_cycle::{self, cycle_date_from_now_sec};
 use dreamd_core::layout::AgentRoot;
 
 /// Fixed reference clock. All age calculations resolve against this.
@@ -37,7 +37,8 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
     // Create the dreamd dir (state.json lives here).
     fs::create_dir_all(root.dreamd_dir()).unwrap();
 
-    run_deterministic_dream_cycle(&root, NOW_SEC)
+    let cycle_date = cycle_date_from_now_sec(NOW_SEC);
+    dream_cycle::run_filesystem_phases(&root, NOW_SEC, &cycle_date)
         .expect("dream cycle must succeed on valid fixture");
 
     (dir, root)

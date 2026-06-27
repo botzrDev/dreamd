@@ -4,13 +4,14 @@
 //!
 //! 1. **Daemon proxy** (default on Unix when `dreamd watch` owns the project):
 //!    `POST /api/v1/dream` over the UDS. Returns early on HTTP 409 (cycle in progress).
-//! 2. **In-process** (no daemon, or `--no-commit`): runs consolidation + decay locally.
+//! 2. **In-process** (no daemon, or `--no-commit`): runs the full cycle via
+//!    [`dreamd_core::dream_cycle::run_in_process`].
 //!
 //! ## WAL protocol
 //!
-//! The in-process path delegates to `run_deterministic_dream_cycle`, which writes
-//! [`dream_in_progress.wal`](dreamd_core::wal::DreamWal) before destructive steps.
-//! `--no-commit` skips the git autobiography commit but still runs the full cycle.
+//! The in-process path writes [`dream_in_progress.wal`](dreamd_core::wal::DreamWal) before
+//! destructive steps. `--no-commit` skips the git autobiography commit but still runs
+//! the full cycle.
 //!
 //! ## `--dry` contract
 //!
@@ -22,19 +23,12 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dreamd_core::{
-    consolidation::{run_deterministic_dream_cycle, DreamCycleError},
-    decay::{run_decay_pruner, DecayError},
-    layout::AgentRoot,
-    server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE},
-};
+use dreamd_core::dream_cycle::{self, DreamCycleError};
 
 /// Errors produced by the `dreamd dream` command.
 #[derive(Debug)]
 pub enum DreamCliError {
     DreamCycle(DreamCycleError),
-    Decay(DecayError),
-    Index(String),
     Io(std::io::Error),
     /// HTTP 409 from the daemon — a cycle is already running for this project.
     DaemonInProgress,
@@ -46,8 +40,6 @@ impl fmt::Display for DreamCliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DreamCycle(e) => write!(f, "dream cycle error: {e}"),
-            Self::Decay(e) => write!(f, "decay error: {e}"),
-            Self::Index(s) => write!(f, "index error: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::DaemonInProgress => {
                 write!(
@@ -64,8 +56,7 @@ impl std::error::Error for DreamCliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::DreamCycle(e) => Some(e),
-            Self::Decay(e) => Some(e),
-            Self::Index(_) | Self::DaemonInProgress | Self::DaemonProxy(_) => None,
+            Self::DaemonInProgress | Self::DaemonProxy(_) => None,
             Self::Io(e) => Some(e),
         }
     }
@@ -94,17 +85,7 @@ pub fn run(
         // None → no daemon for this project; fall through to in-process.
     }
 
-    let agent_root = AgentRoot::new(project_root);
-
-    // Clock read for the cycle — both values derive from it. The core threads
-    // `now_sec` as a caller-provided parameter (see consolidation.rs: "now_sec
-    // is caller-provided for determinism — do not call Utc::now()"); this is the
-    // lone CLI-boundary clock read, so SOURCE_DATE_EPOCH is honored here.
     let now_sec = resolve_now_sec()?;
-    let cycle_date = chrono::DateTime::from_timestamp(now_sec, 0)
-        .expect("valid unix timestamp")
-        .format("%Y-%m-%d")
-        .to_string();
 
     // WEG-63 — capture dirty state BEFORE the cycle runs.
     let dirty_at_cycle_start = if no_commit {
@@ -113,40 +94,12 @@ pub fn run(
         dreamd_core::autobiography::check_dirty_at_cycle_start(project_root).unwrap_or_default()
     };
 
-    run_deterministic_dream_cycle(&agent_root, now_sec).map_err(DreamCliError::DreamCycle)?;
-
     let result =
-        run_decay_pruner(&agent_root, now_sec, &cycle_date).map_err(DreamCliError::Decay)?;
+        dream_cycle::run_in_process(project_root, now_sec, no_commit, dirty_at_cycle_start)
+            .map_err(DreamCliError::DreamCycle)?;
 
-    // Capture counts before moving result.decayed_ids.
-    let decayed_count = result.decayed_ids.len();
-    let kept_count = result.kept_count;
-
-    // Tantivy prune — Phase 1 pattern: open fresh handle per call.
-    // main() is sync, so spin up a new current-thread runtime.
-    // Do NOT use Handle::current().block_on() — panics inside existing runtime.
-    if decayed_count > 0 {
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
-            .map_err(|e| DreamCliError::Index(e.to_string()))?;
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(handle.prune_decayed_events(result.decayed_ids))
-            .map_err(|e| DreamCliError::Index(e.to_string()))?;
-    }
-
-    // WEG-63 — autobiography commit. Best-effort; failure does not fail the cycle.
-    if !no_commit {
-        if let Err(e) = dreamd_core::autobiography::commit_cycle(
-            &agent_root,
-            &cycle_date,
-            &dirty_at_cycle_start,
-        ) {
-            tracing::error!(
-                error = %e,
-                "autobiography commit failed (dream cycle still succeeded)"
-            );
-        }
-    }
+    let decayed_count = result.decay.decayed_ids.len();
+    let kept_count = result.decay.kept_count;
 
     writeln!(
         out,

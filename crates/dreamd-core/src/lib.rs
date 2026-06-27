@@ -15,6 +15,7 @@ pub mod config;
 pub mod consolidation;
 pub mod coordinator;
 pub mod decay;
+pub mod dream_cycle;
 pub mod index;
 pub mod io;
 pub mod layout;
