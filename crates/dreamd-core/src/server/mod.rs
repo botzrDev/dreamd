@@ -12,8 +12,10 @@
 //! or a second Rust binary consumer (see `docs/architecture.md`).
 //!
 //! Submodule layout:
-//!   * [`index_map`] — `IndexHandle` trait skeleton + `ProjectIndexMap<H>` with
-//!     lazy-open, LRU eviction (cap 10), and idle eviction (30 min). Real
+//!   * [`project_resource_map`] — shared lazy-open LRU + idle-eviction container
+//!     (cap 10, 30 min idle) keyed on project root. Index and supervisor maps
+//!     are thin adapters over this module.
+//!   * [`index_map`] — `IndexHandle` trait + `ProjectIndexMap<H>` adapter. Real
 //!     Tantivy-backed handle lands in WEG-42; we ship `TestIndexHandle` here
 //!     so the eviction + shutdown-drain tests can run without `tantivy`.
 //!   * [`uds`] — bind/connect/cleanup for `~/.agent/dreamd.sock` with `0600`
@@ -24,6 +26,7 @@
 pub mod http;
 pub mod index_map;
 pub mod lifecycle;
+pub mod project_resource_map;
 pub mod supervisor_map;
 pub mod tantivy_handle;
 pub mod uds;
@@ -35,6 +38,7 @@ pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,
 };
+pub use project_resource_map::{ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig};
 pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
 pub use tantivy_handle::{
     assess_index_freshness, IndexFreshness, IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,

@@ -13,7 +13,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+use crate::server::project_resource_map::{
+    ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig,
+};
 
 /// Error surfaced when an index handle fails to close cleanly. Concrete
 /// implementations decide what's "fatal" vs "logged" — the skeleton holds
@@ -39,40 +43,34 @@ pub trait IndexHandle: Send + 'static {
     fn last_used(&self) -> Instant;
 }
 
-/// Lifecycle parameters for a [`ProjectIndexMap`]. Defaults match the WEG-21
-/// founder-decision values (cap 10, idle 30 min).
-#[derive(Debug, Clone)]
-pub struct ProjectIndexMapConfig {
-    pub capacity: usize,
-    pub idle_timeout: Duration,
-}
+impl<H: IndexHandle> ProjectMapResource for H {
+    type ReleaseError = IndexError;
 
-impl Default for ProjectIndexMapConfig {
-    fn default() -> Self {
-        Self {
-            capacity: 10,
-            idle_timeout: Duration::from_secs(30 * 60),
-        }
+    fn last_used(&self) -> Instant {
+        IndexHandle::last_used(self)
+    }
+
+    fn release(self) -> Result<(), IndexError> {
+        IndexHandle::close(self)
     }
 }
+
+/// Lifecycle parameters for a [`ProjectIndexMap`]. Defaults match the WEG-21
+/// founder-decision values (cap 10, idle 30 min).
+pub type ProjectIndexMapConfig = ProjectResourceMapConfig;
 
 /// Lazy-opened, LRU + idle-evicting map of per-project index handles.
 ///
 /// Generic on `H: IndexHandle` so tests can drive the same logic against a
 /// recording handle (`TestIndexHandle`) without pulling in `tantivy`.
 pub struct ProjectIndexMap<H: IndexHandle> {
-    config: ProjectIndexMapConfig,
-    /// Insertion-order list of (root, handle). Most-recently-used is at the
-    /// back; we keep it in a `Vec` rather than `LruCache` because we need to
-    /// walk for idle eviction anyway and the cap is small (~10).
-    entries: Vec<(PathBuf, H)>,
+    inner: ProjectResourceMap<H>,
 }
 
 impl<H: IndexHandle> ProjectIndexMap<H> {
     pub fn new(config: ProjectIndexMapConfig) -> Self {
         Self {
-            config,
-            entries: Vec::new(),
+            inner: ProjectResourceMap::new(config),
         }
     }
 
@@ -82,11 +80,11 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
 
     /// Number of currently-open handles.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner.is_empty()
     }
 
     /// Look up the handle for `project_root`, or open it via `open` and insert.
@@ -99,62 +97,19 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
     where
         F: FnOnce(&Path) -> Result<H, IndexError>,
     {
-        // First, evict any idle entries up front so a slow caller doesn't
-        // keep a stale handle alive just by having been opened recently.
-        self.evict_idle();
-
-        if let Some(idx) = self.position(project_root) {
-            // LRU touch: move to back.
-            let entry = self.entries.remove(idx);
-            self.entries.push(entry);
-            let last = self.entries.len() - 1;
-            return Ok(&mut self.entries[last].1);
-        }
-
-        // Miss path: ensure capacity, then open.
-        while self.entries.len() >= self.config.capacity {
-            // Evict LRU (front).
-            let (_, handle) = self.entries.remove(0);
-            let _ = handle.close();
-        }
-
-        let handle = open(project_root)?;
-        self.entries.push((project_root.to_path_buf(), handle));
-        let last = self.entries.len() - 1;
-        Ok(&mut self.entries[last].1)
+        self.inner.get_or_insert(project_root, open)
     }
 
     /// Walk all entries and close any whose `last_used()` is older than
     /// `idle_timeout`. Returns the number of entries evicted.
     pub fn evict_idle(&mut self) -> usize {
-        let cutoff = Instant::now().checked_sub(self.config.idle_timeout);
-        let Some(cutoff) = cutoff else {
-            return 0;
-        };
-        let mut evicted = 0;
-        let mut i = 0;
-        while i < self.entries.len() {
-            if self.entries[i].1.last_used() < cutoff {
-                let (_, handle) = self.entries.remove(i);
-                let _ = handle.close();
-                evicted += 1;
-            } else {
-                i += 1;
-            }
-        }
-        evicted
+        self.inner.evict_idle()
     }
 
     /// Close every open handle. Errors from individual closes are swallowed
     /// — the supervisor uses this on shutdown and there is no recovery.
     pub fn close_all(&mut self) {
-        for (_, handle) in self.entries.drain(..) {
-            let _ = handle.close();
-        }
-    }
-
-    fn position(&self, root: &Path) -> Option<usize> {
-        self.entries.iter().position(|(p, _)| p == root)
+        self.inner.close_all();
     }
 }
 
@@ -249,6 +204,7 @@ impl TestEventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn opener(log: Arc<TestEventLog>) -> impl Fn(&Path) -> Result<TestIndexHandle, IndexError> {
         move |p: &Path| Ok(TestIndexHandle::open(p, log.clone()))
