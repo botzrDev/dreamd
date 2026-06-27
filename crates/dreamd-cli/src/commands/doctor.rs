@@ -50,14 +50,8 @@ pub fn run(
                      jsonl_tail={}; watermark={}; recall may miss recent events \
                      until indexer commit or daemon restart replay]",
                     freshness.unindexed_count,
-                    freshness
-                        .jsonl_tail_id
-                        .as_deref()
-                        .unwrap_or("(none)"),
-                    freshness
-                        .last_indexed_id
-                        .as_deref()
-                        .unwrap_or("(none)"),
+                    freshness.jsonl_tail_id.as_deref().unwrap_or("(none)"),
+                    freshness.last_indexed_id.as_deref().unwrap_or("(none)"),
                 )?;
                 all_ok = false;
             }

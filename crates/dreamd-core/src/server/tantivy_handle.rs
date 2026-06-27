@@ -1795,12 +1795,8 @@ mod tests {
         // Simulate crash after JSONL sync_data but before indexer caught up:
         // append B directly to the episodic log while watermark still at A.
         let jsonl_path = agent_root.episodic_jsonl();
-        let mut line = serde_json::to_string(&sample_learning(
-            id_b.clone(),
-            "rust.test",
-            "second",
-        ))
-        .unwrap();
+        let mut line =
+            serde_json::to_string(&sample_learning(id_b.clone(), "rust.test", "second")).unwrap();
         line.push('\n');
         std::fs::OpenOptions::new()
             .append(true)
@@ -1819,7 +1815,11 @@ mod tests {
 
         let after = assess_index_freshness(&agent_root).expect("assess after");
         assert!(!after.stale, "post-replay must be fresh: {after:?}");
-        assert_eq!(count_docs(&agent_root), 2, "A from first open + B from replay");
+        assert_eq!(
+            count_docs(&agent_root),
+            2,
+            "A from first open + B from replay"
+        );
     }
 
     #[tokio::test]
@@ -1881,15 +1881,8 @@ mod tests {
 
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
-        let misses = crate::recall(
-            handle.reader(),
-            &fields,
-            unique,
-            5,
-            None,
-            now_sec,
-        )
-        .expect("recall before replay");
+        let misses = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
+            .expect("recall before replay");
         assert!(
             misses.is_empty(),
             "recall must miss unindexed append after channel saturation"
@@ -1901,15 +1894,8 @@ mod tests {
         let handle2 =
             TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("reopen replay");
         handle2.reader().reload().expect("reload after replay");
-        let hits = crate::recall(
-            handle2.reader(),
-            &fields,
-            unique,
-            5,
-            None,
-            now_sec,
-        )
-        .expect("recall after replay");
+        let hits = crate::recall(handle2.reader(), &fields, unique, 5, None, now_sec)
+            .expect("recall after replay");
         assert!(
             !hits.is_empty(),
             "startup replay must make saturated append searchable"

@@ -37,8 +37,7 @@ pub use lifecycle::{
 };
 pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
 pub use tantivy_handle::{
-    assess_index_freshness, IndexFreshness, IndexerMsg, TantivyIndexHandle,
-    DEFAULT_COMMIT_CADENCE,
+    assess_index_freshness, IndexFreshness, IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
 };
 pub use uds::{bind_writer_socket, try_connect_existing, SocketGuard, UdsBindError};
 #[cfg(unix)]
