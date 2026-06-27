@@ -12,7 +12,7 @@ use std::io::Write;
 use dreamd_protocol::{AgentLearning, EventId};
 
 use crate::layout::AgentRoot;
-use crate::salience::salience;
+use crate::salience::{salience_with_context, RecurrenceContext};
 use crate::wal::{self, WalIntent};
 
 /// Age threshold: events older than this are candidates for decay.
@@ -26,10 +26,9 @@ pub const DECAY_SALIENCE_THRESHOLD: f64 = 2.0;
 
 /// Returns `true` if this record should be archived.
 ///
-/// Preconditions caller must ensure: recurrence value doesn't need to be
-/// exact — at age > 90d, salience is always below the threshold regardless
-/// of recurrence. Pass 0 if the sidecar is unavailable.
-pub fn should_decay(now_sec: i64, learning: &AgentLearning, recurrence: u64) -> bool {
+/// Uses [`RecurrenceContext::decay`] — at age > 90d, salience is always below
+/// the threshold regardless of live cluster recurrence.
+pub fn should_decay(now_sec: i64, learning: &AgentLearning) -> bool {
     if learning.pinned {
         return false;
     }
@@ -37,12 +36,12 @@ pub fn should_decay(now_sec: i64, learning: &AgentLearning, recurrence: u64) -> 
     if age_sec <= DECAY_AGE_THRESHOLD_SEC {
         return false;
     }
-    let sal = salience(
+    let sal = salience_with_context(
         now_sec,
         learning.timestamp.timestamp(),
         learning.pain as f64,
         learning.importance as f64,
-        recurrence,
+        RecurrenceContext::decay(),
     );
     sal < DECAY_SALIENCE_THRESHOLD
 }
@@ -139,11 +138,11 @@ pub fn run_decay_pruner(
         });
     }
 
-    // Step 2: partition into decayed / kept (recurrence = 0 per spec).
+    // Step 2: partition into decayed / kept ([`RecurrenceContext::decay`]).
     let mut decayed: Vec<AgentLearning> = Vec::new();
     let mut kept: Vec<AgentLearning> = Vec::new();
     for event in all_events {
-        if should_decay(now_sec, &event, 0) {
+        if should_decay(now_sec, &event) {
             decayed.push(event);
         } else {
             kept.push(event);
@@ -311,21 +310,21 @@ mod tests {
     fn should_decay_old_low_salience() {
         let id = make_event_id('0');
         let learning = make_learning(id, OLD_TS, false);
-        assert!(should_decay(NOW_SEC, &learning, 0));
+        assert!(should_decay(NOW_SEC, &learning));
     }
 
     #[test]
     fn should_not_decay_pinned() {
         let id = make_event_id('0');
         let learning = make_learning(id, OLD_TS, true);
-        assert!(!should_decay(NOW_SEC, &learning, 0));
+        assert!(!should_decay(NOW_SEC, &learning));
     }
 
     #[test]
     fn should_not_decay_young() {
         let id = make_event_id('0');
         let learning = make_learning(id, YOUNG_TS, false);
-        assert!(!should_decay(NOW_SEC, &learning, 0));
+        assert!(!should_decay(NOW_SEC, &learning));
     }
 
     #[test]
