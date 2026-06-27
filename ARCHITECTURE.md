@@ -185,6 +185,15 @@ Every persisted episodic record carries `schema_version: "1.0.0"`; daemon `state
 
 Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` override for `detach_double_fork` only, with an explicit SAFETY contract. Do not widen the downgrade.
 
+### 8. Observability
+
+`dreamd_core::observability::init_tracing` installs the process-wide `tracing` subscriber once, at the top of `cli::run()` before subcommand dispatch — the facade and its macro callsites already exist crate-wide, so this baseline is what makes them emit. Two layers:
+
+- **Console → stderr, always.** stdout is reserved for the MCP JSON-RPC channel (`rmcp::transport::stdio`), so logs must never write to it. Pretty human-readable text when stderr is a TTY, JSON when it is not (CI, service-managed daemon); TTY detection uses `std::io::IsTerminal`, not the `atty` crate.
+- **File → `~/.agent/dreamd.log`, JSON always.** Written through a non-blocking `tracing-appender`; the returned `WorkerGuard` is bound as `_log_guard` in `run()` and held until the process exits — dropping it early discards buffered file logs. Truncated at startup for v0.1; rotation is deferred to v0.1.1 (WEG-379). The path resolves via `DaemonHome::log_file()`, never hardcoded.
+
+Log level comes from `DREAMD_LOG` (standard `EnvFilter` syntax, default `info`), owned here rather than by the config loader. `init_tracing` uses `try_init` (idempotent) and degrades to console-only — returning `None` — when the log directory is not writable.
+
 ## HTTP API
 
 All endpoints are JSON over `/api/v1` on the Unix domain socket. Full reference: [`docs/http-api.md`](./docs/http-api.md).

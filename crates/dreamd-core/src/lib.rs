@@ -21,6 +21,7 @@ pub mod io;
 pub mod layout;
 pub mod lessons;
 pub mod mcp;
+pub mod observability;
 pub mod privacy;
 pub mod redaction;
 pub mod registry;

@@ -11,8 +11,8 @@
 //!
 //! Provider / model / cost_cap_usd are present on the struct but **inert at
 //! v0.1** — they ship for v0.1.1 LLM mode and are not read elsewhere yet.
-//! `DREAMD_LOG` env-var handling is owned by DR-714 (Sprint 4) and
-//! deliberately not implemented here.
+//! `DREAMD_LOG` env-var handling is owned by DR-004 / WEG-32 (tracing
+//! baseline), implemented in [`crate::observability`] — not here.
 
 use std::path::{Path, PathBuf};
 
