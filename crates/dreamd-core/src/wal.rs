@@ -163,6 +163,30 @@ pub fn recover_if_needed(
     })
 }
 
+/// Check for a stale WAL on daemon startup and run recovery with logging.
+///
+/// Called from `run_watch` and lazy per-project open before any store access.
+pub fn recover_on_startup(agent_root: &AgentRoot) -> Result<RecoveryOutcome, WalError> {
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let outcome = recover_if_needed(agent_root, now_sec)?;
+    match &outcome {
+        RecoveryOutcome::Clean => {}
+        RecoveryOutcome::Recovered { cleaned_files } => {
+            tracing::info!(
+                count = cleaned_files.len(),
+                "recovered incomplete dream cycle"
+            );
+        }
+        RecoveryOutcome::CommittedButUnclean => {
+            tracing::info!("dream cycle committed; finished WAL cleanup on startup");
+        }
+    }
+    Ok(outcome)
+}
+
 /// Read `last_dream_cycle_status` from `state.json`.
 /// Returns `"idle"` if the file is absent or the key is missing.
 pub fn read_last_cycle_status(agent_root: &AgentRoot) -> Result<String, WalError> {

@@ -164,16 +164,20 @@ impl AppState {
             Some(_) => {}
         }
 
-        // Non-boot root: wire the per-root coordinator to the per-root indexer
-        // (the same handle recall/dream use) so its appends become searchable.
-        // Resolve + release index_map's lock BEFORE locking supervisor_map.
+        // Non-boot root: recover any stale WAL before opening indexes or coordinators.
+        let agent_root = crate::layout::AgentRoot::new(root);
+        crate::wal::recover_on_startup(&agent_root)
+            .map_err(|e| IndexError(format!("wal recovery: {e}")))?;
+
+        // Wire the per-root coordinator to the per-root indexer (the same handle
+        // recall/dream use) so its appends become searchable. Resolve + release
+        // index_map's lock BEFORE locking supervisor_map.
         let indexer_tx = self.with_index_handle(root, |h| h.sender())?;
 
         let mut map = self
             .supervisor_map
             .lock()
             .map_err(|_| IndexError("supervisor map lock poisoned".to_string()))?;
-        let agent_root = crate::layout::AgentRoot::new(root);
         map.get_or_start(root, || {
             Supervisor::start(
                 &agent_root,
@@ -2163,6 +2167,69 @@ mod tests {
         .with_primary(canonical_a.clone(), primary);
 
         (dir_a, dir_b, canonical_a, canonical_b, state)
+    }
+
+    /// Plant a mid-cycle crash on `project_root` (WAL + partial tmp, no Commit).
+    fn plant_mid_cycle_crash(project_root: &std::path::Path) -> AgentRoot {
+        use crate::wal::{DreamWal, WalIntent};
+
+        std::fs::create_dir_all(project_root.join(".agent/.dreamd")).unwrap();
+        let root = AgentRoot::new(project_root);
+
+        let tmp_path = root.episodic_jsonl().with_extension("tmp");
+        std::fs::create_dir_all(tmp_path.parent().unwrap()).unwrap();
+        std::fs::write(&tmp_path, b"partial write\n").unwrap();
+
+        let wal = DreamWal {
+            schema_version: "1.0".to_string(),
+            intents: vec![WalIntent::PruneEpisodicMemory {
+                temp_file_path: tmp_path.to_string_lossy().into_owned(),
+            }],
+        };
+        std::fs::write(
+            root.wal_path(),
+            serde_json::to_string_pretty(&wal).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let state = serde_json::json!({
+            "schema_version": "1.0",
+            "last_dream_cycle_status": "in_progress",
+            "last_dream_cycle_at": null,
+        });
+        std::fs::write(
+            root.state_json(),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        root
+    }
+
+    /// WEG-60: lazy per-project open must recover a stale WAL before starting
+    /// the coordinator for a non-boot project.
+    #[tokio::test]
+    async fn lazy_resolve_recovers_mid_cycle_wal_on_project_b() {
+        let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+        let root_b = plant_mid_cycle_crash(&canonical_b);
+
+        assert!(root_b.wal_path().exists(), "precondition: WAL must exist");
+
+        state
+            .resolve_supervisor(&canonical_b)
+            .expect("resolve_supervisor must recover and start B");
+
+        assert!(
+            !root_b.wal_path().exists(),
+            "WAL must be removed after lazy recovery"
+        );
+        assert!(
+            !root_b.episodic_jsonl().with_extension("tmp").exists(),
+            ".jsonl.tmp must be removed after lazy recovery"
+        );
+        let recovered: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root_b.state_json()).unwrap()).unwrap();
+        assert_eq!(recovered["last_dream_cycle_status"], "failed");
     }
 
     /// Headline AC: a `POST /learn` for project B appends to B's JSONL, leaves

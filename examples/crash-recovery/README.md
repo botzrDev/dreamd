@@ -6,18 +6,19 @@ A **frozen mid-cycle state** showing what dreamd leaves behind when a dream cycl
 
 ```
 .agent/
-  episodic/AGENT_LEARNINGS.jsonl       # two valid lines + a torn tail (no trailing newline on partial JSON)
+  episodic/
+    AGENT_LEARNINGS.jsonl       # two valid lines + a torn tail (no trailing newline on partial JSON)
+    AGENT_LEARNINGS.jsonl.tmp   # partial rewrite from interrupted prune
   .dreamd/
-    dream_in_progress.wal              # PruneEpisodicMemory intent, no Commit
-    state.json                         # last_dream_cycle_status: "in_progress"
-    episodic/AGENT_LEARNINGS.jsonl.tmp # partial rewrite from interrupted prune
+    dream_in_progress.wal       # PruneEpisodicMemory intent, no Commit
+    state.json                  # last_dream_cycle_status: "in_progress"
 ```
 
 This mirrors the `recover_incomplete_deletes_tmp_and_marks_failed` test in `crates/dreamd-core/src/wal.rs`.
 
 ## Recovery path
 
-1. **Detect** — `recover_if_needed()` sees `dream_in_progress.wal` on daemon or `dreamd watch` startup.
+1. **Detect** — `recover_on_startup()` sees `dream_in_progress.wal` on `dreamd watch` startup (boot project) or on first request to a lazy-loaded project.
 2. **Clean** — Delete temp files referenced by WAL intents (the `.jsonl.tmp` file).
 3. **Finalize** — Remove the WAL; set `state.json` → `last_dream_cycle_status: "failed"`.
 4. **Serve** — Daemon accepts traffic; JSONL retains the last valid lines (torn tail truncated on next coordinator append or `doctor --repair`).
@@ -32,8 +33,8 @@ cat .agent/.dreamd/dream_in_progress.wal | jq .
 cat .agent/.dreamd/state.json | jq .
 tail -c 80 .agent/episodic/AGENT_LEARNINGS.jsonl | xxd   # torn tail visible
 
-# Run recovery (in-process; no daemon required)
-dreamd doctor
+# Run recovery via daemon startup
+dreamd watch
 ```
 
 To exercise live recovery, copy this `.agent/` tree into a temp project with a `Cargo.toml` sentinel, run `dreamd watch`, and confirm the WAL disappears.

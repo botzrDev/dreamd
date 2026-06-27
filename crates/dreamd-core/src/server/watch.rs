@@ -50,14 +50,16 @@ pub enum WatchError {
     Config(String),
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
+    #[error("wal recovery: {0}")]
+    Wal(#[from] crate::wal::WalError),
 }
 
 /// Boot a per-project daemon in the foreground, binding `~/.agent/dreamd.sock`,
 /// and block until SIGINT/SIGTERM. Called by `dreamd watch`.
 ///
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard →
-/// boot Supervisor → compose AppState → bind socket → serve until a shutdown
-/// signal (SIGINT/SIGTERM), then unlink the socket.
+/// WAL recovery → boot Supervisor → compose AppState → bind socket → serve
+/// until a shutdown signal (SIGINT/SIGTERM), then unlink the socket.
 pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
     // 1. Discover project root from cwd.
     let agent_root = AgentRoot::discover(cwd)
@@ -73,6 +75,9 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
                 .into(),
         ));
     }
+
+    // 2.5. Recover any stale dream-cycle WAL before opening indexes or coordinators.
+    crate::wal::recover_on_startup(&agent_root)?;
 
     // 3. Open the project index up front and wire it as the coordinator's live
     //    indexer (the "Option B" hand-off documented in tantivy_handle.rs). The

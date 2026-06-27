@@ -140,7 +140,9 @@ pub fn run_in_process(
 
     #[cfg(unix)]
     {
-        let autobiography = tokio::runtime::Runtime::new()
+        let autobiography = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .expect("tokio runtime for dream cycle index phases")
             .block_on(run_post_phases(PostPhaseOptions {
                 agent_root: &agent_root,
