@@ -220,7 +220,7 @@ pub fn run() -> ExitCode {
             let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-            match commands::doctor::run(&config, skip.as_ref(), &mut out) {
+            match commands::doctor::run(&config, &agent_root, skip.as_ref(), &mut out) {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::from(1),
                 Err(e) => {

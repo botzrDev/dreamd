@@ -1,13 +1,14 @@
 //! `dreamd doctor` — structured health-check output (WEG-66 / DR-315).
 //!
 //! Prints one line per check to stdout. Exit 0 if all checks pass; exit 1 if
-//! any check emits a WARNING or ERROR. Today only the dream-cycle mode line is
-//! emitted; additional checks land per DR-107 (WEG-50).
+//! any check emits a WARNING or ERROR. Today: dream-cycle mode and on-disk
+//! index freshness (when a store is present).
 
 use std::io::{self, Write};
 
 use dreamd_core::autobiography::AutobiographySkip;
 use dreamd_core::config::{Config, DreamCycleMode};
+use dreamd_core::layout::AgentRoot;
 
 /// Run `dreamd doctor` and write output to `out`.
 ///
@@ -15,6 +16,7 @@ use dreamd_core::config::{Config, DreamCycleMode};
 /// WARNING or ERROR was emitted (exit 1 caller).
 pub fn run(
     config: &Config,
+    agent_root: &AgentRoot,
     skip: Option<&AutobiographySkip>,
     out: &mut impl Write,
 ) -> io::Result<bool> {
@@ -31,6 +33,41 @@ pub fn run(
                 "dream_cycle_mode: auto  [WARNING: not supported at v0.1]"
             )?;
             all_ok = false;
+        }
+    }
+
+    // v0.1 index-vs-JSONL contract — on-disk watermark vs episodic tail.
+    #[cfg(unix)]
+    {
+        match dreamd_core::server::assess_index_freshness(agent_root) {
+            Ok(freshness) if !freshness.stale => {
+                writeln!(out, "index_freshness: ok")?;
+            }
+            Ok(freshness) => {
+                writeln!(
+                    out,
+                    "index_freshness: stale  [WARNING: {} unindexed event(s); \
+                     jsonl_tail={}; watermark={}; recall may miss recent events \
+                     until indexer commit or daemon restart replay]",
+                    freshness.unindexed_count,
+                    freshness
+                        .jsonl_tail_id
+                        .as_deref()
+                        .unwrap_or("(none)"),
+                    freshness
+                        .last_indexed_id
+                        .as_deref()
+                        .unwrap_or("(none)"),
+                )?;
+                all_ok = false;
+            }
+            Err(e) => {
+                writeln!(
+                    out,
+                    "index_freshness: error  [WARNING: could not assess: {e}]"
+                )?;
+                all_ok = false;
+            }
         }
     }
 
@@ -68,12 +105,26 @@ fn format_elapsed(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dreamd_core::layout::AgentRoot;
+    use std::fs;
+
+    fn setup_agent_root(label: &str) -> (AgentRoot, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join(label);
+        fs::create_dir_all(&project).unwrap();
+        let root = AgentRoot::new(&project);
+        fs::create_dir_all(root.agent_dir()).unwrap();
+        fs::create_dir_all(root.dreamd_dir()).unwrap();
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        (root, dir)
+    }
 
     #[test]
     fn doctor_output_contains_dream_cycle_mode_manual() {
         let cfg = Config::default(); // default is Manual
+        let (root, _dir) = setup_agent_root("manual");
         let mut buf = Vec::new();
-        let ok = run(&cfg, None, &mut buf).expect("run ok");
+        let ok = run(&cfg, &root, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             output.contains("dream_cycle_mode:"),
@@ -92,8 +143,9 @@ mod tests {
             dream_cycle_mode: DreamCycleMode::Auto,
             ..Default::default()
         };
+        let (root, _dir) = setup_agent_root("auto");
         let mut buf = Vec::new();
-        let ok = run(&cfg, None, &mut buf).expect("run ok");
+        let ok = run(&cfg, &root, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             output.contains("dream_cycle_mode:"),
@@ -109,6 +161,7 @@ mod tests {
     #[test]
     fn doctor_skip_some_renders_line() {
         let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("skip-some");
         let skip = AutobiographySkip {
             at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -122,7 +175,7 @@ mod tests {
             ],
         };
         let mut buf = Vec::new();
-        let ok = run(&cfg, Some(&skip), &mut buf).expect("run ok");
+        let ok = run(&cfg, &root, Some(&skip), &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             output.contains("last autobiography skip:"),
@@ -142,8 +195,9 @@ mod tests {
     #[test]
     fn doctor_skip_none_no_skip_line() {
         let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("skip-none");
         let mut buf = Vec::new();
-        run(&cfg, None, &mut buf).expect("run ok");
+        run(&cfg, &root, None, &mut buf).expect("run ok");
         let output = String::from_utf8(buf).expect("utf8");
         assert!(
             !output.contains("last autobiography skip"),
