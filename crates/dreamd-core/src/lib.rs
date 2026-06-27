@@ -17,6 +17,7 @@ pub mod coordinator;
 pub mod decay;
 pub mod dream_cycle;
 pub mod index;
+pub mod ingress;
 pub mod io;
 pub mod layout;
 pub mod lessons;

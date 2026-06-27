@@ -7,7 +7,9 @@ use crate::registry::ProjectEntry;
 
 use super::super::router::error_500;
 use super::super::state::AppState;
-use super::super::types::{RecallMeta, RecallParams, RecallResponse, RecallResultJson};
+use crate::ingress::RecallIngress;
+
+use super::super::types::RecallParams;
 
 /// `GET /api/v1/recall` — BM25 × salience search over the project index.
 ///
@@ -49,31 +51,11 @@ pub(crate) async fn get_recall(
         None,
         now_sec,
     ) {
-        Ok(results) => {
-            let json_results: Vec<RecallResultJson> = results
-                .into_iter()
-                .map(|r| RecallResultJson {
-                    score: r.score,
-                    bm25: r.bm25,
-                    salience: r.salience,
-                    source: format!("{:?}", r.layer).to_lowercase(),
-                    content: r.content,
-                    metadata: RecallMeta {
-                        timestamp_sec: r.timestamp_sec,
-                        pain: r.pain,
-                        importance: r.importance,
-                        recurrence: r.recurrence,
-                    },
-                })
-                .collect();
-            (
-                axum::http::StatusCode::OK,
-                axum::Json(RecallResponse {
-                    results: json_results,
-                }),
-            )
-                .into_response()
-        }
+        Ok(results) => (
+            axum::http::StatusCode::OK,
+            axum::Json(RecallIngress::map_results(results)),
+        )
+            .into_response(),
         Err(e) => error_500(&format!("recall failed: {e}")),
     }
 }

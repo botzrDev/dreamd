@@ -24,7 +24,7 @@ use bytes::Bytes;
 #[cfg(unix)]
 use http_body_util::{BodyExt, Full};
 
-use dreamd_protocol::{AgentLearning, EventId, SkillAction, RECORD_SCHEMA_VERSION};
+use dreamd_protocol::{AgentLearning, EventId};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
@@ -34,9 +34,9 @@ use tokio::sync::mpsc;
 
 use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
+use crate::ingress::{LearnIngress, RecallIngress, RecallResponse};
 use crate::layout::DaemonHome;
 use crate::privacy::DR413_DISCLOSURE;
-use crate::redaction::redact;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
 
@@ -195,7 +195,6 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
         use crate::index::build_schema;
-        use crate::server::http::{RecallMeta, RecallResponse, RecallResultJson};
         use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
         let k = p.k.unwrap_or(5);
@@ -246,26 +245,7 @@ impl MemoryMcpServer {
 
         let results = crate::recall(&reader, &schema_fields, &query, k, None, now_sec)
             .map_err(|e| McpError::invalid_request(format!("recall failed: {e}"), None))?;
-        let json_results: Vec<RecallResultJson> = results
-            .into_iter()
-            .map(|r| RecallResultJson {
-                score: r.score,
-                bm25: r.bm25,
-                salience: r.salience,
-                source: format!("{:?}", r.layer).to_lowercase(),
-                content: r.content,
-                metadata: RecallMeta {
-                    timestamp_sec: r.timestamp_sec,
-                    pain: r.pain,
-                    importance: r.importance,
-                    recurrence: r.recurrence,
-                },
-            })
-            .collect();
-        let resp = RecallResponse {
-            results: json_results,
-        };
-        let json = serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"results":[]}"#.to_string());
+        let json = RecallIngress::to_json(results);
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -300,46 +280,20 @@ impl MemoryMcpServer {
                 agent_root,
                 coordinator_tx,
             } => {
-                // Validate skill_action via the single SkillAction parser
-                // (same rules as post_learn in server/http.rs).
-                let skill_action = SkillAction::parse(&p.skill_action)
-                    .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
-
-                // Range-check scores BEFORE unwrap_or default (parse, don't clamp).
-                if let Some(pain) = p.pain {
-                    if !(0.0..=10.0).contains(&pain) {
-                        return Err(McpError::invalid_request(
-                            "pain must be in 0.0..=10.0",
-                            None,
-                        ));
-                    }
-                }
-                if let Some(importance) = p.importance {
-                    if !(0.0..=10.0).contains(&importance) {
-                        return Err(McpError::invalid_request(
-                            "importance must be in 0.0..=10.0",
-                            None,
-                        ));
-                    }
-                }
-
                 let config = load_config(agent_root.project_root()).map_err(|e| {
                     McpError::internal_error(format!("config load failed: {e}"), None)
                 })?;
-                let content = redact(&p.content, config.redaction);
+                let learning = LearnIngress::build_agent_learning(
+                    &p.content,
+                    &p.source_harness,
+                    &p.skill_action,
+                    p.pain,
+                    p.importance,
+                    config.redaction,
+                )
+                .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
 
-                let timestamp = chrono::Utc::now();
-                let learning = AgentLearning {
-                    schema_version: RECORD_SCHEMA_VERSION.to_string(),
-                    id: EventId::parse("evt_00000000000000000000000000").unwrap(),
-                    timestamp,
-                    pain: p.pain.unwrap_or(5.0) as f32,
-                    importance: p.importance.unwrap_or(5.0) as f32,
-                    pinned: false,
-                    skill_action: skill_action.into_string(),
-                    source_harness: p.source_harness,
-                    content,
-                };
+                let timestamp = learning.timestamp;
 
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                 coordinator_tx
@@ -893,8 +847,8 @@ mod tests {
         );
     }
 
-    /// MCP Phase 1 `append_node` must redact secrets before persist (mirrors
-    /// `server/http.rs::learn_content_redacted`).
+    /// MCP Phase 1 `append_node` must redact secrets before persist (via
+    /// [`LearnIngress`] — same rules as HTTP `post_learn`).
     #[tokio::test]
     async fn append_node_content_redacted() {
         use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};

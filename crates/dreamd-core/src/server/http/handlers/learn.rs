@@ -3,11 +3,11 @@
 use axum::extract::{Extension, Json, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
-use dreamd_protocol::{AgentLearning, SkillAction};
+use dreamd_protocol::AgentLearning;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
-use crate::redaction::redact;
+use crate::ingress::LearnIngress;
 use crate::registry::ProjectEntry;
 use crate::server::lifecycle::CoordinatorSendError;
 
@@ -44,23 +44,10 @@ pub(crate) async fn post_learn(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    // Step 2 — validate skill_action via the single SkillAction parser.
-    let skill_action = match SkillAction::parse(&learning.skill_action) {
-        Ok(sa) => sa,
-        Err(e) => return error_400(&e.to_string()),
-    };
-    learning.skill_action = skill_action.into_string();
-
-    // Step 2b — range-check scores (parse, don't clamp).
-    if !(0.0..=10.0).contains(&learning.pain) {
-        return error_400("pain must be in 0.0..=10.0");
+    // Step 2–3 — validate, normalise, and redact via shared learn ingress.
+    if let Err(e) = LearnIngress::prepare_agent_learning(&mut learning, state.config.redaction) {
+        return error_400(&e.to_string());
     }
-    if !(0.0..=10.0).contains(&learning.importance) {
-        return error_400("importance must be in 0.0..=10.0");
-    }
-
-    // Step 3 — redact content. opt-out is Config.redaction only (D2).
-    learning.content = redact(&learning.content, state.config.redaction);
 
     // Step 4 — capture timestamp before `learning` is moved (Option A).
     let timestamp = learning.timestamp.to_rfc3339();
