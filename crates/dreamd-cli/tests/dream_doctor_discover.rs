@@ -62,11 +62,14 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     // Bare tmpdir: no `.agent/` anywhere up-tree. discover fails before the
     // daemon proxy, so no --no-commit is needed.
+    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
+    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("dream")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd dream in bare dir");
 
@@ -90,11 +93,14 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
 #[test]
 fn doctor_with_no_store_errors() {
     let tmp = tempfile::tempdir().unwrap();
+    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
+    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("doctor")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd doctor in bare dir");
 

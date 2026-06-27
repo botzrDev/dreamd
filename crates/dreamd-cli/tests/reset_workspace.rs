@@ -20,11 +20,15 @@ fn dreamd_bin() -> &'static str {
 fn reset_workspace_yes_overwrites_file_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    // WEG-32: daemon HOME, separate from the project dir. Sharing tmp would let
+    // init_tracing pre-create ~/.agent (= tmp/.agent), so init would skip the
+    // scaffold and `.agent/working/` would never exist for the reset to clear.
+    let home = tempfile::tempdir().unwrap();
 
     let init = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd init");
     assert!(init.status.success(), "init failed: {:?}", init);
@@ -35,7 +39,7 @@ fn reset_workspace_yes_overwrites_file_and_exits_zero() {
     let out = Command::new(dreamd_bin())
         .args(["reset", "workspace", "--yes"])
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd reset workspace");
 
@@ -69,11 +73,14 @@ fn reset_workspace_yes_overwrites_file_and_exits_zero() {
 fn reset_workspace_with_no_agent_dir_exits_two_and_creates_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     // intentionally no `.agent/` and no project-root sentinel either.
+    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
+    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .args(["reset", "workspace", "--yes"])
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd reset workspace");
 

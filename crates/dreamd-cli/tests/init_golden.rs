@@ -30,11 +30,15 @@ fn dreamd_bin() -> &'static str {
 fn first_run_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    // WEG-32: daemon HOME, separate from the project dir. init_tracing creates
+    // ~/.agent/dreamd.log at startup; sharing tmp would pre-create the project
+    // .agent/ and make init report "already initialized".
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd init");
 
@@ -75,7 +79,7 @@ fn first_run_matches_golden() {
     let workspace = tmp.path().join(".agent/working/WORKSPACE.md");
     assert!(workspace.exists());
 
-    let reg_path = tmp.path().join(".agent/registry.toml");
+    let reg_path = home.path().join(".agent/registry.toml");
     assert!(reg_path.exists(), "registry.toml must be created");
     let reg: toml::Value = toml::from_str(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
     let projects = reg["projects"].as_array().unwrap();
@@ -90,11 +94,13 @@ fn first_run_matches_golden() {
 fn rerun_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    let home = tempfile::tempdir().unwrap();
 
     let first = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("first init");
     assert!(first.status.success());
@@ -102,7 +108,7 @@ fn rerun_matches_golden() {
     let out = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("rerun init");
 
@@ -115,7 +121,7 @@ fn rerun_matches_golden() {
         String::from_utf8_lossy(RERUN_FIXTURE)
     );
 
-    let reg_path = tmp.path().join(".agent/registry.toml");
+    let reg_path = home.path().join(".agent/registry.toml");
     let reg: toml::Value = toml::from_str(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
     let projects = reg["projects"].as_array().unwrap();
     assert_eq!(
@@ -129,12 +135,14 @@ fn rerun_matches_golden() {
 fn quiet_first_run_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("init")
         .arg("--quiet")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd init --quiet");
 
@@ -163,11 +171,13 @@ fn quiet_first_run_matches_golden() {
 fn quiet_rerun_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    let home = tempfile::tempdir().unwrap();
 
     let first = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("first init");
     assert!(first.status.success());
@@ -176,7 +186,7 @@ fn quiet_rerun_matches_golden() {
         .arg("init")
         .arg("--quiet")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("rerun init --quiet");
 
@@ -194,11 +204,14 @@ fn quiet_rerun_matches_golden() {
 fn no_project_root_fails_and_skips_scaffold() {
     let tmp = tempfile::tempdir().unwrap();
     // intentionally no .git / Cargo.toml / package.json / pyproject.toml
+    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
+    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("init")
         .current_dir(tmp.path())
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd init");
 

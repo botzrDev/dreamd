@@ -177,6 +177,16 @@ fn discover_store_or_exit(
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
 
+    // WEG-32 / DR-004 — install the tracing subscriber once, before dispatch,
+    // so every subcommand's `tracing` callsites land on stderr + ~/.agent/dreamd.log.
+    // `_log_guard` MUST live until run() returns — `let _ =` would drop it
+    // immediately and discard buffered file logs. Resolve the log path via the
+    // existing HOME idiom (see the Init arm below); None → console-only.
+    let log_file = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
+    let _log_guard = dreamd_core::observability::init_tracing(log_file);
+
     if cli.version {
         println!("{VERSION_SHORT}");
         return ExitCode::SUCCESS;

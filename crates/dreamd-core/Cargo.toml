@@ -37,6 +37,13 @@ lru = "0.16"
 # Absent / NeedsMigration outcomes. Per-crate only — no workspace promotion
 # until a second consumer appears (WEG-41-A drift catalog entry).
 tracing = "0.1"
+# WEG-32 / DR-004 — tracing baseline. `tracing-subscriber` is the subscriber
+# that lights up the existing `tracing` facade callsites (stderr console layer +
+# JSON file layer); `env-filter` reads DREAMD_LOG, `json` formats the file log
+# (and non-TTY console). `tracing-appender` provides the non-blocking file
+# writer + WorkerGuard. Both MIT. `observability::init_tracing` is the sole user.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 # WEG-67 / DR-401 — Axum 0.8 HTTP server skeleton. default-features = true
 # pulls hyper + tower-service; no explicit tower-http dep until WEG-144.
 axum = { version = "0.8", default-features = true }
