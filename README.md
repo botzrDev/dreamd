@@ -7,6 +7,8 @@
 
 **Same memory in every IDE.** Local-first memory layer for AI coding agents — one `.agent/` folder, every harness.
 
+⭐ **[Star this repo](https://github.com/botzrDev/dreamd)** to get notified when v0.1 ships August 7.
+
 ---
 
 ## Install
@@ -123,9 +125,7 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 
 ## Status
 
-**v0.1 in active development — targeting 2026-07-07.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.2`. Linux and macOS.
-
-⭐ **Star and Watch this repo** to be notified when v0.1 lands.
+**v0.1 in active development — targeting 2026-08-07.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.2`. Linux and macOS.
 
 ### v0.1 progress
 
