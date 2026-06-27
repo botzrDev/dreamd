@@ -45,6 +45,7 @@ pub(crate) async fn post_learn(
         .map(|s| s.to_owned());
 
     // Step 2–3 — validate, normalise, and redact via shared learn ingress.
+    // Sole skill_action gate (ARCHITECTURE.md §9); coordinator does not re-check.
     if let Err(e) = LearnIngress::prepare_agent_learning(&mut learning, state.config.redaction) {
         return error_400(&e.to_string());
     }

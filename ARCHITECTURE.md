@@ -208,7 +208,27 @@ Every persisted episodic record carries `schema_version: "1.0.0"`; daemon `state
 
 Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` override for `detach_double_fork` only, with an explicit SAFETY contract. Do not widen the downgrade.
 
-### 9. Observability
+### 9. SkillAction validation seam
+
+**Decision: ingress-only validation forever.** Read-time normalization in the episodic store was considered and rejected for v0.1.
+
+| Layer | Validates `skill_action`? | Notes |
+|---|---|---|
+| HTTP `POST /learn` | yes | `LearnIngress::prepare_agent_learning` → `SkillAction::parse` |
+| MCP `append_node` (local) | yes | `LearnIngress::build_agent_learning` |
+| MCP `append_node` (remote) | yes | daemon `post_learn` re-validates |
+| Coordinator `handle_append` | **no** | trusts ingress; mints `EventId`, stamps schema, fsyncs |
+| Dream cycle / recall | **no** | reads the on-disk `String` as-is |
+
+**Why `AgentLearning.skill_action` stays `String`.** Serde must accept hand-edited JSONL and pre-migration records (dotted keys like `rust.error_handling`) without a custom deserializer. Removing the [`SkillAction`](crates/dreamd-protocol/src/lib.rs) type does not break serde of existing records — it only removes the ingress gate.
+
+**Why not read-time normalization.** A normalization layer in the episodic store would silently rewrite keys on every read, breaking the "filesystem is source of truth" contract and making `cat`/`grep` disagree with in-memory clustering. It also adds per-line overhead on every dream cycle and index replay with no v0.1 caller.
+
+**Legacy on-disk keys.** The dream cycle clusters by splitting on `::` only (`consolidation.rs`). Dotted pre-migration keys are treated as opaque single-segment keys — `rust.error_handling` does **not** merge with `rust::error_handling`. This is intentional until `dreamd migrate` rewrites them (deferred; see schema versioning §7).
+
+**Invariant tests.** `consolidation` unit tests pin legacy dotted-key clustering; `dreamd-protocol` tests confirm dotted records round-trip through serde without `SkillAction`.
+
+### 10. Observability
 
 `dreamd_core::observability::init_tracing` installs the process-wide `tracing` subscriber once, at the top of `cli::run()` before subcommand dispatch — the facade and its macro callsites already exist crate-wide, so this baseline is what makes them emit. Two layers:
 

@@ -476,6 +476,77 @@ mod tests {
     /// so age_days = 0.
     const NOW_SEC: i64 = 1747137600; // 2026-05-13T12:00:00Z
 
+    // ── Legacy dotted-key corpora (ARCHITECTURE.md §9) ─────────────────────
+    //
+    // Pre-migration records may carry dotted keys (e.g. `rust.error_handling`).
+    // The cluster engine splits on `::` only, so dotted keys are opaque
+    // single-segment monoliths until `dreamd migrate` rewrites them.
+
+    #[test]
+    fn legacy_dotted_skill_action_clusters_as_opaque_monolith() {
+        let dir = unique_tmpdir("legacy-dotted");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        let events: Vec<AgentLearning> = (0..3)
+            .map(|i| make_event(i, "rust.error_handling", false))
+            .collect();
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert_eq!(out.promoted.len(), 1);
+        assert_eq!(out.promoted[0].cluster_key, "rust.error_handling");
+        assert_eq!(out.promoted[0].events.len(), 3);
+    }
+
+    #[test]
+    fn legacy_dotted_and_canonical_keys_do_not_merge() {
+        let dir = unique_tmpdir("legacy-mixed");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        let mut events: Vec<AgentLearning> = (0..3)
+            .map(|i| make_event(i, "rust::tokio", false))
+            .collect();
+        events.extend((3..6).map(|i| make_event(i, "rust.tokio", false)));
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        assert_eq!(out.promoted.len(), 2);
+        let keys: Vec<&str> = out
+            .promoted
+            .iter()
+            .map(|c| c.cluster_key.as_str())
+            .collect();
+        assert!(keys.contains(&"rust::tokio"));
+        assert!(keys.contains(&"rust.tokio"));
+    }
+
+    #[test]
+    fn legacy_dotted_key_does_not_participate_in_prefix_tree() {
+        // A dotted key must not contribute prefixes to `::`-segmented siblings.
+        let dir = unique_tmpdir("legacy-prefix");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        let mut events: Vec<AgentLearning> = (0..3)
+            .map(|i| make_event(i, "rust::error_handling", false))
+            .collect();
+        events.push(make_event(3, "rust.error_handling", false));
+        write_jsonl(&root, &events);
+
+        let out = run_cluster_engine(&root, NOW_SEC).unwrap();
+        let canonical = out
+            .promoted
+            .iter()
+            .find(|c| c.cluster_key == "rust::error_handling")
+            .expect("canonical cluster promoted");
+        assert_eq!(canonical.events.len(), 3);
+        assert!(
+            !out.promoted
+                .iter()
+                .any(|c| c.cluster_key == "rust.error_handling"),
+            "single dotted event must not reach promotion threshold"
+        );
+    }
+
     #[test]
     fn cluster_engine_empty_jsonl_returns_no_promoted() {
         let dir = unique_tmpdir("empty");

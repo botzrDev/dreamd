@@ -93,10 +93,19 @@ pub const RECORD_SCHEMA_VERSION: &str = "1.0.0";
 /// Validated clustering key: lowercase `[a-z0-9_]` segments joined by `::`,
 /// e.g. `rust::borrow_checker`. The dream cycle splits on `::` to sub-cluster.
 ///
-/// Unlike [`EventId`], this is a **parse-only boundary validator** — it is NOT
-/// a serde field on [`AgentLearning`] (that field stays `String` so existing
-/// dotted records and hand-edited files read back without error). Construct via
-/// [`parse`] at API ingress, then store the inner `String`.
+/// Parse-only ingress validator — **not** a serde field on [`AgentLearning`].
+///
+/// # Validation seam (ARCHITECTURE.md §9)
+///
+/// * **Ingress** (HTTP `post_learn`, MCP `append_node`): call [`parse`], then
+///   store the inner `String` on the learning before handing off to the
+///   coordinator.
+/// * **Coordinator / dream cycle / recall**: read the on-disk `String` as-is;
+///   no re-validation. Legacy dotted keys (e.g. `rust.error_handling`) serde
+///   cleanly but cluster as opaque monoliths until `dreamd migrate` rewrites
+///   them.
+/// * **Removing this type** does not break serde of existing JSONL lines — it
+///   only removes the ingress gate that rejects new invalid keys.
 ///
 /// [`parse`]: SkillAction::parse
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,8 +194,10 @@ pub struct AgentLearning {
     /// Sticky flag: pinned learnings survive dream-cycle pruning.
     #[serde(default)]
     pub pinned: bool,
-    /// Validated clustering key (e.g., `"rust::borrow_checker"`). Validated at
-    /// ingress via [`SkillAction`]; stored as `String` for backward compatibility.
+    /// Clustering key (e.g., `"rust::borrow_checker"`). Validated and normalised
+    /// at ingress via [`SkillAction`]; persisted as `String` so legacy dotted
+    /// records and hand-edited JSONL deserialize without a custom deserializer.
+    /// See ARCHITECTURE.md §9.
     pub skill_action: String,
     /// Which AI harness produced this learning (e.g., `"claude-code"`,
     /// `"cursor"`, `"cline"`). Used for provenance and cross-harness dedup.
@@ -280,6 +291,26 @@ mod tests {
             SkillAction::parse("  Rust Tokio  ").unwrap().as_str(),
             "rust_tokio"
         );
+    }
+
+    #[test]
+    fn legacy_dotted_skill_action_deserializes_without_skill_action_type() {
+        // ARCHITECTURE.md §9: on-disk String accepts pre-migration dotted keys;
+        // SkillAction is ingress-only and is not involved in serde.
+        let json = r#"{
+            "schema_version": "1.0.0",
+            "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "pain": 5.0,
+            "importance": 5.0,
+            "pinned": false,
+            "skill_action": "rust.error_handling",
+            "source_harness": "test",
+            "content": "legacy dotted key"
+        }"#;
+        let learning: AgentLearning = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(learning.skill_action, "rust.error_handling");
+        assert!(SkillAction::parse(&learning.skill_action).is_err());
     }
 
     #[test]

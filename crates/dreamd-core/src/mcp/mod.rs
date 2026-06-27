@@ -283,6 +283,7 @@ impl MemoryMcpServer {
                 let config = load_config(agent_root.project_root()).map_err(|e| {
                     McpError::internal_error(format!("config load failed: {e}"), None)
                 })?;
+                // Sole skill_action gate for local backend (ARCHITECTURE.md §9).
                 let learning = LearnIngress::build_agent_learning(
                     &p.content,
                     &p.source_harness,

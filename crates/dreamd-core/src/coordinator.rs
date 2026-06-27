@@ -250,6 +250,10 @@ impl MemoryCoordinator {
         // could persist any value. Both ingress paths route through here.
         learning.schema_version = RECORD_SCHEMA_VERSION.to_string();
 
+        // skill_action is NOT re-validated here (ARCHITECTURE.md §9): ingress
+        // (`LearnIngress`) is the sole gate; on-disk String accepts legacy
+        // dotted keys that the dream cycle treats as opaque single segments.
+
         // Write protocol (WEG-7 AC): serialize → ensure trailing \n →
         // 4 KiB check → write_all → sync_data → LRU insert.
         let mut line = serde_json::to_string(&learning)?;
