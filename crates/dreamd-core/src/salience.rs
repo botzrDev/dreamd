@@ -225,13 +225,8 @@ mod tests {
         let importance = 8.0;
         let count = 5_u64;
 
-        let recall_score = salience_with_context(
-            NOW,
-            ts,
-            pain,
-            importance,
-            RecurrenceContext::recall(count),
-        );
+        let recall_score =
+            salience_with_context(NOW, ts, pain, importance, RecurrenceContext::recall(count));
         let dream_score = salience_with_context(
             NOW,
             ts,
@@ -250,20 +245,10 @@ mod tests {
         let pain = 8.0;
         let importance = 9.0;
 
-        let decay_score = salience_with_context(
-            NOW,
-            ts,
-            pain,
-            importance,
-            RecurrenceContext::decay(),
-        );
-        let recall_score = salience_with_context(
-            NOW,
-            ts,
-            pain,
-            importance,
-            RecurrenceContext::recall(100),
-        );
+        let decay_score =
+            salience_with_context(NOW, ts, pain, importance, RecurrenceContext::decay());
+        let recall_score =
+            salience_with_context(NOW, ts, pain, importance, RecurrenceContext::recall(100));
         assert!(
             decay_score <= recall_score,
             "decay ({decay_score}) must not exceed recall with recurrence=100 ({recall_score})"
