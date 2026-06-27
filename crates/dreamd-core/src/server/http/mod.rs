@@ -17,8 +17,6 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use router::{
-    agent_root_middleware, build_router, peer_uid_middleware, PeerUid,
-};
+pub use router::{agent_root_middleware, build_router, peer_uid_middleware, PeerUid};
 pub use state::AppState;
 pub(crate) use types::{RecallMeta, RecallResponse, RecallResultJson};
