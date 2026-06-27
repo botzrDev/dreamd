@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn rejects_out_of_range_required_scores() {
         assert_eq!(
-            LearnIngress::validate_pain(1e9 as f32).unwrap_err(),
+            LearnIngress::validate_pain(1e9_f32).unwrap_err(),
             LearnValidationError::PainOutOfRange
         );
         assert_eq!(
