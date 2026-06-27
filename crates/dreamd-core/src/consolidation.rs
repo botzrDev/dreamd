@@ -949,7 +949,10 @@ mod tests {
             matches!(outcome, crate::wal::RecoveryOutcome::Recovered { .. }),
             "incomplete pin/unpin cycle must be recoverable"
         );
-        assert!(!jsonl_tmp.exists(), ".tmp from pin/unpin must be cleaned up");
+        assert!(
+            !jsonl_tmp.exists(),
+            ".tmp from pin/unpin must be cleaned up"
+        );
         assert_eq!(
             fs::read(root.episodic_jsonl()).unwrap(),
             original_bytes,
@@ -957,7 +960,10 @@ mod tests {
         );
 
         let updated = read_jsonl(root.episodic_jsonl()).unwrap();
-        assert!(updated[0].pinned, "pre-cycle pin state must survive recovery");
+        assert!(
+            updated[0].pinned,
+            "pre-cycle pin state must survive recovery"
+        );
         assert!(!updated[2].pinned, "partial rewrite must not have landed");
     }
 
