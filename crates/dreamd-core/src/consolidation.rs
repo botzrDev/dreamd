@@ -177,8 +177,8 @@ pub fn run_cluster_engine(
 /// Clear all `pinned` flags on episodic entries, then re-pin only those cited
 /// in the freshly-written `LESSONS.md`.
 ///
-/// Called by WEG-61 (DR-308) after `write_lessons_file`, while the dream-cycle
-/// WAL is still open (before [`wal::commit_cycle`]). Returns `Ok` without
+/// Called by WEG-61 (DR-308) after `write_lessons_file`, while the
+/// orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
 /// mutations if `LESSONS.md` or the JSONL is absent.
 pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError> {
     let lessons_path = agent_root.lessons_md();
@@ -256,12 +256,10 @@ pub fn run_deterministic_dream_cycle(
     now_sec: i64,
 ) -> Result<(), DreamCycleError> {
     let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
-    wal::begin_cycle(agent_root, now_sec)?;
 
     let cluster_output = run_cluster_engine(agent_root, now_sec)?;
 
     if cluster_output.promoted.is_empty() {
-        wal::commit_cycle(agent_root, now_sec)?;
         return Ok(());
     }
 
@@ -304,11 +302,9 @@ pub fn run_deterministic_dream_cycle(
     std::fs::create_dir_all(agent_root.semantic_dir())?;
     lessons::write_lessons_file(&lessons_path, &lessons_file)?;
 
-    // Pin/unpin rewrites JSONL — must run before commit_cycle so
-    // `append_intent(PruneEpisodicMemory)` lands in the active WAL.
+    // Pin/unpin rewrites JSONL — `append_intent(PruneEpisodicMemory)` lands in
+    // the orchestrator-owned WAL envelope opened by `run_filesystem_phases`.
     apply_pin_unpin(agent_root)?;
-
-    wal::commit_cycle(agent_root, now_sec)?;
 
     Ok(())
 }
@@ -866,24 +862,6 @@ mod tests {
 
         let lf = read_lessons_file(&root.lessons_md()).unwrap();
         assert_eq!(lf.lessons[0].id, test_id(5).as_str().to_string());
-    }
-
-    #[test]
-    fn deterministic_cycle_wal_absent_after_commit() {
-        let dir = unique_tmpdir("dc-wal");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
-            .map(|i| make_event(i as u32, "rust::types", false))
-            .collect();
-        write_jsonl(&root, &events);
-
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
-
-        assert!(
-            !root.wal_path().exists(),
-            "WAL must be deleted after commit"
-        );
     }
 
     #[test]
