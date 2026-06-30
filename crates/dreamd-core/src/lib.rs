@@ -14,6 +14,9 @@ pub mod collector;
 pub mod config;
 pub mod consolidation;
 pub mod coordinator;
+/// Shared outbound HTTP-over-UDS transport to the dreamd daemon.
+#[cfg(unix)]
+pub mod daemon_client;
 pub mod decay;
 pub mod dream_cycle;
 pub mod index;
