@@ -1,14 +1,11 @@
 //! Minimal HTTP-over-UDS client so `dreamd dream` can proxy to a running
-//! daemon instead of racing its coordinator (WEG-271 fast-follow). Mirrors the
-//! per-call-connect idiom of `mcp::send_remote`; deliberately NOT shared with
-//! it (that DRY cleanup is out of scope).
+//! daemon instead of racing its coordinator (WEG-271 fast-follow). Transport
+//! is delegated to [`crate::daemon_client`].
 
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-
-use crate::layout::DaemonHome;
+use http_body_util::Full;
 
 /// Outcome of attempting to proxy a dream cycle to a daemon. All four are
 /// "the proxy made a decision"; only `Ran` and `InProgress` mean the daemon
@@ -53,11 +50,7 @@ impl std::error::Error for DreamProxyError {}
 /// `~/.agent/dreamd.sock`. `None` if the home dir can't be resolved (caller
 /// then runs in-process). Mirrors `mcp::resolve_sock_path`.
 pub fn resolve_daemon_socket() -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os("DREAMD_SOCK") {
-        return Some(PathBuf::from(v));
-    }
-    let home = dirs::home_dir()?;
-    Some(DaemonHome::new(home.join(".agent")).socket_path())
+    crate::daemon_client::resolve_daemon_socket().ok()
 }
 
 /// Map a daemon HTTP status to an outcome. Pure — unit-tested directly.
@@ -84,30 +77,7 @@ pub async fn proxy_dream_cycle(
     sock_path: &Path,
     project_root: &Path,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
-    use hyper::client::conn::http1;
-    use hyper_util::rt::TokioIo;
-
-    let stream = match tokio::net::UnixStream::connect(sock_path).await {
-        Ok(s) => s,
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(DreamProxyOutcome::NotReachable)
-        }
-        Err(e) => return Err(DreamProxyError::Transport(format!("connect: {e}"))),
-    };
-    // TokioIo wrap is required: a raw UnixStream does not implement hyper's IO
-    // trait (WEG-72-B drift entry).
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = http1::handshake(io)
-        .await
-        .map_err(|e| DreamProxyError::Transport(format!("handshake: {e}")))?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    use crate::daemon_client::{send_one, DaemonTransportError};
 
     let req = hyper::Request::builder()
         .method(hyper::Method::POST)
@@ -117,22 +87,18 @@ pub async fn proxy_dream_cycle(
         .body(Full::new(Bytes::new()))
         .map_err(|e| DreamProxyError::Transport(format!("build request: {e}")))?;
 
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| DreamProxyError::Transport(format!("send: {e}")))?;
-    let status = resp.status().as_u16();
-    let body = resp
-        .collect()
-        .await
-        .map_err(|e| DreamProxyError::Transport(format!("read body: {e}")))?
-        .to_bytes();
-    map_dream_status(status, &body)
+    let (status, body) = match send_one(sock_path, req).await {
+        Ok(pair) => pair,
+        Err(DaemonTransportError::Unreachable) => return Ok(DreamProxyOutcome::NotReachable),
+        Err(e) => return Err(DreamProxyError::Transport(format!("{e:?}"))),
+    };
+    map_dream_status(status.as_u16(), &body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::Full;
 
     #[test]
     fn resolve_daemon_socket_honors_env_override() {

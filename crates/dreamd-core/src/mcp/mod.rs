@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use bytes::Bytes;
 #[cfg(unix)]
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 
 use dreamd_protocol::{AgentLearning, EventId};
 use rmcp::handler::server::wrapper::Parameters;
@@ -35,7 +35,6 @@ use tokio::sync::mpsc;
 use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::ingress::{LearnIngress, RecallIngress, RecallResponse};
-use crate::layout::DaemonHome;
 use crate::privacy::DR413_DISCLOSURE;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
@@ -370,16 +369,10 @@ impl Default for MemoryMcpServer {
 /// 1. `$DREAMD_SOCK` env var (override for testing / custom installs).
 /// 2. `DaemonHome::new(~/.agent).socket_path()`.
 fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
-    if let Some(v) = std::env::var_os("DREAMD_SOCK") {
-        let path = PathBuf::from(v);
-        if !path.is_absolute() {
-            return Err(McpRunError::InvalidSockPath(path));
-        }
-        return Ok(path);
-    }
-    let home = dirs::home_dir().ok_or(McpRunError::NoHome)?;
-    let daemon_home = DaemonHome::new(home.join(".agent"));
-    Ok(daemon_home.socket_path())
+    crate::daemon_client::resolve_daemon_socket().map_err(|e| match e {
+        crate::daemon_client::SockPathError::RelativeSockPath(p) => McpRunError::InvalidSockPath(p),
+        crate::daemon_client::SockPathError::NoHome => McpRunError::NoHome,
+    })
 }
 
 /// Percent-encode a query-string value (RFC 3986 unreserved set passes
@@ -484,34 +477,21 @@ async fn send_remote(
     sock_path: &Path,
     req: hyper::Request<Full<Bytes>>,
 ) -> Result<(hyper::StatusCode, Bytes), McpError> {
-    use hyper::client::conn::http1;
-    use hyper_util::rt::TokioIo;
-
-    let stream = tokio::net::UnixStream::connect(sock_path)
-        .await
-        .map_err(|e| McpError::internal_error(format!("daemon connect failed: {e}"), None))?;
-    // TokioIo wrap is required: a raw UnixStream does not implement hyper's IO
-    // trait (WEG-72-B drift entry).
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = http1::handshake(io)
-        .await
-        .map_err(|e| McpError::internal_error(format!("daemon handshake failed: {e}"), None))?;
-    // Drive the connection in the background until the stream closes.
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| McpError::internal_error(format!("daemon request failed: {e}"), None))?;
-    let status = resp.status();
-    let body = resp
-        .collect()
-        .await
-        .map_err(|e| McpError::internal_error(format!("daemon response read failed: {e}"), None))?
-        .to_bytes();
-    Ok((status, body))
+    use crate::daemon_client::{send_one, DaemonTransportError};
+    send_one(sock_path, req).await.map_err(|e| match e {
+        DaemonTransportError::Unreachable | DaemonTransportError::Connect(_) => {
+            McpError::internal_error(format!("daemon connect failed: {e:?}"), None)
+        }
+        DaemonTransportError::Handshake(_) => {
+            McpError::internal_error(format!("daemon handshake failed: {e:?}"), None)
+        }
+        DaemonTransportError::Send(_) => {
+            McpError::internal_error(format!("daemon request failed: {e:?}"), None)
+        }
+        DaemonTransportError::ReadBody(_) => {
+            McpError::internal_error(format!("daemon response read failed: {e:?}"), None)
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +607,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     /// Serializes the two `resolve_sock_path` tests, which both mutate the
     /// process-global `DREAMD_SOCK` env var. Without this, Rust's parallel
