@@ -92,17 +92,18 @@ pub enum DecayError {
 /// Write sequence:
 ///   1. Read + parse AGENT_LEARNINGS.jsonl (empty/absent → early return)
 ///   2. Partition into decayed / kept (recurrence = 0; see constant note above)
-///   3. If decayed is empty → return early (no files touched, no WAL opened)
+///   3. If decayed is empty → return early (no files touched)
 ///   4. fs::create_dir_all(snapshots_dir)
 ///   5. Append decayed records to snapshot_file(cycle_date) — one JSONL line each
-///   6. File::open(snapshot_file)?.sync_data() — must complete before WAL opens
-///   7. wal::begin_cycle(agent_root, now_sec)
-///   8. Write kept records to episodic_jsonl().with_extension("tmp")
-///   9. wal::append_intent(agent_root, WalIntent::PruneEpisodicMemory { temp_file_path })
-///  10. fs::rename(tmp, episodic_jsonl())
-///  11. File::open(episodic_dir)?.sync_all() — parent-dir fsync
-///  12. wal::commit_cycle(agent_root, now_sec)
-///  13. Return DecayResult { decayed_ids, kept_count }
+///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rename
+///   7. Write kept records to episodic_jsonl().with_extension("tmp")
+///   8. wal::append_intent(agent_root, WalIntent::PruneEpisodicMemory { temp_file_path })
+///   9. fs::rename(tmp, episodic_jsonl())
+///  10. File::open(episodic_dir)?.sync_all() — parent-dir fsync
+///  11. Return DecayResult { decayed_ids, kept_count }
+///
+/// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
+/// only records the prune intent into the already-open WAL.
 pub fn run_decay_pruner(
     agent_root: &AgentRoot,
     now_sec: i64,
@@ -174,14 +175,11 @@ pub fn run_decay_pruner(
             snap_file.write_all(line.as_bytes())?;
             snap_file.write_all(b"\n")?;
         }
-        // Step 6: sync snapshot before opening the WAL.
+        // Step 6: sync snapshot before the destructive rename.
         snap_file.sync_data()?;
     }
 
-    // Step 7: open the WAL.
-    wal::begin_cycle(agent_root, now_sec)?;
-
-    // Step 8: write kept records to .tmp file.
+    // Step 7: write kept records to .tmp file.
     let tmp_path = jsonl_path.with_extension("tmp");
     {
         let mut tmp_file = File::create(&tmp_path)?;
@@ -194,7 +192,7 @@ pub fn run_decay_pruner(
         tmp_file.sync_data()?;
     }
 
-    // Step 9: record WAL intent before the rename.
+    // Step 8: record WAL intent before the rename.
     wal::append_intent(
         agent_root,
         WalIntent::PruneEpisodicMemory {
@@ -202,17 +200,14 @@ pub fn run_decay_pruner(
         },
     )?;
 
-    // Step 10: atomic rename.
+    // Step 9: atomic rename.
     fs::rename(&tmp_path, &jsonl_path)?;
 
-    // Step 11: parent-dir fsync so the rename is durable.
+    // Step 10: parent-dir fsync so the rename is durable.
     let episodic_dir = agent_root.episodic_dir();
     File::open(&episodic_dir)?.sync_all()?;
 
-    // Step 12: commit WAL.
-    wal::commit_cycle(agent_root, now_sec)?;
-
-    // Step 13: return result.
+    // Step 11: return result.
     let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();
     Ok(DecayResult {
         decayed_ids,

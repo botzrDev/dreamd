@@ -1,10 +1,13 @@
 //! Dream cycle orchestration — single owner of the full phase graph.
 //!
 //! Phase order (load-bearing):
-//!   1. Consolidation — WAL → cluster → LESSONS.md → pin/unpin
-//!   2. Decay — archive + JSONL prune (own WAL envelope)
+//!   1. Consolidation — cluster → LESSONS.md → pin/unpin
+//!   2. Decay — archive + JSONL prune
 //!   3. Index — recurrence sidecar apply → prune decayed docs
 //!   4. Autobiography — best-effort git commit
+//!
+//! [`run_filesystem_phases`] opens and commits the single WAL envelope that
+//! spans consolidation + decay (one cycle = one atomic region).
 //!
 //! Entry points (`dreamd dream`, `POST /api/v1/dream`) are thin adapters over
 //! this module. The coordinator actor calls [`run_filesystem_phases`] only so it
@@ -86,14 +89,23 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 
 /// Filesystem phases: consolidation then decay.
 ///
-/// Called by the coordinator actor, which must reopen its append fd afterward.
+/// Opens one WAL envelope before consolidation and commits it after decay so the
+/// full cycle is a single atomic region (ARCH-2). Called by the coordinator
+/// actor, which must reopen its append fd afterward.
 pub fn run_filesystem_phases(
     agent_root: &AgentRoot,
     now_sec: i64,
     cycle_date: &str,
 ) -> Result<DecayResult, DreamCycleError> {
+    // ARCH-2: ONE WAL envelope spans BOTH filesystem phases. begin_cycle guards
+    // `.agent/` existence (WEG-281) and sets state=in_progress; commit_cycle sets
+    // state=complete and deletes the WAL. A phase error short-circuits via `?`
+    // BEFORE commit, leaving an uncommitted WAL for next-startup recovery
+    // (state=failed) — so no half-finished cycle is ever recorded "complete".
+    wal::begin_cycle(agent_root, now_sec)?;
     consolidation::run_deterministic_dream_cycle(agent_root, now_sec)?;
     let decay = decay::run_decay_pruner(agent_root, now_sec, cycle_date)?;
+    wal::commit_cycle(agent_root, now_sec)?;
     Ok(decay)
 }
 
@@ -299,6 +311,22 @@ mod tests {
     }
 
     #[test]
+    fn single_wal_envelope_committed_and_cleaned_after_full_cycle() {
+        let (_dir, root) = scaffold_fixture();
+        run_filesystem_phases(&root, NOW_SEC, &cycle_date_from_now_sec(NOW_SEC))
+            .expect("filesystem phases");
+        assert!(
+            !root.wal_path().exists(),
+            "single envelope committed + WAL cleaned"
+        );
+        assert_eq!(
+            crate::wal::read_last_cycle_status(&root).unwrap(),
+            "complete",
+            "exactly one transition to complete, at the end"
+        );
+    }
+
+    #[test]
     fn ensure_not_in_progress_rejects_active_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let root = AgentRoot::new(dir.path());
@@ -307,5 +335,37 @@ mod tests {
 
         let err = ensure_not_in_progress(&root).unwrap_err();
         assert!(matches!(err, DreamCycleError::InProgress));
+    }
+
+    #[test]
+    fn seam_crash_after_consolidation_recovers_not_clean() {
+        // Old two-envelope bug: run_deterministic_dream_cycle committed its OWN WAL,
+        // so a crash after consolidation but before decay left NO WAL → recovery
+        // returned Clean and state read "complete" (a half-cycle silently recorded
+        // as success). With the single hoisted envelope the orchestrator's WAL stays
+        // open across the seam, so the same crash is recoverable.
+        let (_dir, root) = scaffold_fixture();
+
+        // Orchestrator opens the one envelope...
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        // ...consolidation runs and records its intents but no longer commits.
+        consolidation::run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        // Simulate a crash in the seam: decay + commit never run.
+        assert!(root.wal_path().exists(), "WAL must remain open in the seam");
+        let wal: crate::wal::DreamWal =
+            serde_json::from_str(&std::fs::read_to_string(root.wal_path()).unwrap()).unwrap();
+        assert!(
+            !wal.intents.contains(&crate::wal::WalIntent::Commit),
+            "no Commit intent — the cycle did not finish"
+        );
+
+        // Recovery must NOT report Clean, and state must NOT be left "complete".
+        let outcome = crate::wal::recover_if_needed(&root, NOW_SEC).unwrap();
+        assert!(
+            matches!(outcome, crate::wal::RecoveryOutcome::Recovered { .. }),
+            "seam crash must be recovered, not silently Clean"
+        );
+        assert_eq!(crate::wal::read_last_cycle_status(&root).unwrap(), "failed");
     }
 }
