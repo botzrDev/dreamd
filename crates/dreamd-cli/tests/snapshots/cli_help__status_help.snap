@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"status\")"
+---
+Print daemon liveness, resolved project, last dream cycle, and recent log
+
+Usage: status
+
+Options:
+  -h, --help
+          Print help
