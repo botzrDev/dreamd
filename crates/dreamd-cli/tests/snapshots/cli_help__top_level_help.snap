@@ -1,6 +1,5 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 43
 expression: top_help()
 ---
 Portable memory layer for AI coding agents
@@ -13,6 +12,7 @@ Commands:
   init     Scaffold per-project .agent/ store and register it with the daemon
   mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
   reset    Reset scratch state (DR-113). Today only `workspace` is supported
+  status   Print daemon liveness, resolved project, last dream cycle, and recent log
   watch    Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
   version  Print structured version information (semver, commit, build date, target, schema)
   help     Print this message or the help of the given subcommand(s)

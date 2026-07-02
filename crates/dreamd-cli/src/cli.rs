@@ -82,6 +82,8 @@ pub enum Command {
     Mcp(McpArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
+    /// Print daemon liveness, resolved project, last dream cycle, and recent log.
+    Status,
     /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
     Watch(WatchArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
@@ -185,6 +187,20 @@ pub fn run() -> ExitCode {
     let log_file = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
+
+    // WEG-103 — `dreamd status` tails the daemon log, but init_tracing opens it
+    // with truncate(true) at startup (as every subcommand does). Capture the
+    // tail BEFORE that truncation so status can surface a running daemon's real
+    // recent lines rather than the empty file it just cleared.
+    let status_log_tail = if matches!(cli.command, Some(Command::Status)) {
+        log_file
+            .as_deref()
+            .map(commands::status::read_log_tail)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let _log_guard = dreamd_core::observability::init_tracing(log_file);
 
     if cli.version {
@@ -372,6 +388,39 @@ pub fn run() -> ExitCode {
                 }
             }
         },
+        Command::Status => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
+            // registry resolves off $HOME the same way the tracing log path above does.
+            // The log tail was captured into `status_log_tail` before init_tracing ran.
+            let socket = dreamd_core::client::resolve_daemon_socket();
+            let registry_path = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
+                .unwrap_or_else(|| PathBuf::from("registry.toml"));
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            match commands::status::run(
+                &cwd,
+                socket.as_deref(),
+                &registry_path,
+                &status_log_tail,
+                &mut out,
+            ) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::from(1),
+                Err(e) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Watch(_args) => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
