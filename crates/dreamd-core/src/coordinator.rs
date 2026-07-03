@@ -18,7 +18,7 @@
 //! or `spawn_blocking` without re-reading `docs/architecture/durability.md`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -27,13 +27,14 @@ use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 use ulid::Ulid;
 
+use crate::episodic::{self, EpisodicError};
 use crate::layout::AgentRoot;
 
-/// Hard cap on a single serialized JSONL line (including the trailing `\n`).
-/// Anything larger is rejected at the coordinator boundary; the HTTP handler
-/// maps the error to 413 Payload Too Large. Sidecar storage is deferred to
-/// v0.1.1.
-pub const MAX_LEARNING_LINE_BYTES: usize = 4096;
+/// Hard cap on a single serialized JSONL line — the on-disk line-format limit
+/// now lives in [`episodic`](crate::episodic). Re-exported so existing callers
+/// (`crate::coordinator::MAX_LEARNING_LINE_BYTES`) and the HTTP 413 mapping keep
+/// resolving unchanged.
+pub use crate::episodic::MAX_LEARNING_LINE_BYTES;
 
 const IDEMPOTENCY_CAPACITY: usize = 1024;
 
@@ -63,6 +64,18 @@ pub enum CoordinatorError {
     /// to HTTP 500.
     #[error("dream cycle: {0}")]
     DreamCycle(String),
+}
+
+impl From<EpisodicError> for CoordinatorError {
+    fn from(e: EpisodicError) -> Self {
+        match e {
+            EpisodicError::Io(io) => CoordinatorError::Io(io),
+            EpisodicError::Serialize(je) => CoordinatorError::Serialize(je),
+            EpisodicError::PayloadTooLarge { size, max } => {
+                CoordinatorError::PayloadTooLarge { size, max }
+            }
+        }
+    }
 }
 
 /// Messages accepted by the coordinator actor.
@@ -168,7 +181,7 @@ impl MemoryCoordinator {
             .truncate(false)
             .open(jsonl_path)?;
 
-        truncate_malformed_tail(&mut file)?;
+        episodic::recover(&mut file)?;
         // Seek to end for subsequent appends. We deliberately do NOT open
         // with `.append(true)` because the recovery path needs `set_len`
         // and explicit positioning.
@@ -254,21 +267,12 @@ impl MemoryCoordinator {
         // (`LearnIngress`) is the sole gate; on-disk String accepts legacy
         // dotted keys that the dream cycle treats as opaque single segments.
 
-        // Write protocol (WEG-7 AC): serialize → ensure trailing \n →
-        // 4 KiB check → write_all → sync_data → LRU insert.
-        let mut line = serde_json::to_string(&learning)?;
-        if !line.ends_with('\n') {
-            line.push('\n');
-        }
-        let size = line.len();
-        if size > MAX_LEARNING_LINE_BYTES {
-            return Err(CoordinatorError::PayloadTooLarge {
-                size,
-                max: MAX_LEARNING_LINE_BYTES,
-            });
-        }
-        self.file.write_all(line.as_bytes())?;
-        self.file.sync_data()?;
+        // Write protocol (WEG-7 AC): serialize → ensure trailing \n → 4 KiB
+        // check → write_all → sync_data. Delegated to the single durable-write
+        // seam `episodic::append` (WEG-378); `PayloadTooLarge` maps to HTTP 413
+        // via `From<EpisodicError>`. LRU insert stays below — only after a
+        // durable write succeeds.
+        episodic::append(&mut self.file, &learning)?;
 
         // Cache insert ONLY after durable write succeeds. Insert-before
         // would poison the cache on write failure.
@@ -298,7 +302,7 @@ impl MemoryCoordinator {
     /// reopen unconditionally after both run so the next append lands on the
     /// live inode regardless of whether either step actually rewrote the file.
     /// The cycle writes a well-formed file via atomic rename, so no
-    /// `truncate_malformed_tail` scan is needed on reopen.
+    /// `episodic::recover` scan is needed on reopen.
     fn handle_run_dream_cycle(
         &mut self,
         now_sec: i64,
@@ -343,54 +347,6 @@ impl MemoryCoordinator {
             }
         }
     }
-}
-
-/// Walk the JSONL file from the end, find the last byte offset such that
-/// every preceding line deserializes cleanly to `AgentLearning`, and
-/// truncate any malformed-tail bytes past that point.
-///
-/// Strategy: read the whole file (JSONL files in v0.1 stay small; a
-/// streaming reverse-scan can come later), iterate line-by-line forward,
-/// and keep the byte offset just after the last complete-and-parseable
-/// line. Truncate to that offset.
-///
-/// "Complete" means terminated by `\n`. A final partial line without a
-/// trailing newline is automatically dropped because the iterator below
-/// only yields complete `\n`-terminated segments.
-fn truncate_malformed_tail(file: &mut File) -> std::io::Result<()> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-
-    let mut last_good_offset: u64 = 0;
-    let mut cursor: usize = 0;
-    while cursor < buf.len() {
-        // Find next newline.
-        let Some(rel_nl) = buf[cursor..].iter().position(|b| *b == b'\n') else {
-            // Trailing bytes without a newline — torn write. Drop them.
-            break;
-        };
-        let line_end_exclusive = cursor + rel_nl; // position of '\n'
-        let line_slice = &buf[cursor..line_end_exclusive];
-        // An empty line (two consecutive newlines) is treated as malformed
-        // and stops the scan — torn writes can leave such a gap.
-        if line_slice.is_empty() {
-            break;
-        }
-        match serde_json::from_slice::<AgentLearning>(line_slice) {
-            Ok(_) => {
-                last_good_offset = (line_end_exclusive + 1) as u64; // include \n
-                cursor = line_end_exclusive + 1;
-            }
-            Err(_) => break,
-        }
-    }
-
-    if (last_good_offset as usize) < buf.len() {
-        file.set_len(last_good_offset)?;
-        file.sync_data()?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

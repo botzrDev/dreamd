@@ -6,11 +6,12 @@
 //! WAL-guarded rename so a mid-cycle crash leaves `.agent/` in a recoverable
 //! state. Pinned records are never archived.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 use dreamd_protocol::{AgentLearning, EventId};
 
+use crate::episodic::{self, EpisodicError};
 use crate::layout::AgentRoot;
 use crate::salience::{salience_with_context, RecurrenceContext};
 use crate::wal::{self, WalIntent};
@@ -74,6 +75,8 @@ impl DecayResult {
 pub enum DecayError {
     #[error("decay I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// Retained for the serialize side (WEG-378); the read side no longer
+    /// produces a per-line parse error — `episodic::scan` tolerates a torn tail.
     #[error("decay parse at line {line}: {source}")]
     Json {
         line: usize,
@@ -83,6 +86,23 @@ pub enum DecayError {
     Wal(#[from] crate::wal::WalError),
 }
 
+impl From<EpisodicError> for DecayError {
+    fn from(e: EpisodicError) -> Self {
+        match e {
+            EpisodicError::Io(io) => DecayError::Io(io),
+            EpisodicError::Serialize(je) => DecayError::Json {
+                line: 0,
+                source: je,
+            },
+            // Never produced on the decay rewrite/read paths (no size check),
+            // but the match must be exhaustive.
+            EpisodicError::PayloadTooLarge { size, max } => DecayError::Io(std::io::Error::other(
+                format!("payload too large: {size} > {max}"),
+            )),
+        }
+    }
+}
+
 /// Archive episodic events that have decayed below the salience threshold.
 ///
 /// `now_sec` is caller-provided — wall-clock APIs must not be called internally.
@@ -90,17 +110,15 @@ pub enum DecayError {
 /// derives it from `now_sec` (avoids timezone ambiguity inside the fn).
 ///
 /// Write sequence:
-///   1. Read + parse AGENT_LEARNINGS.jsonl (empty/absent → early return)
+///   1. Read AGENT_LEARNINGS.jsonl via `episodic::read_all` (absent/empty/torn
+///      tail → clean prefix; empty → early return)
 ///   2. Partition into decayed / kept (recurrence = 0; see constant note above)
 ///   3. If decayed is empty → return early (no files touched)
 ///   4. fs::create_dir_all(snapshots_dir)
 ///   5. Append decayed records to snapshot_file(cycle_date) — one JSONL line each
 ///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rename
-///   7. Write kept records to episodic_jsonl().with_extension("tmp")
-///   8. wal::append_intent(agent_root, WalIntent::PruneEpisodicMemory { temp_file_path })
-///   9. fs::rename(tmp, episodic_jsonl())
-///  10. File::open(episodic_dir)?.sync_all() — parent-dir fsync
-///  11. Return DecayResult { decayed_ids, kept_count }
+///   7. `episodic::rewrite_atomic(episodic_jsonl(), &kept, hook)` rewrites the live JSONL — temp write+fsync, then `hook` (WalIntent::PruneEpisodicMemory, after tmp-fsync/before rename), rename, parent-dir fsync (old steps 7–10)
+///   8. Return DecayResult { decayed_ids, kept_count }
 ///
 /// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
 /// only records the prune intent into the already-open WAL.
@@ -109,28 +127,11 @@ pub fn run_decay_pruner(
     now_sec: i64,
     cycle_date: &str,
 ) -> Result<DecayResult, DecayError> {
-    // Step 1: read + parse AGENT_LEARNINGS.jsonl.
+    // Step 1: read AGENT_LEARNINGS.jsonl through the shared episodic scan
+    // (WEG-378). Absent/empty/torn-tail all collapse to a clean prefix — the
+    // CLI `dreamd dream` path no longer aborts on a post-SIGKILL torn line.
     let jsonl_path = agent_root.episodic_jsonl();
-    let read_result = fs::read(&jsonl_path);
-    if let Err(ref e) = read_result {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            return Ok(DecayResult::default());
-        }
-    }
-    let bytes = read_result?;
-
-    let mut all_events: Vec<AgentLearning> = Vec::new();
-    for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let event =
-            serde_json::from_slice::<AgentLearning>(line).map_err(|e| DecayError::Json {
-                line: i + 1,
-                source: e,
-            })?;
-        all_events.push(event);
-    }
+    let all_events = episodic::read_all(&jsonl_path)?;
 
     if all_events.is_empty() {
         return Ok(DecayResult {
@@ -179,33 +180,21 @@ pub fn run_decay_pruner(
         snap_file.sync_data()?;
     }
 
-    // Step 7: write kept records to .tmp file.
+    // Steps 7–10: atomically rewrite the live JSONL with the kept records.
+    // `episodic::rewrite_atomic` writes the temp, fsyncs it, runs the hook, then
+    // renames and parent-dir fsyncs. The WAL prune intent is appended inside the
+    // hook — after tmp-fsync, before the rename — so the named temp provably
+    // exists when the intent references it (WEG-378).
     let tmp_path = jsonl_path.with_extension("tmp");
-    {
-        let mut tmp_file = File::create(&tmp_path)?;
-        for record in &kept {
-            let line = serde_json::to_string(record)
-                .map_err(|e| DecayError::Json { line: 0, source: e })?;
-            tmp_file.write_all(line.as_bytes())?;
-            tmp_file.write_all(b"\n")?;
-        }
-        tmp_file.sync_data()?;
-    }
-
-    // Step 8: record WAL intent before the rename.
-    wal::append_intent(
-        agent_root,
-        WalIntent::PruneEpisodicMemory {
-            temp_file_path: tmp_path.to_string_lossy().into_owned(),
-        },
-    )?;
-
-    // Step 9: atomic rename.
-    fs::rename(&tmp_path, &jsonl_path)?;
-
-    // Step 10: parent-dir fsync so the rename is durable.
-    let episodic_dir = agent_root.episodic_dir();
-    File::open(&episodic_dir)?.sync_all()?;
+    episodic::rewrite_atomic(&jsonl_path, &kept, || {
+        wal::append_intent(
+            agent_root,
+            WalIntent::PruneEpisodicMemory {
+                temp_file_path: tmp_path.to_string_lossy().into_owned(),
+            },
+        )
+        .map_err(std::io::Error::other)
+    })?;
 
     // Step 11: return result.
     let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();

@@ -536,28 +536,19 @@ fn apply_recurrence_sidecar_inner(
     let sidecar: RecurrenceSidecar = serde_json::from_str(&sidecar_json)
         .map_err(|e| IndexError(format!("parse recurrence_counts.json: {e}")))?;
 
-    // 2. Walk the JSONL and bucket events by skill_action.
+    // 2. Walk the JSONL (shared episodic scan, WEG-378) and bucket by skill_action.
     let jsonl_path = agent_root.episodic_jsonl();
-    let jsonl_bytes = match std::fs::read(&jsonl_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Nothing indexed yet — sidecar application is a no-op.
-            return Ok(());
-        }
-        Err(e) => return Err(IndexError(format!("read AGENT_LEARNINGS.jsonl: {e}"))),
-    };
-
+    let events = read_jsonl_events(&jsonl_path)?;
+    if events.is_empty() {
+        // Nothing indexed yet — sidecar application is a no-op.
+        return Ok(());
+    }
     let mut by_skill: HashMap<String, Vec<AgentLearning>> = HashMap::new();
-    for line_bytes in jsonl_bytes.split(|&b| b == b'\n') {
-        if line_bytes.is_empty() {
-            continue;
-        }
-        if let Ok(learning) = serde_json::from_slice::<AgentLearning>(line_bytes) {
-            by_skill
-                .entry(learning.skill_action.clone())
-                .or_default()
-                .push(learning);
-        }
+    for learning in events {
+        by_skill
+            .entry(learning.skill_action.clone())
+            .or_default()
+            .push(learning);
     }
 
     // 3. Delete-and-re-add for each cluster listed in the sidecar.
@@ -617,37 +608,28 @@ fn add_document(
 // Replay (two-pass)
 // ---------------------------------------------------------------------------
 
-fn read_jsonl_bytes(jsonl_path: &Path) -> Result<Vec<u8>, IndexError> {
-    match std::fs::read(jsonl_path) {
-        Ok(b) => Ok(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(IndexError(format!("read jsonl: {e}"))),
-    }
-}
-
 fn read_jsonl_events(jsonl_path: &Path) -> Result<Vec<AgentLearning>, IndexError> {
-    Ok(parse_jsonl_until_torn(&read_jsonl_bytes(jsonl_path)?))
+    crate::episodic::read_all(jsonl_path).map_err(|e| IndexError(format!("read jsonl: {e}")))
 }
 
 fn replay_two_pass(
     jsonl_path: &Path,
     last_indexed_id: Option<&str>,
 ) -> Result<(HashMap<String, u32>, Vec<AgentLearning>), IndexError> {
-    let bytes = read_jsonl_bytes(jsonl_path)?;
+    // One owned read via the shared episodic scan (WEG-378): pass 1 counts
+    // clusters over `&events`, pass 2 filters the same Vec by watermark.
+    let events = read_jsonl_events(jsonl_path)?;
 
     // Pass 1: build final cluster counts by walking every well-formed line.
-    let pass1 = parse_jsonl_until_torn(&bytes);
     let mut clusters: HashMap<String, u32> = HashMap::new();
-    for ev in &pass1 {
+    for ev in &events {
         *clusters.entry(ev.skill_action.clone()).or_insert(0) += 1;
     }
 
     // Pass 2: filter to events whose id is strictly greater than the watermark.
     // EventId does not implement `Ord`; compare via `as_str()` (ULIDs are
     // lexicographically sortable in their canonical Crockford base32 form).
-    // Separate `parse_jsonl_until_torn` call rather than re-filtering pass-1's
-    // Vec so we get an owned iterator without cloning the full collection.
-    let to_index: Vec<AgentLearning> = parse_jsonl_until_torn(&bytes)
+    let to_index: Vec<AgentLearning> = events
         .into_iter()
         .filter(|ev| match last_indexed_id {
             Some(last) => ev.id.as_str() > last,
@@ -656,31 +638,6 @@ fn replay_two_pass(
         .collect();
 
     Ok((clusters, to_index))
-}
-
-/// Walk JSONL bytes line-by-line and return every cleanly-parseable record
-/// up to the first torn-write halt signal (blank line or unparseable record).
-/// Mirrors the convention in `coordinator::truncate_malformed_tail` — see
-/// drift catalog entry `torn-write-blank-line-signal`.
-fn parse_jsonl_until_torn(bytes: &[u8]) -> Vec<AgentLearning> {
-    let mut out = Vec::new();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        let Some(rel_nl) = bytes[cursor..].iter().position(|b| *b == b'\n') else {
-            break;
-        };
-        let line_end = cursor + rel_nl;
-        let slice = &bytes[cursor..line_end];
-        if slice.is_empty() {
-            break;
-        }
-        match serde_json::from_slice::<AgentLearning>(slice) {
-            Ok(ev) => out.push(ev),
-            Err(_) => break,
-        }
-        cursor = line_end + 1;
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
