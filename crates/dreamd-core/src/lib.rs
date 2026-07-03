@@ -19,6 +19,7 @@ pub mod coordinator;
 pub mod daemon_client;
 pub mod decay;
 pub mod dream_cycle;
+pub mod episodic;
 pub mod index;
 pub mod ingress;
 pub mod io;

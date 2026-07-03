@@ -36,32 +36,47 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Shared implementation behind [`write_atomic`]. `hook` runs after the `.tmp`
-/// file is fully fsynced and before the rename into `path` — the only window
-/// any caller can wedge into the atomic write. Production callers pass a
-/// no-op hook; tests inject a failing hook to assert the destination file is
-/// untouched on error and the `.tmp` survives as a recovery signal.
-#[cfg(not(windows))]
+/// Shared implementation behind [`write_atomic`] (and [`episodic::rewrite_atomic`](crate::episodic::rewrite_atomic)).
+/// `hook` runs after the `.tmp` file is fully fsynced and before the rename into
+/// `path` — the only window any caller can wedge into the atomic write.
+/// Production callers pass a no-op hook (or, for the episodic log, a WAL prune
+/// intent append — the named `.tmp` provably exists at that point); tests inject
+/// a failing hook to assert the destination file is untouched on error and the
+/// `.tmp` survives as a recovery signal.
+///
+/// Returns [`io::ErrorKind::Unsupported`] on Windows (hook ignored), mirroring
+/// [`write_atomic`]; Windows durable writes land in v0.1.1 (see `docs/windows.md`).
 pub(crate) fn write_atomic_with_hook(
     path: &Path,
     contents: &[u8],
     hook: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = File::create(&tmp)?;
-    f.write_all(contents)?;
-    f.sync_data()?;
-    drop(f);
-    hook()?;
-    fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent() {
-        // `std::fs::rename` does not expose the parent-dir fd, and `PathBuf`
-        // has no `sync_data` — we must re-open the parent and fsync it so
-        // the rename itself is durable across crash. No-op-but-not-error
-        // on macOS; correct on Linux.
-        File::open(parent)?.sync_all()?;
+    #[cfg(windows)]
+    {
+        let _ = (path, contents, hook);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic write on Windows lands in v0.1.1; see docs/windows.md",
+        ));
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        let tmp = path.with_extension("tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_data()?;
+        drop(f);
+        hook()?;
+        fs::rename(&tmp, path)?;
+        if let Some(parent) = path.parent() {
+            // `std::fs::rename` does not expose the parent-dir fd, and `PathBuf`
+            // has no `sync_data` — we must re-open the parent and fsync it so
+            // the rename itself is durable across crash. No-op-but-not-error
+            // on macOS; correct on Linux.
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -10,11 +10,11 @@
 //! to call before `LESSONS.md` exists (succeeds silently if absent).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use dreamd_protocol::AgentLearning;
 
+use crate::episodic::{self, EpisodicError};
 use crate::index::{ClusterCount, RecurrenceSidecar};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
@@ -26,11 +26,30 @@ use crate::wal::{self, WalError, WalIntent};
 pub enum ConsolidationError {
     #[error("reading AGENT_LEARNINGS.jsonl: {0}")]
     Io(#[from] std::io::Error),
+    /// Retained for the serialize side (WEG-378); the read side no longer
+    /// produces a per-line parse error — `episodic::scan` tolerates a torn tail.
     #[error("parsing event at line {line}: {source}")]
     Json {
         line: usize,
         source: serde_json::Error,
     },
+}
+
+impl From<EpisodicError> for ConsolidationError {
+    fn from(e: EpisodicError) -> Self {
+        match e {
+            EpisodicError::Io(io) => ConsolidationError::Io(io),
+            EpisodicError::Serialize(je) => ConsolidationError::Json {
+                line: 0,
+                source: je,
+            },
+            // Never produced on the consolidation rewrite/read paths (no size
+            // check), but the match must be exhaustive.
+            EpisodicError::PayloadTooLarge { size, max } => ConsolidationError::Io(
+                std::io::Error::other(format!("payload too large: {size} > {max}")),
+            ),
+        }
+    }
 }
 
 /// Output of [`run_cluster_engine`]: which clusters were promoted and their
@@ -82,7 +101,7 @@ pub fn run_cluster_engine(
     agent_root: &AgentRoot,
     now_sec: i64,
 ) -> Result<ClusterOutput, ConsolidationError> {
-    let events = read_jsonl(agent_root.episodic_jsonl())?;
+    let events = episodic::read_all(&agent_root.episodic_jsonl())?;
     if events.is_empty() {
         return Ok(ClusterOutput { promoted: vec![] });
     }
@@ -190,7 +209,7 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     };
 
     let jsonl_path = agent_root.episodic_jsonl();
-    let mut events = read_jsonl(&jsonl_path)?;
+    let mut events = episodic::read_all(&jsonl_path)?;
     if events.is_empty() {
         return Ok(());
     }
@@ -199,38 +218,20 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
         event.pinned = cited_ids.contains(event.id.as_str());
     }
 
-    let mut out = String::with_capacity(events.len() * 256);
-    for event in &events {
-        out.push_str(
-            &serde_json::to_string(event)
-                .map_err(|e| ConsolidationError::Json { line: 0, source: e })?,
-        );
-        out.push('\n');
-    }
-    // WAL: record intent before the destructive JSONL rewrite (WEG-60).
-    // The temp file written by write_atomic is the recovery artefact.
+    // WAL: record the prune intent inside the atomic rewrite's hook (WEG-378) —
+    // after the temp is fsynced, before the rename. This makes the named temp
+    // provably exist when the intent references it; recovery cleans up that
+    // temp on a mid-cycle crash. `append_intent` no-ops when no WAL is open.
     let tmp_path = jsonl_path.with_extension("tmp");
-    crate::wal::append_intent(
-        agent_root,
-        crate::wal::WalIntent::PruneEpisodicMemory {
-            temp_file_path: tmp_path.to_string_lossy().into_owned(),
-        },
-    )
-    .map_err(|e| match e {
-        crate::wal::WalError::Io(io) => ConsolidationError::Io(io),
-        crate::wal::WalError::Json(je) => ConsolidationError::Json {
-            line: 0,
-            source: je,
-        },
-        // `append_intent` early-returns Ok when no WAL exists, so it never
-        // yields NoAgentStore (only `begin_cycle` guards on the store). Mapped
-        // explicitly — no wildcard — to keep the match exhaustive (WEG-281).
-        e @ crate::wal::WalError::NoAgentStore(_) => ConsolidationError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            e.to_string(),
-        )),
+    episodic::rewrite_atomic(&jsonl_path, &events, || {
+        wal::append_intent(
+            agent_root,
+            WalIntent::PruneEpisodicMemory {
+                temp_file_path: tmp_path.to_string_lossy().into_owned(),
+            },
+        )
+        .map_err(std::io::Error::other)
     })?;
-    write_atomic(&jsonl_path, out.as_bytes())?;
     Ok(())
 }
 
@@ -356,28 +357,6 @@ fn count_in_window(
         .iter()
         .filter(|&&i| events[i].timestamp.timestamp() >= cutoff)
         .count()
-}
-
-fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<AgentLearning>, ConsolidationError> {
-    let bytes = match std::fs::read(path.as_ref()) {
-        Ok(b) => b,
-        Err(not_found) if not_found.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(io_err) => return Err(ConsolidationError::Io(io_err)),
-    };
-    let mut events = Vec::new();
-    for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let event = serde_json::from_slice::<AgentLearning>(line).map_err(|e| {
-            ConsolidationError::Json {
-                line: i + 1,
-                source: e,
-            }
-        })?;
-        events.push(event);
-    }
-    Ok(events)
 }
 
 #[cfg(test)]
@@ -698,7 +677,7 @@ mod tests {
 
         apply_pin_unpin(&root).unwrap();
 
-        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 4);
         let find = |n: u32| {
             updated
@@ -728,7 +707,7 @@ mod tests {
         // LESSONS.md is absent — apply_pin_unpin should clear all pins.
         apply_pin_unpin(&root).unwrap();
 
-        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 2);
         assert!(
             !updated[0].pinned,
@@ -1009,7 +988,7 @@ mod tests {
             "JSONL must be unchanged when pin/unpin rename never completed"
         );
 
-        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert!(
             updated[0].pinned,
             "pre-cycle pin state must survive recovery"
@@ -1044,7 +1023,7 @@ mod tests {
 
         run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
 
-        let updated = read_jsonl(root.episodic_jsonl()).unwrap();
+        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 3);
         let pinned = |n: u32| {
             updated
