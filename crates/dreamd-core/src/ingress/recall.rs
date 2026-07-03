@@ -33,6 +33,8 @@ impl RecallIngress {
                 pain: r.pain,
                 importance: r.importance,
                 recurrence: r.recurrence,
+                skill_action: r.skill_action,
+                source_harness: r.source_harness,
             },
         }
     }
@@ -56,6 +58,8 @@ mod tests {
             pain: 7.0,
             importance: 8.0,
             recurrence: 2,
+            skill_action: "rust::tokio::async".to_string(),
+            source_harness: "cursor".to_string(),
         }]);
 
         assert_eq!(resp.results.len(), 1);
@@ -64,5 +68,7 @@ mod tests {
         assert_eq!(r.content, "rust tokio");
         assert_eq!(r.metadata.timestamp_sec, 1_700_000_000);
         assert_eq!(r.metadata.recurrence, 2);
+        assert_eq!(r.metadata.skill_action, "rust::tokio::async");
+        assert_eq!(r.metadata.source_harness, "cursor");
     }
 }
