@@ -56,7 +56,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
   -H "Content-Type: application/json" \
   -d '{
     "schema_version": "1.0.0",
-    "id": "evt_placeholder",
+    "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "timestamp": "2026-06-23T12:00:00Z",
     "pain": 7.0,
     "importance": 8.0,

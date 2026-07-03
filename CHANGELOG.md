@@ -26,7 +26,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `README.md` restructured for install/quick start; marketing narrative moved to `docs/marketing.md`.
 - `SECURITY.md` expanded with lesson-injection, privacy, and input-cap sections (merged from `docs/security.md`).
 - `docs/security.md` now redirects to canonical `SECURITY.md`.
-- `docs/production_schedule.md` is canonical; `docs/video-schedule.md` redirects (removed Antigravity harness drift).
 
 ## [0.1.0-rc.1] - 2026-06-22
 
