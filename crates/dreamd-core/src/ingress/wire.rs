@@ -35,4 +35,6 @@ pub struct RecallMeta {
     pub pain: f64,
     pub importance: f64,
     pub recurrence: u64,
+    pub skill_action: String,
+    pub source_harness: String,
 }

@@ -140,7 +140,7 @@ impl Supervisor {
                 tracing::warn!(
                     from,
                     binary = crate::index::SCHEMA_VERSION,
-                    "index schema predates binary; run `dreamd migrate` to upgrade"
+                    "index schema predates binary; TantivyIndexHandle::open will rebuild from JSONL"
                 );
             }
         }

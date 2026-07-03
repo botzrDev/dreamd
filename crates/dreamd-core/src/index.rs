@@ -21,7 +21,7 @@ use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 /// start on mismatch.
 // bumped in WEG-43 when content gained STORED
 // bumped in WEG-45 when event_id (STRING | STORED) was added for delete-and-re-add
-pub const SCHEMA_VERSION: &str = "index/1.2";
+pub const SCHEMA_VERSION: &str = "index/1.3";
 
 /// Canonical field-name strings for the dreamd Tantivy schema.
 ///
@@ -42,6 +42,10 @@ pub const CITED_EVENT_COUNT_FIELD: &str = "cited_event_count";
 /// `STRING | STORED` — not tokenized — so `Term::from_field_text` resolves to
 /// exactly one document during the delete-and-re-add cycle (WEG-45 / DR-205′).
 pub const EVENT_ID_FIELD: &str = "event_id";
+/// Hierarchical clustering key from `AgentLearning::skill_action` (`STRING | STORED`).
+pub const SKILL_ACTION_FIELD: &str = "skill_action";
+/// Provenance harness identifier from `AgentLearning::source_harness` (`STRING | STORED`).
+pub const SOURCE_HARNESS_FIELD: &str = "source_harness";
 
 /// Memory layer for an indexed document.
 ///
@@ -110,6 +114,10 @@ pub struct SchemaFields {
     /// `STRING | STORED` -- daemon-assigned `EventId` (`evt_` + ULID) for
     /// targeted delete-and-re-add during recurrence sidecar application (WEG-45).
     pub event_id: Field,
+    /// `STRING | STORED` -- hierarchical clustering key from `AgentLearning::skill_action`.
+    pub skill_action: Field,
+    /// `STRING | STORED` -- provenance harness from `AgentLearning::source_harness`.
+    pub source_harness: Field,
 }
 
 /// Build the canonical dreamd Tantivy schema.
@@ -132,6 +140,8 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let cited_event_count = b.add_u64_field(CITED_EVENT_COUNT_FIELD, FAST);
     // WEG-45: STRING | STORED (not TEXT) for exact-match delete-and-re-add.
     let event_id = b.add_text_field(EVENT_ID_FIELD, STRING | STORED);
+    let skill_action = b.add_text_field(SKILL_ACTION_FIELD, STRING | STORED);
+    let source_harness = b.add_text_field(SOURCE_HARNESS_FIELD, STRING | STORED);
 
     let schema = b.build();
     (
@@ -146,6 +156,8 @@ pub fn build_schema() -> (Schema, SchemaFields) {
             last_updated_sec,
             cited_event_count,
             event_id,
+            skill_action,
+            source_harness,
         },
     )
 }
@@ -299,6 +311,14 @@ mod tests {
             schema.get_field("event_id").is_ok(),
             "missing field: event_id"
         );
+        assert!(
+            schema.get_field("skill_action").is_ok(),
+            "missing field: skill_action"
+        );
+        assert!(
+            schema.get_field("source_harness").is_ok(),
+            "missing field: source_harness"
+        );
     }
 
     #[test]
@@ -394,14 +414,14 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: IndexManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
-        assert_eq!(deserialized.schema_version, "index/1.2");
+        assert_eq!(deserialized.schema_version, "index/1.3");
     }
 
     /// `SCHEMA_VERSION` must equal the hardcoded string so accidental bumps
     /// (e.g. whitespace, prefix change) are caught before they reach CI.
     #[test]
     fn schema_version_constant_value() {
-        assert_eq!(SCHEMA_VERSION, "index/1.2");
+        assert_eq!(SCHEMA_VERSION, "index/1.3");
     }
 
     #[test]
@@ -416,13 +436,29 @@ mod tests {
     fn manifest_current() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index_manifest.json");
-        std::fs::write(&path, r#"{"schema_version":"index/1.2"}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":"index/1.3"}"#).unwrap();
         let outcome = check_manifest_version(&path).unwrap();
         assert_eq!(outcome, ManifestCheckOutcome::Current);
     }
 
     #[test]
     fn manifest_needs_migration() {
+        // index/1.2 predates provenance anchor fields; any on-disk index at
+        // 1.2 must be rebuilt before recall can surface skill_action/source_harness.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index_manifest.json");
+        std::fs::write(&path, r#"{"schema_version":"index/1.2"}"#).unwrap();
+        let outcome = check_manifest_version(&path).unwrap();
+        assert_eq!(
+            outcome,
+            ManifestCheckOutcome::NeedsMigration {
+                from: "index/1.2".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn manifest_needs_migration_from_1_1() {
         // index/1.1 was the pre-WEG-45 schema (no event_id field); any
         // on-disk index at 1.1 must be rebuilt before delete-and-re-add works.
         let dir = tempfile::tempdir().unwrap();
@@ -446,7 +482,7 @@ mod tests {
         match err {
             ManifestVersionError::TooNew { manifest, binary } => {
                 assert_eq!(manifest, "index/2.0");
-                assert_eq!(binary, "index/1.2");
+                assert_eq!(binary, "index/1.3");
             }
             other => panic!("expected TooNew, got {other:?}"),
         }

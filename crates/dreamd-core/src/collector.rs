@@ -46,6 +46,10 @@ pub struct RecallResult {
     pub recurrence: u64,
     /// Memory layer the document was indexed under.
     pub layer: Layer,
+    /// Hierarchical clustering key hydrated from the stored `skill_action` field.
+    pub skill_action: String,
+    /// Provenance harness identifier hydrated from the stored `source_harness` field.
+    pub source_harness: String,
     /// Raw BM25 score before the salience multiply, for the `--explain` formatter (DR-703).
     pub bm25: f64,
     /// Salience multiplier at query time, for the `--explain` formatter (DR-703).
@@ -246,6 +250,16 @@ pub fn recall(
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<Layer>().ok())
             .unwrap_or(Layer::Episodic);
+        let skill_action = doc
+            .get_first(fields.skill_action)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let source_harness = doc
+            .get_first(fields.source_harness)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         results.push(RecallResult {
             score: scored.score.0,
             bm25: scored.bm25,
@@ -256,6 +270,8 @@ pub fn recall(
             importance: scored.importance,
             recurrence: scored.recurrence,
             layer: layer_val,
+            skill_action,
+            source_harness,
         });
     }
 
@@ -296,6 +312,8 @@ mod tests {
                     fields.layer => layer.as_str(),
                     fields.last_updated_sec => *ts as u64,
                     fields.cited_event_count => 0u64,
+                    fields.skill_action => "rust::axum::error_handling",
+                    fields.source_harness => "claude-code",
                 ))
                 .expect("add doc");
         }

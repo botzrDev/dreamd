@@ -46,8 +46,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::index::{
-    build_schema, ClusterCount, IndexManifest, Layer, RecurrenceSidecar, SchemaFields,
-    INDEX_MANIFEST_FILENAME,
+    build_schema, check_manifest_version, ClusterCount, IndexManifest, Layer, ManifestCheckOutcome,
+    ManifestVersionError, RecurrenceSidecar, SchemaFields, INDEX_MANIFEST_FILENAME, SCHEMA_VERSION,
 };
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
@@ -218,14 +218,36 @@ impl TantivyIndexHandle {
         std::fs::create_dir_all(&index_dir).map_err(io_to_index)?;
 
         let manifest_path = dreamd_dir.join(INDEX_MANIFEST_FILENAME);
-        write_manifest_if_absent(&manifest_path)?;
-
         let progress_path = dreamd_dir.join(INDEX_PROGRESS_FILENAME);
         let jsonl_path = agent_root.episodic_jsonl();
 
+        // Index schema bump => rebuild the derived cache from JSONL (ARCHITECTURE.md §4).
+        // This is NOT `dreamd migrate` (§7, durable data); the index is a rebuildable cache.
+        match check_manifest_version(&manifest_path) {
+            Ok(ManifestCheckOutcome::NeedsMigration { from }) => {
+                tracing::warn!(
+                    from,
+                    to = SCHEMA_VERSION,
+                    "index schema outdated; rebuilding from JSONL"
+                );
+                let _ = std::fs::remove_dir_all(&index_dir);
+                let _ = std::fs::remove_file(&manifest_path);
+                // Reset watermark so replay_two_pass re-indexes the full JSONL, not just the tail.
+                let _ = std::fs::remove_file(&progress_path);
+                std::fs::create_dir_all(&index_dir).map_err(io_to_index)?;
+            }
+            Err(ManifestVersionError::TooNew { manifest, binary }) => {
+                return Err(IndexError(format!(
+                    "index schema {manifest:?} is newer than binary {binary:?}; \
+                     downgrade dreamd or run `dreamd migrate`"
+                )));
+            }
+            _ => {}
+        }
+
         let (schema, fields) = build_schema();
-        let mmap_dir = MmapDirectory::open(&index_dir).map_err(tantivy_io_to_index)?;
-        let index = Index::open_or_create(mmap_dir, schema).map_err(tantivy_to_index)?;
+        let index = open_or_create_index(&index_dir, schema, &manifest_path, &progress_path)?;
+        write_manifest_if_absent(&manifest_path)?;
         let reader = index.reader().map_err(tantivy_to_index)?;
         let mut writer: IndexWriter<TantivyDocument> =
             index.writer(WRITER_HEAP_BYTES).map_err(tantivy_to_index)?;
@@ -599,6 +621,8 @@ fn add_document(
         fields.last_updated_sec => ts,
         fields.cited_event_count => 0u64,
         fields.event_id => id_str,
+        fields.skill_action => learning.skill_action.clone(),
+        fields.source_harness => learning.source_harness.clone(),
     );
     writer.add_document(doc).map_err(tantivy_to_index)?;
     Ok(())
@@ -671,6 +695,46 @@ fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
     write_atomic(path, &bytes)
         .map_err(|e| IndexError(format!("write {INDEX_MANIFEST_FILENAME}: {e}")))?;
     Ok(())
+}
+
+/// Open or create the on-disk Tantivy index. If the directory holds a stale
+/// schema with no manifest (or a mismatch open_or_create cannot reconcile),
+/// wipe the index cache once and retry — same JSONL replay path as manifest
+/// migration, not `dreamd migrate`.
+fn open_or_create_index(
+    index_dir: &Path,
+    schema: tantivy::schema::Schema,
+    manifest_path: &Path,
+    progress_path: &Path,
+) -> Result<Index, IndexError> {
+    match try_open_or_create(index_dir, schema.clone()) {
+        Ok(index) => Ok(index),
+        Err(e) if is_schema_incompatible(&e) => {
+            tracing::warn!(
+                error = %e,
+                "index schema incompatible with binary; rebuilding from JSONL"
+            );
+            let _ = std::fs::remove_dir_all(index_dir);
+            let _ = std::fs::remove_file(manifest_path);
+            let _ = std::fs::remove_file(progress_path);
+            std::fs::create_dir_all(index_dir).map_err(io_to_index)?;
+            try_open_or_create(index_dir, schema)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn try_open_or_create(
+    index_dir: &Path,
+    schema: tantivy::schema::Schema,
+) -> Result<Index, IndexError> {
+    let mmap_dir = MmapDirectory::open(index_dir).map_err(tantivy_io_to_index)?;
+    Index::open_or_create(mmap_dir, schema).map_err(tantivy_to_index)
+}
+
+fn is_schema_incompatible(err: &IndexError) -> bool {
+    let msg = err.0.to_ascii_lowercase();
+    msg.contains("schema") || msg.contains("incompatible")
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,6 +1687,62 @@ mod tests {
         );
 
         drop(tx);
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema migration — self-healing rebuild surfaces provenance anchors
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn schema_migration_rebuilds_index_and_surfaces_anchors() {
+        use crate::index::{IndexManifest, SCHEMA_VERSION};
+
+        let dir = unique_tmpdir("schema-migrate");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+
+        let id = make_event_id('M');
+        let learning = AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: id.clone(),
+            timestamp: DateTime::parse_from_rfc3339("2026-05-14T08:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            pain: 7.0,
+            importance: 8.0,
+            pinned: false,
+            skill_action: "rust::migration::anchor_test".to_string(),
+            source_harness: "cursor".to_string(),
+            content: "migration anchor marker token".to_string(),
+        };
+        prime_jsonl(&dir, &[learning]);
+
+        let dreamd_dir = agent_root.dreamd_dir();
+        std::fs::create_dir_all(&dreamd_dir).unwrap();
+        std::fs::write(
+            dreamd_dir.join(INDEX_MANIFEST_FILENAME),
+            r#"{"schema_version":"index/1.2"}"#,
+        )
+        .unwrap();
+
+        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
+            .expect("open after migration");
+
+        let (_, fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let results = crate::recall(handle.reader(), &fields, "anchor marker", 5, None, now_sec)
+            .expect("recall after migration rebuild");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].skill_action, "rust::migration::anchor_test");
+        assert_eq!(results[0].source_harness, "cursor");
+
+        let manifest_text =
+            std::fs::read_to_string(dreamd_dir.join(INDEX_MANIFEST_FILENAME)).expect("manifest");
+        let manifest: IndexManifest = serde_json::from_str(&manifest_text).expect("parse manifest");
+        assert_eq!(manifest.schema_version, SCHEMA_VERSION);
+
         handle.shutdown().await.expect("shutdown");
     }
 

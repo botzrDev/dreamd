@@ -1,6 +1,6 @@
 ---
 source: crates/dreamd-core/src/collector.rs
-assertion_line: 480
+assertion_line: 503
 expression: results
 ---
 [
@@ -12,6 +12,8 @@ expression: results
         importance: 9.0,
         recurrence: 3,
         layer: Episodic,
+        skill_action: "rust::axum::error_handling",
+        source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
     },
@@ -23,6 +25,8 @@ expression: results
         importance: 7.0,
         recurrence: 3,
         layer: Episodic,
+        skill_action: "rust::axum::error_handling",
+        source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
     },
@@ -34,6 +38,8 @@ expression: results
         importance: 5.0,
         recurrence: 3,
         layer: Episodic,
+        skill_action: "rust::axum::error_handling",
+        source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
     },
