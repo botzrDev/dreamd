@@ -49,13 +49,13 @@ This is the bet: that as multi-agent workflows mature, sovereign file-native mem
 
 ## Receipts: what a node looks like
 
-Pulled live from this repo's own `.agent/` (yes, we dogfood):
+A node is one plain JSONL line — this is the shape (we run dreamd on our own work; its `.agent/` store looks exactly like this):
 
 ```jsonl
 {"schema_version":"1.0.0","id":"evt_01KSFKPXEDYR7NSJQNQGHFN60N","timestamp":"2026-05-25T13:03:12.845198614Z","source_harness":"claude-code","skill_action":"rust::error_type::non_exhaustive_enum","content":"Error enums in library crates should be #[non_exhaustive] so callers cannot pattern-match all variants exhaustively — adding new error cases later is a non-breaking change.","pain":3.0,"importance":8.0,"pinned":false}
 ```
 
-That's one line in `.agent/episodic/AGENT_LEARNINGS.jsonl`. You can `git blame` it. You can paste it into a teammate's Slack. You can `rg "non_exhaustive" .agent/` and find every related lesson across every agent that ever wrote there.
+That's one line in a project's `.agent/episodic/AGENT_LEARNINGS.jsonl` — plain text you can `git blame`, paste into a teammate's Slack, or `rg "non_exhaustive" .agent/` to find every related lesson across every agent that ever wrote there.
 
 ---
 
@@ -97,5 +97,5 @@ We're sending this to two builders we respect specifically. We are not running a
 - Repo: [github.com/botzrDev/dreamd](https://github.com/botzrDev/dreamd)
 - Install: `npx dreamd-mcp` (Apache-2.0, ≤30s on a clean machine)
 - Spec: [`SPEC.md`](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): RFC-2119 conformance for folder layout, node schema, dream cycle
-- Roadmap: `ROADMAP.md`
+- Roadmap: [`ROADMAP.md`](https://github.com/botzrDev/dreamd/blob/main/ROADMAP.md): what shipped, what's next, and the v0.2 direction
 - Contact: Austin at `uveddi@pm.me` for slow-thread, `@wgi_dev` on X for fast

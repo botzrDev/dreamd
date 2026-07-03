@@ -21,7 +21,7 @@ This mirrors the `recover_incomplete_deletes_tmp_and_marks_failed` test in `crat
 1. **Detect** — `recover_on_startup()` sees `dream_in_progress.wal` on `dreamd watch` startup (boot project) or on first request to a lazy-loaded project.
 2. **Clean** — Delete temp files referenced by WAL intents (the `.jsonl.tmp` file).
 3. **Finalize** — Remove the WAL; set `state.json` → `last_dream_cycle_status: "failed"`.
-4. **Serve** — Daemon accepts traffic; JSONL retains the last valid lines (torn tail truncated on next coordinator append or `doctor --repair`).
+4. **Serve** — Daemon accepts traffic; JSONL retains the last valid lines (torn tail truncated on next coordinator append).
 
 ## Try it
 
