@@ -3,9 +3,6 @@ context/
 .claude/
 .uveddi/
 
-# User-facing docs (ready to track — remove this line when committing docs/).
-docs/
-
 # Added by cargo
 /target
 # Local task/spec assignment files, not repo artifacts
