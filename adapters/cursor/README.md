@@ -42,7 +42,7 @@ Ask the agent:
 
 > What has dreamd remembered about this codebase?
 
-**Expect:** `search_nodes` with your task as the query; results include `score` and `content`.
+**Expect:** `search_nodes` with your task as the query; results include `score`, `content`, and per-hit `metadata.skill_action` + `metadata.source_harness` (the harness that authored each learning).
 
 To append:
 

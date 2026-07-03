@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Recall responses now surface provenance anchors under `metadata` — `skill_action` (cluster key) and `source_harness` (authoring harness) — so recall is cross-harness-attributable (WEG-424).
+- Self-healing index rebuild on schema-version mismatch: `TantivyIndexHandle::open` wipes and replays the JSONL under the current schema when an on-disk index predates the binary, on both the daemon and no-daemon paths (WEG-424).
+
+### Changed
+
+- Tantivy index schema bumped `index/1.2` → `index/1.3` (adds the `skill_action` + `source_harness` STORED fields). Existing indexes rebuild automatically from the JSONL on first open.
+
 ## [0.1.0-rc.2] - 2026-06-24
 
 ### Added

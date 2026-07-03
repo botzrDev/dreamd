@@ -94,7 +94,7 @@ salience = exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recu
 final_score = bm25 × salience
 ```
 
-Each result includes `score`, `bm25`, `salience`, and `metadata` (timestamp, pain, importance, recurrence).
+Each result includes `score`, `bm25`, `salience`, and `metadata` (timestamp, pain, importance, recurrence, plus `skill_action` and `source_harness` — each hit's cluster key and authoring harness, so recall is cross-harness-attributable).
 
 > **Timing:** A learning appended seconds ago may not appear until the next index commit (5 s cadence in v0.1). Wait briefly and retry if results are empty.
 
