@@ -25,6 +25,10 @@ Code never logged it. The promoted cluster draws from both tools (two
 `cursor` events, two `claude-code` events) — memory that follows the work, not
 the editor.
 
+Recall now surfaces `source_harness` on every hit, so a learning written under
+one harness is recalled with its origin attached — Claude Code can see that
+`needless_borrow` was first taught by Cursor.
+
 That is what "across every tool" buys you: a lesson learned once, anywhere,
 surfaces everywhere.
 

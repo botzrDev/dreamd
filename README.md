@@ -82,7 +82,7 @@ Adapter-specific setup: [adapters/claude-code](./adapters/claude-code/README.md)
 
 ## Architecture (one paragraph)
 
-Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence). The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
+Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence), and each hit carries its `source_harness` and `skill_action` — so recall is cross-harness-attributable, not an opaque lookup. The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
 
 Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md)
 

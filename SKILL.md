@@ -31,6 +31,8 @@ Without it, `search_nodes` returns empty results silently.
 
 Returns a ranked list of episodic events scored by BM25 × salience (recency, pain, importance, recurrence).
 
+Each result carries `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can see each hit's cluster and which tool taught it.
+
 **Call `search_nodes` when:**
 
 - Starting a task in a project you've worked in before

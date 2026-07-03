@@ -8,6 +8,8 @@ Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https
 
 `.agent/` is a directory convention any AI coding agent or harness can read from and write to in order to share runtime memory across tools. It sits beside [`AGENTS.md`](https://agents.md) and [`SKILL.md`](https://www.anthropic.com/news/skills) in a project root. This spec defines the folder layout, the JSON record schema, a salience formula for ranking recall, and a consolidation contract called the *dream cycle*. It does not mandate a storage engine, an LLM, a transport, or a daemon — those are implementation choices. **AGENTS.md is what you wrote down. `.agent/` is what your agent learned.**
 
+**Design principle (informative).** The portable record is natural-language `content`. Text is the one representation every model and harness can consume without translation, which is what makes `.agent/` portable across tools by construction — a model-specific representation (an embedding from one encoder) is not portable to a different model. Implementations MAY build any index they like over `content` (lexical, vector, or hybrid) as private derived state, but the canonical, shared, cross-harness record remains the natural-language node, never a model-specific representation.
+
 ## Relationship to `AGENTS.md` and `SKILL.md`
 
 | File | Author | Role |

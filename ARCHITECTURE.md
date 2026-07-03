@@ -135,7 +135,7 @@ Concurrent third-party writers to the JSONL are not supported in v0.1.
 
 ### 2. Salience is query-time, not indexed
 
-Storing the score would force daily re-indexing as `age_days` drifts. Tantivy schema fields: `content` (TEXT), `timestamp_sec`, `pain`, `importance`, `recurrence` (fastfields). A custom collector computes:
+Storing the score would force daily re-indexing as `age_days` drifts. Tantivy schema fields: `content` (TEXT), `timestamp_sec`, `pain`, `importance`, `recurrence` (fastfields), plus the `STRING | STORED` provenance anchors `skill_action` and `source_harness` (hydrated into recall `metadata`, WEG-424 — stored for surfacing, not salience inputs). A custom collector computes:
 
 ```
 salience = exp(-age_days / 14.0) * (pain / 10.0) * (importance / 10.0) * (1.0 + ln(1.0 + recurrence))
@@ -187,6 +187,8 @@ sequenceDiagram
 - `dreamd doctor` (`index_freshness:` line)
 
 **Healing.** `TantivyIndexHandle::open` replays every JSONL event whose `EventId` is strictly greater than the on-disk watermark. `add_document` is idempotent; replay re-does at most one commit window after crash. v0.1.1 may add indexer backpressure instead of drop-on-full.
+
+**Schema-version migration.** The index carries an `index_manifest.json` version (`SCHEMA_VERSION`, e.g. `index/1.3`). On open, a manifest older than the binary's (`NeedsMigration`) triggers a full rebuild: `TantivyIndexHandle::open` wipes the index dir + progress watermark, replays the JSONL under the current schema, and re-stamps the manifest — on both the daemon and no-daemon paths. This is why an index-schema field add (e.g. WEG-424's `skill_action`/`source_harness`) self-heals on upgrade rather than needing `dreamd migrate` (§7, which governs the durable JSONL/state schema, not the derived index cache). A manifest *newer* than the binary aborts startup.
 
 ### 5. Local API security
 

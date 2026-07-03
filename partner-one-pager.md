@@ -71,7 +71,7 @@ dreamd is **open-core on the GitLab model.**
 ## What dreamd is NOT
 
 - A model. We don't train anything, don't host inference, don't compete with the harness you use.
-- A vector DB. The substrate is JSONL files in your repo. No embedding index to manage.
+- A vector DB. The substrate is natural-language JSONL in your repo — portable by construction, because text is the one representation every model reads. No model-specific embedding index to manage or re-encode when you switch harnesses.
 - A multi-tenant SaaS. Never.
 - A replacement for the agent's working context. dreamd is long-term memory the harness consults; it doesn't try to be the harness's prompt-stuffer.
 - A replacement for your memory system if you already have one. dreamd touches only `.agent/`, removes cleanly with `rm -rf .agent/`, and is silent if you don't query it.
