@@ -135,6 +135,20 @@ pub enum ResetCommand {
     },
 }
 
+/// Render the `dreamd(1)` man page from the clap definition.
+///
+/// Used by the `generate_man` bin; exposed so tests can assert the page
+/// renders without writing `doc/dreamd.1`.
+pub fn render_man_page() -> std::io::Result<Vec<u8>> {
+    use clap::CommandFactory;
+    use clap_mangen::Man;
+
+    let man = Man::new(Cli::command());
+    let mut buffer = Vec::new();
+    man.render(&mut buffer)?;
+    Ok(buffer)
+}
+
 /// Guard that rejects `Auto` dream-cycle mode at v0.1.
 ///
 /// Returns `Ok(())` for `Manual` mode; `Err(message)` for `Auto` mode.
@@ -448,6 +462,7 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn auto_mode_rejected() {
@@ -468,5 +483,147 @@ mod tests {
             check_dream_mode(&cfg).is_ok(),
             "manual mode must be accepted by check_dream_mode"
         );
+    }
+
+    #[test]
+    fn dream_args_validate_rejects_dry_and_auto() {
+        let args = DreamArgs {
+            dry: true,
+            auto: true,
+            no_commit: false,
+        };
+        let err = args.validate().unwrap_err();
+        assert!(
+            err.contains("mutually exclusive"),
+            "expected mutual-exclusion message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dream_args_validate_accepts_each_flag_alone() {
+        assert!(DreamArgs {
+            dry: true,
+            auto: false,
+            no_commit: false,
+        }
+        .validate()
+        .is_ok());
+        assert!(DreamArgs {
+            dry: false,
+            auto: true,
+            no_commit: false,
+        }
+        .validate()
+        .is_ok());
+        assert!(DreamArgs {
+            dry: false,
+            auto: false,
+            no_commit: true,
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn parses_version_flag() {
+        let cli = Cli::try_parse_from(["dreamd", "--version"]).unwrap();
+        assert!(cli.version);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_dream_no_commit() {
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--no-commit"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.no_commit);
+                assert!(!args.dry);
+                assert!(!args.auto);
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_project_root_and_manual_only() {
+        let cli = Cli::try_parse_from([
+            "dreamd",
+            "mcp",
+            "--manual-only",
+            "--project-root",
+            "/tmp/proj",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Mcp(args)) => {
+                assert!(args.manual_only);
+                assert_eq!(
+                    args.project_root.as_deref(),
+                    Some(PathBuf::from("/tmp/proj").as_path())
+                );
+            }
+            _ => panic!("expected Mcp"),
+        }
+    }
+
+    #[test]
+    fn parses_reset_workspace_yes() {
+        let cli = Cli::try_parse_from(["dreamd", "reset", "workspace", "--yes"]).unwrap();
+        match cli.command {
+            Some(Command::Reset(ResetArgs {
+                command: ResetCommand::Workspace { yes },
+            })) => assert!(yes),
+            _ => panic!("expected Reset workspace --yes"),
+        }
+    }
+
+    #[test]
+    fn parses_watch_and_status_and_doctor() {
+        for (argv, expect) in [
+            (vec!["dreamd", "watch"], "watch"),
+            (vec!["dreamd", "status"], "status"),
+            (vec!["dreamd", "doctor"], "doctor"),
+            (vec!["dreamd", "version"], "version"),
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let label = match cli.command {
+                Some(Command::Watch(_)) => "watch",
+                Some(Command::Status) => "status",
+                Some(Command::Doctor) => "doctor",
+                Some(Command::Version) => "version",
+                _ => panic!("unexpected command for {argv:?}"),
+            };
+            assert_eq!(label, expect);
+        }
+    }
+
+    #[test]
+    fn parses_init_quiet_and_uninstall() {
+        let quiet = Cli::try_parse_from(["dreamd", "init", "--quiet"]).unwrap();
+        match quiet.command {
+            Some(Command::Init(args)) => {
+                assert!(args.quiet);
+                assert!(!args.uninstall_project);
+            }
+            _ => panic!("expected Init --quiet"),
+        }
+        let uninstall = Cli::try_parse_from(["dreamd", "init", "--uninstall-project"]).unwrap();
+        match uninstall.command {
+            Some(Command::Init(args)) => assert!(args.uninstall_project),
+            _ => panic!("expected Init --uninstall-project"),
+        }
+    }
+
+    #[test]
+    fn render_man_page_includes_binary_name_and_subcommands() {
+        let page = String::from_utf8(render_man_page().unwrap()).unwrap();
+        assert!(page.contains("dreamd"), "man page must name the binary");
+        for sub in ["init", "dream", "mcp", "watch", "doctor", "status", "version", "reset"] {
+            assert!(
+                page.contains(sub),
+                "man page must document subcommand {sub}; page length={}",
+                page.len()
+            );
+        }
     }
 }

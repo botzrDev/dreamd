@@ -5,13 +5,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use clap::CommandFactory;
-use clap_mangen::Man;
-
 fn main() {
-    let man = Man::new(dreamd::cli::Cli::command());
-    let mut buffer: Vec<u8> = Vec::new();
-    man.render(&mut buffer).expect("render man page");
+    let buffer = dreamd::cli::render_man_page().expect("render man page");
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_path = manifest_dir.join("../../doc/dreamd.1");

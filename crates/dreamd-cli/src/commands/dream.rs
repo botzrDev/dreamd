@@ -172,6 +172,8 @@ fn parse_epoch_override(raw: &str) -> Result<i64, DreamCliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+    use std::fs;
 
     #[test]
     fn parse_epoch_override_accepts_integer() {
@@ -193,5 +195,42 @@ mod tests {
             DreamCliError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
             other => panic!("expected Io(InvalidInput), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn display_and_source_cover_all_variants() {
+        let cycle = DreamCliError::DreamCycle(DreamCycleError::InProgress);
+        assert!(cycle.to_string().contains("dream cycle error"));
+        assert!(cycle.source().is_some());
+
+        let io = DreamCliError::from(std::io::Error::other("write failed"));
+        assert!(io.to_string().contains("I/O error"));
+        assert!(io.source().is_some());
+
+        let in_progress = DreamCliError::DaemonInProgress;
+        assert!(in_progress.to_string().contains("already running"));
+        assert!(in_progress.source().is_none());
+
+        let proxy = DreamCliError::DaemonProxy("timeout".into());
+        assert_eq!(proxy.to_string(), "daemon proxy error: timeout");
+        assert!(proxy.source().is_none());
+    }
+
+    #[test]
+    fn run_no_commit_completes_on_minimal_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let episodic = tmp.path().join(".agent/episodic");
+        fs::create_dir_all(&episodic).unwrap();
+        fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();
+
+        let mut out = Vec::new();
+        run(tmp.path(), &mut out, true).unwrap();
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(
+            stdout.contains("dream cycle complete"),
+            "expected completion line, got: {stdout}"
+        );
+        assert!(stdout.contains("events decayed"));
+        assert!(stdout.contains("kept"));
     }
 }
