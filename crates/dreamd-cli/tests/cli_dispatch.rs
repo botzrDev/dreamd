@@ -304,8 +304,5 @@ fn status_without_daemon_exits_one() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("daemon: not running"),
-        "got: {stdout}"
-    );
+    assert!(stdout.contains("daemon: not running"), "got: {stdout}");
 }
