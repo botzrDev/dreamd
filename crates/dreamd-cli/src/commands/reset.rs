@@ -121,7 +121,10 @@ mod tests {
         let mut err = Vec::new();
         run_workspace(tmp.path(), true, &mut out, &mut err).unwrap();
 
-        assert_eq!(fs::read(&workspace).unwrap(), DEFAULT_WORKSPACE_MD.as_bytes());
+        assert_eq!(
+            fs::read(&workspace).unwrap(),
+            DEFAULT_WORKSPACE_MD.as_bytes()
+        );
         let stdout = String::from_utf8(out).unwrap();
         assert!(stdout.contains("reset workspace: cleared "));
         assert!(stdout.contains("WORKSPACE.md"));

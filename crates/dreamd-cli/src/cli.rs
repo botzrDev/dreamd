@@ -618,7 +618,9 @@ mod tests {
     fn render_man_page_includes_binary_name_and_subcommands() {
         let page = String::from_utf8(render_man_page().unwrap()).unwrap();
         assert!(page.contains("dreamd"), "man page must name the binary");
-        for sub in ["init", "dream", "mcp", "watch", "doctor", "status", "version", "reset"] {
+        for sub in [
+            "init", "dream", "mcp", "watch", "doctor", "status", "version", "reset",
+        ] {
             assert!(
                 page.contains(sub),
                 "man page must document subcommand {sub}; page length={}",
