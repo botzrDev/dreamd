@@ -20,8 +20,8 @@ pub fn run(cwd: &Path) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     match rt.block_on(run_watch(cwd)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(WatchError::NoProjectRoot(msg)) => {
-            eprintln!("dreamd watch: {msg}");
+        Err(e @ WatchError::NoProjectRoot(_)) => {
+            eprintln!("dreamd watch: {e}");
             ExitCode::from(2)
         }
         Err(e) => {

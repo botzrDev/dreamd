@@ -109,4 +109,24 @@ mod tests {
     fn sha_is_exactly_seven_chars() {
         assert_eq!(SHA.len(), 7, "SHA must be exactly 7 chars; got {SHA:?}");
     }
+
+    #[test]
+    fn run_writes_render_long_to_writer() {
+        let mut buf = Vec::new();
+        run(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), render_long());
+    }
+
+    #[test]
+    fn or_unknown_maps_vergen_placeholder() {
+        assert_eq!(or_unknown(VERGEN_PLACEHOLDER), "unknown");
+        assert_eq!(or_unknown("abc1234"), "abc1234");
+    }
+
+    #[test]
+    fn str_eq_compares_bytewise() {
+        assert!(str_eq("same", "same"));
+        assert!(!str_eq("same", "diff"));
+        assert!(!str_eq("short", "longer"));
+    }
 }

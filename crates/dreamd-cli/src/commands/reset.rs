@@ -87,3 +87,74 @@ pub fn run_workspace(
     writeln!(out, "reset workspace: cleared {}", target.display())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn display_covers_all_variants() {
+        assert_eq!(
+            ResetError::NotFound.to_string(),
+            "no .agent/ directory found"
+        );
+        assert_eq!(
+            ResetError::NotATty.to_string(),
+            "stdin is not a tty; pass --yes to confirm"
+        );
+        assert_eq!(ResetError::Declined.to_string(), "reset declined");
+        let io = ResetError::from(std::io::Error::other("disk full"));
+        assert_eq!(io.to_string(), "disk full");
+    }
+
+    #[test]
+    fn yes_clears_workspace_to_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join(".agent");
+        let working = agent.join("working");
+        fs::create_dir_all(&working).unwrap();
+        let workspace = working.join("WORKSPACE.md");
+        fs::write(&workspace, b"scratch notes\n").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run_workspace(tmp.path(), true, &mut out, &mut err).unwrap();
+
+        assert_eq!(fs::read(&workspace).unwrap(), DEFAULT_WORKSPACE_MD.as_bytes());
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(stdout.contains("reset workspace: cleared "));
+        assert!(stdout.contains("WORKSPACE.md"));
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn missing_agent_dir_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run_workspace(tmp.path(), true, &mut out, &mut err);
+        assert!(matches!(result, Err(ResetError::NotFound)));
+        assert!(out.is_empty());
+        let stderr = String::from_utf8(err).unwrap();
+        assert!(stderr.contains("no .agent/ directory found"));
+        assert!(stderr.contains("dreamd init"));
+    }
+
+    #[test]
+    fn without_yes_on_non_tty_stdin_is_not_a_tty() {
+        // Integration / unit tests run with a non-TTY stdin (piped or /dev/null).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".agent/working")).unwrap();
+        fs::write(tmp.path().join(".agent/working/WORKSPACE.md"), b"x\n").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run_workspace(tmp.path(), false, &mut out, &mut err);
+        assert!(matches!(result, Err(ResetError::NotATty)));
+        assert!(out.is_empty());
+        let stderr = String::from_utf8(err).unwrap();
+        assert!(stderr.contains("stdin is not a tty"));
+        assert!(stderr.contains("--yes"));
+    }
+}

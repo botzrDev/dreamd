@@ -1,6 +1,10 @@
 # Local-only working notes and PM-side spec docs, not repo artifacts.
 context/
-.claude/
+.claude/*
+# ship only the committed alpha-test skill; keep the rest of .claude/ local
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/alpha-test/
 .uveddi/
 
 # Added by cargo
