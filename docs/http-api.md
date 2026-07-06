@@ -83,7 +83,7 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 |---|---|---|---|
 | `schema_version` | string | Yes | Client may send any value; server overwrites with `"1.0.0"` |
 | `id` | string | Yes | Placeholder accepted; server overwrites with daemon-minted `evt_<ULID>` |
-| `timestamp` | string (RFC 3339) | Yes | ISO 8601 UTC timestamp |
+| `timestamp` | string (RFC 3339) | Yes | Placeholder accepted; server overwrites with daemon-minted UTC timestamp at durable write |
 | `pain` | number | Yes | `0.0`–`10.0` inclusive |
 | `importance` | number | Yes | `0.0`–`10.0` inclusive |
 | `pinned` | boolean | No | Default `false`; reserved for v0.2 |

@@ -13,6 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Learn responses (`POST /api/v1/learn` and MCP `append_node`) now return a daemon-minted `timestamp` from the coordinator, matching the `EventId` overwrite rule; client-supplied timestamps in the request body are ignored on success.
 - Tantivy index schema bumped `index/1.2` → `index/1.3` (adds the `skill_action` + `source_harness` STORED fields). Existing indexes rebuild automatically from the JSONL on first open.
 
 ## [0.1.0-rc.2] - 2026-06-24

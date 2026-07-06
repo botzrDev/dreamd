@@ -223,7 +223,8 @@ async fn stub_learn_endpoint_returns_501() {
 
 #[tokio::test]
 async fn learn_valid_body_returns_201() {
-    let (_dir, root_str, router) = real_router_with_dir();
+    let (dir, root_str, router) = real_router_with_dir();
+    let agent_root = AgentRoot::new(dir.path());
 
     let body = sample_body("rust::cargo::test", "learned something useful");
     let req = with_peer_uid(
@@ -244,11 +245,20 @@ async fn learn_valid_body_returns_201() {
         json["id"].as_str().unwrap().starts_with("evt_"),
         "id must be daemon-minted"
     );
-    assert_eq!(
-        json["timestamp"].as_str().unwrap(),
-        "2026-05-20T12:00:00+00:00"
+    let resp_ts = json["timestamp"].as_str().unwrap();
+    assert_ne!(
+        resp_ts, "2026-05-20T12:00:00+00:00",
+        "response timestamp must not echo the client-supplied value"
     );
     assert_eq!(json["deduplicated"], false);
+
+    let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
+    let record: AgentLearning = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        record.timestamp.to_rfc3339(),
+        resp_ts,
+        "on-disk timestamp must match the learn response"
+    );
 }
 
 #[tokio::test]
@@ -601,6 +611,57 @@ async fn learn_server_stamps_schema_version() {
         record["schema_version"].as_str().unwrap(),
         "1.0.0",
         "client-supplied schema_version must be server-stamped"
+    );
+}
+
+/// The coordinator server-stamps `timestamp`: a client-supplied value is
+/// overwritten at durable write and echoed in the learn response.
+#[tokio::test]
+async fn learn_server_stamps_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_real_state(dir.path(), registry_path);
+    let agent_root = AgentRoot::new(dir.path());
+    let router = build_router(state);
+
+    let body = serde_json::json!({
+        "schema_version": "1.0.0",
+        "id": format!("evt_{SAMPLE_ULID}"),
+        "timestamp": "1999-01-01T00:00:00Z",
+        "pain": 5.0,
+        "importance": 5.0,
+        "skill_action": "rust::test",
+        "source_harness": "test-harness",
+        "content": "stamp me"
+    });
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/learn")
+            .header("x-agent-root", root_str)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let json = body_json(resp).await;
+    assert_ne!(
+        json["timestamp"].as_str().unwrap(),
+        "1999-01-01T00:00:00+00:00",
+        "client-supplied timestamp must not be echoed"
+    );
+
+    let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
+    let record: AgentLearning = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        record.timestamp.to_rfc3339(),
+        json["timestamp"].as_str().unwrap(),
+        "on-disk timestamp must match the learn response"
     );
 }
 

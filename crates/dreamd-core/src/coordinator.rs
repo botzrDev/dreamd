@@ -22,6 +22,7 @@ use std::io::{Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use dreamd_protocol::{AgentLearning, EventId, RECORD_SCHEMA_VERSION};
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
@@ -38,11 +39,20 @@ pub use crate::episodic::MAX_LEARNING_LINE_BYTES;
 
 const IDEMPOTENCY_CAPACITY: usize = 1024;
 
+/// Cached outcome for an idempotent retry — both fields are returned verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdempotencyEntry {
+    id: EventId,
+    timestamp: DateTime<Utc>,
+}
+
 /// The outcome of a successful coordinator append. Returned via the oneshot
 /// channel so the HTTP handler can include `deduplicated` in the response body.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppendOutcome {
     pub id: EventId,
+    /// Daemon-minted UTC timestamp stamped at durable write (or cached on dedup hit).
+    pub timestamp: DateTime<Utc>,
     /// `true` when the idempotency LRU returned a cached `EventId` instead of
     /// performing a new write.
     pub deduplicated: bool,
@@ -132,7 +142,7 @@ pub struct MemoryCoordinator {
     /// Falls back to the un-canonicalized path if canonicalization fails
     /// (e.g., in tests against not-yet-created scratch dirs).
     agent_root_key: PathBuf,
-    idempotency: LruCache<(PathBuf, String), EventId>,
+    idempotency: LruCache<(PathBuf, String), IdempotencyEntry>,
     /// WEG-42: optional hand-off to the per-project Tantivy indexer task.
     /// `None` means "no indexer wired, append only" (existing tests). On
     /// `TrySendError::Full` we log `warn!` and drop the update; on
@@ -245,7 +255,8 @@ impl MemoryCoordinator {
             let full_key = (self.agent_root_key.clone(), key.to_owned());
             if let Some(cached) = self.idempotency.get(&full_key) {
                 return Ok(AppendOutcome {
-                    id: cached.clone(),
+                    id: cached.id.clone(),
+                    timestamp: cached.timestamp,
                     deduplicated: true,
                 });
             }
@@ -263,6 +274,10 @@ impl MemoryCoordinator {
         // could persist any value. Both ingress paths route through here.
         learning.schema_version = RECORD_SCHEMA_VERSION.to_string();
 
+        // Server-stamp timestamp — same "daemon owns durable fields" rule as `id`.
+        let stamped = Utc::now();
+        learning.timestamp = stamped;
+
         // skill_action is NOT re-validated here (ARCHITECTURE.md §9): ingress
         // (`LearnIngress`) is the sole gate; on-disk String accepts legacy
         // dotted keys that the dream cycle treats as opaque single segments.
@@ -278,7 +293,13 @@ impl MemoryCoordinator {
         // would poison the cache on write failure.
         if let Some(key) = client_dedup_key {
             let full_key = (self.agent_root_key.clone(), key);
-            self.idempotency.put(full_key, event_id.clone());
+            self.idempotency.put(
+                full_key,
+                IdempotencyEntry {
+                    id: event_id.clone(),
+                    timestamp: stamped,
+                },
+            );
         }
 
         // WEG-42 hand-off to the indexer task. Best-effort non-blocking
@@ -290,6 +311,7 @@ impl MemoryCoordinator {
 
         Ok(AppendOutcome {
             id: event_id,
+            timestamp: stamped,
             deduplicated: false,
         })
     }
@@ -433,16 +455,22 @@ mod tests {
         .await
         .expect("send append");
 
-        let minted = resp_rx.await.expect("oneshot recv").expect("append ok").id;
+        let outcome = resp_rx.await.expect("oneshot recv").expect("append ok");
+        let minted = outcome.id;
         // Coordinator overwrote the placeholder id with a freshly minted one.
         assert_ne!(minted, learning.id);
         assert!(minted.as_str().starts_with("evt_"));
         assert_eq!(minted.as_str().len(), "evt_".len() + 26);
+        assert_ne!(
+            outcome.timestamp, learning.timestamp,
+            "client-supplied timestamp must be server-stamped"
+        );
 
         let raw = std::fs::read_to_string(&path).expect("read jsonl");
         let line = raw.lines().next().expect("at least one line");
         let decoded: AgentLearning = serde_json::from_str(line).expect("deserialize");
         assert_eq!(decoded.id, minted);
+        assert_eq!(decoded.timestamp, outcome.timestamp);
         assert_eq!(decoded.content, learning.content);
 
         shutdown(tx, handle).await;

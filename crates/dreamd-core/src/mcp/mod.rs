@@ -69,7 +69,7 @@ pub enum McpRunError {
 pub struct SearchNodesParams {
     /// Free-text search query (BM25 × salience).
     pub query: String,
-    /// Maximum number of results to return (default 5).
+    /// Maximum number of results to return (default [`DEFAULT_RECALL_K`]).
     pub k: Option<u32>,
 }
 
@@ -293,8 +293,6 @@ impl MemoryMcpServer {
                 )
                 .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
 
-                let timestamp = learning.timestamp;
-
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                 coordinator_tx
                     .send(MemoryCoordinatorMsg::AppendLearning {
@@ -310,13 +308,9 @@ impl MemoryMcpServer {
                     .map_err(|_| McpError::internal_error("coordinator dropped", None))?
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                let json = serde_json::json!({
-                    "id": outcome.id.to_string(),
-                    "timestamp": timestamp.to_rfc3339(),
-                    "deduplicated": outcome.deduplicated,
-                });
+                let response = crate::ingress::LearnResponse::from_append_outcome(&outcome);
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string(&json)
+                    serde_json::to_string(&response)
                         .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string()),
                 )]))
             }
@@ -414,8 +408,8 @@ fn build_recall_request(
 /// Build `POST /api/v1/learn` with `X-Agent-Root`, `Content-Type:
 /// application/json`, an optional `X-Client-Dedup-Key`, and a JSON body that
 /// deserializes as [`AgentLearning`] (the shape `post_learn` expects). The
-/// daemon mints the real `id` and re-normalises `skill_action`, so we send a
-/// placeholder id and the raw skill_action. Pure: unit-tested directly.
+/// daemon mints the real `id` and `timestamp` and re-normalises `skill_action`,
+/// so we send a placeholder id and the raw skill_action. Pure: unit-tested directly.
 #[cfg(unix)]
 fn build_learn_request(
     params: &AppendNodeParams,
@@ -789,6 +783,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = setup_agent_root(dir.path());
+        let jsonl_path = root.episodic_jsonl();
 
         let supervisor =
             Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
@@ -818,14 +813,22 @@ mod tests {
             parsed["id"].as_str().unwrap_or("").starts_with("evt_"),
             "id must be daemon-minted; got: {parsed:?}"
         );
-        assert!(
-            parsed["timestamp"].as_str().is_some(),
-            "timestamp must be present; got: {parsed:?}"
-        );
+        let resp_ts = parsed["timestamp"]
+            .as_str()
+            .expect("timestamp must be present");
         assert_eq!(
             parsed["deduplicated"],
             serde_json::json!(false),
             "first append must not be deduplicated"
+        );
+
+        let jsonl = std::fs::read_to_string(jsonl_path).expect("read jsonl");
+        let record: AgentLearning =
+            serde_json::from_str(jsonl.lines().next().expect("one line")).expect("parse record");
+        assert_eq!(
+            record.timestamp.to_rfc3339(),
+            resp_ts,
+            "Phase 1 response timestamp must match on-disk daemon stamp"
         );
     }
 
@@ -1145,10 +1148,9 @@ mod tests {
             parsed["id"].as_str().unwrap_or("").starts_with("evt_"),
             "id must be daemon-minted; got: {parsed:?}"
         );
-        assert!(
-            parsed["timestamp"].as_str().is_some(),
-            "timestamp must be present; got: {parsed:?}"
-        );
+        let resp_ts = parsed["timestamp"]
+            .as_str()
+            .expect("timestamp must be present");
         assert_eq!(
             parsed["deduplicated"],
             serde_json::json!(false),
@@ -1163,10 +1165,14 @@ mod tests {
             1,
             "exactly one learning persisted; got: {jsonl:?}"
         );
-        let record: serde_json::Value =
-            serde_json::from_str(lines[0]).expect("record is valid json");
-        assert_eq!(record["content"].as_str().unwrap(), "remote append content");
-        assert_eq!(record["skill_action"].as_str().unwrap(), "rust::remote");
+        let record: AgentLearning = serde_json::from_str(lines[0]).expect("record is valid json");
+        assert_eq!(record.content, "remote append content");
+        assert_eq!(record.skill_action, "rust::remote");
+        assert_eq!(
+            record.timestamp.to_rfc3339(),
+            resp_ts,
+            "Phase 2 response timestamp must match on-disk daemon stamp"
+        );
     }
 
     /// Integration: an unregistered agent root yields a 404 from the daemon,

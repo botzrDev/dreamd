@@ -23,7 +23,8 @@ use super::super::types::LearnResponse;
 /// * `X-Client-Dedup-Key` (optional) — idempotency key scoped per project
 ///
 /// # Body
-/// [`AgentLearning`] JSON; inbound `id` and `schema_version` are server-stamped.
+/// [`AgentLearning`] JSON; inbound `id`, `schema_version`, and `timestamp` are
+/// server-stamped on durable write.
 ///
 /// # Responses
 /// * `201` — `{"id","timestamp","deduplicated"}`
@@ -50,10 +51,7 @@ pub(crate) async fn post_learn(
         return error_400(&e.to_string());
     }
 
-    // Step 4 — capture timestamp before `learning` is moved (Option A).
-    let timestamp = learning.timestamp.to_rfc3339();
-
-    // Step 5 — resolve the coordinator that OWNS this project root (WEG-272),
+    // Step 4 — resolve the coordinator that OWNS this project root (WEG-272),
     // then build and dispatch. Routing on `project.root` is what keeps a
     // `POST /learn` for project B out of the boot project's JSONL.
     let supervisor = match state.resolve_supervisor(std::path::Path::new(&project.root)) {
@@ -83,15 +81,11 @@ pub(crate) async fn post_learn(
         }
     }
 
-    // Step 6 — await durable write outcome.
+    // Step 5 — await durable write outcome.
     match resp_rx.await {
         Ok(Ok(outcome)) => (
             axum::http::StatusCode::CREATED,
-            axum::Json(LearnResponse {
-                id: outcome.id.as_str().to_owned(),
-                timestamp,
-                deduplicated: outcome.deduplicated,
-            }),
+            axum::Json(LearnResponse::from_append_outcome(&outcome)),
         )
             .into_response(),
         Ok(Err(CoordinatorError::PayloadTooLarge { .. })) => (

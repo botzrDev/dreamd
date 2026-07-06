@@ -1,5 +1,7 @@
 //! Shared JSON wire shapes for learn/recall ingress (HTTP + MCP).
 
+use crate::coordinator::AppendOutcome;
+
 /// Response body for a successful `POST /api/v1/learn`.
 #[derive(serde::Serialize)]
 pub struct LearnResponse {
@@ -8,10 +10,31 @@ pub struct LearnResponse {
     pub deduplicated: bool,
 }
 
+impl LearnResponse {
+    /// Single construction site for HTTP and MCP learn-success responses.
+    pub fn from_append_outcome(outcome: &AppendOutcome) -> Self {
+        Self {
+            id: outcome.id.as_str().to_owned(),
+            timestamp: outcome.timestamp.to_rfc3339(),
+            deduplicated: outcome.deduplicated,
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct RecallParams {
     pub q: String,
     pub k: Option<u32>,
+}
+
+/// Default max results for recall when `k` is omitted (HTTP and MCP).
+pub const DEFAULT_RECALL_K: u32 = 5;
+
+impl RecallParams {
+    /// Resolved `k` query param — [`DEFAULT_RECALL_K`] when omitted.
+    pub fn k_or_default(&self) -> u32 {
+        self.k.unwrap_or(DEFAULT_RECALL_K)
+    }
 }
 
 #[derive(serde::Serialize)]
