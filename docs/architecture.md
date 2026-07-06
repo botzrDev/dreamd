@@ -58,6 +58,8 @@ Future splits will happen exactly when their tripwires fire — not before:
   `pub mod server`. Module layout:
   - `crates/dreamd-core/src/server/uds.rs` — `bind_writer_socket` with
     orphan-recovery and 0600 perms; `SocketGuard` Drop-cleans the path.
+    Production `dreamd watch` uses `uds_server::bind_api_socket` instead
+    (manual unlink on shutdown); see ARCHITECTURE.md §8.1.
   - `crates/dreamd-core/src/server/lifecycle.rs` — `Supervisor` owning the
     coordinator sender + handle, plus the Unix `detach_double_fork` helper.
   - `crates/dreamd-core/src/server/index_map.rs` — `IndexHandle` trait
@@ -78,8 +80,10 @@ Future splits will happen exactly when their tripwires fire — not before:
   Lint override: `dreamd-core/Cargo.toml` locally downgrades
   `unsafe_code` from `forbid` (workspace) to `deny`. The sole authorised
   callsite is `server::lifecycle::detach_double_fork`, which calls
-  `nix::unistd::fork` (an `unsafe fn`). All other modules in the crate
-  still surface unsafe usage at compile time.
+  `nix::unistd::fork` (an `unsafe fn`). **Zero production call sites in
+  v0.1** — the helper is reserved for v0.1.1 `dreamd service` install
+  (see `ARCHITECTURE.md` §8.1). All other modules in the crate still
+  surface unsafe usage at compile time.
 
 - **`dreamd-layout`** splits out when (and only when) a no-tokio consumer
   of layout appears. Today every layout caller already pulls in tokio
@@ -113,6 +117,8 @@ the child a session leader; the second fork ensures the final process is
 not a session leader and therefore can never acquire a controlling
 terminal. The session-leader process exits, leaving the kernel to reap the
 final detached child via the grandparent (init / launchd / systemd).
+**Not called in v0.1 production** — `dreamd watch` runs in the foreground;
+this helper is reserved for v0.1.1 service install (ARCHITECTURE.md §8.1).
 Windows daemonisation is DR-121 / WEG-135, deferred to v0.1.1.
 
 ## API backpressure

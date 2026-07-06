@@ -210,6 +210,18 @@ Every persisted episodic record carries `schema_version: "1.0.0"`; daemon `state
 
 Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` override for `detach_double_fork` only, with an explicit SAFETY contract. Do not widen the downgrade.
 
+#### 8.1 Vestigial / deferred machinery (v0.1)
+
+Modules and CLI surfaces that have **no production call sites** (or misleading docs) but are intentionally retained. Do not delete these during launch freeze without revisiting the decision here.
+
+| Item | What it is | Status (v0.1) | Decision | Revisit when |
+|---|---|---|---|---|
+| `detach_double_fork` (`server/lifecycle.rs`) | Unix `fork → setsid → fork` daemonization helper; sole `unsafe` block in `dreamd-core` (WEG-99–104) | **Zero call sites** — not invoked by `dreamd watch` or any shipped path | **Keep** — reserved for v0.1.1 `dreamd service` install | WEG-99–104 / service install lands |
+| `ServerConfig` (`server/lifecycle.rs`) | Struct + `impl` for future daemon boot configuration | **Never constructed** in production | **Keep** — wiring type for a future `server::run` refactor; do not delete pre-launch | Second binary consumer or `server::run` extraction (see `docs/architecture.md` crate-split tripwires) |
+| `SocketGuard` / `bind_writer_socket` (`server/uds.rs`) | RAII UDS bind with Drop-unlink and orphan recovery | **Tested**; production uses `bind_api_socket` + manual unlink in `watch.rs` | **Keep** — v0.1.1 should switch production bind to RAII (closes orphan-socket gap after `SIGKILL`); note the production gap | Service install / orphan-socket hardening ticket |
+| `layer` filter in `collector::recall` | `layer: Option<Layer>` param on BM25 recall | **All production callers pass `None`** (HTTP `/recall`, MCP `search_nodes`) | **Keep** — test-only surface for future layer-filtered recall; not v0.1 scope | LESSONS.md / semantic layer indexing (WEG-136, v0.1.1) |
+| `--dry` / `--auto` on `dreamd dream` | Clap flags on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for v0.1.1 dry-run and auto modes; documented here, not only in `cli.rs` | v0.1.1 dream-cycle UX (CHANGELOG) |
+
 ### 9. SkillAction validation seam
 
 **Decision: ingress-only validation forever.** Read-time normalization in the episodic store was considered and rejected for v0.1.

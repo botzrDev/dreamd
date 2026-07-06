@@ -37,9 +37,9 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 /// `socket` is the resolved daemon UDS path (`None` when the home directory
 /// can't be resolved); `registry_path` is a daemon-home path; `log_tail` holds
 /// the daemon log's last lines, pre-read by the caller (see [`read_log_tail`]).
-/// Returns `Ok(true)` when the daemon appears live — the socket is present, so
-/// the caller exits 0 — and `Ok(false)` otherwise (exit 1). Reads that fail on
-/// malformed on-disk state degrade to a fallback string rather than aborting the
+/// Returns `Ok(true)` when the daemon appears live — a bounded UDS connect
+/// probe succeeds — so the caller exits 0 — and `Ok(false)` otherwise (exit 1).
+/// Reads that fail on malformed on-disk state degrade to a fallback string rather than aborting the
 /// report, so `status` always prints a clean block.
 pub fn run(
     cwd: &Path,

@@ -6,8 +6,8 @@
 //!    pattern. The first fork escapes the parent's process group; `setsid`
 //!    makes the child a session leader; the second fork ensures the final
 //!    process is not a session leader and therefore can never acquire a
-//!    controlling terminal. Called only in the production `run()` path —
-//!    tests exercise the supervisor without detachment.
+//!    controlling terminal. Zero production call sites in v0.1 — reserved for
+//!    v0.1.1 `dreamd service` install (WEG-99–104). See ARCHITECTURE.md §8.1.
 //!
 //! 2. [`Supervisor`] — owns the [`MemoryCoordinator`] task handle plus all
 //!    senders into the actor channel. Shutdown-drain contract (decision
