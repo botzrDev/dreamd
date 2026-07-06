@@ -18,7 +18,7 @@ use super::super::types::RecallParams;
 ///
 /// # Query
 /// * `q` (required) — search string
-/// * `k` (optional, default `5`) — max results
+/// * `k` (optional, default [`crate::ingress::DEFAULT_RECALL_K`]) — max results
 ///
 /// # Response (`200`)
 /// `{"results":[{"score","bm25","salience","source","content","metadata":{…}}]}`
@@ -27,7 +27,7 @@ pub(crate) async fn get_recall(
     Extension(entry): Extension<ProjectEntry>,
     Query(params): Query<RecallParams>,
 ) -> axum::response::Response {
-    let k = params.k.unwrap_or(5);
+    let k = params.k_or_default();
     let now_sec = chrono::Utc::now().timestamp();
 
     // Resolve the reader for this project: the pinned primary handle when this

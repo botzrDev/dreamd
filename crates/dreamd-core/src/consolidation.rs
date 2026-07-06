@@ -4,10 +4,12 @@
 //! `skill_action` (split on `::`), applies deepest-wins disambiguation, and
 //! writes `semantic/recurrence_counts.json`.
 //!
-//! `apply_pin_unpin` rewrites `AGENT_LEARNINGS.jsonl` with all `pinned` flags
-//! cleared then re-set for IDs cited in the freshly-written `LESSONS.md`.
-//! Called by WEG-61 after `write_lessons_file`, before `commit_cycle`; not safe
-//! to call before `LESSONS.md` exists (succeeds silently if absent).
+//! `apply_pin_unpin` rewrites `AGENT_LEARNINGS.jsonl`, setting `pinned` on IDs
+//! cited in the freshly-written `LESSONS.md` **unioned** with any `pinned` flag
+//! an external writer already set — the cycle never unsets a pin it did not
+//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after `write_lessons_file`,
+//! before `commit_cycle`; not safe to call before `LESSONS.md` exists (succeeds
+//! silently if absent).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -193,8 +195,9 @@ pub fn run_cluster_engine(
     Ok(ClusterOutput { promoted })
 }
 
-/// Clear all `pinned` flags on episodic entries, then re-pin only those cited
-/// in the freshly-written `LESSONS.md`.
+/// Set `pinned` on episodic entries cited in the freshly-written `LESSONS.md`,
+/// **unioned** with any `pinned` flag an external writer already set — the cycle
+/// never unsets a pin it did not itself set (SPEC §67 / WEG-426).
 ///
 /// Called by WEG-61 (DR-308) after `write_lessons_file`, while the
 /// orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
@@ -215,7 +218,7 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     }
 
     for event in &mut events {
-        event.pinned = cited_ids.contains(event.id.as_str());
+        event.pinned = event.pinned || cited_ids.contains(event.id.as_str());
     }
 
     // WAL: record the prune intent inside the atomic rewrite's hook (WEG-378) —
@@ -636,13 +639,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_pin_unpin_clears_old_pins_and_sets_new() {
+    fn apply_pin_unpin_unions_external_pins_with_cited() {
         let dir = unique_tmpdir("pinunpin");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
 
-        // Write 4 events: ids 0,1 are pinned=true; ids 2,3 are pinned=false.
-        // LESSONS.md will cite ids 2,3 — so after apply, 0,1 → false; 2,3 → true.
+        // Write 4 events: ids 0,1 are pinned=true (external, uncited); ids 2,3
+        // are pinned=false. LESSONS.md cites ids 2,3. Under union semantics the
+        // external pins on 0,1 SURVIVE and cited 2,3 get pinned → all four true.
         let events = vec![
             make_event(0, "rust::types", true),
             make_event(1, "rust::types", true),
@@ -686,14 +690,14 @@ mod tests {
                 .unwrap()
                 .pinned
         };
-        assert!(!find(0), "id 0: was pinned, not cited → must be false");
-        assert!(!find(1), "id 1: was pinned, not cited → must be false");
+        assert!(find(0), "id 0: external pin, uncited → union preserves it");
+        assert!(find(1), "id 1: external pin, uncited → union preserves it");
         assert!(find(2), "id 2: cited in LESSONS.md → must be true");
         assert!(find(3), "id 3: cited in LESSONS.md → must be true");
     }
 
     #[test]
-    fn apply_pin_unpin_no_lessons_md_clears_all_pins() {
+    fn apply_pin_unpin_no_lessons_md_preserves_external_pins() {
         let dir = unique_tmpdir("nopins");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
@@ -704,18 +708,19 @@ mod tests {
         ];
         write_jsonl(&root, &events);
 
-        // LESSONS.md is absent — apply_pin_unpin should clear all pins.
+        // LESSONS.md is absent — cited_ids is empty, so union preserves the
+        // external pins rather than clearing them (SPEC §67 / WEG-426).
         apply_pin_unpin(&root).unwrap();
 
         let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 2);
         assert!(
-            !updated[0].pinned,
-            "id 0: no LESSONS.md → pinned must be false"
+            updated[0].pinned,
+            "id 0: no LESSONS.md, but external pin survives union"
         );
         assert!(
-            !updated[1].pinned,
-            "id 1: no LESSONS.md → pinned must be false"
+            updated[1].pinned,
+            "id 1: no LESSONS.md, but external pin survives union"
         );
     }
 

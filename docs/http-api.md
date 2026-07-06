@@ -150,7 +150,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 | Param | Required | Default | Description |
 |---|---|---|---|
 | `q` | Yes | — | Search query string |
-| `k` | No | `5` | Maximum results to return |
+| `k` | No | [`DEFAULT_RECALL_K`] (`5`) | Maximum results to return |
 
 #### Response (`200 OK`)
 

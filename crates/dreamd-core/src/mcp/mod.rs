@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
-use crate::ingress::{LearnIngress, RecallIngress, RecallResponse};
+use crate::ingress::{LearnIngress, RecallIngress, RecallResponse, DEFAULT_RECALL_K};
 use crate::privacy::DR413_DISCLOSURE;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
@@ -196,7 +196,7 @@ impl MemoryMcpServer {
         use crate::index::build_schema;
         use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
-        let k = p.k.unwrap_or(5);
+        let k = p.k.unwrap_or(DEFAULT_RECALL_K);
         let query = p.query;
 
         // Resolve the read path. Local/LocalReadOnly read the on-disk Tantivy
@@ -258,7 +258,7 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
         let _query = p.query;
-        let _k = p.k.unwrap_or(5);
+        let _k = p.k.unwrap_or(DEFAULT_RECALL_K);
         Ok(CallToolResult::success(vec![Content::text(
             r#"{"results":[]}"#,
         )]))
