@@ -148,6 +148,42 @@ pub fn try_connect_existing(path: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
+/// Upper bound for a daemon liveness probe (`dreamd status`, etc.). A wedged
+/// listener that never completes `connect()` must not hang the caller.
+const LIVENESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Returns `true` only when a UDS connect to `path` succeeds within
+/// [`LIVENESS_PROBE_TIMEOUT`].
+///
+/// Probe-only: the stream is dropped immediately on success. Orphan socket
+/// files (`ConnectionRefused` / `NotFound`) and connect timeouts both map to
+/// `false`, matching MCP Phase 2 fallback and `bind_socket_raw` recovery.
+pub fn is_daemon_socket_live(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let live = match UnixStream::connect(&path) {
+            Ok(_stream) => true,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                false
+            }
+            Err(_) => false,
+        };
+        let _ = tx.send(live);
+    });
+
+    rx.recv_timeout(LIVENESS_PROBE_TIMEOUT).unwrap_or_default()
+}
+
 fn chmod_0600(path: &Path) -> io::Result<()> {
     let perms = std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, perms)
@@ -200,6 +236,42 @@ mod tests {
         assert_eq!(&reply, b"world");
 
         acceptor.join().expect("acceptor joined");
+        drop(guard);
+    }
+
+    #[test]
+    fn is_daemon_socket_live_false_when_path_missing() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("missing.sock");
+        assert!(!is_daemon_socket_live(&sock));
+    }
+
+    #[test]
+    fn is_daemon_socket_live_false_for_orphan_socket_file() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+
+        {
+            let mut guard = bind_writer_socket(&sock).expect("first bind");
+            guard.disarm_unlink();
+            drop(guard);
+        }
+        assert!(sock.exists(), "stale socket file expected for the test");
+        assert!(
+            !is_daemon_socket_live(&sock),
+            "orphan socket file must not report live"
+        );
+    }
+
+    #[test]
+    fn is_daemon_socket_live_true_for_bound_listener() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        let guard = bind_writer_socket(&sock).expect("bind ok");
+        assert!(
+            is_daemon_socket_live(&sock),
+            "bound listener must answer connect probe"
+        );
         drop(guard);
     }
 

@@ -1175,6 +1175,96 @@ mod tests {
         );
     }
 
+    /// Integration: Phase 2 forwards a dotted `skill_action` to the daemon;
+    /// daemon validation must reject it and nothing is persisted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_append_rejects_invalid_skill_action_via_daemon() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, true).await;
+
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        let err = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "must not land".to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust.tokio".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await
+            .expect_err("dotted skill_action must be rejected by daemon");
+
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "daemon 400 must map to invalid_request; got: {err:?}"
+        );
+
+        let content = std::fs::read_to_string(root.episodic_jsonl()).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            0,
+            "rejected append must not persist; got: {content:?}"
+        );
+    }
+
+    /// Integration: Phase 2 forwards out-of-range `pain` to the daemon;
+    /// daemon validation must reject it and nothing is persisted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_append_rejects_out_of_range_pain_via_daemon() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, true).await;
+
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        let err = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "must not land".to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust::tokio".to_string(),
+                pain: Some(1e9),
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await
+            .expect_err("out-of-range pain must be rejected by daemon");
+
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "daemon 400 must map to invalid_request; got: {err:?}"
+        );
+
+        let content = std::fs::read_to_string(root.episodic_jsonl()).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            0,
+            "rejected append must not persist; got: {content:?}"
+        );
+    }
+
     /// Integration: an unregistered agent root yields a 404 from the daemon,
     /// which the Remote backend surfaces as `invalid_request` (not a dropped
     /// connection).

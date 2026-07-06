@@ -3,9 +3,9 @@
 //! Prints a structured plain-text block: daemon liveness, the socket path, the
 //! project resolved from `$CWD` and whether it is registered with the daemon,
 //! the last dream cycle recorded in per-project state, and the tail of the
-//! daemon log. Liveness is a pure filesystem check — the socket's presence at
-//! the expected path — so `status` never connects and never hangs, even with no
-//! daemon running.
+//! daemon log. Liveness is a bounded UDS connect probe (see
+//! [`dreamd_core::server::is_daemon_socket_live`]) so orphan socket files left
+//! after `SIGKILL` report `not running` without hanging on a wedged listener.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -48,9 +48,7 @@ pub fn run(
     log_tail: &[String],
     out: &mut impl Write,
 ) -> io::Result<bool> {
-    // Liveness is socket presence at the expected path. Never connect — a
-    // connect to a wedged daemon can hang, and this command must not.
-    let live = socket.map(Path::exists).unwrap_or(false);
+    let live = socket.map(daemon_liveness).unwrap_or(false);
     writeln!(
         out,
         "daemon: {}",
@@ -107,27 +105,64 @@ pub fn run(
     Ok(live)
 }
 
+/// Daemon liveness probe for the resolved socket path.
+#[cfg(unix)]
+fn daemon_liveness(path: &Path) -> bool {
+    dreamd_core::server::is_daemon_socket_live(path)
+}
+
+/// Windows has no UDS in v0.1; fall back to path presence so the command compiles.
+#[cfg(not(unix))]
+fn daemon_liveness(path: &Path) -> bool {
+    path.exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
     #[test]
     fn daemon_running_when_socket_present() {
-        let sock = tempfile::NamedTempFile::new().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        let guard = dreamd_core::server::bind_writer_socket(&sock).expect("bind listener");
         let mut buf = Vec::new();
         let live = run(
             dir.path(),
-            Some(sock.path()),
+            Some(&sock),
             Path::new("/no/registry.toml"),
             &[],
             &mut buf,
         )
         .unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(live, "present socket must report the daemon live");
+        assert!(live, "live listener must report the daemon running");
         assert!(out.contains("daemon: running"), "got: {out}");
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_not_running_when_orphan_socket_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        // File present at the socket path but no listener — the SIGKILL orphan case.
+        std::fs::write(&sock, b"").unwrap();
+
+        let mut buf = Vec::new();
+        let live = run(
+            dir.path(),
+            Some(&sock),
+            Path::new("/no/registry.toml"),
+            &[],
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!live, "orphan socket must not report the daemon live");
+        assert!(out.contains("daemon: not running"), "got: {out}");
     }
 
     #[test]
