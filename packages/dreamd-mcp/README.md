@@ -1,22 +1,35 @@
 # dreamd-mcp
 
-Node shim for the dreamd MCP server. Downloads the right prebuilt binary for your OS/arch and starts the MCP server.
+Node shim for the [dreamd](https://github.com/botzrDev/dreamd) MCP server. Downloads the right prebuilt binary for your OS/arch and starts the MCP server over stdio.
 
 ## Install
+
+Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
 ```sh
 # 1. Scaffold .agent/ into your project
 npx dreamd-mcp@0.1.0-rc.2 init
 
-# 2. Point Claude Code, Cursor, or any MCP-aware harness at the server
+# 2. Start a shared daemon (recommended when multiple agents write)
+npx dreamd-mcp@0.1.0-rc.2 watch
+
+# 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
 npx dreamd-mcp@0.1.0-rc.2
 ```
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).
 
+Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor)
+
 ## Running several agents at once
 
-`npx dreamd-mcp` auto-connects to a shared daemon if one is running, and otherwise runs a standalone in-process server. Sequential use across tools is safe. If you point **several agents at the same project simultaneously**, start one shared daemon per machine with `npx dreamd-mcp watch` (or the native `dreamd watch`) so every agent routes through a single serialized writer. See the [project README](https://github.com/botzrDev/dreamd#running) for the full footprint and crash-safety notes.
+`npx dreamd-mcp` auto-connects to a shared daemon if one is running, and otherwise runs a standalone in-process server. Sequential use across tools is safe. If you point **several agents at the same project simultaneously**, start one shared daemon per machine with `npx dreamd-mcp watch` (or the native `dreamd watch`) so every agent routes through a single serialized writer. See the [project README](https://github.com/botzrDev/dreamd#quick-start--30-seconds) for the full footprint and crash-safety notes.
+
+## Learn more
+
+- [GUIDE.md](https://github.com/botzrDev/dreamd/blob/main/GUIDE.md) — 20-minute tutorial walkthrough
+- [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md) — on-disk `.agent/` contract
+- [docs/troubleshooting.md](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md) — common failures
 
 ## Override (development only)
 
