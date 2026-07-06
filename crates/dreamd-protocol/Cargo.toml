@@ -21,3 +21,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # serde_json is dev-only: protocol defines the shape, not the codec.
 # Production serialization happens in dreamd-core's coordinator.
 serde_json = "1"
+# proptest is test-only (JSONL round-trip property suite, WEG-159). It does NOT
+# relax the runtime dep-discipline policy above: runtime deps stay serde+chrono.
+# Pinned to major 1; its `rand 0.9` chain already resolves in Cargo.lock, so it
+# adds no parallel-major.
+proptest = "1"
