@@ -131,11 +131,11 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 
 | Layer | Status |
 |---|---|
-| `SPEC.md` v0.1-draft | Drafted |
+| `SPEC.md` v0.1 | Shipped |
 | Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
 | MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.2` on npm |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
-| Conformance test suite | Not started |
+| Conformance test suite | Reference-impl suites shipped (`scripts/alpha/`); no formal certification in v0.1 |
 
 ---
 

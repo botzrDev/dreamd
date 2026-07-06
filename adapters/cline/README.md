@@ -2,7 +2,7 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.1.
+> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.2.
 
 ## 1. Init the project store
 

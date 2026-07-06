@@ -1,6 +1,6 @@
 # Contributing to dreamd
 
-Thanks for your interest. `dreamd` is pre-release; the spec ([`SPEC.md`](./SPEC.md)) is stable-ish, the implementation is not. Expect churn.
+Thanks for your interest. `dreamd` is pre-release; the spec ([`SPEC.md`](./SPEC.md)) is v0.1 (on-disk contract frozen), the implementation is not. Expect churn.
 
 ## Code of Conduct
 

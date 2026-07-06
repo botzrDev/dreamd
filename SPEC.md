@@ -1,6 +1,6 @@
 # `.agent/` — Portable Memory for AI Coding Agents
 
-**Status:** v0.1-draft · 2026-05-26
+**Status:** v0.1 · 2026-08-09
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
@@ -56,7 +56,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1-draft. |
+| `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1. |
 | `id` | string | MUST be lexically sortable by creation time. ULID and UUIDv7 are the recommended formats. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
 | `source_harness` | string | Lowercase ASCII identifier matching `[a-z0-9_-]+`. Implementations MAY use any value; the following are reserved and MUST resolve to their canonical owner: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. New reserved values are added via RFC. |
@@ -157,7 +157,13 @@ Implementations that maintain derived indexes MUST tolerate out-of-band edits to
 
 ## Versioning
 
-This SPEC is **v0.1-draft**; breaking changes are possible before v1.0. The `schema_version` field in episodic records evolves independently of the SPEC version. After SPEC v1.0, `schema_version` follows semver, and any breaking change requires a documented migration path.
+This SPEC is **v0.1**, the first stable spec revision for the `.agent/` on-disk contract.
+
+**Frozen for v0.1:** folder layout, episodic node schema (`schema_version` `"1.0.0"`), salience formula, and dream-cycle output shape. Breaking changes to any of these require SPEC v0.2+ and a documented migration path.
+
+**May evolve in patch releases without a schema bump:** implementation-defined dream-cycle thresholds (promotion, decay, pruning), and informative pain/importance rubrics — provided existing `.agent/` folders remain readable by conformant readers.
+
+SPEC **v1.0** is the long-term stability promise: after v1.0, `schema_version` follows semver and any breaking on-disk change requires a documented migration path.
 
 **Migration ownership.** Migrations are the writer's responsibility. A writer encountering a lower-versioned log MAY rewrite the file in place, but MUST preserve every original `id`, `timestamp`, and `pinned` value.
 
