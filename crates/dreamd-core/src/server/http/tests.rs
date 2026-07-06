@@ -1272,42 +1272,39 @@ async fn dream_empty_jsonl_returns_200_no_lessons_md() {
 /// would trigger no rename, so the bug would not reproduce.) Learning #2 is
 /// appended after the cycle; pre-fix it was written to the orphaned inode
 /// and never appeared in the on-disk file.
+///
+/// Learning #1 is seeded directly on disk: `POST /learn` now server-stamps
+/// `timestamp` with `Utc::now()`, which would defeat the >90d decay precondition.
 #[tokio::test]
 async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
-    let (dir, root_str, router) = real_router_with_dir();
+    let dir = tempfile::tempdir().unwrap();
     let agent_root = AgentRoot::new(dir.path());
-    // The dream cycle's WAL writes under .agent/.dreamd/.
+    std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
     std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
 
     // Learning #1 — timestamp > 90 days old so the decay pruner archives it,
     // forcing the rewrite-by-rename that orphans the coordinator fd.
-    let body1 = serde_json::json!({
-        "schema_version": "1.0.0",
-        "id": format!("evt_{SAMPLE_ULID}"),
-        "timestamp": "2020-01-01T00:00:00Z",
-        "pain": 5.0,
-        "importance": 5.0,
-        "skill_action": "rust::regression",
-        "source_harness": "test-harness",
-        "content": "first-learning-pre-dream"
-    });
-    let resp1 = router
-        .clone()
-        .into_service()
-        .oneshot(with_peer_uid(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/learn")
-                .header("x-agent-root", &root_str)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body1).unwrap()))
-                .unwrap(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::CREATED);
+    let learning1 = AgentLearning {
+        schema_version: "1.0.0".to_owned(),
+        id: EventId::parse(&format!("evt_{SAMPLE_ULID}")).unwrap(),
+        timestamp: DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        pain: 5.0,
+        importance: 5.0,
+        pinned: false,
+        skill_action: "rust::regression".to_owned(),
+        source_harness: "test-harness".to_owned(),
+        content: "first-learning-pre-dream".to_owned(),
+    };
+    let line = serde_json::to_string(&learning1).unwrap();
+    std::fs::write(agent_root.episodic_jsonl(), format!("{line}\n")).unwrap();
 
-    // Dream cycle — decay archives learning #1 and renames the JSONL.
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root_str);
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state);
     let dream_resp = router
         .clone()
         .into_service()
