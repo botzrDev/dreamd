@@ -258,7 +258,6 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
         let _query = p.query;
-        let _k = p.k.unwrap_or(DEFAULT_RECALL_K);
         Ok(CallToolResult::success(vec![Content::text(
             r#"{"results":[]}"#,
         )]))
@@ -1262,6 +1261,54 @@ mod tests {
             lines.len(),
             0,
             "rejected append must not persist; got: {content:?}"
+        );
+    }
+
+    /// Integration: Phase 2 sends raw, un-redacted content to the daemon
+    /// (`build_learn_request` skips redaction on purpose); the daemon MUST
+    /// re-do the redaction the local path performs, so the secret never
+    /// reaches disk. Closes the "the daemon re-does what build_learn_request
+    /// skips" contract for the redaction dimension (skill_action / range are
+    /// the sibling Remote rejection tests above).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_append_redacts_content_via_daemon() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, true).await;
+
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        server
+            .append_node(Parameters(AppendNodeParams {
+                content: format!("key is {secret}"),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust::remote".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok (redaction transforms, never rejects)");
+
+        let jsonl = std::fs::read_to_string(root.episodic_jsonl()).expect("read jsonl");
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("one line")).expect("parse record");
+        assert!(
+            !record["content"].as_str().unwrap().contains(secret),
+            "daemon must redact the secret build_learn_request forwarded raw; got: {record:?}"
+        );
+        assert!(
+            record["content"].as_str().unwrap().contains("[REDACTED]"),
+            "REDACTED marker must be present after the daemon re-does redaction"
         );
     }
 
