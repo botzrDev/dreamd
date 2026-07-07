@@ -111,6 +111,8 @@ nix = { version = "0.29", default-features = false, features = ["process", "fs",
 # that production code intentionally excludes.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 tempfile = "3"
+# WEG-132 / DR-812 — episodic scan proptest (malformed JSONL fuzz coverage).
+proptest = "1"
 # WEG-48 / DR-208 — Criterion benchmark harness for recall() latency.
 criterion = "0.5"
 # WEG-67 — `tower::ServiceExt::oneshot` for axum router unit tests. Pinned

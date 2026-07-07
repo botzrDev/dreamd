@@ -736,6 +736,7 @@ dependencies = [
  "lru",
  "nix",
  "ordered-float",
+ "proptest",
  "regex",
  "rmcp",
  "schemars",

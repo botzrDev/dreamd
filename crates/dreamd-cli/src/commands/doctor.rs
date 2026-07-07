@@ -65,6 +65,40 @@ pub fn run(
         }
     }
 
+    // WEG-132 / DR-812 — episodic log malformed-line check (DR-107 doctor).
+    let episodic_path = agent_root.episodic_jsonl();
+    if episodic_path.exists() {
+        match dreamd_core::episodic::assess_log_health(&episodic_path) {
+            Ok(health) if health.malformed_line_count == 0 && health.torn_tail_bytes == 0 => {
+                writeln!(out, "episodic_log: ok")?;
+            }
+            Ok(health) => {
+                if health.malformed_line_count > 0 {
+                    writeln!(
+                        out,
+                        "episodic_log: {} malformed line(s)  [WARNING: hand-edited or \
+                         corrupt \\n-terminated lines in AGENT_LEARNINGS.jsonl; skipped \
+                         at read time]",
+                        health.malformed_line_count,
+                    )?;
+                }
+                if health.torn_tail_bytes > 0 {
+                    writeln!(
+                        out,
+                        "episodic_log: torn tail ({} byte(s))  [WARNING: incomplete final \
+                         line with no trailing newline; truncated on daemon open]",
+                        health.torn_tail_bytes,
+                    )?;
+                }
+                all_ok = false;
+            }
+            Err(e) => {
+                writeln!(out, "episodic_log: error  [WARNING: could not assess: {e}]")?;
+                all_ok = false;
+            }
+        }
+    }
+
     // WEG-63 — last autobiography skip (if any).
     if let Some(s) = skip {
         let now = std::time::SystemTime::now()
@@ -197,5 +231,41 @@ mod tests {
             !output.contains("last autobiography skip"),
             "no skip line when skip is None; got: {output:?}"
         );
+    }
+
+    #[test]
+    fn doctor_episodic_log_ok_when_clean() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("episodic-clean");
+        let jsonl = root.episodic_jsonl();
+        fs::write(&jsonl, b"").unwrap();
+        let mut buf = Vec::new();
+        let ok = run(&cfg, &root, None, &mut buf).expect("run ok");
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            output.contains("episodic_log: ok"),
+            "clean episodic log must report ok; got: {output:?}"
+        );
+        assert!(ok, "clean episodic log must return all_ok=true");
+    }
+
+    #[test]
+    fn doctor_episodic_log_warns_on_malformed_lines() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("episodic-bad");
+        let jsonl = root.episodic_jsonl();
+        fs::write(&jsonl, b"{not valid json}\n").unwrap();
+        let mut buf = Vec::new();
+        let ok = run(&cfg, &root, None, &mut buf).expect("run ok");
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            output.contains("episodic_log:") && output.contains("WARNING"),
+            "malformed lines must emit WARNING; got: {output:?}"
+        );
+        assert!(
+            output.contains("1 malformed line"),
+            "must report malformed line count; got: {output:?}"
+        );
+        assert!(!ok, "malformed episodic log must return all_ok=false");
     }
 }

@@ -1,0 +1,47 @@
+name: Nightly
+
+on:
+  schedule:
+    # 06:00 UTC daily — separate from PR CI to keep merge cycle time low.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  episodic-proptest:
+    name: Episodic JSONL scan proptest (WEG-132)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-nightly-
+
+      - name: Run episodic scan proptest (1024 cases)
+        env:
+          PROPTEST_CASES: "1024"
+        run: cargo test -p dreamd-core --test episodic_scan_proptest
+
+      - name: Run protocol JSONL roundtrip proptest (1024 cases)
+        env:
+          PROPTEST_CASES: "1024"
+        run: cargo test -p dreamd-protocol --test roundtrip_proptest

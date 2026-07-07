@@ -51,6 +51,41 @@ struct ScanSkip {
     reason: String,
 }
 
+/// Episodic log health report for `dreamd doctor` and diagnostics (WEG-132).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EpisodicLogHealth {
+    /// `\n`-terminated lines that were blank or failed schema validation.
+    pub malformed_line_count: usize,
+    /// Bytes after the last complete `\n`-terminated line (torn tail at EOF).
+    pub torn_tail_bytes: u64,
+    /// Well-formed records ingested from complete lines.
+    pub valid_record_count: usize,
+}
+
+/// Assess episodic log bytes without logging. Used by [`assess_log_health`] and
+/// the WEG-132 proptest suite.
+pub fn assess_bytes(bytes: &[u8]) -> EpisodicLogHealth {
+    let (records, clean_len, skips) = scan(bytes);
+    EpisodicLogHealth {
+        malformed_line_count: skips.len(),
+        torn_tail_bytes: bytes.len() as u64 - clean_len,
+        valid_record_count: records.len(),
+    }
+}
+
+/// Read and assess the episodic log at `path` without emitting `tracing` warnings.
+/// An absent file is healthy with zero counts.
+pub fn assess_log_health(path: &Path) -> Result<EpisodicLogHealth, EpisodicError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EpisodicLogHealth::default())
+        }
+        Err(e) => return Err(EpisodicError::Io(e)),
+    };
+    Ok(assess_bytes(&bytes))
+}
+
 /// The single episodic scan policy (SPEC §88). Returns parsed records, the byte
 /// end of the last `\n`-terminated line (`clean_len`), and any skipped lines.
 /// A final line without a trailing `\n` is a torn tail: `clean_len` stops before
