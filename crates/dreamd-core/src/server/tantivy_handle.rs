@@ -1203,11 +1203,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC-16 — replay halts on blank line / unparseable record
+    // AC-16 — replay skips mid-file blank/corrupt lines (SPEC §88 / WEG-427)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn replay_halts_on_blank_line_in_jsonl() {
+    async fn replay_skips_blank_midfile_line_in_jsonl() {
         let dir = unique_tmpdir("replay-blank");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -1218,7 +1218,7 @@ mod tests {
         let good2 = sample_learning(make_event_id('1'), "rust.test", "after blank");
         let mut bytes = serde_json::to_string(&good1).unwrap();
         bytes.push('\n');
-        bytes.push('\n'); // blank line — torn-write halt signal
+        bytes.push('\n'); // mid-file blank — skipped
         let mut tail = serde_json::to_string(&good2).unwrap();
         tail.push('\n');
         bytes.push_str(&tail);
@@ -1229,13 +1229,13 @@ mod tests {
 
         assert_eq!(
             count_docs(&agent_root),
-            1,
-            "only the pre-blank record is indexed"
+            2,
+            "both valid records indexed; mid-file blank skipped"
         );
     }
 
     #[tokio::test]
-    async fn replay_halts_on_unparseable_record() {
+    async fn replay_skips_unparseable_midfile_record() {
         let dir = unique_tmpdir("replay-bad");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -1245,8 +1245,8 @@ mod tests {
         let good1 = sample_learning(make_event_id('0'), "rust.test", "first");
         let mut bytes = serde_json::to_string(&good1).unwrap();
         bytes.push('\n');
-        bytes.push_str("{not json}\n"); // unparseable — halt
-        let good2 = sample_learning(make_event_id('1'), "rust.test", "unreachable");
+        bytes.push_str("{not json}\n"); // unparseable mid-file — skipped
+        let good2 = sample_learning(make_event_id('1'), "rust.test", "after bad");
         bytes.push_str(&serde_json::to_string(&good2).unwrap());
         bytes.push('\n');
         std::fs::write(&jsonl_path, bytes.as_bytes()).unwrap();
@@ -1256,8 +1256,8 @@ mod tests {
 
         assert_eq!(
             count_docs(&agent_root),
-            1,
-            "only the pre-corrupt record is indexed"
+            2,
+            "both valid records indexed; mid-file corrupt line skipped"
         );
     }
 

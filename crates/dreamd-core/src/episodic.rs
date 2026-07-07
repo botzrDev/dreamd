@@ -6,14 +6,14 @@
 //! rewrite of that log funnels through this module so the torn-tail recovery
 //! policy lives in exactly one place — [`scan`].
 //!
-//! **Recovery policy (founder-locked): tolerate-and-report.** A torn final line
-//! (no trailing `\n`), a blank line (`\n\n` — the documented torn-write halt
-//! signal; see drift-catalog `torn-write-blank-line-signal`), or an unparseable
-//! record terminates the scan: everything before it is the clean prefix,
-//! everything after is dropped. [`read_all`] emits ONE `tracing::warn!` when it
-//! drops bytes; [`recover`] truncates the file to the clean prefix and logs at
-//! `debug!` (routine on restart). Never hard-error a torn tail; never silently
-//! swallow corruption.
+//! **Recovery policy (SPEC §88): skip mid-file corruption; halt torn tail.**
+//! A `\n`-terminated line that is blank or fails schema validation is skipped
+//! (logged with line number + reason); scanning continues. A torn final line
+//! with no trailing `\n` (crash mid-append) halts ingestion — everything after
+//! the last complete line is dropped. [`read_all`] emits ONE `tracing::warn!`
+//! for a genuine torn tail; [`recover`] truncates only a no-newline torn tail
+//! via `set_len` (mid-file holes cannot be excised without deleting valid data).
+//! Never hard-error a torn tail; never silently swallow corruption.
 //!
 //! Free-function module by design (matches `io.rs` / `wal.rs` / `lessons.rs`):
 //! the single mutable owner is already the coordinator actor, so no struct is
@@ -45,53 +45,86 @@ pub enum EpisodicError {
     PayloadTooLarge { size: usize, max: usize },
 }
 
-/// The single torn-tail recovery policy. Returns the parsed records plus the
-/// byte length of the clean prefix — everything before the first torn, blank,
-/// or unparseable line. Sound as "drop the rest" because the log is append-only
-/// single-writer (DR-103): a torn line and everything after it can only be a
-/// torn tail. This is the ONLY place the policy is expressed.
-fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64) {
+/// One skipped `\n`-terminated line (blank or schema-invalid).
+struct ScanSkip {
+    line_number: usize,
+    reason: String,
+}
+
+/// The single episodic scan policy (SPEC §88). Returns parsed records, the byte
+/// end of the last `\n`-terminated line (`clean_len`), and any skipped lines.
+/// A final line without a trailing `\n` is a torn tail: `clean_len` stops before
+/// it so [`recover`] can truncate; [`read_all`] never ingests it. Mid-file blank
+/// or unparseable `\n`-terminated lines advance `clean_len` but are not returned.
+fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64, Vec<ScanSkip>) {
     let mut out = Vec::new();
-    let (mut cursor, mut clean_len) = (0usize, 0u64);
+    let mut skips = Vec::new();
+    let (mut cursor, mut clean_len, mut line_number) = (0usize, 0u64, 1usize);
     while cursor < bytes.len() {
         let Some(rel_nl) = bytes[cursor..].iter().position(|b| *b == b'\n') else {
-            break;
+            break; // torn tail at EOF — no trailing newline
         };
         let end = cursor + rel_nl;
+        let line_end = end + 1;
         let slice = &bytes[cursor..end];
         if slice.is_empty() {
-            break; // blank line = torn-write halt (torn-write-blank-line-signal)
+            skips.push(ScanSkip {
+                line_number,
+                reason: "blank line".to_string(),
+            });
+            clean_len = line_end as u64;
+            cursor = line_end;
+            line_number += 1;
+            continue;
         }
         match serde_json::from_slice::<AgentLearning>(slice) {
             Ok(ev) => {
                 out.push(ev);
-                clean_len = (end + 1) as u64;
-                cursor = end + 1;
+                clean_len = line_end as u64;
+                cursor = line_end;
+                line_number += 1;
             }
-            Err(_) => break,
+            Err(e) => {
+                skips.push(ScanSkip {
+                    line_number,
+                    reason: e.to_string(),
+                });
+                clean_len = line_end as u64;
+                cursor = line_end;
+                line_number += 1;
+            }
         }
     }
-    (out, clean_len)
+    (out, clean_len, skips)
 }
 
 /// Read every well-formed record from the episodic log at `path`. An absent
-/// file is `Ok(empty)`. On a torn/blank/unparseable line the clean prefix is
-/// returned and ONE `tracing::warn!` records the dropped bytes —
-/// tolerate-and-report. Never errors on a torn tail; only a genuine I/O failure
-/// opening/reading the file is an error.
+/// file is `Ok(empty)`. Mid-file blank or invalid `\n`-terminated lines are
+/// skipped (each logged at `warn!`). A torn final line (no trailing `\n`)
+/// halts ingestion; ONE `tracing::warn!` records the dropped bytes. Never
+/// errors on a torn tail; only a genuine I/O failure opening/reading the file
+/// is an error.
 pub fn read_all(path: &Path) -> Result<Vec<AgentLearning>, EpisodicError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(EpisodicError::Io(e)),
     };
-    let (records, clean_len) = scan(&bytes);
+    let (records, clean_len, skips) = scan(&bytes);
+    for skip in &skips {
+        tracing::warn!(
+            path = %path.display(),
+            line = skip.line_number,
+            reason = %skip.reason,
+            "episodic log: skipping invalid line"
+        );
+    }
     if clean_len < bytes.len() as u64 {
         tracing::warn!(
             path = %path.display(),
             dropped_bytes = bytes.len() as u64 - clean_len,
             records = records.len(),
-            "episodic log has a torn/corrupt tail; returning clean prefix"
+            "episodic log has a torn tail; returning clean prefix"
         );
     }
     Ok(records)
@@ -105,7 +138,7 @@ pub fn recover(file: &mut File) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let (_records, clean_len) = scan(&bytes);
+    let (_records, clean_len, _skips) = scan(&bytes);
     if clean_len < bytes.len() as u64 {
         tracing::debug!(
             dropped_bytes = bytes.len() as u64 - clean_len,
@@ -258,29 +291,47 @@ mod tests {
         assert_eq!(got[0].content, "kept");
     }
 
-    // ── Test 3: good + blank line + more → halts at the blank line ─────────
+    // ── Test 3: good + blank line + more → skip blank, both records survive ─
     #[test]
-    fn read_all_halts_at_blank_line() {
-        let dir = unique_tmpdir("blank-halt");
+    fn read_all_skips_blank_midfile_line() {
+        let dir = unique_tmpdir("blank-skip");
         let _g = DirGuard(dir.clone());
         let path = dir.join("AGENT_LEARNINGS.jsonl");
 
         let good = make_learning('A', "before-gap");
         let after = make_learning('B', "after-gap");
         let mut bytes = line_of(&good);
-        bytes.push(b'\n'); // the blank line (\n\n) = torn-write halt
+        bytes.push(b'\n'); // mid-file blank (\n\n) — hand-edit only
         bytes.extend_from_slice(&line_of(&after));
         std::fs::write(&path, &bytes).unwrap();
 
         let got = read_all(&path).unwrap();
-        assert_eq!(got.len(), 1, "blank line halts the scan");
+        assert_eq!(got.len(), 2, "mid-file blank is skipped");
         assert_eq!(got[0].content, "before-gap");
+        assert_eq!(got[1].content, "after-gap");
     }
 
-    // ── Test 4: good + {bad} + later-good → halts at {bad} ─────────────────
+    // ── Test 4a: good + unparseable torn tail (no \n) → halts ──────────────
     #[test]
-    fn read_all_halts_at_unparseable_line() {
-        let dir = unique_tmpdir("bad-halt");
+    fn read_all_halts_at_unparseable_torn_tail() {
+        let dir = unique_tmpdir("bad-torn-tail");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        let good = make_learning('A', "before-bad");
+        let mut bytes = line_of(&good);
+        bytes.extend_from_slice(b"{not valid json"); // no trailing \n
+        std::fs::write(&path, &bytes).unwrap();
+
+        let got = read_all(&path).unwrap();
+        assert_eq!(got.len(), 1, "torn unparseable tail halts the scan");
+        assert_eq!(got[0].content, "before-bad");
+    }
+
+    // ── Test 4b: good + {bad}\n + later-good → skip bad, later survives ────
+    #[test]
+    fn read_all_skips_unparseable_midfile_line() {
+        let dir = unique_tmpdir("bad-midfile-skip");
         let _g = DirGuard(dir.clone());
         let path = dir.join("AGENT_LEARNINGS.jsonl");
 
@@ -292,11 +343,46 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let got = read_all(&path).unwrap();
-        assert_eq!(got.len(), 1, "unparseable line halts the scan");
+        assert_eq!(got.len(), 2, "newline-terminated bad line is skipped");
         assert_eq!(got[0].content, "before-bad");
+        assert_eq!(got[1].content, "after-bad");
     }
 
-    // ── Test 5: recover truncates torn tail; append lands on clean boundary ─
+    // ── Test 5: recover leaves mid-file corruption; valid suffix survives ───
+    #[test]
+    fn recover_leaves_midfile_corruption_in_place() {
+        let dir = unique_tmpdir("recover-midfile");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        let good = make_learning('A', "before-bad");
+        let after = make_learning('B', "after-bad");
+        let mut bytes = line_of(&good);
+        bytes.extend_from_slice(b"{not valid json}\n");
+        bytes.extend_from_slice(&line_of(&after));
+        let original_len = bytes.len();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        recover(&mut file).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            original_len as u64,
+            "mid-file corruption must not be truncated away"
+        );
+
+        let got = read_all(&path).unwrap();
+        assert_eq!(got.len(), 2, "both valid records survive recovery");
+        assert_eq!(got[0].content, "before-bad");
+        assert_eq!(got[1].content, "after-bad");
+    }
+
+    // ── Test 6: recover truncates torn tail; append lands on clean boundary ─
     #[test]
     fn recover_truncates_torn_tail_to_clean_prefix() {
         let dir = unique_tmpdir("recover");
@@ -334,7 +420,7 @@ mod tests {
         assert_eq!(got[1].content, "appended");
     }
 
-    // ── Test 6: append rejects >4 KiB serialized line, file untouched ──────
+    // ── Test 7: append rejects >4 KiB serialized line, file untouched ──────
     #[test]
     fn append_rejects_oversized_payload_untouched() {
         let dir = unique_tmpdir("toobig");
@@ -368,7 +454,7 @@ mod tests {
         );
     }
 
-    // ── Test 7: CLI-path regression — torn tail no longer aborts the cycle ─
+    // ── Test 8: CLI-path regression — torn tail no longer aborts the cycle ─
     //
     // The whole point of WEG-378. On the `dreamd dream` CLI path there is no
     // coordinator to pre-truncate a torn tail, so a normal post-SIGKILL torn
