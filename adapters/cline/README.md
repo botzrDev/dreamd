@@ -18,11 +18,15 @@ Cline must open a project that already has `.agent/`. Without it, `append_node` 
 
 Copy [`.mcp.json.example`](./.mcp.json.example) into Cline's MCP settings file.
 
-**macOS path:**
+| OS | Path |
+|----|------|
+| **Linux** | `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` |
+| **macOS** | `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` |
+| **Windows** | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json` |
 
-```
-~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json
-```
+For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline sidebar → MCP Servers → **Configure MCP Servers**.
+
+> **npm note (2026-07-07):** `dreamd-mcp@0.1.0-rc.2` is not yet on npm (`latest` = `0.1.0-rc.1`). Until publish lands, use the local-binary config below or see [`docs/spikes/dr-014-cline-mcp.md`](../../docs/spikes/dr-014-cline-mcp.md).
 
 **Published npm path:**
 
