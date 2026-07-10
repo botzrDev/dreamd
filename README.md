@@ -5,9 +5,11 @@
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
 [![Status](https://img.shields.io/badge/v0.1-in%20progress-orange.svg)](#v01-progress)
 
-**Same memory in every IDE.** Local-first memory layer for AI coding agents — one `.agent/` folder, every harness.
+**A local-first memory layer for AI coding agents.**
 
-⭐ **[Star this repo](https://github.com/botzrDev/dreamd)** to get notified when v0.1 launches August 11.
+dreamd is a local-first, single-binary MCP memory layer for AI coding agents. Multiple agents share one `.agent/` folder — sessions, learnings, and skills in plain files, version-controlled alongside your code.
+
+Watch this repo for v0.1 release notifications (Aug 9).
 
 ---
 
@@ -136,6 +138,16 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 | MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.2` on npm |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Reference-impl suites shipped (`scripts/alpha/`); no formal certification in v0.1 |
+
+---
+
+## State-Drift benchmark
+
+In October 2026, we're publishing a neutral, reproducible benchmark measuring whether AI memory systems correctly update superseded facts.
+
+The benchmark runs Mem0, Zep, Letta, Anthropic's memory, and dreamd through identical scenarios — the same question asked after a fact has changed ("I live in London" → "I moved to Tokyo"). Every system is scored by a deterministic oracle, not an LLM judge. dreamd is one row in the table; the results are public regardless of where it places.
+
+Transparency: because dreamd's developer built the benchmark, we've taken explicit steps to maintain neutrality — vendor configs verified with maintainers before publication, raw per-question outputs committed, and an external engineer independently reproducing results before we publish. See [scripts/benchmark/README.md](./scripts/benchmark/README.md) for methodology.
 
 ---
 
