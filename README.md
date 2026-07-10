@@ -7,7 +7,11 @@
 
 **A local-first memory layer for AI coding agents.**
 
-dreamd is a local-first, single-binary MCP memory layer for AI coding agents. Multiple agents share one `.agent/` folder — sessions, learnings, and skills in plain files, version-controlled alongside your code.
+dreamd gives multiple coding agents — Claude Code, Cursor, Cline — a shared memory format. One `.agent/` folder in your repo. Every agent reads and writes to it. Sessions, learnings, and skills in plain files, version-controlled alongside your code.
+
+Every coding agent ships its own memory format. dreamd is what they could share.
+
+AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
 
 Watch this repo for v0.1 release notifications (Aug 9).
 
@@ -143,11 +147,13 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 
 ## State-Drift benchmark
 
-In October 2026, we're publishing a neutral, reproducible benchmark measuring whether AI memory systems correctly update superseded facts.
+In October 2026, we're publishing a neutral, reproducible benchmark measuring whether AI memory systems correctly update superseded facts — the specific failure where a system "knows" you moved from London to Tokyo but keeps confidently answering "London" because the old fact was never retired.
 
-The benchmark runs Mem0, Zep, Letta, Anthropic's memory, and dreamd through identical scenarios — the same question asked after a fact has changed ("I live in London" → "I moved to Tokyo"). Every system is scored by a deterministic oracle, not an LLM judge. dreamd is one row in the table; the results are public regardless of where it places.
+The benchmark runs Mem0, Zep, Letta, Anthropic's memory, and dreamd through identical scenarios. The same probe question is asked after a fact has changed. Every system is scored by a deterministic oracle — not an LLM judge — so results are identical across runs and independent of model version. dreamd is one row in the results table, published regardless of where it places.
 
-Transparency: because dreamd's developer built the benchmark, we've taken explicit steps to maintain neutrality — vendor configs verified with maintainers before publication, raw per-question outputs committed, and an external engineer independently reproducing results before we publish. See [scripts/benchmark/README.md](./scripts/benchmark/README.md) for methodology.
+**Transparency:** dreamd's developer built and maintains this benchmark, which creates an obvious conflict of interest. We've taken explicit steps to address it: every system is configured using its maintainer's documented recommended settings; we contact Mem0/Zep/Letta maintainers before publication to verify our configurations; raw per-question outputs for every system are committed to the repo so you can audit every individual answer; and an external engineer independently reproduces results before we publish. There is a scenario subset where dreamd's BM25 retrieval loses to paraphrase-heavy probes — that result is in the table.
+
+The methodology and bake-off harness live in [scripts/benchmark/README.md](./scripts/benchmark/README.md); the public results repo will be linked here when it publishes in October. If you maintain a memory system and want to verify how we configured yours before we publish, open an issue.
 
 ---
 
