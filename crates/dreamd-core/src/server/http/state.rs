@@ -125,8 +125,8 @@ impl AppState {
 
     /// Resolve the coordinator that owns `root` (WEG-272).
     ///
-/// * `primary` is `None` (in-process MCP fallback / tests, single project) → the boot
-///   `state.supervisor`. Preserves every existing single-coordinator test.
+    /// * `primary` is `None` (in-process MCP fallback / tests, single project) → the boot
+    ///   `state.supervisor`. Preserves every existing single-coordinator test.
     /// * `root` IS the pinned boot project → the boot `state.supervisor`.
     /// * otherwise → a lazily-started, idle-reaped per-root coordinator from
     ///   `supervisor_map`, wired to that root's index handle so its appends
