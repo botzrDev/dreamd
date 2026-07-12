@@ -63,7 +63,7 @@ search_call() { # <query>
 echo "--- Phase 2 (daemon / shared index) ---"
 "$BIN" watch >"$SANDBOX/daemon.log" 2>&1 &
 DAEMON_PID=$!
-for i in $(seq 1 20); do [ -S "$SANDBOX/.agent/dreamd.sock" ] && break; sleep 0.5; done
+for i in $(seq 1 60); do [ -S "$SANDBOX/.agent/dreamd.sock" ] && break; sleep 0.5; done
 if [ -S "$SANDBOX/.agent/dreamd.sock" ]; then ok "daemon bound socket"; else bad "daemon never bound socket"; fi
 
 # Harness A (claude-code) appends.

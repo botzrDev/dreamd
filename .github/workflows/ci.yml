@@ -436,6 +436,7 @@ jobs:
   alpha:
     name: Alpha suite (cross-harness recall)
     needs: lint
+    continue-on-error: true   # non-gating until it proves out (≥3 green) — WEG-509 / AC #4
     runs-on: ubuntu-latest
     permissions:
       contents: read
