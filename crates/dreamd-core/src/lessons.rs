@@ -20,6 +20,7 @@ use crate::io::write_atomic;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lesson {
+    /// EventId string of the exemplar (or pinned) learning this lesson came from.
     pub id: String,
     pub content: String,
     /// Reserved; always `false` in v0.1. Forward-compat slot for v0.2.
@@ -28,8 +29,10 @@ pub struct Lesson {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LessonsFile {
+    /// Caller-provided consolidation time (never `Utc::now()` inside this module).
     pub last_updated: DateTime<Utc>,
     pub prompt_version: String,
+    /// File-level `skill_action` cluster key; all lessons in the file share it.
     pub cluster_key: String,
     pub lessons: Vec<Lesson>,
 }

@@ -1,4 +1,8 @@
-//! CLI subcommand implementations (`dreamd init`, `dreamd mcp`, `dreamd reset`, `dreamd status`, `dreamd version`, `dreamd doctor`, `dreamd dream`, `dreamd watch`).
+//! CLI subcommand implementations.
+//!
+//! Dispatch lives in `cli.rs` (clap + exit codes). Prefer `dreamd init` for
+//! first-time `.agent/` layout; `doctor` / discover paths diagnose an existing
+//! workspace without rewriting golden files.
 
 pub mod doctor;
 pub mod dream;

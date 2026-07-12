@@ -8,16 +8,17 @@
 //!
 //! Crate placement decision (2026-05-14): UDS binding, double-fork, and the
 //! supervisor lifecycle live in `dreamd-core` behind `pub mod server`. No
-//! `dreamd-server` crate yet. Re-evaluation trigger is WEG-42 compile pressure
-//! or a second Rust binary consumer (see `docs/architecture.md`).
+//! `dreamd-server` crate yet. Re-evaluation trigger is compile pressure or a
+//! second Rust binary consumer (see `docs/architecture.md`).
 //!
 //! Submodule layout:
 //!   * [`project_resource_map`] — shared lazy-open LRU + idle-eviction container
 //!     (cap 10, 30 min idle) keyed on project root. Index and supervisor maps
 //!     are thin adapters over this module.
-//!   * [`index_map`] — `IndexHandle` trait + `ProjectIndexMap<H>` adapter. Real
-//!     Tantivy-backed handle lands in WEG-42; we ship `TestIndexHandle` here
-//!     so the eviction + shutdown-drain tests can run without `tantivy`.
+//!   * [`index_map`] — `IndexHandle` trait + `ProjectIndexMap<H>` adapter.
+//!     Production writes use [`tantivy_handle`] (WEG-42); `TestIndexHandle`
+//!     remains for eviction + shutdown-drain tests without a live index.
+//!   * [`tantivy_handle`] — Tantivy-backed `IndexHandle` (open/commit/close).
 //!   * [`uds`] — bind/connect/cleanup for `~/.agent/dreamd.sock` with `0600`
 //!     perms and orphaned-socket recovery.
 //!   * [`lifecycle`] — supervisor (owns `MemoryCoordinator` senders + handle)

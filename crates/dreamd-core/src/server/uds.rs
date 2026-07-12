@@ -157,7 +157,7 @@ const LIVENESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 ///
 /// Probe-only: the stream is dropped immediately on success. Orphan socket
 /// files (`ConnectionRefused` / `NotFound`) and connect timeouts both map to
-/// `false`, matching MCP Phase 2 fallback and `bind_socket_raw` recovery.
+/// `false`, matching MCP daemon-proxy fallback and `bind_socket_raw` recovery.
 pub fn is_daemon_socket_live(path: &Path) -> bool {
     if !path.exists() {
         return false;

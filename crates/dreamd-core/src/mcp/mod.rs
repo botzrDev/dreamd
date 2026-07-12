@@ -6,19 +6,19 @@
 //! memory provider.
 //!
 //! Start-up logic:
-//!   1. If the dreamd daemon socket is reachable (Phase 2), serve the same MCP
-//!      tool surface over stdio but back each tool call with an HTTP-over-UDS
-//!      client to the daemon (`Backend::Remote`) so memory is shared across
-//!      every harness pointed at the same daemon.
+//!   1. If the dreamd daemon socket is reachable, serve the same MCP tool
+//!      surface over stdio but back each tool call with an HTTP-over-UDS client
+//!      to the daemon (`Backend::Remote`) so memory is shared across every
+//!      harness pointed at the same daemon.
 //!   2. If the daemon is not running, fall back to an in-process MCP server
-//!      that answers tool calls directly (Phase 1 fallback, `Backend::Local`).
+//!      that answers tool calls directly (`Backend::Local`).
 //!
 //! Both paths expose identical tools: `search_nodes` performs recall (WEG-78)
 //! and `append_node` writes the learning durably (WEG-79).
 
 use std::path::{Path, PathBuf};
 
-// Phase 2 Remote backend (Unix only) — HTTP-over-UDS client deps.
+// Remote-backend deps (Unix only) — HTTP-over-UDS client.
 #[cfg(unix)]
 use bytes::Bytes;
 #[cfg(unix)]
@@ -97,25 +97,23 @@ pub struct AppendNodeParams {
 
 /// Backing store for a [`MemoryMcpServer`].
 ///
-/// `Local` / `LocalReadOnly` / `Empty` are the Phase 1 in-process paths.
-/// `Remote` is the Phase 2 path: each tool call is proxied to the running
-/// daemon over an HTTP-over-UDS client (WEG-259) so memory is shared across
-/// harnesses pointed at the same daemon.
+/// `Local` / `LocalReadOnly` / `Empty` are in-process paths (product term:
+/// "Phase 1"). `Remote` proxies each tool call to the daemon over UDS
+/// (product term: "Phase 2"; WEG-259) so memory is shared across harnesses.
 #[derive(Clone)]
 enum Backend {
-    /// Phase 1: local in-process coordinator (durable writes + reads via the
-    /// shared Tantivy handle).
+    /// In-process coordinator (durable writes + reads via the shared Tantivy handle).
     Local {
         agent_root: AgentRoot,
         coordinator_tx: mpsc::Sender<MemoryCoordinatorMsg>,
     },
-    /// Phase 1 read-only: agent root known but no coordinator (search only).
+    /// In-process read-only: agent root known but no coordinator (search only).
     LocalReadOnly { agent_root: AgentRoot },
     /// No `.agent/` found — recall returns empty results; append errors.
     Empty,
-    /// Phase 2: HTTP-over-UDS to the running daemon. `agent_root_header` is the
-    /// canonicalized project-root string sent as the `X-Agent-Root` header
-    /// (matches `resolve_project`'s server-side canonical lookup).
+    /// Daemon proxy: HTTP-over-UDS. `agent_root_header` is the canonicalized
+    /// project-root string sent as the `X-Agent-Root` header (matches
+    /// `resolve_project`'s server-side canonical lookup).
     #[cfg(unix)]
     Remote {
         sock_path: PathBuf,
@@ -156,8 +154,8 @@ impl MemoryMcpServer {
     }
 
     /// Create an in-process server bound to an agent root and a live
-    /// coordinator channel ([`Backend::Local`]). Used by the Phase 1 fallback
-    /// when the daemon is not running.
+    /// coordinator channel ([`Backend::Local`]). Used when the daemon is not
+    /// running (Phase 1 fallback).
     pub fn with_coordinator(root: AgentRoot, tx: mpsc::Sender<MemoryCoordinatorMsg>) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -353,7 +351,7 @@ impl Default for MemoryMcpServer {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 Remote backend (Unix only — daemon socket is UDS)
+// Remote backend (Unix only — daemon socket is UDS)
 // ---------------------------------------------------------------------------
 
 /// Resolve the path to the daemon Unix socket.
@@ -493,13 +491,14 @@ async fn send_remote(
 
 /// Start the MCP server process.
 ///
-/// Phase 2 (Remote, Unix only): if the daemon socket is reachable, serve the
-/// MCP tool surface over stdio backed by an HTTP-over-UDS client to the daemon
-/// ([`MemoryMcpServer::with_remote`]) and return when the session ends.
+/// Daemon proxy (Remote, Unix only / Phase 2): if the daemon socket is
+/// reachable, serve the MCP tool surface over stdio backed by an HTTP-over-UDS
+/// client to the daemon ([`MemoryMcpServer::with_remote`]) and return when the
+/// session ends.
 ///
-/// Phase 1 (fallback): if the daemon is not running (or on Windows where the
-/// UDS path is deferred to DR-121), serve MCP tool calls in-process using
-/// [`MemoryMcpServer`].
+/// In-process fallback (Phase 1): if the daemon is not running (or on Windows
+/// where the UDS path is deferred to DR-121), serve MCP tool calls in-process
+/// using [`MemoryMcpServer`].
 ///
 /// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
 /// is the first invocation in a directory that has no `.agent/` store yet.
@@ -510,14 +509,11 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         eprintln!("{DR413_DISCLOSURE}");
     }
 
-    // Resolve daemon socket path (used on Unix; on Windows the Phase 2 bridge
-    // is deferred so we still need the path for the log message).
+    // Resolve daemon socket path (used on Unix; Windows daemon bridge is DR-121).
     let sock_path = resolve_sock_path()?;
 
-    // Phase 2 (Unix only): if the daemon is reachable over UDS, serve the MCP
-    // tool surface over stdio backed by an HTTP-over-UDS Remote client. The
-    // daemon socket is a Unix domain socket; this path is intentionally absent
-    // on Windows until DR-121 (TCP fallback) ships.
+    // Daemon proxy (Unix only): if reachable over UDS, serve MCP over stdio
+    // backed by Remote. Absent on Windows until DR-121 (TCP fallback).
     #[cfg(unix)]
     match tokio::net::UnixStream::connect(&sock_path).await {
         Ok(_) => {
@@ -549,7 +545,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
             return Ok(());
         }
         Err(_) => {
-            // Daemon not running — fall through to Phase 1 in-process server.
+            // Daemon not running — fall through to in-process server.
             eprintln!(
                 "dreamd mcp: daemon not found at {} — running in-process (Phase 1 fallback)",
                 sock_path.display()
@@ -557,12 +553,12 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         }
     }
 
-    // Suppress unused-variable warning on non-Unix targets where Phase 2 is
+    // Suppress unused-variable warning on non-Unix targets where Remote is
     // not compiled in.
     #[cfg(not(unix))]
     let _ = &sock_path;
 
-    // Phase 1: run in-process MCP server over stdio.
+    // In-process MCP server over stdio (Phase 1).
     // When an agent root is found, boot a MemoryCoordinator via Supervisor so
     // append_node dispatches durably. `supervisor` is bound here and must
     // outlive the serve call; it drops after svc.waiting() returns.
@@ -650,7 +646,6 @@ mod tests {
             .await
             .expect("search_nodes ok");
 
-        // Extract the text content from the result.
         let text = result
             .content
             .iter()
@@ -911,7 +906,7 @@ mod tests {
         assert!(bad_pain.is_err(), "out-of-range pain must be rejected");
     }
 
-    // ── WEG-259: Phase 2 Remote backend (HTTP-over-UDS) ──────────────────────
+    // WEG-259: Remote backend (HTTP-over-UDS)
 
     /// Unit: `build_recall_request` sets GET, the percent-encoded URI, and the
     /// `X-Agent-Root` header. Pure — no socket, no async.

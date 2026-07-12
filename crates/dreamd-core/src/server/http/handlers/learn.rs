@@ -39,19 +39,18 @@ pub(crate) async fn post_learn(
 ) -> axum::response::Response {
     tracing::debug!(project_root = %project.root, "POST /api/v1/learn");
 
-    // Step 1 — extract optional idempotency key.
     let client_dedup_key = headers
         .get("x-client-dedup-key")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    // Step 2–3 — validate, normalise, and redact via shared learn ingress.
+    // Validate, normalise, and redact via shared learn ingress.
     // Sole skill_action gate (ARCHITECTURE.md §9); coordinator does not re-check.
     if let Err(e) = LearnIngress::prepare_agent_learning(&mut learning, state.config.redaction) {
         return error_400(&e.to_string());
     }
 
-    // Step 4 — resolve the coordinator that OWNS this project root (WEG-272),
+    // Resolve the coordinator that OWNS this project root (WEG-272),
     // then build and dispatch. Routing on `project.root` is what keeps a
     // `POST /learn` for project B out of the boot project's JSONL.
     let supervisor = match state.resolve_supervisor(std::path::Path::new(&project.root)) {
@@ -81,7 +80,6 @@ pub(crate) async fn post_learn(
         }
     }
 
-    // Step 5 — await durable write outcome.
     match resp_rx.await {
         Ok(Ok(outcome)) => (
             axum::http::StatusCode::CREATED,

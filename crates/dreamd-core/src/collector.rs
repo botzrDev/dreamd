@@ -7,9 +7,9 @@
 //! fastfields per matching doc, reweights the score with [`salience`], and
 //! evicts via a min-heap of size `k`.
 //!
-//! Production wiring (calling [`recall`] from the HTTP handler) lands in
-//! WEG-69 once `TantivyIndexHandle::reader()` is exposed. WEG-43 ships the
-//! engine + tests only; nothing in the write path is touched.
+//! Production path (WEG-69): HTTP/MCP recall → `TantivyIndexHandle::reader`
+//! → [`recall`]. This module owns the collector engine; the write path is
+//! untouched.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -184,6 +184,8 @@ impl Collector for SalienceCollector {
     }
 
     fn merge_fruits(&self, segment_fruits: Vec<Vec<ScoredDoc>>) -> tantivy::Result<Vec<ScoredDoc>> {
+        // Each segment already kept its own top-k; re-apply a global min-heap of
+        // size `k` so cross-segment recall cannot return more than `k` hits.
         let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(self.k + 1);
         for doc in segment_fruits.into_iter().flatten() {
             if merged.len() < self.k {

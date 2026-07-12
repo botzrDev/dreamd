@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-// ── compiled patterns ──────────────────────────────────────────────────────
+// Compiled patterns (LazyLock — once per process).
 
 /// AWS access key ID — exactly the `AKIA` prefix followed by 16 uppercase
 /// alphanumerics.
@@ -46,8 +46,6 @@ static RE_ENV_VAR: LazyLock<Regex> = LazyLock::new(|| {
 static RE_AWS_SECRET_ENV: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+").expect("RE_AWS_SECRET_ENV pattern is valid")
 });
-
-// ── public API ─────────────────────────────────────────────────────────────
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -90,8 +88,6 @@ pub fn redact(input: &str, enabled: bool) -> String {
 
     current
 }
-
-// ── tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

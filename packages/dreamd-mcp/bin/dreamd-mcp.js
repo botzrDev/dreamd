@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+// dreamd-mcp — npx download/verify/exec shim for the native `dreamd` binary.
+// Flow: resolve platform → cache hit or GitHub release download → sha256 verify
+// → exec. Env overrides: DREAMD_BIN (+ DREAMD_BIN_ALLOW_UNVERIFIED). Exports
+// below are for unit tests only; IDEs spawn this file as the MCP entrypoint.
+
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
@@ -9,8 +14,14 @@ const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 const zlib = require('zlib');
 
+// Must match package.json "version", GitHub release tag `v${VERSION}`, and
+// manifest.json download URLs. Tests assert package↔manifest; keep this in sync
+// on every release cut.
 const VERSION = '0.1.0-rc.2';
 const MANIFEST = require('../manifest.json');
+
+// Bound redirect-following to limit redirect-loop DoS during asset download.
+const MAX_REDIRECTS = 5;
 
 // Hosts a release download is allowed to redirect to. Captured empirically
 // 2026-06-24: github.com 302-redirects release assets to
@@ -19,8 +30,6 @@ const MANIFEST = require('../manifest.json');
 // backstop; this allowlist is defense-in-depth against redirect-loop DoS, an
 // http:// downgrade, and an arbitrary-host fetch if github.com ever returned a
 // poisoned Location. If GitHub changes its asset host, update this list.
-const MAX_REDIRECTS = 5;
-
 function isAllowedRedirectHost(hostname) {
   return (
     hostname === 'github.com' ||
@@ -35,7 +44,7 @@ function validateRedirect(location, currentUrl) {
   if (!location) throw new Error('redirect response had no Location header');
   let next;
   try {
-    next = new URL(location, currentUrl); // resolves a relative Location too
+    next = new URL(location, currentUrl);
   } catch {
     throw new Error(`invalid redirect target: ${location}`);
   }
@@ -99,6 +108,8 @@ Environment:
 `;
 
 function getPlatformTarget() {
+  // v0.1 ships linux-x86_64 + darwin; Windows is out of scope until v0.1.1
+  // (AGENTS.md). Cache helpers below still tolerate win32 paths defensively.
   const { platform, arch } = process;
   if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
   if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
@@ -139,7 +150,8 @@ function downloadFile(url, destPath) {
     function get(u, depth) {
       https.get(u, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
-          res.resume(); // drain the redirect body
+          // Only follow 301/302 (GitHub asset hops); drain body before recurse.
+          res.resume();
           if (depth >= MAX_REDIRECTS) {
             return reject(new Error(`too many redirects (>${MAX_REDIRECTS}) fetching release asset`));
           }
@@ -205,7 +217,7 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
     process.stderr.write(`[dreamd-mcp] Downloading dreamd v${VERSION} for ${target}...\n`);
     await downloadFile(downloadUrl, archivePath);
 
-    assertSafeArchive(archivePath); // reject traversal/absolute entries pre-unpack
+    assertSafeArchive(archivePath);
 
     process.stderr.write('[dreamd-mcp] Extracting...\n');
     extractTarGz(archivePath, work);
@@ -233,7 +245,7 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
     }
 
     fs.chmodSync(extracted, 0o755);
-    fs.renameSync(extracted, binaryPath); // promote only the validated file
+    fs.renameSync(extracted, binaryPath);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
@@ -242,7 +254,6 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
 async function main() {
   const args = process.argv.slice(2);
 
-  // Leading --version/--help are answered here without touching the binary.
   switch (topLevelFlag(args)) {
     case 'version':
       process.stdout.write(`dreamd-mcp ${VERSION}\n`);

@@ -6,8 +6,8 @@
 //!   * [`types`] — re-exports wire shapes from [`crate::ingress`]
 //!   * [`handlers`] — `learn`, `recall`, `dream`, `preferences` handlers
 //!
-//! Out of scope here: TraceLayer (WEG-144), TCP binding (WEG-73),
-//! TantivyIndexHandle::reader (WEG-69).
+//! Out of scope here: TraceLayer (WEG-144), TCP binding (WEG-73).
+//! Recall already goes through `TantivyIndexHandle::reader` (WEG-69).
 
 mod handlers;
 mod router;

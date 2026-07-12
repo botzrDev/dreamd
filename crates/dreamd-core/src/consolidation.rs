@@ -313,6 +313,8 @@ pub fn run_deterministic_dream_cycle(
     Ok(())
 }
 
+/// Pick the cluster exemplar: highest salience, then pain, then importance,
+/// then reverse EventId string (deterministic total order when scores tie).
 fn pick_exemplar(events: &[AgentLearning], now_sec: i64) -> &AgentLearning {
     let recurrence = RecurrenceContext::dream_cycle(events.len());
     events

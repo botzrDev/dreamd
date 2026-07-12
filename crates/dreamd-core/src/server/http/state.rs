@@ -39,7 +39,7 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 /// (canonicalized) project root use this handle instead of `index_map`, so the
 /// coordinator's live appends and the recall reader share **one** index — and
 /// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
-/// Never evicted. `None` outside the daemon (Phase 1, tests).
+/// Never evicted. `None` outside the daemon (in-process MCP fallback, tests).
 ///
 /// `supervisor_map` — lazily-started, LRU + idle-evicting per-project
 /// coordinators for every registered root that is NOT the pinned boot project
@@ -49,12 +49,19 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 /// `None`/Phase-1/test states route everything to `supervisor`.
 #[derive(Clone)]
 pub struct AppState {
+    /// Path to `~/.agent/registry.toml` (see struct docs).
     pub registry_path: PathBuf,
+    /// Boot-project coordinator; prefer [`Self::resolve_supervisor`].
     pub supervisor: Arc<Supervisor>,
+    /// Layered runtime config loaded at daemon start.
     pub config: Arc<Config>,
+    /// Lazy per-project Tantivy handles (LRU + idle eviction).
     pub index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
+    /// Daemon process UID for `peer_uid_middleware` (WEG-72).
     pub daemon_uid: u32,
+    /// Pinned boot-project index handle; `None` in in-process / test setups.
     pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
+    /// Per-root coordinators for non-boot projects (WEG-272).
     pub supervisor_map: Arc<Mutex<SupervisorMap>>,
 }
 
@@ -118,8 +125,8 @@ impl AppState {
 
     /// Resolve the coordinator that owns `root` (WEG-272).
     ///
-    /// * `primary` is `None` (Phase 1 / tests, single project) → the boot
-    ///   `state.supervisor`. Preserves every existing single-coordinator test.
+/// * `primary` is `None` (in-process MCP fallback / tests, single project) → the boot
+///   `state.supervisor`. Preserves every existing single-coordinator test.
     /// * `root` IS the pinned boot project → the boot `state.supervisor`.
     /// * otherwise → a lazily-started, idle-reaped per-root coordinator from
     ///   `supervisor_map`, wired to that root's index handle so its appends

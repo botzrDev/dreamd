@@ -1,10 +1,9 @@
-//! dreamd core engine.
+//! dreamd core engine: episodic actor, Tantivy BM25 index, dream cycle, MCP,
+//! and the Unix UDS HTTP server.
 //!
-//! Modules land here over Sprint 1-5 (PRD Part IV / `context/planning/agile/plan1.md`).
-//! DR-101 ships [`layout`] — the typed path-resolution module that every adapter,
-//! harness, and CLI command goes through. All other call sites MUST resolve
-//! `.agent/` and `~/.agent/` paths via [`AgentRoot`] / [`DaemonHome`] rather
-//! than building strings.
+//! Path resolution goes through [`layout`] (DR-101). All call sites MUST resolve
+//! `.agent/` and `~/.agent/` via [`AgentRoot`] / [`DaemonHome`] rather than
+//! building path strings.
 
 pub mod autobiography;
 /// HTTP-over-UDS client for CLI → daemon proxying (WEG-271 fast-follow).

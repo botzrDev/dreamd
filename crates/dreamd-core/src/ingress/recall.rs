@@ -26,7 +26,8 @@ impl RecallIngress {
             score: r.score,
             bm25: r.bm25,
             salience: r.salience,
-            source: format!("{:?}", r.layer).to_lowercase(),
+            // Stable wire token — use Layer::as_str, not Debug formatting.
+            source: r.layer.as_str().to_owned(),
             content: r.content,
             metadata: RecallMeta {
                 timestamp_sec: r.timestamp_sec,

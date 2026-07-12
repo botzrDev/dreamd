@@ -7,7 +7,7 @@ const {
   isSafeTarEntry,
 } = require('../bin/dreamd-mcp.js');
 
-// --- HIGH-a: redirect host allowlist ---
+// --- Redirect host allowlist ---
 test('accepts github.com and its real release-asset host', () => {
   assert.ok(isAllowedRedirectHost('github.com'));
   assert.ok(isAllowedRedirectHost('release-assets.githubusercontent.com')); // observed 2026-06-24
@@ -34,7 +34,7 @@ test('validateRedirect rejects a missing Location', () => {
   assert.throws(() => validateRedirect(undefined, 'https://github.com/a'), /no Location/);
 });
 
-// --- MED-1: tar entry safety ---
+// --- Tar entry safety ---
 test('isSafeTarEntry accepts the expected binary name', () => {
   assert.ok(isSafeTarEntry('dreamd'));
   assert.ok(isSafeTarEntry('dreamd.exe'));
@@ -46,14 +46,13 @@ test('isSafeTarEntry rejects traversal and absolute paths', () => {
   assert.ok(!isSafeTarEntry('foo/../../bar'));
 });
 
-// --- MED-1: cache-hit verify-before-exec invariant (regression) ---
+// --- Cache-hit verify-before-exec (regression) ---
 const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 
 test('cache-hit path verifies sha before exec (poisoned cache exits non-zero)', (t) => {
-  // Resolve the platform target the shim would use; skip on unsupported arch.
   const platform = process.platform;
   const arch = process.arch;
   const target =
@@ -70,7 +69,7 @@ test('cache-hit path verifies sha before exec (poisoned cache exits non-zero)', 
     const binName = platform === 'win32' ? 'dreamd.exe' : 'dreamd';
     const cacheDir = path.join(fakeHome, '.cache', 'dreamd-mcp', version);
     fs.mkdirSync(cacheDir, { recursive: true });
-    fs.writeFileSync(path.join(cacheDir, binName), 'not the real binary'); // wrong sha
+    fs.writeFileSync(path.join(cacheDir, binName), 'not the real binary');
 
     const res = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'dreamd-mcp.js'), 'version'], {
       env: { ...process.env, HOME: fakeHome, DREAMD_BIN: '', DREAMD_BIN_ALLOW_UNVERIFIED: '' },

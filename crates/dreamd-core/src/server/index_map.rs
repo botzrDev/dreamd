@@ -6,9 +6,9 @@
 //! whose `last_used()` exceeds a configurable timeout (default 30 min).
 //!
 //! The trait surface is intentionally minimal — exactly the two methods the
-//! AC specifies. Real `IndexWriter` open/commit/close logic lands in WEG-42
-//! via `TantivyIndexHandle`. We ship [`TestIndexHandle`] so the eviction and
-//! shutdown-drain tests can run without any `tantivy` dep in this ticket.
+//! AC specifies. Production open/commit/close lives in [`crate::server::tantivy_handle`]
+//! (WEG-42). This module keeps the map + [`TestIndexHandle`] so eviction and
+//! shutdown-drain tests can run without a live Tantivy index.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

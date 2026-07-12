@@ -116,8 +116,9 @@ impl From<EpisodicError> for DecayError {
 ///   3. If decayed is empty → return early (no files touched)
 ///   4. fs::create_dir_all(snapshots_dir)
 ///   5. Append decayed records to snapshot_file(cycle_date) — one JSONL line each
-///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rename
-///   7. `episodic::rewrite_atomic(episodic_jsonl(), &kept, hook)` rewrites the live JSONL — temp write+fsync, then `hook` (WalIntent::PruneEpisodicMemory, after tmp-fsync/before rename), rename, parent-dir fsync (old steps 7–10)
+///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rewrite
+///   7. `episodic::rewrite_atomic(…, hook)` — temp write+fsync, WAL prune intent in
+///      `hook` (after tmp-fsync / before rename), rename, parent-dir fsync
 ///   8. Return DecayResult { decayed_ids, kept_count }
 ///
 /// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
@@ -159,7 +160,6 @@ pub fn run_decay_pruner(
         });
     }
 
-    // Step 4: ensure snapshot directory exists.
     let snapshots_dir = agent_root.snapshots_dir();
     fs::create_dir_all(&snapshots_dir)?;
 
@@ -176,11 +176,11 @@ pub fn run_decay_pruner(
             snap_file.write_all(line.as_bytes())?;
             snap_file.write_all(b"\n")?;
         }
-        // Step 6: sync snapshot before the destructive rename.
+        // Step 6: sync snapshot before the destructive rewrite.
         snap_file.sync_data()?;
     }
 
-    // Steps 7–10: atomically rewrite the live JSONL with the kept records.
+    // Step 7: atomically rewrite the live JSONL with the kept records.
     // `episodic::rewrite_atomic` writes the temp, fsyncs it, runs the hook, then
     // renames and parent-dir fsyncs. The WAL prune intent is appended inside the
     // hook — after tmp-fsync, before the rename — so the named temp provably
@@ -196,7 +196,6 @@ pub fn run_decay_pruner(
         .map_err(std::io::Error::other)
     })?;
 
-    // Step 11: return result.
     let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();
     Ok(DecayResult {
         decayed_ids,
