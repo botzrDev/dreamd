@@ -467,7 +467,7 @@ jobs:
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
   notify-failure:
     name: Notify on main CI failure
-    needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate]
+    needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate, audit, deny]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
