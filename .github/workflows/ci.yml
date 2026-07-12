@@ -426,6 +426,44 @@ jobs:
             target/coverage/lcov.info
           retention-days: 14
 
+  # ── Alpha suite — cross-harness recall smoke test (WEG-423) ──────────────────
+  # End-to-end proof of the demo claim "what one agent learns, the next already
+  # knows": drives the real MCP stdio protocol (sandboxed HOME, real daemon) so a
+  # learning appended as one harness is recalled by an independent process — on
+  # both the daemon path (Phase 2) and the JSONL-replay path (Phase 1). Guards the
+  # live append->index->read wiring that unit tests do NOT cover (WEG-264 was a
+  # silent regression exactly there). Non-gating until it proves out (AC #4).
+  alpha:
+    name: Alpha suite (cross-harness recall)
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build dreamd CLI (debug binary)
+        run: cargo build -p dreamd
+
+      - name: Run alpha suite (cross-harness append->recall)
+        # Suite polls ~10s for the socket + up to ~18s for the index commit;
+        # 180s gives generous headroom. Exit code is authoritative (0 iff zero
+        # failures); the suite prints "=== RESULT: N passed, N failed ===".
+        run: timeout 180 bash scripts/alpha/alpha-suite.sh
+
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
   notify-failure:
     name: Notify on main CI failure

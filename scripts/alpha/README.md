@@ -15,6 +15,21 @@ scripts/alpha/alpha-suite.sh     # from repo root
 
 Exit `0` and `7 passed, 0 failed` means the round-trip works.
 
+## CI
+
+The **Alpha suite (cross-harness recall)** job in `.github/workflows/ci.yml`
+(WEG-423) runs this suite on every push / PR to `main`, so a silent recall
+regression (append→index→read broke once while the engine unit tests stayed
+green — WEG-264) can't ship unnoticed. The job's exit code is the gate. Repro it
+locally with the exact commands CI runs:
+
+```bash
+cargo build -p dreamd && scripts/alpha/alpha-suite.sh
+```
+
+Only `alpha-suite.sh` is wired into CI; the `quality-suite.sh` LLM-judge suite in
+this directory is a separate, manually-run tool.
+
 ## What it does
 
 - Redirects `HOME` to a throwaway `mktemp -d`, so the real `~/.agent` daemon,
