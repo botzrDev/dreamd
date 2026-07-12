@@ -169,6 +169,11 @@ DR-108 / v0.1.1). A manifest *newer* than the binary aborts startup
 with `ServerError::ManifestCheck(ManifestVersionError::TooNew)` —
 the user must downgrade or migrate.
 
+For the forward-looking plan across a future Tantivy major bump — how each schema
+field is consumed, the custom collector's Tantivy-internal assumptions, and what a
+maintainer must re-verify before bumping — see
+[`architecture/tantivy-migration.md`](architecture/tantivy-migration.md).
+
 ### Read-after-write visibility (commit-cadence window)
 
 The indexer commits to Tantivy on a wall-clock cadence
