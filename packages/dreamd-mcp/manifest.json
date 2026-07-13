@@ -2,13 +2,13 @@
     "version": "0.1.0-rc.3",
     "binaries": {
         "linux-x86_64": {
-            "sha256": "1e24e87ac6e14123a829ab481ae109d934617d1986d032e63fe5843449165589"
+            "sha256": "00fa790fbe5109a7deaa9bb57775a9924c0f87f2f5e026b7078d35152580dee3"
         },
         "darwin-x86_64": {
-            "sha256": "de071996d501e77c8f699bfc992dfeb8d6b7ba0242eda82b6a479cb963491891"
+            "sha256": "4bf35db491b4d92a179b7eb369217154897df929b6a618d023f0b6fb5386ccde"
         },
         "darwin-aarch64": {
-            "sha256": "d9898a316d0be010b695a45fb95932d4c89b5ebd749032319a1e0895367e8fea"
+            "sha256": "d346062e3bb9d1733945bb58d9a4cd164b094d20aa60e971530d992bafe2c260"
         }
     }
 }
