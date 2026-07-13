@@ -17,7 +17,7 @@ const zlib = require('zlib');
 // Must match package.json "version", GitHub release tag `v${VERSION}`, and
 // manifest.json download URLs. Tests assert package↔manifest; keep this in sync
 // on every release cut.
-const VERSION = '0.1.0-rc.2';
+const VERSION = '0.1.0-rc.3';
 const MANIFEST = require('../manifest.json');
 
 // Bound redirect-following to limit redirect-loop DoS during asset download.

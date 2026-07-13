@@ -6,8 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.3] - 2026-07-13
+
 ### Added
 
+- `dreamd archive --force-unpin` — operator safety valve that clears sticky `pinned` flags on episodic entries via an atomic rewrite, guarded by a daemon-live refusal check (WEG-134 / DR-116).
 - Recall responses now surface provenance anchors under `metadata` — `skill_action` (cluster key) and `source_harness` (authoring harness) — so recall is cross-harness-attributable (WEG-424).
 - Self-healing index rebuild on schema-version mismatch: `TantivyIndexHandle::open` wipes and replays the JSONL under the current schema when an on-disk index predates the binary, on both the daemon and no-daemon paths (WEG-424).
 
@@ -78,6 +81,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.2...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...HEAD
+[0.1.0-rc.3]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/botzrDev/dreamd/releases/tag/v0.1.0-rc.1

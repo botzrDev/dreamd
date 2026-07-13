@@ -1,5 +1,5 @@
 {
-    "version": "0.1.0-rc.2",
+    "version": "0.1.0-rc.3",
     "binaries": {
         "linux-x86_64": {
             "sha256": "1e24e87ac6e14123a829ab481ae109d934617d1986d032e63fe5843449165589"
