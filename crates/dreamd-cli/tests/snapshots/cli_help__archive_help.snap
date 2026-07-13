@@ -1,0 +1,21 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"archive\")"
+---
+Operator maintenance on the episodic log. Today: --force-unpin
+
+Usage: archive [OPTIONS] [EVENT_ID]
+
+Arguments:
+  [EVENT_ID]
+          The event id to unpin. Mutually exclusive with --all
+
+Options:
+      --force-unpin
+          Clear the `pinned` flag so the next pruning pass can remove the entry
+
+      --all
+          Unpin every entry. Refused unless explicitly set
+
+  -h, --help
+          Print help

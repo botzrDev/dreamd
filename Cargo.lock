@@ -706,6 +706,7 @@ dependencies = [
  "clap_mangen",
  "const_format",
  "dreamd-core",
+ "dreamd-protocol",
  "insta",
  "serde",
  "serde_json",

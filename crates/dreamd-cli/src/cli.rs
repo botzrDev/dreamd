@@ -71,6 +71,8 @@ pub struct WatchArgs {}
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
+    /// Operator maintenance on the episodic log. Today: --force-unpin.
+    Archive(ArchiveArgs),
     /// Run health checks and print status (dream-cycle mode, etc.).
     Doctor,
     /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
@@ -88,6 +90,24 @@ pub enum Command {
     Watch(WatchArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
     Version,
+}
+
+/// Args for `dreamd archive`. Force-unpin is the only operation today; the
+/// struct is shaped to grow (future maintenance ops) without reshuffling
+/// top-level parsing. Target-mode invariants (`--force-unpin` required; exactly
+/// one of `<EVENT_ID>` / `--all`) are enforced at runtime in
+/// [`commands::archive::run`] so they surface a clear message and non-zero exit.
+#[derive(Args)]
+pub struct ArchiveArgs {
+    /// Clear the `pinned` flag so the next pruning pass can remove the entry.
+    #[arg(long)]
+    pub force_unpin: bool,
+    /// The event id to unpin. Mutually exclusive with --all.
+    #[arg(value_name = "EVENT_ID")]
+    pub id: Option<String>,
+    /// Unpin every entry. Refused unless explicitly set.
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// Arguments for the `dreamd init` subcommand.
@@ -228,6 +248,50 @@ pub fn run() -> ExitCode {
     };
 
     match command {
+        Command::Archive(args) => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            // Resolve the daemon socket the same way `status` does ($DREAMD_SOCK
+            // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
+            // a running daemon can't clobber the rewrite.
+            let socket = dreamd_core::client::resolve_daemon_socket();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut out = stdout.lock();
+            let mut err = stderr.lock();
+            match commands::archive::run(
+                &cwd,
+                socket.as_deref(),
+                args.force_unpin,
+                args.id.as_deref(),
+                args.all,
+                &mut out,
+                &mut err,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                // Usage / precondition errors — the user must fix the invocation.
+                Err(commands::archive::ArchiveError::NotFound)
+                | Err(commands::archive::ArchiveError::ForceUnpinRequired)
+                | Err(commands::archive::ArchiveError::NoTarget)
+                | Err(commands::archive::ArchiveError::IdAndAll) => ExitCode::from(2),
+                // Runtime failures — the store/log or a live daemon got in the way.
+                Err(commands::archive::ArchiveError::DaemonRunning)
+                | Err(commands::archive::ArchiveError::UnknownId(_)) => ExitCode::from(1),
+                Err(commands::archive::ArchiveError::Episodic(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+                Err(commands::archive::ArchiveError::Io(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Doctor => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
@@ -578,6 +642,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_archive_force_unpin_with_id() {
+        let cli = Cli::try_parse_from(["dreamd", "archive", "--force-unpin", "evt_123"]).unwrap();
+        match cli.command {
+            Some(Command::Archive(args)) => {
+                assert!(args.force_unpin);
+                assert_eq!(args.id.as_deref(), Some("evt_123"));
+                assert!(!args.all);
+            }
+            _ => panic!("expected Archive --force-unpin evt_123"),
+        }
+    }
+
+    #[test]
+    fn parses_archive_force_unpin_all() {
+        let cli = Cli::try_parse_from(["dreamd", "archive", "--force-unpin", "--all"]).unwrap();
+        match cli.command {
+            Some(Command::Archive(args)) => {
+                assert!(args.force_unpin);
+                assert!(args.id.is_none());
+                assert!(args.all);
+            }
+            _ => panic!("expected Archive --force-unpin --all"),
+        }
+    }
+
+    #[test]
     fn parses_watch_and_status_and_doctor() {
         for (argv, expect) in [
             (vec!["dreamd", "watch"], "watch"),
@@ -619,7 +709,7 @@ mod tests {
         let page = String::from_utf8(render_man_page().unwrap()).unwrap();
         assert!(page.contains("dreamd"), "man page must name the binary");
         for sub in [
-            "init", "dream", "mcp", "watch", "doctor", "status", "version", "reset",
+            "init", "dream", "mcp", "watch", "doctor", "status", "version", "reset", "archive",
         ] {
             assert!(
                 page.contains(sub),

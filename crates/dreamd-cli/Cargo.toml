@@ -48,3 +48,5 @@ vergen = "=9.0.6"
 [dev-dependencies]
 tempfile = "3"
 insta = { workspace = true }
+# Typed episodic fixtures for the `archive` command tests (AgentLearning/EventId).
+dreamd-protocol = { path = "../dreamd-protocol", version = "0.1.0-rc.2" }
