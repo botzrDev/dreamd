@@ -4,6 +4,7 @@
 //! first-time `.agent/` layout; `doctor` / discover paths diagnose an existing
 //! workspace without rewriting golden files.
 
+pub mod archive;
 pub mod doctor;
 pub mod dream;
 pub mod init;
