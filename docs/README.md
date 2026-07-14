@@ -30,6 +30,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | Document | Audience | Purpose |
 |---|---|---|
 | [marketing.md](./marketing.md) | Evaluators, press | Product story, positioning, the "moment it earns its name" demo |
+| [compared.md](./compared.md) | Evaluators, HN | Honest v0.1 comparison vs Mem0 / Letta Code / MCP-ref / Cline Memory Bank |
 
 ## Architecture deep-dives
 
