@@ -33,7 +33,7 @@ pub mod salience;
 pub use salience::{salience_with_context, RecurrenceContext};
 pub mod wal;
 
-pub use collector::{recall, RecallResult, SalienceCollector};
+pub use collector::{recall, score_by_salience, RecallResult, SalienceCollector};
 
 // WEG-21 / DR-118: per-user UDS writer-process lifecycle. Unix-only; the
 // `server` submodules guard themselves with `#![cfg(unix)]` where they touch

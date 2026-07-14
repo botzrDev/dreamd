@@ -84,6 +84,11 @@ pub enum Command {
     Mcp(McpArgs),
     /// BM25 × salience recall as a markdown table (DR-703).
     Recall(RecallArgs),
+    /// Top-N entries by salience with no lexical filter (DR-704).
+    ///
+    /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
+    /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
+    Score(ScoreArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
@@ -147,6 +152,21 @@ pub struct RecallArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     pub k: usize,
     /// Print per-hit salience factor breakdown (DR-204).
+    #[arg(long)]
+    pub explain: bool,
+}
+
+/// Arguments for the `dreamd score` subcommand (WEG-52 / DR-704).
+///
+/// Ranks the index by query-time salience with no lexical BM25 filter
+/// (`AllQuery`). Under that path every hit has `bm25 ≈ 1` and
+/// `score ≈ salience` — expected Tantivy/`SalienceCollector` behavior.
+#[derive(Args)]
+pub struct ScoreArgs {
+    /// Max results (default 100).
+    #[arg(short = 'n', long, default_value_t = 100)]
+    pub n: usize,
+    /// Print per-hit salience factor breakdown (same blocks as `dreamd recall --explain`).
     #[arg(long)]
     pub explain: bool,
 }
@@ -496,6 +516,34 @@ pub fn run() -> ExitCode {
                 }
             }
         }
+        Command::Score(args) => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            // Query instant: wall clock (same as recall — age_days / salience decay).
+            let now_sec = chrono::Utc::now().timestamp();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut out = stdout.lock();
+            let mut err = stderr.lock();
+            match commands::score::run(&cwd, args.n, args.explain, now_sec, &mut out, &mut err) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(commands::score::ScoreError::NotFound) => ExitCode::from(2),
+                Err(commands::score::ScoreError::IndexUnavailable(_)) => ExitCode::from(1),
+                Err(commands::score::ScoreError::Search(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+                Err(commands::score::ScoreError::Io(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => {
                 let cwd = match std::env::current_dir() {
@@ -746,6 +794,30 @@ mod tests {
                 assert!(args.explain);
             }
             _ => panic!("expected Recall"),
+        }
+    }
+
+    #[test]
+    fn parses_score_defaults_n_to_hundred() {
+        let cli = Cli::try_parse_from(["dreamd", "score"]).unwrap();
+        match cli.command {
+            Some(Command::Score(args)) => {
+                assert_eq!(args.n, 100, "CLI default -n is 100");
+                assert!(!args.explain);
+            }
+            _ => panic!("expected Score"),
+        }
+    }
+
+    #[test]
+    fn parses_score_n_and_explain() {
+        let cli = Cli::try_parse_from(["dreamd", "score", "-n", "3", "--explain"]).unwrap();
+        match cli.command {
+            Some(Command::Score(args)) => {
+                assert_eq!(args.n, 3);
+                assert!(args.explain);
+            }
+            _ => panic!("expected Score"),
         }
     }
 

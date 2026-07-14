@@ -17,7 +17,7 @@ use std::collections::BinaryHeap;
 use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, TantivyDocument, Term, Value};
 use tantivy::{DocAddress, DocId, IndexReader, Score, SegmentOrdinal, SegmentReader};
 
@@ -205,42 +205,15 @@ impl Collector for SalienceCollector {
     }
 }
 
-/// Execute a salience-scored BM25 recall query.
+/// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s and sort descending by score.
 ///
-/// `now_sec` is caller-provided so tests stay deterministic — same
-/// invariant as `LessonsFile` (drift entry `timestamps-caller-provided-no-utc-now`):
-/// no wall-clock call inside this function.
-///
-/// Layer filtering is wired as a `BooleanQuery` AND with a `TermQuery` on
-/// the `layer` field rather than inside the collector; the collector
-/// stays layer-agnostic.
-pub fn recall(
-    reader: &IndexReader,
+/// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is crate-private
+/// on [`ScoredDoc`], so hydration must stay inside this module.
+fn hydrate_scored(
+    searcher: tantivy::Searcher,
     fields: &SchemaFields,
-    query_text: &str,
-    k: usize,
-    layer: Option<Layer>,
-    now_sec: i64,
+    top_docs: Vec<ScoredDoc>,
 ) -> tantivy::Result<Vec<RecallResult>> {
-    let searcher = reader.searcher();
-
-    let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
-    let bm25_query = query_parser.parse_query(query_text)?;
-
-    let final_query: Box<dyn Query> = if let Some(l) = layer {
-        let term = Term::from_field_text(fields.layer, l.as_str());
-        let layer_query = TermQuery::new(term, IndexRecordOption::Basic);
-        Box::new(BooleanQuery::new(vec![
-            (Occur::Must, bm25_query),
-            (Occur::Must, Box::new(layer_query)),
-        ]))
-    } else {
-        bm25_query
-    };
-
-    let collector = SalienceCollector::new(k, now_sec);
-    let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
-
     let mut results = Vec::with_capacity(top_docs.len());
     for scored in top_docs {
         // `searcher.doc` is generic over `D: DocumentDeserialize` in 0.26;
@@ -293,6 +266,63 @@ pub fn recall(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(results)
+}
+
+/// Execute a salience-scored BM25 recall query.
+///
+/// `now_sec` is caller-provided so tests stay deterministic — same
+/// invariant as `LessonsFile` (drift entry `timestamps-caller-provided-no-utc-now`):
+/// no wall-clock call inside this function.
+///
+/// Layer filtering is wired as a `BooleanQuery` AND with a `TermQuery` on
+/// the `layer` field rather than inside the collector; the collector
+/// stays layer-agnostic.
+pub fn recall(
+    reader: &IndexReader,
+    fields: &SchemaFields,
+    query_text: &str,
+    k: usize,
+    layer: Option<Layer>,
+    now_sec: i64,
+) -> tantivy::Result<Vec<RecallResult>> {
+    let searcher = reader.searcher();
+
+    let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
+    let bm25_query = query_parser.parse_query(query_text)?;
+
+    let final_query: Box<dyn Query> = if let Some(l) = layer {
+        let term = Term::from_field_text(fields.layer, l.as_str());
+        let layer_query = TermQuery::new(term, IndexRecordOption::Basic);
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Must, bm25_query),
+            (Occur::Must, Box::new(layer_query)),
+        ]))
+    } else {
+        bm25_query
+    };
+
+    let collector = SalienceCollector::new(k, now_sec);
+    let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
+    hydrate_scored(searcher, fields, top_docs)
+}
+
+/// Top-`n` documents by query-time salience with no lexical filter (DR-704 / WEG-52).
+///
+/// Uses Tantivy [`AllQuery`] (every doc matches with score **1.0**) so
+/// [`SalienceCollector`] heap order is salience order. Printed `bm25 ≈ 1` and
+/// `score ≈ salience` under this path is expected — not a second collector.
+///
+/// `now_sec` is caller-provided (same invariant as [`recall`]).
+pub fn score_by_salience(
+    reader: &IndexReader,
+    fields: &SchemaFields,
+    n: usize,
+    now_sec: i64,
+) -> tantivy::Result<Vec<RecallResult>> {
+    let searcher = reader.searcher();
+    let collector = SalienceCollector::new(n, now_sec);
+    let top_docs: Vec<ScoredDoc> = searcher.search(&AllQuery, &collector)?;
+    hydrate_scored(searcher, fields, top_docs)
 }
 
 #[cfg(test)]
@@ -546,5 +576,91 @@ mod tests {
         }, {
             insta::assert_debug_snapshot!(results);
         });
+    }
+
+    /// WEG-52 / DR-704 — top-N by salience with no lexical filter.
+    /// Distinct pain/age so order is unambiguous; content strings do not share
+    /// a BM25 term, proving ranking is not lexical match.
+    #[test]
+    fn test_score_by_salience_orders_and_caps_n() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        // High salience: recent + high pain. Unique token "alpha".
+        writer
+            .add_document(doc!(
+                fields.content => "alpha unique token one",
+                fields.timestamp_sec => (NOW_SEC - DAY_SECS) as u64,
+                fields.pain => 9.0_f64,
+                fields.importance => 9.0_f64,
+                fields.recurrence => 3_u64,
+                fields.layer => Layer::Episodic.as_str(),
+                fields.last_updated_sec => (NOW_SEC - DAY_SECS) as u64,
+                fields.cited_event_count => 0_u64,
+                fields.event_id => "evt_score_high",
+                fields.skill_action => "rust::alpha",
+                fields.source_harness => "claude-code",
+            ))
+            .expect("add high");
+        // Mid salience: older + mid pain. Unique token "beta".
+        writer
+            .add_document(doc!(
+                fields.content => "beta unique token two",
+                fields.timestamp_sec => (NOW_SEC - 7 * DAY_SECS) as u64,
+                fields.pain => 6.0_f64,
+                fields.importance => 6.0_f64,
+                fields.recurrence => 2_u64,
+                fields.layer => Layer::Episodic.as_str(),
+                fields.last_updated_sec => (NOW_SEC - 7 * DAY_SECS) as u64,
+                fields.cited_event_count => 0_u64,
+                fields.event_id => "evt_score_mid",
+                fields.skill_action => "rust::beta",
+                fields.source_harness => "claude-code",
+            ))
+            .expect("add mid");
+        // Low salience: very old + low pain. Unique token "gamma".
+        writer
+            .add_document(doc!(
+                fields.content => "gamma unique token three",
+                fields.timestamp_sec => (NOW_SEC - 30 * DAY_SECS) as u64,
+                fields.pain => 2.0_f64,
+                fields.importance => 2.0_f64,
+                fields.recurrence => 1_u64,
+                fields.layer => Layer::Episodic.as_str(),
+                fields.last_updated_sec => (NOW_SEC - 30 * DAY_SECS) as u64,
+                fields.cited_event_count => 0_u64,
+                fields.event_id => "evt_score_low",
+                fields.skill_action => "rust::gamma",
+                fields.source_harness => "claude-code",
+            ))
+            .expect("add low");
+        writer.commit().expect("commit");
+        let reader = index.reader().expect("reader");
+
+        let results = score_by_salience(&reader, &fields, 2, NOW_SEC).expect("score");
+        assert_eq!(results.len(), 2, "n=2 must cap to 2 hits across all docs");
+        assert_eq!(results[0].event_id, "evt_score_high");
+        assert_eq!(results[1].event_id, "evt_score_mid");
+        assert!(
+            results[0].salience > results[1].salience,
+            "heap order must follow salience: {} > {}",
+            results[0].salience,
+            results[1].salience
+        );
+        // AllQuery scores 1.0 — bm25 flat; score ≈ salience.
+        for r in &results {
+            assert!(
+                (r.bm25 - 1.0).abs() < 1e-5,
+                "AllQuery bm25≈1, got {}",
+                r.bm25
+            );
+            assert!(
+                (r.score - r.salience).abs() < 1e-5,
+                "score≈salience under AllQuery: {} vs {}",
+                r.score,
+                r.salience
+            );
+            assert!(!r.event_id.is_empty(), "event_id must be hydrated");
+        }
     }
 }

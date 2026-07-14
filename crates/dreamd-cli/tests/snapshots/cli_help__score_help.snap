@@ -1,0 +1,21 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"score\")"
+---
+Top-N entries by salience with no lexical filter (DR-704).
+
+Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
+
+Usage: score [OPTIONS]
+
+Options:
+  -n, --n <N>
+          Max results (default 100)
+          
+          [default: 100]
+
+      --explain
+          Print per-hit salience factor breakdown (same blocks as `dreamd recall --explain`)
+
+  -h, --help
+          Print help (see a summary with '-h')
