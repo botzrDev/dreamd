@@ -82,6 +82,8 @@ pub enum Command {
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),
+    /// BM25 × salience recall as a markdown table (DR-703).
+    Recall(RecallArgs),
     /// Reset scratch state (DR-113). Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
@@ -134,6 +136,19 @@ pub struct McpArgs {
     /// the directory that contains `.agent/`.
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
+}
+
+/// Arguments for the `dreamd recall` subcommand (WEG-51 / DR-703).
+#[derive(Args)]
+pub struct RecallArgs {
+    /// Free-text query (BM25 over episodic content).
+    pub query: String,
+    /// Max results (default 10 — CLI demo default; HTTP/MCP stay at 5).
+    #[arg(short = 'k', long, default_value_t = 10)]
+    pub k: usize,
+    /// Print per-hit salience factor breakdown (DR-204).
+    #[arg(long)]
+    pub explain: bool,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -441,6 +456,46 @@ pub fn run() -> ExitCode {
             }
             commands::mcp::run(&effective_root)
         }
+        Command::Recall(args) => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            // Query instant: wall clock. Recall derives age_days / salience decay
+            // live from this, so — unlike `dreamd dream` — it is not byte-stable
+            // and takes no SOURCE_DATE_EPOCH override.
+            let now_sec = chrono::Utc::now().timestamp();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut out = stdout.lock();
+            let mut err = stderr.lock();
+            match commands::recall::run(
+                &cwd,
+                &args.query,
+                args.k,
+                args.explain,
+                now_sec,
+                &mut out,
+                &mut err,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                // Usage / precondition — the user must fix the invocation or init first.
+                Err(commands::recall::RecallError::NotFound) => ExitCode::from(2),
+                // Runtime — the index is not ready, or a search/IO failure.
+                Err(commands::recall::RecallError::IndexUnavailable(_)) => ExitCode::from(1),
+                Err(commands::recall::RecallError::Search(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+                Err(commands::recall::RecallError::Io(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => {
                 let cwd = match std::env::current_dir() {
@@ -664,6 +719,33 @@ mod tests {
                 assert!(args.all);
             }
             _ => panic!("expected Archive --force-unpin --all"),
+        }
+    }
+
+    #[test]
+    fn parses_recall_defaults_k_to_ten() {
+        let cli = Cli::try_parse_from(["dreamd", "recall", "axum error"]).unwrap();
+        match cli.command {
+            Some(Command::Recall(args)) => {
+                assert_eq!(args.query, "axum error");
+                assert_eq!(args.k, 10, "CLI default -k is 10 (HTTP/MCP stay at 5)");
+                assert!(!args.explain);
+            }
+            _ => panic!("expected Recall"),
+        }
+    }
+
+    #[test]
+    fn parses_recall_k_and_explain() {
+        let cli =
+            Cli::try_parse_from(["dreamd", "recall", "tokio", "-k", "3", "--explain"]).unwrap();
+        match cli.command {
+            Some(Command::Recall(args)) => {
+                assert_eq!(args.query, "tokio");
+                assert_eq!(args.k, 3);
+                assert!(args.explain);
+            }
+            _ => panic!("expected Recall"),
         }
     }
 

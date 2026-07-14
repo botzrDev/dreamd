@@ -710,6 +710,7 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
+ "tantivy",
  "tempfile",
  "tokio",
  "toml",
