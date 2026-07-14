@@ -1,0 +1,23 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"recall\")"
+---
+BM25 × salience recall as a markdown table (DR-703)
+
+Usage: recall [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>
+          Free-text query (BM25 over episodic content)
+
+Options:
+  -k, --k <K>
+          Max results (default 10 — CLI demo default; HTTP/MCP stay at 5)
+          
+          [default: 10]
+
+      --explain
+          Print per-hit salience factor breakdown (DR-204)
+
+  -h, --help
+          Print help

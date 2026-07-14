@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod dream;
 pub mod init;
 pub mod mcp;
+pub mod recall;
 pub mod reset;
 pub mod status;
 pub mod version;

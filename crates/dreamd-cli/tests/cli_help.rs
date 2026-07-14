@@ -78,6 +78,11 @@ fn snapshot_doctor_help() {
 }
 
 #[test]
+fn snapshot_recall_help() {
+    assert_snapshot!("recall_help", subcommand_help("recall"));
+}
+
+#[test]
 fn snapshot_watch_help() {
     assert_snapshot!("watch_help", subcommand_help("watch"));
 }

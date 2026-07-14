@@ -24,6 +24,11 @@ workspace = true
 dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.2" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
+# WEG-51 / DR-703 — `dreamd recall` opens the per-project index read-only with
+# `Index::open_in_dir` (never `TantivyIndexHandle::open`, which spawns a
+# competing indexer). Pinned to match dreamd-core (0.26); already linked into
+# the binary transitively via dreamd-core, so this direct edge adds no weight.
+tantivy = "0.26"
 clap_mangen = "0.2"
 const_format = "0.2"
 serde = { version = "1", features = ["derive"] }
