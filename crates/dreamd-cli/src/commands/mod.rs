@@ -11,6 +11,7 @@ pub mod init;
 pub mod mcp;
 pub mod recall;
 pub mod reset;
+pub mod score;
 pub mod status;
 pub mod version;
 pub mod watch;

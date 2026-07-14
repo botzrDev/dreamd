@@ -13,6 +13,7 @@ Commands:
   init     Scaffold per-project .agent/ store and register it with the daemon
   mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
   recall   BM25 × salience recall as a markdown table (DR-703)
+  score    Top-N entries by salience with no lexical filter (DR-704)
   reset    Reset scratch state (DR-113). Today only `workspace` is supported
   status   Print daemon liveness, resolved project, last dream cycle, and recent log
   watch    Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
