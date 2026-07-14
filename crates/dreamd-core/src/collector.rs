@@ -54,6 +54,10 @@ pub struct RecallResult {
     pub bm25: f64,
     /// Salience multiplier at query time, for the `--explain` formatter (DR-703).
     pub salience: f64,
+    /// Event id hydrated from the `STORED` `event_id` field (WEG-45 / DR-703).
+    /// Empty string when the document predates the field or carries no id;
+    /// surfaced as the `id` column by the `dreamd recall` formatter (WEG-51).
+    pub event_id: String,
 }
 
 /// Per-doc bookkeeping kept on the heap. Fast-field values are cached
@@ -262,6 +266,11 @@ pub fn recall(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let event_id = doc
+            .get_first(fields.event_id)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         results.push(RecallResult {
             score: scored.score.0,
             bm25: scored.bm25,
@@ -274,6 +283,7 @@ pub fn recall(
             layer: layer_val,
             skill_action,
             source_harness,
+            event_id,
         });
     }
 
@@ -322,6 +332,38 @@ mod tests {
         writer.commit().expect("commit");
         let reader = index.reader().expect("reader");
         (index, fields, reader)
+    }
+
+    #[test]
+    fn test_event_id_hydrated() {
+        // `event_id` is `STORED` in the schema (WEG-45); recall() must hydrate it
+        // onto the result so the DR-703 `id` column is real (WEG-51 / DR-703).
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        writer
+            .add_document(doc!(
+                fields.content => "axum error handling pattern",
+                fields.timestamp_sec => (NOW_SEC - DAY_SECS) as u64,
+                fields.pain => 8.0_f64,
+                fields.importance => 9.0_f64,
+                fields.recurrence => 3_u64,
+                fields.layer => Layer::Episodic.as_str(),
+                fields.last_updated_sec => (NOW_SEC - DAY_SECS) as u64,
+                fields.cited_event_count => 0_u64,
+                fields.event_id => "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                fields.skill_action => "rust::axum::error_handling",
+                fields.source_harness => "claude-code",
+            ))
+            .expect("add doc");
+        writer.commit().expect("commit");
+        let reader = index.reader().expect("reader");
+        let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].event_id, "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "recall must hydrate the STORED event_id onto RecallResult"
+        );
     }
 
     #[test]

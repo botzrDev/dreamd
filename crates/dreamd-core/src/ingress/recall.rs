@@ -61,6 +61,7 @@ mod tests {
             recurrence: 2,
             skill_action: "rust::tokio::async".to_string(),
             source_harness: "cursor".to_string(),
+            event_id: "evt_test".to_string(),
         }]);
 
         assert_eq!(resp.results.len(), 1);

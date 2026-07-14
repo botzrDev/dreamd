@@ -1,6 +1,6 @@
 ---
 source: crates/dreamd-core/src/collector.rs
-assertion_line: 503
+assertion_line: 547
 expression: results
 ---
 [
@@ -16,6 +16,7 @@ expression: results
         source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
+        event_id: "",
     },
     RecallResult {
         score: <f64>,
@@ -29,6 +30,7 @@ expression: results
         source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
+        event_id: "",
     },
     RecallResult {
         score: <f64>,
@@ -42,5 +44,6 @@ expression: results
         source_harness: "claude-code",
         bm25: <f64>,
         salience: <f64>,
+        event_id: "",
     },
 ]
