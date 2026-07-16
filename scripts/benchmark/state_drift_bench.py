@@ -577,18 +577,11 @@ class ZepAdapter(MemoryAdapter):
     def __init__(self) -> None:
         self.api_key = os.environ.get("ZEP_API_KEY", "")
         self.wired = bool(self.api_key)
-        self._user_id = ""
+        self._graph_id = ""
 
     def reset(self, run_id: str) -> None:
-        self._user_id = f"bench-{run_id}"
-        if not self.wired:
-            return
-        self._request(
-            "POST",
-            "/api/v2/users",
-            {"user_id": self._user_id, "email": f"{self._user_id}@bench.local", "first_name": "Bench"},
-            ignore_exists=True,
-        )
+        # Per-trial graph isolation; user create often 403 on restricted keys.
+        self._graph_id = f"bench-{run_id}"
 
     def _request(
         self,
@@ -604,6 +597,8 @@ class ZepAdapter(MemoryAdapter):
             headers={
                 "Authorization": f"Api-Key {self.api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "dreamd-state-drift-bench/0.1 (ANTH-20)",
+                "Accept": "application/json",
             },
             method=method,
         )
@@ -614,7 +609,10 @@ class ZepAdapter(MemoryAdapter):
         except urllib.error.HTTPError as exc:
             if ignore_exists and exc.code in (400, 409):
                 return {}
-            raise
+            body = exc.read().decode(errors="replace")
+            raise urllib.error.HTTPError(
+                exc.url, exc.code, f"{exc.reason}: {body[:300]}", exc.headers, None
+            ) from exc
 
     def ingest(self, scenario: Scenario) -> None:
         for turn in scenario.turns:
@@ -622,7 +620,7 @@ class ZepAdapter(MemoryAdapter):
                 "POST",
                 "/api/v2/graph",
                 {
-                    "user_id": self._user_id,
+                    "graph_id": self._graph_id,
                     "type": "text",
                     "data": turn.content,
                 },
@@ -634,7 +632,7 @@ class ZepAdapter(MemoryAdapter):
             "POST",
             "/api/v2/graph/search",
             {
-                "user_id": self._user_id,
+                "graph_id": self._graph_id,
                 "query": scenario.query,
                 "scope": "edges",
                 "limit": 5,
@@ -764,13 +762,28 @@ def gate_verdict(reports: list[SystemReport]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def load_env_file(path: Path) -> None:
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:]
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip().strip("'").strip('"'))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="State-Drift benchmark bake-off gate")
+    parser.add_argument("--env-file", type=Path, help="Source export KEY=VAL lines before run")
     parser.add_argument("--demo", action="store_true", help="Reference/floor systems only")
     parser.add_argument("--verify-determinism", action="store_true", help="Determinism replay check")
     parser.add_argument("--bakeoff", action="store_true", help="Run dreamd vs Mem0 vs Zep gate")
     parser.add_argument("--trials", type=int, default=DEFAULT_TRIALS, help="Trials per scenario")
     args = parser.parse_args(argv)
+
+    if args.env_file:
+        load_env_file(args.env_file)
 
     scenarios = bakeoff_suite()
 
