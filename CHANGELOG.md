@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Documented HTTP API stability policy: `/api/v1/*` is **not** a stable interface in v0.1. Breaking changes to request shapes, response shapes, and status codes may land between v0.1.x releases, each called out here; stabilization is intended at v0.2. The on-disk `.agent/` contract is governed separately and remains frozen for v0.1 (see `SPEC.md`). Full rationale in `docs/architecture.md` § API stability (WEG-90 / DR-904).
+
 ## [0.1.0-rc.3] - 2026-07-13
 
 ### Added
