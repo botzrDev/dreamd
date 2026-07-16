@@ -31,6 +31,27 @@ Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/
 - [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md) — on-disk `.agent/` contract
 - [docs/troubleshooting.md](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md) — common failures
 
+## Official MCP Registry
+
+`server.json` holds the metadata for the [official MCP Registry](https://registry.modelcontextprotocol.io) entry `io.github.botzrDev/dreamd`. The registry serves metadata only — it points at the npm package, so the matching version must already be public on npm before publishing.
+
+Anyone (including CI) can check the metadata. Validation is non-mutating: it neither authenticates nor writes to the registry.
+
+```sh
+# from packages/dreamd-mcp
+mcp-publisher validate server.json
+```
+
+Publication is owner-only. `mcp-publisher login github` must authenticate as a GitHub identity authorized for the `botzrDev` namespace — the registry derives the `io.github.botzrDev/*` namespace from that identity and rejects the publish otherwise.
+
+```sh
+mcp-publisher login github
+mcp-publisher publish server.json
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.botzrDev%2Fdreamd"
+```
+
+The `curl` query is read-only and confirms the entry is live. Publishing is deliberately not automated in CI — no workflow holds registry credentials.
+
 ## Override (development only)
 
 Set `DREAMD_BIN=/path/to/dreamd` to skip download and use a local build instead of the cached release binary. Because this bypasses sha256 verification, you must also set `DREAMD_BIN_ALLOW_UNVERIFIED=1` to confirm — `DREAMD_BIN` on its own is refused.
