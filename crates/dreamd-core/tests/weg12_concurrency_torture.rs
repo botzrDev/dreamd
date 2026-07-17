@@ -20,7 +20,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
