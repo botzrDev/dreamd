@@ -52,6 +52,7 @@ To append:
 
 ## Companion docs
 
+- [`../../docs/adapters.md`](../../docs/adapters.md) — authoring hub (MCP-first + doc-first patterns)
 - [`SKILL.md`](../../SKILL.md) — shared conventions with Claude Code
 - [`GUIDE.md`](../../GUIDE.md) — full walkthrough including multi-harness
 - [`../claude-code/README.md`](../claude-code/README.md) — same `.agent/` folder, different harness

@@ -55,6 +55,7 @@ To log a learning:
 
 ## Companion docs
 
+- Authoring an adapter (MCP-first + doc-first patterns): [`../../docs/adapters.md`](../../docs/adapters.md)
 - Tool naming and `skill_action` conventions: [`SKILL.md`](../../SKILL.md)
 - Full tutorial: [`GUIDE.md`](../../GUIDE.md)
 - Cursor adapter (same `.agent/` folder): [`../cursor/README.md`](../cursor/README.md)
