@@ -109,13 +109,18 @@ Checklist a maintainer works before bumping:
    did, the index must be rebuilt from the durable JSONL (`episodic/AGENT_LEARNINGS.jsonl`),
    which remains the source of truth; the Tantivy index is a derived cache.
 4. **Schema-version manifest gate.** The per-project manifest at
-   `<agent_root>/.dreamd/index_manifest.json` carries `schema_version: "index/1.0"`
-   (see `../architecture.md`). WEG-42 writes it on first index init; WEG-49 enforces it
-   on daemon startup — a manifest *older* than the binary logs a `NeedsMigration`
-   warning (the `dreamd migrate` command ships in DR-108 / v0.1.1), and a manifest
-   *newer* than the binary aborts startup (`ManifestVersionError::TooNew`). A bump that
-   requires a re-index must also bump `schema_version` so this gate fires instead of
-   silently serving a stale or incompatible index.
+   `<project>/.agent/.dreamd/index_manifest.json` carries the schema version from
+   `dreamd-core::index::SCHEMA_VERSION` (`index.rs:24` — `index/1.3` at time of
+   writing; read the constant, this line goes stale on the next bump). WEG-42
+   writes it on first index init; WEG-49 enforces it on daemon startup. A manifest
+   *older* than the binary (`NeedsMigration`) makes `TantivyIndexHandle::open`
+   rebuild the derived index from `episodic/AGENT_LEARNINGS.jsonl` in place,
+   resetting the replay watermark so the full JSONL re-indexes rather than the
+   tail; no `dreamd migrate` step is involved (see `../architecture.md`). A
+   manifest *newer* than the binary aborts startup with
+   `ManifestVersionError::TooNew` — a hard error, not a rebuild. A bump that
+   requires a re-index must also bump `SCHEMA_VERSION` so this gate fires instead
+   of silently serving a stale or incompatible index.
 5. **Lock-file discipline unchanged.** Never `rm` `.tantivy-writer.lock` /
    `.tantivy-meta.lock` across a bump (WEG-24-A) — the kernel handles advisory flock.
 

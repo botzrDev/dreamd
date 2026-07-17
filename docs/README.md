@@ -73,6 +73,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 |---|---|---|
 | [../PERF.md](../PERF.md) | Contributors | Performance benchmark methodology (WIP) |
 | [../CHANGELOG.md](../CHANGELOG.md) | Users, contributors | Release history |
+| [v0.1.1-scope.md](./v0.1.1-scope.md) | Maintainers | Frozen v0.1.1 contents, review window, reserve, and cut order |
 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Contributors | Community standards |
 | [security.md](./security.md) | Redirect | Points to [../SECURITY.md](../SECURITY.md) |
 | [../tests/README.md](../tests/README.md) | Contributors | Workspace test fixtures |
