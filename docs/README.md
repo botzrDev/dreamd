@@ -43,6 +43,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 
 | Document | Audience | Purpose |
 |---|---|---|
+| [adapters.md](./adapters.md) | Harness maintainers / third parties | How to author an adapter (MCP-first + doc-first) |
 | [../adapters/claude-code/README.md](../adapters/claude-code/README.md) | Claude Code users | MCP config and setup |
 | [../adapters/cursor/README.md](../adapters/cursor/README.md) | Cursor users | MCP config, daemon recommendation, agent rule |
 | [../adapters/cline/README.md](../adapters/cline/README.md) | Cline users | MCP config and verification steps |

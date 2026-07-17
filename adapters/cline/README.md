@@ -102,4 +102,5 @@ See [`SKILL.md`](../../SKILL.md) for `skill_action` naming (`rust::error_handlin
 
 ## Companion docs
 
+- [`../../docs/adapters.md`](../../docs/adapters.md) — authoring hub (MCP-first + doc-first patterns)
 - [`GUIDE.md`](../../GUIDE.md) — section 6 (multi-harness)

@@ -162,3 +162,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** `episodic::scan` skips mid-file corrupt `\n`-terminated lines but treats a final no-`\n` fragment as a torn tail (WEG-378).
 - **How to apply:** Prefer `dreamd_core::episodic::{read_all, assess_log_health}` over ad-hoc `lines()` alone; also assert unique `id`s.
 - **Cross-refs:** none
+
+### npm-dreamd-mcp-unscoped
+
+- **Rule:** The npx package is unscoped `dreamd-mcp`, never `@dataprime1/dreamd-mcp`. Prefer floating `npx dreamd-mcp` in new docs; adapter `.mcp.json.example` pins may lag `packages/dreamd-mcp/package.json` — bump pins only in an explicit pin-sweep ticket.
+- **Why:** Linear AC for WEG-91 still cited `@dataprime1/…`; live `package.json` is `"name": "dreamd-mcp"` with `mcpName: "io.github.botzrDev/dreamd"`. As of WEG-91, examples pinned `rc.2` while the package was already `rc.3`.
+- **How to apply:** Grep for `@dataprime1/dreamd-mcp` before shipping adapter/docs copy. Check version via `packages/dreamd-mcp/package.json` or `npm view dreamd-mcp version`.
+- **Cross-refs:** none
