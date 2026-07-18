@@ -25,6 +25,7 @@ pub mod io;
 pub mod layout;
 pub mod lessons;
 pub mod mcp;
+pub mod migrate;
 pub mod observability;
 pub mod privacy;
 pub mod redaction;
@@ -34,6 +35,7 @@ pub use salience::{salience_with_context, RecurrenceContext};
 pub mod wal;
 
 pub use collector::{recall, score_by_salience, RecallResult, SalienceCollector};
+pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry};
 
 // WEG-21 / DR-118: per-user UDS writer-process lifecycle. Unix-only; the
 // `server` submodules guard themselves with `#![cfg(unix)]` where they touch

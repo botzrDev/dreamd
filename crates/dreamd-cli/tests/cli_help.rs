@@ -1,9 +1,10 @@
 //! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
 //!
-//! Fourteen snapshots, all bound directly to in-process symbols (no subprocess):
-//! top-level `--help`, each subcommand `--help` (archive, init, dream, mcp, doctor,
-//! recall, score, watch, reset, status, version), nested `reset workspace --help`,
-//! plus the WEG-18 version output contract (`VERSION_SHORT` and `render_long()`).
+//! Snapshots, all bound directly to in-process symbols (no subprocess):
+//! top-level `--help`, each subcommand `--help` (archive, init, dream, mcp, migrate,
+//! doctor, recall, score, watch, reset, status, version), nested
+//! `reset workspace --help`, plus the WEG-18 version output contract
+//! (`VERSION_SHORT` and `render_long()`).
 //!
 //! Help snapshots are deterministic clap output and use no filters. Version
 //! output snapshots carry vergen-baked SHA/date/triple that drift per-build; they go
@@ -70,6 +71,11 @@ fn snapshot_dream_help() {
 #[test]
 fn snapshot_mcp_help() {
     assert_snapshot!("mcp_help", subcommand_help("mcp"));
+}
+
+#[test]
+fn snapshot_migrate_help() {
+    assert_snapshot!("migrate_help", subcommand_help("migrate"));
 }
 
 #[test]

@@ -12,6 +12,7 @@ Commands:
   dream    Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
   init     Scaffold per-project .agent/ store and register it with the daemon
   mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
+  migrate  Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
   recall   BM25 × salience recall as a markdown table (DR-703)
   score    Top-N entries by salience with no lexical filter (DR-704)
   reset    Reset scratch state (DR-113). Today only `workspace` is supported
