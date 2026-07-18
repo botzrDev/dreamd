@@ -82,6 +82,8 @@ pub enum Command {
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),
+    /// Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op).
+    Migrate(MigrateArgs),
     /// BM25 × salience recall as a markdown table (DR-703).
     Recall(RecallArgs),
     /// Top-N entries by salience with no lexical filter (DR-704).
@@ -141,6 +143,23 @@ pub struct McpArgs {
     /// the directory that contains `.agent/`.
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
+}
+
+/// Arguments for the `dreamd migrate` subcommand (WEG-133 / DR-108).
+///
+/// `--from` / `--to` are **episodic record** schema strings
+/// (`dreamd_protocol::RECORD_SCHEMA_VERSION`), e.g. `1.0.0` — not the daemon
+/// `state.json` schema the `dreamd version` display line prints, and not the
+/// Tantivy index schema. At v0.1 the only registered path is the identity
+/// `1.0.0 → 1.0.0` (a no-op).
+#[derive(Args)]
+pub struct MigrateArgs {
+    /// Source episodic record schema version (e.g. `1.0.0`).
+    #[arg(long)]
+    pub from: String,
+    /// Target episodic record schema version (e.g. `1.0.0`).
+    #[arg(long)]
+    pub to: String,
 }
 
 /// Arguments for the `dreamd recall` subcommand (WEG-51 / DR-703).
@@ -476,6 +495,35 @@ pub fn run() -> ExitCode {
             }
             commands::mcp::run(&effective_root)
         }
+        Command::Migrate(args) => {
+            let cwd = match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dreamd: error — could not read current directory: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut out = stdout.lock();
+            let mut err = stderr.lock();
+            match commands::migrate::run(&cwd, &args.from, &args.to, &mut out, &mut err) {
+                Ok(()) => ExitCode::SUCCESS,
+                // Usage — no store to migrate; run `dreamd init` first.
+                Err(commands::migrate::MigrateError::NotFound) => ExitCode::from(2),
+                // Runtime — unregistered path (already reported inside run).
+                Err(commands::migrate::MigrateError::NoMigration { .. }) => ExitCode::from(1),
+                // Runtime — a registered transform or a `.bak`/IO write failed.
+                Err(commands::migrate::MigrateError::Apply(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+                Err(commands::migrate::MigrateError::Io(e)) => {
+                    eprintln!("dreamd: error — {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Recall(args) => {
             let cwd = match std::env::current_dir() {
                 Ok(p) => p,
@@ -771,6 +819,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_migrate_from_and_to() {
+        let cli =
+            Cli::try_parse_from(["dreamd", "migrate", "--from", "1.0.0", "--to", "1.0.0"]).unwrap();
+        match cli.command {
+            Some(Command::Migrate(args)) => {
+                assert_eq!(args.from, "1.0.0");
+                assert_eq!(args.to, "1.0.0");
+            }
+            _ => panic!("expected Migrate"),
+        }
+    }
+
+    #[test]
     fn parses_recall_defaults_k_to_ten() {
         let cli = Cli::try_parse_from(["dreamd", "recall", "axum error"]).unwrap();
         match cli.command {
@@ -864,6 +925,7 @@ mod tests {
         assert!(page.contains("dreamd"), "man page must name the binary");
         for sub in [
             "init", "dream", "mcp", "watch", "doctor", "status", "version", "reset", "archive",
+            "migrate",
         ] {
             assert!(
                 page.contains(sub),

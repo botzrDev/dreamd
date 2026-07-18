@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `dreamd migrate --from <ver> --to <ver>` — episodic schema migration command (WEG-133 / DR-108). v0.1 ships a stub: the only registered path is the identity `1.0.0 → 1.0.0` (a no-op success), backed by a `dreamd-core::migrate` trait + registry so v0.1.1 can plug in real transforms. `--from`/`--to` are episodic record schema strings (`RECORD_SCHEMA_VERSION`), distinct from the daemon `state.json` schema and the Tantivy index schema. On the no-op path it copies present durable files (`AGENT_LEARNINGS.jsonl`, `state.json`) to sibling `.bak` files; the self-healing index is never rewritten or backed up. Documented in `docs/migrate.md`.
 - Documented HTTP API stability policy: `/api/v1/*` is **not** a stable interface in v0.1. Breaking changes to request shapes, response shapes, and status codes may land between v0.1.x releases, each called out here; stabilization is intended at v0.2. The on-disk `.agent/` contract is governed separately and remains frozen for v0.1 (see `SPEC.md`). Full rationale in `docs/architecture.md` § API stability (WEG-90 / DR-904).
 - Root `Justfile` with `dev` / `test` / `bench` / `release` / `lint` recipes wrapping the canonical cargo invocations for common contributor loops; documented in `CONTRIBUTING.md`. Contributor convenience only — CI still calls cargo directly (WEG-33 / DR-005).
 

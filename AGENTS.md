@@ -87,7 +87,8 @@ every request. Do not bind to TCP without `--insecure`.
 ## Schema
 
 Every persisted record carries `schema_version: "1.0.0"`. Before changing the schema,
-add a `dreamd migrate` path (not yet implemented). `skill_action` is the dream-cycle clustering key — segments match `[a-z0-9_]`, joined by `::`, language-first (e.g. `rust::error_handling::axum_rejection`).
+register a real transform in `dreamd-core::migrate` (WEG-133 shipped the stub:
+`dreamd migrate --from 1.0.0 --to 1.0.0` only). `skill_action` is the dream-cycle clustering key — segments match `[a-z0-9_]`, joined by `::`, language-first (e.g. `rust::error_handling::axum_rejection`).
 
 ---
 
@@ -117,7 +118,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Lint command:** `cargo clippy --workspace --all-targets --all-features -- -D warnings` (also `cargo fmt --all -- --check`)
 **Test command:** `cargo test --workspace` / `cargo test --all-features --workspace` (CI)
 **Test convention:** unit tests in `src/**`; integration tests in `crates/*/tests/` (often `wegNN_*.rs`); unix-only suites use `#![cfg(unix)]`; helper bins under `crates/dreamd-core/tests/bin/`
-**Migration dir:** n/a (JSONL + `schema_version: "1.0.0"`; `dreamd migrate` not implemented)
+**Migration dir:** n/a (JSONL + `schema_version: "1.0.0"`; `dreamd migrate` stub via `dreamd-core::migrate` / WEG-133)
 **Spec dir:** `assignments/`, naming `WEG-<n>.v2.md` (v1 often Linear-only; leave v1 intact when a local file exists)
 **Spec v2 convention:** `assignments/WEG-*.v2.md` next to any local v1; established by existing specs
 **Memory location:** `AGENTS.md` (this file) — drift catalog section below
@@ -168,4 +169,14 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Rule:** The npx package is unscoped `dreamd-mcp`, never `@dataprime1/dreamd-mcp`. Prefer floating `npx dreamd-mcp` in new docs; adapter `.mcp.json.example` pins may lag `packages/dreamd-mcp/package.json` — bump pins only in an explicit pin-sweep ticket.
 - **Why:** Linear AC for WEG-91 still cited `@dataprime1/…`; live `package.json` is `"name": "dreamd-mcp"` with `mcpName: "io.github.botzrDev/dreamd"`. As of WEG-91, examples pinned `rc.2` while the package was already `rc.3`.
 - **How to apply:** Grep for `@dataprime1/dreamd-mcp` before shipping adapter/docs copy. Check version via `packages/dreamd-mcp/package.json` or `npm view dreamd-mcp version`.
+- **Cross-refs:** none
+
+### migrate-from-to-is-record-schema
+
+- **Rule:** `dreamd migrate --from` / `--to` take **episodic** `RECORD_SCHEMA_VERSION` (`"1.0.0"`), never daemon `STATE_SCHEMA_VERSION` (`"1.0"` / `dreamd version` display), never `index::SCHEMA_VERSION` (`"index/1.3"`). Index self-heals; migrate does not bak or rewrite it.
+- **Why:** Linear WEG-133 AC said `"1.0"`; three independent streams exist on disk. Registering `"1.0"→"1.0"` would teach the wrong token.
+- **How to apply:**
+  - Registry identity via `dreamd_protocol::RECORD_SCHEMA_VERSION` (see `dreamd-core::migrate`).
+  - CLI `.bak` only `episodic_jsonl()` + `state_json()`; report index read-only.
+  - Docs: `docs/migrate.md`.
 - **Cross-refs:** none
