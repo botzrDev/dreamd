@@ -58,10 +58,11 @@ In-repo patterns to copy from:
   — a documentation-first rule file already in the tree.
 - [`../adapters/claude-code/AGENTS.md.snippet`](../adapters/claude-code/AGENTS.md.snippet)
   — a drop-in Claude Code snippet.
+- [`../adapters/aider/CONVENTIONS.md.template`](../adapters/aider/CONVENTIONS.md.template)
+  — a documentation-first CONVENTIONS.md template for Aider (no MCP tools; append via UDS HTTP).
 
-Describing how to add a harness that isn't shipped yet (Aider, Goose, Continue, …)
-is fine. Do **not** claim an `adapters/<harness>/` tree exists before it does — an
-Aider adapter, for example, is future work (WEG-128), not a shipped directory.
+Describing how to add a harness that isn't shipped yet (Goose, Continue, …) is fine.
+Do **not** claim an `adapters/<harness>/` tree exists before it does.
 
 ## Locked tool names
 

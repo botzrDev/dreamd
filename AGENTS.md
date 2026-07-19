@@ -180,3 +180,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
   - CLI `.bak` only `episodic_jsonl()` + `state_json()`; report index read-only.
   - Docs: `docs/migrate.md`.
 - **Cross-refs:** none
+
+### doc-first-append-via-uds-learn
+
+- **Rule:** Non-MCP / documentation-pattern adapters teach durable append via UDS `POST /api/v1/learn` (placeholder `EventId` / `timestamp` / `schema_version`), never hand-edit or `echo >>` of `AGENT_LEARNINGS.jsonl`. There is no `dreamd learn` CLI in v0.1.
+- **Why:** Linear WEG-128 AC said “append … JSONL directly”; that fights `coordinator-not-mutex-file` and `agentlearning-placeholder-id`. Shipped fix: `adapters/aider/CONVENTIONS.md.template` + README.
+- **How to apply:**
+  - Copy curl shape from `docs/http-api.md` `POST /api/v1/learn`; set reserved `source_harness` (e.g. `"aider"`).
+  - Recall = `/read` (or equivalent) of `LESSONS.md` / JSONL; append requires a live daemon (`dreamd watch` preferred default).
+  - Anti-pattern: any new adapter doc that instructs editing the JSONL file by hand.
+- **Cross-refs:** `coordinator-not-mutex-file`, `agentlearning-placeholder-id`

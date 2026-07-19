@@ -1,0 +1,69 @@
+## dreamd — cross-session memory
+
+This project uses [dreamd](https://github.com/botzrDev/dreamd) for cross-session memory. What you learn here persists for the next agent.
+
+### Session start
+
+```bash
+# Recall past learnings before starting work
+/read .agent/semantic/LESSONS.md
+
+# Optional — raw episodic log for deeper context (read only)
+/read .agent/episodic/AGENT_LEARNINGS.jsonl
+```
+
+### Logging a new learning
+
+When you discover something worth remembering, append it via the dreamd HTTP API over the Unix socket. **Never hand-edit `AGENT_LEARNINGS.jsonl` with an editor or `echo >>`** — the daemon owns that file.
+
+```bash
+PROJECT=/absolute/path/to/your-project
+
+curl --unix-socket ~/.agent/dreamd.sock \
+  -X POST \
+  -H "X-Agent-Root: $PROJECT" \
+  -H "Content-Type: application/json" \
+  -H "X-Client-Dedup-Key: <first ~60 chars of content>" \
+  -d '{
+    "schema_version": "1.0.0",
+    "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "timestamp": "2026-07-19T12:00:00Z",
+    "pain": 5.0,
+    "importance": 7.0,
+    "skill_action": "language::domain::specific",
+    "source_harness": "aider",
+    "content": "What was learned, in one clear sentence."
+  }' \
+  http://localhost/api/v1/learn
+```
+
+- `pain` and `importance` are 0.0–10.0. Higher = more salient.
+- `skill_action` follows the `language::domain::specific` convention — see [SPEC.md](../../SPEC.md) (`AgentLearning` table) for full rules. Lowercase `[a-z0-9_]` segments joined by `::`. Examples: `rust::error_handling`, `python::api_design`, `typescript::types::branded`.
+- `source_harness` is `"aider"`. This lets dreamd attribute learnings across harnesses.
+- `id` and `schema_version` are placeholders — the daemon overwrites them. `timestamp` is also overwritten at durable write.
+- `X-Client-Dedup-Key` is optional. If two appends share the same key in the same project, the second returns the original `id` with `"deduplicated": true`.
+- The daemon must be running (`dreamd watch` or an active MCP session from another harness) for the `curl` to succeed. Without it, you get `connection refused`.
+
+### Example
+
+```bash
+PROJECT=/home/you/your-project
+
+curl --unix-socket ~/.agent/dreamd.sock \
+  -X POST \
+  -H "X-Agent-Root: $PROJECT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version": "1.0.0",
+    "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "timestamp": "2026-07-19T12:00:00Z",
+    "pain": 8.0,
+    "importance": 9.0,
+    "skill_action": "rust::testing::integration_test_setup",
+    "source_harness": "aider",
+    "content": "Integration tests go in tests/ at crate root, one file per feature area."
+  }' \
+  http://localhost/api/v1/learn
+```
+
+Expect HTTP `201 Created` with `{"id":"evt_…","timestamp":"…","deduplicated":false}`.
