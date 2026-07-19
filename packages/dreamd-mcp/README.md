@@ -8,13 +8,13 @@ Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyp
 
 ```sh
 # 1. Scaffold .agent/ into your project
-npx dreamd-mcp@0.1.0-rc.2 init
+npx dreamd-mcp@0.1.0-rc.3 init
 
 # 2. Start a shared daemon (recommended when multiple agents write)
-npx dreamd-mcp@0.1.0-rc.2 watch
+npx dreamd-mcp@0.1.0-rc.3 watch
 
 # 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
-npx dreamd-mcp@0.1.0-rc.2
+npx dreamd-mcp@0.1.0-rc.3
 ```
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).

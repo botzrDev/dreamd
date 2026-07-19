@@ -2,14 +2,14 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.2.
+> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.3.
 
 ## 1. Init the project store
 
 ```bash
 cd ~/your-project
 dreamd init
-# or: npx dreamd-mcp@0.1.0-rc.2 init
+# or: npx dreamd-mcp@0.1.0-rc.3 init
 ```
 
 Cline must open a project that already has `.agent/`. Without it, `append_node` errors with `coordinator unavailable: no agent root found`.
@@ -26,7 +26,7 @@ Copy [`.mcp.json.example`](./.mcp.json.example) into Cline's MCP settings file.
 
 For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline sidebar → MCP Servers → **Configure MCP Servers**.
 
-> **npm note (2026-07-07):** `dreamd-mcp@0.1.0-rc.2` is not yet on npm (`latest` = `0.1.0-rc.1`). Until publish lands, use the local-binary config below or see [`docs/spikes/dr-014-cline-mcp.md`](../../docs/spikes/dr-014-cline-mcp.md).
+> **npm note (2026-07-19):** `dreamd-mcp@0.1.0-rc.3` is live on npm — `npx dreamd-mcp` resolves directly. The local-binary config below is for local development only.
 
 **Published npm path:**
 
@@ -35,7 +35,7 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp@0.1.0-rc.2"],
+      "args": ["-y", "dreamd-mcp@0.1.0-rc.3"],
       "disabled": false,
       "autoApprove": []
     }

@@ -1,5 +1,7 @@
 # DR-014: Cline-via-MCP spike (WEG-39)
 
+*Status (2026-07-19): npm `latest` is `0.1.0-rc.3`; historical tables below unchanged.*
+
 **Date:** 2026-07-07  
 **Commit:** `5684105` (`main`)  
 **Verifier:** Cursor agent (automated MCP layer) + pending human Cline UI pass  

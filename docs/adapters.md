@@ -9,7 +9,7 @@ The on-disk contract every adapter targets is root [`SPEC.md`](../SPEC.md) — t
 `.agent/` layout, the `AgentLearning` JSON shape, and the dream-cycle output.
 
 > **Versions.** Examples here use the floating form `npx dreamd-mcp`. In-repo adapter
-> examples currently pin `dreamd-mcp@0.1.0-rc.2`, which can lag the published package.
+> examples currently pin `dreamd-mcp@0.1.0-rc.3`, which can lag the published package.
 > For the current version, check [`packages/dreamd-mcp/package.json`](../packages/dreamd-mcp/package.json)
 > or `npm view dreamd-mcp version` — don't trust a pin copied from a harness README.
 
@@ -26,7 +26,7 @@ For any MCP-capable harness:
    This scaffolds `.agent/`. Harnesses that require an existing `.agent/` (e.g.
    Cline) fail with `no agent root found` until this runs.
 2. Register an MCP server whose `command` is `npx` with `args` `["dreamd-mcp"]`.
-   Pin a version (`["dreamd-mcp@0.1.0-rc.2"]`) only if you are mirroring a harness
+   Pin a version (`["dreamd-mcp@0.1.0-rc.3"]`) only if you are mirroring a harness
    README that already does.
 3. Confirm the two tools appear: `search_nodes` and `append_node`. The names are
    fixed (see below) — do not rename or alias them.

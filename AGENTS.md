@@ -167,8 +167,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 ### npm-dreamd-mcp-unscoped
 
 - **Rule:** The npx package is unscoped `dreamd-mcp`, never `@dataprime1/dreamd-mcp`. Prefer floating `npx dreamd-mcp` in new docs; adapter `.mcp.json.example` pins may lag `packages/dreamd-mcp/package.json` — bump pins only in an explicit pin-sweep ticket.
-- **Why:** Linear AC for WEG-91 still cited `@dataprime1/…`; live `package.json` is `"name": "dreamd-mcp"` with `mcpName: "io.github.botzrDev/dreamd"`. As of WEG-91, examples pinned `rc.2` while the package was already `rc.3`.
-- **How to apply:** Grep for `@dataprime1/dreamd-mcp` before shipping adapter/docs copy. Check version via `packages/dreamd-mcp/package.json` or `npm view dreamd-mcp version`.
+- **Why:** Linear AC for WEG-91 still cited `@dataprime1/…`; live `package.json` is `"name": "dreamd-mcp"` with `mcpName: "io.github.botzrDev/dreamd"`. WEG-91 left examples on `rc.2` while the package was already `rc.3`; the 2026-07-19 pin-sweep (`assignments/adapter-pin-sweep.v2.md`) brought consumer-facing pins to `@0.1.0-rc.3` without bumping the Rust binary train (`Cargo.toml` still `0.1.0-rc.2`).
+- **How to apply:** Grep for `@dataprime1/dreamd-mcp` before shipping adapter/docs copy. Check version via `packages/dreamd-mcp/package.json` or `npm view dreamd-mcp version`. Do not conflate npm pin with workspace crate version.
 - **Cross-refs:** none
 
 ### migrate-from-to-is-record-schema

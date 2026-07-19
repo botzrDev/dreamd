@@ -43,7 +43,7 @@ dreamd watch
 ```bash
 dreamd init                    # creates .agent/ + registry entry
 dreamd watch &                 # if you want Phase 2 daemon bridge
-npx dreamd-mcp@0.1.0-rc.2      # test stdio server manually
+npx dreamd-mcp@0.1.0-rc.3      # test stdio server manually
 dreamd doctor                  # verify store health
 ```
 

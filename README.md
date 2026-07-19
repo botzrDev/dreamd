@@ -22,8 +22,8 @@ Watch this repo for v0.1 release notifications (Aug 9).
 ### npm (recommended)
 
 ```bash
-npx dreamd-mcp@0.1.0-rc.2 init    # scaffold .agent/ in your project
-npx dreamd-mcp@0.1.0-rc.2         # MCP server (stdio)
+npx dreamd-mcp@0.1.0-rc.3 init    # scaffold .agent/ in your project
+npx dreamd-mcp@0.1.0-rc.3         # MCP server (stdio)
 ```
 
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
@@ -51,13 +51,13 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 
 ```bash
 cd ~/your-project          # must contain a repo root sentinel
-npx dreamd-mcp@0.1.0-rc.2 init
+npx dreamd-mcp@0.1.0-rc.3 init
 
 # Terminal 1 — shared daemon (recommended for multiple agents)
 dreamd watch
 
 # Terminal 2 — point your harness at the MCP server
-npx dreamd-mcp@0.1.0-rc.2
+npx dreamd-mcp@0.1.0-rc.3
 ```
 
 In Claude Code, Cursor, or Cline (experimental): ask the agent to search memory for something you just learned. It calls `search_nodes` over MCP and recalls prior context.
@@ -131,7 +131,7 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 
 ## Status
 
-**v0.1 in active development — targeting 2026-08-09.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.2`. Linux and macOS.
+**v0.1 in active development — targeting 2026-08-09.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp@0.1.0-rc.3`. Linux and macOS.
 
 ### v0.1 progress
 
@@ -139,7 +139,7 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 |---|---|
 | `SPEC.md` v0.1 | Shipped |
 | Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
-| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.2` on npm |
+| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp@0.1.0-rc.3` on npm |
 | CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
 | Conformance test suite | Reference-impl suites shipped (`scripts/alpha/`); no formal certification in v0.1 |
 
