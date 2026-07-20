@@ -2,3 +2,6 @@
 # on demand (tantivy index + state.json live here). The file system of truth
 # is the plain working/, episodic/, semantic/, and personal/ files alongside it.
 .dreamd/
+# Frozen mid-cycle WAL fixtures must ship in git (WEG-422).
+!crash-recovery/.agent/.dreamd/
+!crash-recovery/.agent/.dreamd/**
