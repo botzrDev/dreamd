@@ -41,6 +41,11 @@ jobs:
           PROPTEST_CASES: "1024"
         run: cargo test -p dreamd-core --test episodic_scan_proptest
 
+      - name: Run salience proptest (1024 cases)
+        env:
+          PROPTEST_CASES: "1024"
+        run: cargo test -p dreamd-core --test salience_proptest
+
       - name: Run protocol JSONL roundtrip proptest (1024 cases)
         env:
           PROPTEST_CASES: "1024"

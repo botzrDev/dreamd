@@ -112,6 +112,7 @@ nix = { version = "0.29", default-features = false, features = ["process", "fs",
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 tempfile = "3"
 # WEG-132 / DR-812 — episodic scan proptest (malformed JSONL fuzz coverage).
+# WEG-47 / DR-207 — salience formula monotonicity proptest.
 proptest = "1"
 # WEG-48 / DR-208 — Criterion benchmark harness for recall() latency.
 criterion = "0.5"

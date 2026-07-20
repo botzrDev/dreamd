@@ -15,6 +15,9 @@
 //! into [`salience`] separately. Bugs in call-site policy (index-time
 //! staleness vs live cluster size vs decay conservatism) are invisible to
 //! [`salience`] unit tests; they surface here instead.
+//!
+//! Monotonicity properties over the valid input ranges are enforced by the
+//! WEG-47 proptest suite (`tests/salience_proptest.rs`).
 
 /// Phase-specific recurrence input for query-time salience.
 ///
@@ -95,52 +98,6 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
     const DAY: i64 = 86_400;
-
-    #[test]
-    fn monotonic_decreasing_in_age() {
-        let one_day = salience(NOW, NOW - DAY, 5.0, 5.0, 3);
-        let one_week = salience(NOW, NOW - 7 * DAY, 5.0, 5.0, 3);
-        let one_month = salience(NOW, NOW - 30 * DAY, 5.0, 5.0, 3);
-        assert!(
-            one_day > one_week,
-            "1d ({one_day}) should beat 7d ({one_week})"
-        );
-        assert!(
-            one_week > one_month,
-            "7d ({one_week}) should beat 30d ({one_month})"
-        );
-    }
-
-    #[test]
-    fn monotonic_non_decreasing_in_pain() {
-        let lo = salience(NOW, NOW - DAY, 1.0, 5.0, 3);
-        let mid = salience(NOW, NOW - DAY, 5.0, 5.0, 3);
-        let hi = salience(NOW, NOW - DAY, 10.0, 5.0, 3);
-        assert!(
-            lo <= mid && mid <= hi,
-            "pain monotonicity: {lo} <= {mid} <= {hi}"
-        );
-        assert!(lo < hi, "pain should strictly increase score: {lo} < {hi}");
-    }
-
-    #[test]
-    fn monotonic_non_decreasing_in_importance() {
-        let lo = salience(NOW, NOW - DAY, 5.0, 1.0, 3);
-        let mid = salience(NOW, NOW - DAY, 5.0, 5.0, 3);
-        let hi = salience(NOW, NOW - DAY, 5.0, 10.0, 3);
-        assert!(lo <= mid && mid <= hi);
-        assert!(lo < hi);
-    }
-
-    #[test]
-    fn monotonic_non_decreasing_in_recurrence() {
-        let r0 = salience(NOW, NOW - DAY, 5.0, 5.0, 0);
-        let r1 = salience(NOW, NOW - DAY, 5.0, 5.0, 1);
-        let r10 = salience(NOW, NOW - DAY, 5.0, 5.0, 10);
-        let r100 = salience(NOW, NOW - DAY, 5.0, 5.0, 100);
-        assert!(r0 <= r1 && r1 <= r10 && r10 <= r100);
-        assert!(r0 < r100);
-    }
 
     #[test]
     fn zero_recurrence_is_finite_and_positive() {
