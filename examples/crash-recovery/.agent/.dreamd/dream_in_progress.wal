@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "intents": [
+    {
+      "operation": "PruneEpisodicMemory",
+      "payload": {
+        "temp_file_path": ".agent/episodic/AGENT_LEARNINGS.jsonl.tmp"
+      }
+    }
+  ]
+}
