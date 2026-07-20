@@ -212,6 +212,13 @@ The ranking score is **BM25 × salience — a product, not a weighted sum**
 score) and `salience` as separate fields (`:53-56`), so `dreamd recall
 --explain` can show both factors instead of one blended number.
 
+**Property tests (WEG-47).** Monotonicity and finiteness invariants for the
+formula above are enforced by a `proptest` suite in
+`crates/dreamd-core/tests/salience_proptest.rs` (nightly CI, 512 cases
+locally / 1024 via `PROPTEST_CASES`). Valid ranges: `age_days` ∈ \[0, 10000\],
+`pain` / `importance` ∈ \[0, 10\], `recurrence` ∈ \[0, `u64::MAX`/2\]. Edge
+cases: `pain=0` or `importance=0` → score 0; `recurrence=0` → ln factor 1.
+
 ### Read-after-write visibility (commit-cadence window)
 
 The indexer commits to Tantivy on a wall-clock cadence
