@@ -6,11 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.4] - 2026-07-21
+
 ### Added
 
 - `dreamd migrate --from <ver> --to <ver>` — episodic schema migration command (WEG-133 / DR-108). v0.1 ships a stub: the only registered path is the identity `1.0.0 → 1.0.0` (a no-op success), backed by a `dreamd-core::migrate` trait + registry so v0.1.1 can plug in real transforms. `--from`/`--to` are episodic record schema strings (`RECORD_SCHEMA_VERSION`), distinct from the daemon `state.json` schema and the Tantivy index schema. On the no-op path it copies present durable files (`AGENT_LEARNINGS.jsonl`, `state.json`) to sibling `.bak` files; the self-healing index is never rewritten or backed up. Documented in `docs/migrate.md`.
 - Documented HTTP API stability policy: `/api/v1/*` is **not** a stable interface in v0.1. Breaking changes to request shapes, response shapes, and status codes may land between v0.1.x releases, each called out here; stabilization is intended at v0.2. The on-disk `.agent/` contract is governed separately and remains frozen for v0.1 (see `SPEC.md`). Full rationale in `docs/architecture.md` § API stability (WEG-90 / DR-904).
 - Root `Justfile` with `dev` / `test` / `bench` / `release` / `lint` recipes wrapping the canonical cargo invocations for common contributor loops; documented in `CONTRIBUTING.md`. Contributor convenience only — CI still calls cargo directly (WEG-33 / DR-005).
+- MCP `initialize` response now includes a structured agent usage guide in `server.instructions`: session discipline (search at start, append at close), `skill_action` charset rules (`[a-z0-9_:.-]`, dots only), importance/pain scoring, `client_dedup_key` pattern, and what not to store. Fixed `AppendNodeParams.skill_action` doc comment to show a valid dot-separated example. Expanded `adapters/claude-code/AGENTS.md.snippet` with the same guide in Markdown form (ANTH-150, ANTH-151).
 
 ## [0.1.0-rc.3] - 2026-07-13
 
@@ -87,7 +90,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.4...HEAD
+[0.1.0-rc.4]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/botzrDev/dreamd/releases/tag/v0.1.0-rc.1
