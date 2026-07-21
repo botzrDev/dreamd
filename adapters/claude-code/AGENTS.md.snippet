@@ -1,3 +1,49 @@
-This project uses dreamd for cross-session memory — what your agent learns here persists.
-Call `search_nodes` at task start to recall prior decisions and patterns; call `append_node` when you discover something worth keeping.
-At session start, call `GET /api/v1/preferences` over the Unix socket once, passing the `X-Agent-Root` header set to your project's absolute root path, and use the body to calibrate your `pain` and `importance` scores.
+This project uses dreamd for cross-session memory -- what your agent learns here persists across sessions.
+
+## Session discipline
+
+At task start, call `search_nodes` on the domain you are working in. If you are fixing a Rust async bug,
+search "rust async"; if you are auditing an MCP server, search "echos mcp". You may have a relevant note
+that saves 10+ minutes.
+
+At session end, call `append_node` for each discovery worth keeping: non-obvious constraints, surprises,
+patterns that would have changed your approach if known at the start.
+
+At session start, call `GET /api/v1/preferences` over the Unix socket, passing the `X-Agent-Root` header
+set to your project's absolute root path. Use the response body to calibrate your `pain` and `importance`
+scores for this user.
+
+## skill_action format
+
+Allowed characters: `[a-z0-9_:.-]` -- no forward slashes.
+Use dots as hierarchy separators.
+
+Good examples:
+- `rust.async.tokio`
+- `echos.audit-pattern`
+- `python.benchmark.runner`
+- `mcp.skill-action-charset`
+
+Bad examples (rejected by the server):
+- `rust/async/tokio` -- forward slash not allowed
+- `rust::borrow-checker` -- double colon works but dot is canonical
+
+Max 256 bytes.
+
+## Scores (0-10)
+
+- **importance**: how broadly applicable across sessions. 8+ means this should change behavior whenever
+  you encounter this domain again. 3-5 is situational.
+- **pain**: how disruptive if unknown. 8+ caused bugs, rework, or failed attempts. 3-5 is an optimization.
+
+## client_dedup_key
+
+Set this when the same learning could be written twice in a session (e.g. you call append_node at both
+mid-session discovery and end-of-session wrap-up). Use a stable slug: `"session:YYYY-MM-DD:skill.topic"`.
+
+## What NOT to store
+
+- Task status, progress notes, in-progress state (use your working files)
+- Anything directly readable from the repo docs, source, or git log
+- Conversation summaries or role-play context
+- Things that are only true for the current session

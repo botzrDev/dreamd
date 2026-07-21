@@ -80,7 +80,8 @@ pub struct AppendNodeParams {
     pub content: String,
     /// The agent harness that produced this learning (e.g. "claude-code").
     pub source_harness: String,
-    /// Clustering key describing the skill or action domain (e.g. "rust::borrow_checker").
+    /// Clustering key describing the skill or action domain (e.g. "rust.borrow-checker").
+    /// Characters: [a-z0-9_:.-] only -- no forward slashes. Use dots as separators.
     pub skill_action: String,
     /// Pain score 0–10: how disruptive was this if not known?
     pub pain: Option<f64>,
@@ -340,7 +341,36 @@ impl ServerHandler for MemoryMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dreamd-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions("dreamd memory server — search and append episodic agent learnings.")
+            .with_instructions(r#"dreamd memory server -- search and append episodic agent learnings.
+
+WHEN TO CALL search_nodes
+- Session start on any domain you have worked in before (language, framework, project area)
+- Before reasoning from scratch on a topic; you may already have a relevant note
+- Use 2-4 keywords matching the current task
+
+WHEN TO CALL append_node
+- End of session: capture discoveries, constraints, and non-obvious patterns
+- Mid-session: anything that would have saved 10+ minutes if known at the start
+- One precise node beats several vague ones
+
+skill_action FORMAT
+- Allowed characters: [a-z0-9_:.-] -- no forward slashes
+- Use dots as separators: "rust.async.tokio", "echos.audit-pattern", "python.benchmark"
+- Max 256 bytes
+
+SCORES (0-10)
+- importance: how broadly applicable across sessions (8+ changes behavior on familiar domains)
+- pain: how disruptive if unknown (8+ causes bugs, rework, or failed attempts)
+- Call GET /api/v1/preferences at session start to read per-user thresholds
+
+client_dedup_key
+- Set when the same learning could be written twice in a session
+- Use a stable slug: "session:YYYY-MM-DD:skill.topic"
+
+DO NOT STORE
+- Task status, progress notes, or ephemeral in-session state
+- Anything directly readable from docs, source, or git log
+- Conversation summaries or role-play context"#)
     }
 }
 
