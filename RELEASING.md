@@ -106,13 +106,23 @@ package comes from `main`, so it carries the correct shas.)
 
 ## 6. Publish to npm — HUMAN ONLY (2FA)
 
+npm auth expires between releases; **log in FIRST**. The `dataprime1` account uses a
+**passkey** (WebAuthn), so the CLI OTP flow does not work — use the web flow. A
+`404 Not Found` on `npm publish` (or `401` on `npm whoami`) means "not logged in /
+not authorized" — npm deliberately hides package existence from unauthenticated
+callers; it is NOT a missing package.
+
 ```sh
+npm login --auth-type=web              # browser flow; authenticate as dataprime1 with the passkey
+npm whoami                              # must print: dataprime1
+
 cd packages/dreamd-mcp
-npm publish                      # prompts for the dataprime1 passkey 2FA; moves the `latest` dist-tag
-npm view dreamd-mcp dist-tags    # confirm latest = X.Y.Z
+npm publish                            # passkey-prompts; moves the `latest` dist-tag to X.Y.Z
+npm dist-tag add dreamd-mcp@X.Y.Z next # keep `next` off any older/broken release
+npm view dreamd-mcp dist-tags          # confirm latest = X.Y.Z (and next)
 ```
 
-If replacing a broken prior release, deprecate it:
+If replacing a broken prior release, deprecate it (also needs the login above):
 
 ```sh
 npm deprecate dreamd-mcp@X.Y.Z-1 "Broken; upgrade to X.Y.Z+"
