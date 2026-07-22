@@ -16,3 +16,7 @@ context/
 
 # Per-project daemon state (config.toml, state.json); local-only
 /.agent/.dreamd/
+
+# dreamd-mcp is a zero-dependency npx shim; its npm lockfile is noise, and only
+# package.json + the pinned manifest.json define what ships (see files[] there).
+packages/dreamd-mcp/package-lock.json
