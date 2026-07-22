@@ -1,7 +1,7 @@
 {
   "name": "dreamd-mcp",
   "mcpName": "io.github.botzrDev/dreamd",
-  "version": "0.1.0-rc.4",
+  "version": "0.1.0-rc.5",
   "description": "npx shim for dreamd MCP server — downloads the right prebuilt Rust binary for your OS/arch",
   "bin": {
     "dreamd-mcp": "bin/dreamd-mcp.js"

@@ -699,7 +699,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 
 [[package]]
 name = "dreamd"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 dependencies = [
  "chrono",
  "clap",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "dreamd-core"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 dependencies = [
  "axum",
  "bytes",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "dreamd-protocol"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 dependencies = [
  "chrono",
  "proptest",

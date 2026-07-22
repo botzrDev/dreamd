@@ -6,6 +6,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.5] - 2026-07-22
+
+### Fixed
+
+- **`dreamd-mcp` npx shim ran the wrong binary.** The published `0.1.0-rc.4` package silently downloaded and ran the **rc.3** native binary: a hardcoded `VERSION` constant in `bin/dreamd-mcp.js` drove the release-download URL and per-version cache path while `package.json` / `manifest.json` advertised rc.4. `VERSION` is now derived from `package.json`, so the release tag (`v${VERSION}`), download URL, cache dir, and `--version` output can never drift from the package version again.
+- Corrected the bundled `manifest.json` binary `sha256` digests, which had drifted a release behind the version field (a `VERSION` bump alone would otherwise have failed sha256 verification at runtime).
+- Restored a green CI baseline: the `test` job is gated on `lint`, so a formatting violation had silently masked a stale `Cargo.lock` and stale `dreamd --version` snapshots. All corrected.
+
+### Added
+
+- Version-consistency guard test for the shim (`-V` / `--version` must equal `package.json`), and a CI job that runs the shim's `node --test` suite (previously ungated — the reason the broken package shipped).
+- `dreamd-mcp` README: pin-`@latest` guidance (a bare `npx dreamd-mcp` caches the first resolved version and never re-checks the registry) and a true uninstall / reset procedure.
+- `RELEASING.md` — the canonical, drift-proof release procedure.
+
+### Changed
+
+- Locked in `dreamd mcp` clean-shutdown-on-stdin-EOF with regression tests (`crates/dreamd-cli/tests/mcp_stdin_eof.rs`): a normal MCP disconnect exits 0; a pre-initialize disconnect exits non-zero but still terminates promptly (no orphaned process).
+
 ## [0.1.0-rc.4] - 2026-07-21
 
 ### Added
