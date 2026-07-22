@@ -15,18 +15,18 @@ scores for this user.
 
 ## skill_action format
 
-Allowed characters: `[a-z0-9_:.-]` -- no forward slashes.
-Use dots as hierarchy separators.
+Lowercase `[a-z0-9_]` segments joined by `::` -- no dots, hyphens, or slashes.
 
 Good examples:
-- `rust.async.tokio`
-- `echos.audit-pattern`
-- `python.benchmark.runner`
-- `mcp.skill-action-charset`
+- `rust::async::tokio`
+- `echos::audit_pattern`
+- `python::benchmark::runner`
+- `mcp::skill_action_charset`
 
 Bad examples (rejected by the server):
-- `rust/async/tokio` -- forward slash not allowed
-- `rust::borrow-checker` -- double colon works but dot is canonical
+- `rust/async/tokio` -- forward slashes not allowed
+- `rust.async.tokio` -- dots not allowed; use `::`
+- `rust::borrow-checker` -- hyphens not allowed; use `_` (`rust::borrow_checker`)
 
 Max 256 bytes.
 

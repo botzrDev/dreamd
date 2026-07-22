@@ -80,8 +80,8 @@ pub struct AppendNodeParams {
     pub content: String,
     /// The agent harness that produced this learning (e.g. "claude-code").
     pub source_harness: String,
-    /// Clustering key describing the skill or action domain (e.g. "rust.borrow-checker").
-    /// Characters: [a-z0-9_:.-] only -- no forward slashes. Use dots as separators.
+    /// Clustering key describing the skill or action domain (e.g. "rust::async::tokio").
+    /// Lowercase `[a-z0-9_]` segments joined by `::` -- no dots, hyphens, or slashes.
     pub skill_action: String,
     /// Pain score 0–10: how disruptive was this if not known?
     pub pain: Option<f64>,
@@ -355,8 +355,8 @@ WHEN TO CALL append_node
 - One precise node beats several vague ones
 
 skill_action FORMAT
-- Allowed characters: [a-z0-9_:.-] -- no forward slashes
-- Use dots as separators: "rust.async.tokio", "echos.audit-pattern", "python.benchmark"
+- Lowercase [a-z0-9_] segments joined by "::" -- no dots, hyphens, or slashes
+- Examples: "rust::async::tokio", "echos::audit_pattern", "python::benchmark"
 - Max 256 bytes
 
 SCORES (0-10)
