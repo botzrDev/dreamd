@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.6] - 2026-07-22
+
+### Fixed
+
+- **`skill_action` docs advertised a format the validator rejects.** The MCP `append_node` tool schema doc, the `server.instructions` agent guide, and the `adapters/claude-code/AGENTS.md.snippet` copy-in all told clients the clustering key allowed `[a-z0-9_:.-]` with dots as separators (e.g. `rust.async.tokio`), but the ingress validator (`SkillAction::parse`) accepts only lowercase `[a-z0-9_]` segments joined by `::` and rejects dots, hyphens, and slashes with `invalid skill_action`. Agents that followed the docs produced rejected writes. All three now describe the real format (`rust::async::tokio`). Docs-only change — the validator is unchanged; the rc.4 ANTH-150/151 guidance was the source of the mismatch. (The other doc surfaces — `SKILL.md`, `llms-full.txt`, `docs/http-api.md`, `docs/adapters.md`, `docs/glossary.md`, `AGENTS.md`, and the cursor/aider/cline adapters — already documented the correct `::` form.)
+
 ## [0.1.0-rc.5] - 2026-07-22
 
 ### Fixed
