@@ -14,7 +14,7 @@ Pick one path:
 
 ```bash
 # npm (no Rust required)
-npx dreamd-mcp@0.1.0-rc.3 --version
+npx -y dreamd-mcp --version
 
 # cargo (from a clone)
 cargo install --path crates/dreamd-cli
@@ -152,7 +152,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 Terminal 3 — MCP bridges to the daemon automatically:
 
 ```bash
-npx dreamd-mcp@0.1.0-rc.3
+npx -y dreamd-mcp
 ```
 
 Stderr should show `Phase 2 (Remote backend)` when the daemon is reachable.

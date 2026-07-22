@@ -8,10 +8,11 @@ explains the two patterns those READMEs follow.
 The on-disk contract every adapter targets is root [`SPEC.md`](../SPEC.md) — the
 `.agent/` layout, the `AgentLearning` JSON shape, and the dream-cycle output.
 
-> **Versions.** Examples here use the floating form `npx dreamd-mcp`. In-repo adapter
-> examples currently pin `dreamd-mcp@0.1.0-rc.3`, which can lag the published package.
-> For the current version, check [`packages/dreamd-mcp/package.json`](../packages/dreamd-mcp/package.json)
-> or `npm view dreamd-mcp version` — don't trust a pin copied from a harness README.
+> **Versions.** Use the floating form `npx -y dreamd-mcp` everywhere — npx
+> re-resolves the `latest` dist-tag on each fresh spawn, so a config never goes
+> stale. Do **not** hard-pin a version in copy-paste examples (a hard pin never
+> tracks new releases); pin only to reproduce a specific build. Check the current
+> published version with `npm view dreamd-mcp version`.
 
 ## Two patterns
 
@@ -25,9 +26,9 @@ For any MCP-capable harness:
 1. Initialize the store in the project: `npx dreamd-mcp init` (or `dreamd init`).
    This scaffolds `.agent/`. Harnesses that require an existing `.agent/` (e.g.
    Cline) fail with `no agent root found` until this runs.
-2. Register an MCP server whose `command` is `npx` with `args` `["dreamd-mcp"]`.
-   Pin a version (`["dreamd-mcp@0.1.0-rc.3"]`) only if you are mirroring a harness
-   README that already does.
+2. Register an MCP server whose `command` is `npx` with `args` `["-y", "dreamd-mcp"]`.
+   Leave it floating — npx re-resolves `latest` on each fresh spawn. Pin a version
+   only to reproduce a specific build, never in a general copy-paste example.
 3. Confirm the two tools appear: `search_nodes` and `append_node`. The names are
    fixed (see below) — do not rename or alias them.
 4. Multi-writer setups: run `dreamd watch` so several agents share one daemon

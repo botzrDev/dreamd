@@ -8,19 +8,21 @@ Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyp
 
 ```sh
 # 1. Scaffold .agent/ into your project
-npx dreamd-mcp@latest init
+npx -y dreamd-mcp init
 
 # 2. Start a shared daemon (recommended when multiple agents write)
-npx dreamd-mcp@latest watch
+npx -y dreamd-mcp watch
 
 # 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
-npx dreamd-mcp@latest
+npx -y dreamd-mcp
 ```
 
-> **Pin `@latest` (or an explicit version) in your MCP config.** A bare
-> `npx dreamd-mcp` resolves once and then reuses whatever npx first cached —
-> it never re-checks the registry, so it can serve an old version indefinitely.
-> `npx dreamd-mcp@latest` (or `npx --yes dreamd-mcp@<version>`) forces a refresh.
+> **Leave `npx dreamd-mcp` floating — don't pin.** On a fresh spawn, npx
+> re-resolves the `latest` dist-tag from the registry, so a floating config always
+> starts the current version. Two caveats: a **running** MCP server or `dreamd watch`
+> daemon keeps the version it started with until you restart it, and an **offline**
+> run falls back to the last-cached binary. A hard version pin (`dreamd-mcp@0.1.0-rc.3`)
+> is the one form that never picks up new releases.
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).
 

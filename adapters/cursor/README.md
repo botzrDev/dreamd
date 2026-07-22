@@ -6,14 +6,14 @@ Quickstart for wiring `dreamd-mcp` into Cursor with the optional recall agent ru
 
 ```bash
 cd ~/your-project
-npx dreamd-mcp@0.1.0-rc.3 init
+npx -y dreamd-mcp init
 ```
 
 ## 2. Start the daemon (recommended)
 
 ```bash
 dreamd watch &
-# or: npx dreamd-mcp@0.1.0-rc.3 watch &
+# or: npx -y dreamd-mcp watch &
 ```
 
 Without a daemon, MCP runs in-process (Phase 1). That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
