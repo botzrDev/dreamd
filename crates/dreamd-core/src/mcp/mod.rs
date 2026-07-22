@@ -341,7 +341,8 @@ impl ServerHandler for MemoryMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dreamd-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions(r#"dreamd memory server -- search and append episodic agent learnings.
+            .with_instructions(
+                r#"dreamd memory server -- search and append episodic agent learnings.
 
 WHEN TO CALL search_nodes
 - Session start on any domain you have worked in before (language, framework, project area)
@@ -370,7 +371,8 @@ client_dedup_key
 DO NOT STORE
 - Task status, progress notes, or ephemeral in-session state
 - Anything directly readable from docs, source, or git log
-- Conversation summaries or role-play context"#)
+- Conversation summaries or role-play context"#,
+            )
     }
 }
 
@@ -532,6 +534,17 @@ async fn send_remote(
 ///
 /// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
 /// is the first invocation in a directory that has no `.agent/` store yet.
+///
+/// Shutdown is driven by the stdio transport: `rmcp::transport::stdio()` reads
+/// stdin, and when the MCP client closes it (stdin EOF — the conventional stdio
+/// shutdown signal), the transport loop ends. After a normal session (post
+/// `initialize`), `svc.waiting()` resolves `Ok(())` and this returns 0 — so
+/// `dreamd mcp` self-exits cleanly on disconnect with no orphaned process. A
+/// disconnect *before* `initialize` surfaces as a `.serve()` error (non-zero
+/// exit) but still terminates promptly. Do NOT wrap `svc.waiting()` in anything
+/// that would block EOF from completing it; the in-process branch relies on
+/// `waiting()` returning so `supervisor` drops. Both paths are regression-tested
+/// in `dreamd-cli/tests/mcp_stdin_eof.rs`.
 pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     // Emit privacy disclosure to stderr if no .agent/ store is found.
     // This is the "first run" signal for MCP harness users.

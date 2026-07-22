@@ -14,10 +14,12 @@ const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 const zlib = require('zlib');
 
-// Must match package.json "version", GitHub release tag `v${VERSION}`, and
-// manifest.json download URLs. Tests assert package↔manifest; keep this in sync
-// on every release cut.
-const VERSION = '0.1.0-rc.3';
+// Derived from package.json — the single source of truth for the version. This
+// drives the GitHub release tag (`v${VERSION}`), the download URL, the per-version
+// cache dir, and `--version` output, so all of them track package.json with no
+// hand-sync on a release cut. (package.json ships in every installed npm package
+// regardless of the `files` allowlist, so this require is always resolvable.)
+const VERSION = require('../package.json').version;
 const MANIFEST = require('../manifest.json');
 
 // Bound redirect-following to limit redirect-loop DoS during asset download.

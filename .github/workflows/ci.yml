@@ -120,6 +120,28 @@ jobs:
       - name: Run tests
         run: cargo test --all-features --workspace
 
+  # ── MCP npx shim tests ───────────────────────────────────────────────────────
+  # The dreamd-mcp shim's tests (version↔manifest↔server.json consistency, arg
+  # routing, redirect/tar safety) run on plain `node --test` with no dependencies.
+  # These were previously ungated in CI — a version drift that broke the shim
+  # shipped with a red-but-never-run suite. This is that gate.
+  mcp-shim:
+    name: MCP shim (node --test)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run dreamd-mcp shim tests
+        working-directory: packages/dreamd-mcp
+        run: node --test
+
   # ── Binary size gate (NFR-2: stripped release < 15 MB) ───────────────────────
   size-gate:
     name: Binary size gate

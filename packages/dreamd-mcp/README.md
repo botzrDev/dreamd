@@ -8,14 +8,19 @@ Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyp
 
 ```sh
 # 1. Scaffold .agent/ into your project
-npx dreamd-mcp@0.1.0-rc.3 init
+npx dreamd-mcp@latest init
 
 # 2. Start a shared daemon (recommended when multiple agents write)
-npx dreamd-mcp@0.1.0-rc.3 watch
+npx dreamd-mcp@latest watch
 
 # 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
-npx dreamd-mcp@0.1.0-rc.3
+npx dreamd-mcp@latest
 ```
+
+> **Pin `@latest` (or an explicit version) in your MCP config.** A bare
+> `npx dreamd-mcp` resolves once and then reuses whatever npx first cached —
+> it never re-checks the registry, so it can serve an old version indefinitely.
+> `npx dreamd-mcp@latest` (or `npx --yes dreamd-mcp@<version>`) forces a refresh.
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).
 
@@ -66,6 +71,28 @@ export DREAMD_BIN=~/.cargo/bin/dreamd
 export DREAMD_BIN_ALLOW_UNVERIFIED=1
 npx dreamd-mcp
 ```
+
+## Uninstall / reset
+
+`dreamd-mcp` is never installed globally — it runs straight from the npx cache and
+downloads the native binary into a per-version cache. `npm uninstall -g dreamd-mcp`
+is therefore a no-op. To fully remove it (or force a clean re-download), clear both
+caches and drop the server entry from your MCP client config:
+
+```sh
+# npx package cache (macOS/Linux)
+rm -rf ~/.npm/_npx
+# npx package cache (Windows / WSL running Windows Node)
+#   rm -rf "$LOCALAPPDATA/npm-cache/_npx"   (PowerShell: Remove-Item -Recurse "$env:LOCALAPPDATA\npm-cache\_npx")
+
+# native binary cache
+rm -rf ~/.cache/dreamd-mcp                  # macOS/Linux
+#   Windows: Remove-Item -Recurse "$env:LOCALAPPDATA\dreamd-mcp\cache"
+```
+
+Then remove the `dreamd` MCP server from your client config (Claude Code, Cursor, …).
+Clearing only one cache is a common cause of "it still runs the old version" — clear
+both.
 
 ## License
 
