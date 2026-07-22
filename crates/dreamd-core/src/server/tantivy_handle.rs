@@ -239,7 +239,7 @@ impl TantivyIndexHandle {
             Err(ManifestVersionError::TooNew { manifest, binary }) => {
                 return Err(IndexError(format!(
                     "index schema {manifest:?} is newer than binary {binary:?}; \
-                     downgrade dreamd or run `dreamd migrate`"
+                     upgrade dreamd, or wipe the index dir to rebuild under this binary"
                 )));
             }
             _ => {}
@@ -419,9 +419,7 @@ impl IndexHandle for TantivyIndexHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Indexer task
-// ---------------------------------------------------------------------------
 
 async fn run_indexer(
     mut writer: IndexWriter<TantivyDocument>,
@@ -628,9 +626,7 @@ fn add_document(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Replay (two-pass)
-// ---------------------------------------------------------------------------
 
 fn read_jsonl_events(jsonl_path: &Path) -> Result<Vec<AgentLearning>, IndexError> {
     crate::episodic::read_all(jsonl_path).map_err(|e| IndexError(format!("read jsonl: {e}")))
@@ -664,9 +660,7 @@ fn replay_two_pass(
     Ok((clusters, to_index))
 }
 
-// ---------------------------------------------------------------------------
 // Progress + manifest persistence
-// ---------------------------------------------------------------------------
 
 fn read_progress(path: &Path) -> Result<IndexProgress, IndexError> {
     match std::fs::read(path) {
@@ -699,8 +693,8 @@ fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
 
 /// Open or create the on-disk Tantivy index. If the directory holds a stale
 /// schema with no manifest (or a mismatch open_or_create cannot reconcile),
-/// wipe the index cache once and retry — same JSONL replay path as manifest
-/// migration, not `dreamd migrate`.
+/// wipe the index cache once and retry — same JSONL replay path as the
+/// manifest-driven self-heal rebuild, not `dreamd migrate`.
 fn open_or_create_index(
     index_dir: &Path,
     schema: tantivy::schema::Schema,
@@ -737,9 +731,7 @@ fn is_schema_incompatible(err: &IndexError) -> bool {
     msg.contains("schema") || msg.contains("incompatible")
 }
 
-// ---------------------------------------------------------------------------
 // Error helpers
-// ---------------------------------------------------------------------------
 
 fn io_to_index(e: std::io::Error) -> IndexError {
     IndexError(format!("io: {e}"))
@@ -753,9 +745,7 @@ fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryError) -> Inde
     IndexError(format!("tantivy directory: {e}"))
 }
 
-// ===========================================================================
 // Tests
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -892,9 +882,7 @@ mod tests {
         rx.await.expect("flush ack")
     }
 
-    // -----------------------------------------------------------------------
     // AC-1
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn lock_files_present_post_sigkill_do_not_block_open() {
@@ -916,9 +904,7 @@ mod tests {
         assert!(index_dir.join(".tantivy-meta.lock").exists());
     }
 
-    // -----------------------------------------------------------------------
     // AC-2 — replay two-pass + AC-2 watermark gating
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn replay_two_pass_assigns_final_cluster_count() {
@@ -980,9 +966,7 @@ mod tests {
         assert_eq!(values, vec![3]);
     }
 
-    // -----------------------------------------------------------------------
     // AC-3 — steady-state recurrence + bounded-staleness
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn steady_state_increments_counter_per_skill_action() {
@@ -1061,9 +1045,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // AC-5 — progress file written after commit only
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn progress_file_written_after_commit_only() {
@@ -1132,9 +1114,7 @@ mod tests {
         assert_eq!(progress.last_indexed_id.as_deref(), Some(id.as_str()));
     }
 
-    // -----------------------------------------------------------------------
     // AC-7 — manifest written on first open only
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn manifest_written_on_first_open_only() {
@@ -1164,9 +1144,7 @@ mod tests {
         assert_eq!(mtime1, mtime2, "manifest must not be rewritten on re-open");
     }
 
-    // -----------------------------------------------------------------------
     // AC-9 — commit cadence drives a tick (short cadence)
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn commit_cadence_constructor_arg_drives_tick() {
@@ -1202,9 +1180,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // -----------------------------------------------------------------------
     // AC-16 — replay skips mid-file blank/corrupt lines (SPEC §88 / WEG-427)
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn replay_skips_blank_midfile_line_in_jsonl() {
@@ -1261,9 +1237,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // AC-23 — coordinator routes appends to indexer sender
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn coordinator_routes_appends_to_indexer_sender() {
@@ -1432,9 +1406,7 @@ mod tests {
         coord_handle.await.unwrap();
     }
 
-    // -----------------------------------------------------------------------
     // AC-24 — shutdown flushes final batch to disk
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn shutdown_flushes_final_batch_to_disk() {
@@ -1465,9 +1437,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // WEG-69 — reader() accessor
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn tantivy_handle_reader_is_accessible() {
@@ -1483,9 +1453,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // -----------------------------------------------------------------------
     // WEG-264 Defect 1 — fresh handle's reader reflects the open-time replay
-    // -----------------------------------------------------------------------
 
     /// Regression: a process that opens a `TantivyIndexHandle` and is the
     /// first to index a JSONL record must see that record on its *first* query
@@ -1527,9 +1495,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // -----------------------------------------------------------------------
     // WEG-45 — apply_recurrence_sidecar (delete-and-re-add)
-    // -----------------------------------------------------------------------
 
     /// Verify that `apply_recurrence_sidecar` updates the `recurrence` FastField
     /// for all documents in a cluster from their original values to the sidecar's
@@ -1625,9 +1591,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // WEG-62 — prune_decayed_events removes docs from index
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn prune_decayed_events_removes_docs_from_index() {
@@ -1690,9 +1654,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // -----------------------------------------------------------------------
     // Schema migration — self-healing rebuild surfaces provenance anchors
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn schema_migration_rebuilds_index_and_surfaces_anchors() {
@@ -1746,9 +1708,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // -----------------------------------------------------------------------
     // AC-11 — trait conformance + ProjectIndexMap integration
-    // -----------------------------------------------------------------------
 
     #[test]
     fn tantivy_handle_satisfies_index_handle_trait() {
@@ -1799,9 +1759,7 @@ mod tests {
         assert_eq!(map.len(), 0);
     }
 
-    // -----------------------------------------------------------------------
     // v0.1 index-vs-JSONL contract — assess + replay healing
-    // -----------------------------------------------------------------------
 
     #[test]
     fn assess_index_freshness_ok_when_watermark_matches_tail() {

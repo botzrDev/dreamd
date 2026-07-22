@@ -20,12 +20,12 @@ pub enum LearnValidationError {
 pub struct LearnIngress;
 
 impl LearnIngress {
-    /// Parse and validate a raw `skill_action` string.
+    /// Reject malformed `skill_action` before it reaches the coordinator.
     pub fn validate_skill_action(raw: &str) -> Result<SkillAction, LearnValidationError> {
         SkillAction::parse(raw).map_err(|e| LearnValidationError::InvalidSkillAction(e.to_string()))
     }
 
-    /// Range-check a required score (HTTP body fields).
+    /// HTTP requires an explicit pain; reject out-of-range rather than clamp.
     pub fn validate_pain(pain: f32) -> Result<(), LearnValidationError> {
         if (0.0..=10.0).contains(&pain) {
             Ok(())
@@ -34,7 +34,7 @@ impl LearnIngress {
         }
     }
 
-    /// Range-check a required score (HTTP body fields).
+    /// HTTP requires an explicit importance; reject out-of-range rather than clamp.
     pub fn validate_importance(importance: f32) -> Result<(), LearnValidationError> {
         if (0.0..=10.0).contains(&importance) {
             Ok(())
@@ -43,7 +43,7 @@ impl LearnIngress {
         }
     }
 
-    /// Range-check an optional score before applying the MCP default (parse, don't clamp).
+    /// MCP may omit pain (caller applies default later); reject only when present and invalid.
     pub fn validate_optional_pain(pain: Option<f64>) -> Result<(), LearnValidationError> {
         if let Some(pain) = pain {
             if !(0.0..=10.0).contains(&pain) {
@@ -53,7 +53,7 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// Range-check an optional score before applying the MCP default (parse, don't clamp).
+    /// MCP may omit importance (caller applies default later); reject only when present and invalid.
     pub fn validate_optional_importance(
         importance: Option<f64>,
     ) -> Result<(), LearnValidationError> {
@@ -78,7 +78,7 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// Validate, redact, and build an [`AgentLearning`] from MCP append params.
+    /// Build an [`AgentLearning`] from MCP append params (optional scores default later).
     ///
     /// The placeholder `id` is overwritten by the coordinator on persist.
     pub fn build_agent_learning(

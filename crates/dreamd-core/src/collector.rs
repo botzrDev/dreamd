@@ -27,9 +27,9 @@ use crate::index::{
 use crate::salience::{salience_with_context, RecurrenceContext};
 
 /// One hydrated result from a salience-scored recall query. Score is
-/// `f64` to preserve precision for the upcoming `--explain` formatter
-/// (DR-703); Tantivy's internal `Score` is `f32` and gets widened before
-/// the salience multiply.
+/// `f64` to preserve precision for `dreamd recall --explain` (DR-703);
+/// Tantivy's internal `Score` is `f32` and gets widened before the
+/// salience multiply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallResult {
     /// BM25 x salience product, widened to `f64` for the `--explain` formatter (DR-703).

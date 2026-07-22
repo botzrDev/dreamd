@@ -13,12 +13,18 @@
 use serde::{Deserialize, Serialize};
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 
-/// On-disk index schema version. Bump only with a matching `dreamd
-/// migrate` path (see ARCHITECTURE.md "Schema versioning is mandatory").
+/// On-disk Tantivy index schema version (`index/MAJOR.MINOR`).
 ///
-/// WEG-49 (DR-210) is the startup gate that compares this constant to
-/// the value carried on the per-project index manifest and refuses to
-/// start on mismatch.
+/// Bump when the Tantivy field layout changes. On open, a manifest older than
+/// this constant triggers a full rebuild from JSONL
+/// ([`ManifestCheckOutcome::NeedsMigration`]); a newer manifest aborts
+/// ([`ManifestVersionError::TooNew`]). The index is a derived cache — it
+/// self-heals; do **not** point operators at `dreamd migrate` (that command
+/// is episodic `RECORD_SCHEMA_VERSION` only — see `crate::migrate`,
+/// ARCHITECTURE.md §4 / §7, AGENTS.md `migrate-from-to-is-record-schema`).
+///
+/// WEG-49 (DR-210) is the startup gate that compares this constant to the
+/// per-project index manifest.
 // bumped in WEG-43 when content gained STORED
 // bumped in WEG-45 when event_id (STRING | STORED) was added for delete-and-re-add
 pub const SCHEMA_VERSION: &str = "index/1.3";
@@ -223,7 +229,8 @@ pub enum ManifestCheckOutcome {
     Absent,
     /// Schema version matches binary. Caller: proceed.
     Current,
-    /// Binary is newer than manifest — migration pending. Caller: log warn + continue.
+    /// Binary is newer than manifest — open path rebuilds the index from JSONL
+    /// (self-heal). Caller: log warn + continue; do not run `dreamd migrate`.
     NeedsMigration { from: String },
 }
 
@@ -231,7 +238,7 @@ pub enum ManifestCheckOutcome {
 pub enum ManifestVersionError {
     #[error(
         "index schema {manifest:?} is newer than binary {binary:?}; \
-         downgrade dreamd or run `dreamd migrate`"
+         upgrade dreamd, or wipe the index dir to rebuild under this binary"
     )]
     TooNew { manifest: String, binary: String },
     #[error("index manifest is corrupt: {0}")]
@@ -279,8 +286,9 @@ pub fn check_manifest_version(
 }
 
 /// Parse `"index/MAJOR.MINOR"` → `(MAJOR, MINOR)`. Returns `None` on any
-/// parse failure — callers treat unparseable versions as "needs migration"
-/// (the fallback in `check_manifest_version`).
+/// parse failure — callers treat unparseable versions as "needs rebuild"
+/// (the [`ManifestCheckOutcome::NeedsMigration`] fallback in
+/// `check_manifest_version`).
 fn parse_index_version(s: &str) -> Option<(u32, u32)> {
     let ver = s.strip_prefix("index/")?;
     let (major, minor) = ver.split_once('.')?;

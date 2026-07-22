@@ -39,9 +39,7 @@ use crate::privacy::DR413_DISCLOSURE;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
 
-// ---------------------------------------------------------------------------
 // Error type
-// ---------------------------------------------------------------------------
 
 /// Errors surfaced by [`run_mcp_server`].
 #[derive(Debug, thiserror::Error)]
@@ -60,9 +58,7 @@ pub enum McpRunError {
     InvalidSockPath(PathBuf),
 }
 
-// ---------------------------------------------------------------------------
 // Tool parameter structs
-// ---------------------------------------------------------------------------
 
 /// Parameters for the `search_nodes` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -92,15 +88,13 @@ pub struct AppendNodeParams {
     pub client_dedup_key: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
 // MCP server struct
-// ---------------------------------------------------------------------------
 
 /// Backing store for a [`MemoryMcpServer`].
 ///
-/// `Local` / `LocalReadOnly` / `Empty` are in-process paths (product term:
-/// "Phase 1"). `Remote` proxies each tool call to the daemon over UDS
-/// (product term: "Phase 2"; WEG-259) so memory is shared across harnesses.
+/// `Local` / `LocalReadOnly` / `Empty` answer tools in-process.
+/// `Remote` proxies each tool call to the daemon over UDS (WEG-259) so
+/// memory is shared across harnesses.
 #[derive(Clone)]
 enum Backend {
     /// In-process coordinator (durable writes + reads via the shared Tantivy handle).
@@ -156,7 +150,7 @@ impl MemoryMcpServer {
 
     /// Create an in-process server bound to an agent root and a live
     /// coordinator channel ([`Backend::Local`]). Used when the daemon is not
-    /// running (Phase 1 fallback).
+    /// running.
     pub fn with_coordinator(root: AgentRoot, tx: mpsc::Sender<MemoryCoordinatorMsg>) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -382,9 +376,7 @@ impl Default for MemoryMcpServer {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Remote backend (Unix only — daemon socket is UDS)
-// ---------------------------------------------------------------------------
 
 /// Resolve the path to the daemon Unix socket.
 ///
@@ -517,20 +509,18 @@ async fn send_remote(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Public entry point
-// ---------------------------------------------------------------------------
 
 /// Start the MCP server process.
 ///
-/// Daemon proxy (Remote, Unix only / Phase 2): if the daemon socket is
+/// Daemon proxy ([`Backend::Remote`], Unix only): if the daemon socket is
 /// reachable, serve the MCP tool surface over stdio backed by an HTTP-over-UDS
 /// client to the daemon ([`MemoryMcpServer::with_remote`]) and return when the
 /// session ends.
 ///
-/// In-process fallback (Phase 1): if the daemon is not running (or on Windows
-/// where the UDS path is deferred to DR-121), serve MCP tool calls in-process
-/// using [`MemoryMcpServer`].
+/// In-process fallback: if the daemon is not running (or on Windows where the
+/// UDS path is deferred to DR-121), serve MCP tool calls in-process using
+/// [`MemoryMcpServer`].
 ///
 /// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
 /// is the first invocation in a directory that has no `.agent/` store yet.
@@ -575,7 +565,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
                 Err(_) => cwd.to_string_lossy().into_owned(),
             };
             eprintln!(
-                "dreamd mcp: daemon reachable at {} — serving Phase 2 (Remote backend), agent root: {agent_root_header}",
+                "dreamd mcp: daemon reachable at {} — serving Remote (daemon proxy), agent root: {agent_root_header}",
                 sock_path.display()
             );
             let svc = MemoryMcpServer::with_remote(sock_path, agent_root_header)
@@ -590,7 +580,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         Err(_) => {
             // Daemon not running — fall through to in-process server.
             eprintln!(
-                "dreamd mcp: daemon not found at {} — running in-process (Phase 1 fallback)",
+                "dreamd mcp: daemon not found at {} — running in-process",
                 sock_path.display()
             );
         }
@@ -601,7 +591,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     #[cfg(not(unix))]
     let _ = &sock_path;
 
-    // In-process MCP server over stdio (Phase 1).
+    // In-process MCP server over stdio.
     // When an agent root is found, boot a MemoryCoordinator via Supervisor so
     // append_node dispatches durably. `supervisor` is bound here and must
     // outlive the serve call; it drops after svc.waiting() returns.
@@ -632,9 +622,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

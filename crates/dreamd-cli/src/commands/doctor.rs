@@ -1,8 +1,9 @@
 //! `dreamd doctor` — structured health-check output (WEG-66 / DR-315).
 //!
 //! Prints one line per check to stdout. Exit 0 if all checks pass; exit 1 if
-//! any check emits a WARNING or ERROR. Today: dream-cycle mode and on-disk
-//! index freshness (when a store is present).
+//! any check emits a WARNING or ERROR. Checks (when applicable): dream-cycle
+//! mode, on-disk index freshness vs JSONL watermark, episodic log health
+//! (malformed lines / torn tail), and last autobiography skip.
 
 use std::io::{self, Write};
 

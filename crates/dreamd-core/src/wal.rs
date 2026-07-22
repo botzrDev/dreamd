@@ -22,11 +22,18 @@ use crate::layout::AgentRoot;
 /// the record schema (`dreamd_protocol::RECORD_SCHEMA_VERSION`).
 pub const STATE_SCHEMA_VERSION: &str = "1.0";
 
+/// Destructive dream-cycle step recorded before it executes.
+///
+/// On crash recovery without [`WalIntent::Commit`], each non-commit intent's
+/// temp file is deleted and the WAL is removed so `.agent/` stays pre-cycle.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "operation", content = "payload")]
 pub enum WalIntent {
+    /// About to promote a temp LESSONS.md (or semantic memory file) into place.
     ReplaceSemanticMemory { temp_file_path: String },
+    /// About to replace episodic JSONL with a pruned temp copy.
     PruneEpisodicMemory { temp_file_path: String },
+    /// All destructive steps succeeded; recovery treats the cycle as committed.
     Commit,
 }
 
@@ -43,13 +50,14 @@ pub struct DreamWal {
     pub intents: Vec<WalIntent>,
 }
 
+/// Result of scanning / applying `dream_in_progress.wal` on startup.
 #[derive(Debug, PartialEq)]
 pub enum RecoveryOutcome {
     /// No WAL found — nothing to recover.
     Clean,
-    /// Incomplete cycle recovered: temp files cleaned up, WAL deleted.
+    /// Incomplete cycle (no Commit): temp files removed, WAL deleted.
     Recovered { cleaned_files: Vec<PathBuf> },
-    /// Cycle had committed but cleanup wasn't finished; state.json updated.
+    /// Commit was recorded but post-commit cleanup did not finish; repair state.json.
     CommittedButUnclean,
 }
 

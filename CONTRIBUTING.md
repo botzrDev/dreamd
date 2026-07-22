@@ -92,6 +92,16 @@ Some decisions in the implementation are not negotiable without re-reading SPEC.
 
 If your PR touches any of these areas, please call it out in the description and link the relevant section of [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
+## Comments and docs in code
+
+Prefer short invariant / "do NOT" comments over narrating what the next line does:
+
+- Lead module `//!` with the constraint and the anti-pattern when one exists.
+- Keep an explicit `SAFETY:` contract next to any `unsafe` (do not widen the scoped `detach_double_fork` exception without an equal contract).
+- Ticket IDs are fine as provenance; do not describe shipped work as "upcoming", and never point `dreamd migrate` at the Tantivy index (index self-heals; migrate is episodic `RECORD_SCHEMA_VERSION` only).
+- Avoid decorative `// ---` / `// ===` section banners — blank lines or a one-line section title are enough.
+- Do not conflate episodic `RECORD_SCHEMA_VERSION`, daemon `STATE_SCHEMA_VERSION`, and `index::SCHEMA_VERSION`.
+
 ## Documentation
 
 When your change affects behavior users or contributors see, update the matching doc:
