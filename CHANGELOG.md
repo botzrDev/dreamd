@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.7] - 2026-07-23
+
+### Fixed
+
+- **`tracing::warn!` demoted to `tracing::info!` for absent index manifest.** First-run users saw a scary `WARN` log message ("no index manifest found; treating project as unindexed") on every fresh project. This is the expected first-run state — now logged at `INFO`. (`crates/dreamd-core/src/server/lifecycle.rs:133`)
+- **`eprintln!` demoted to `tracing::debug!` for MCP daemon-not-found fallback.** The Phase 1 in-process fallback message ("daemon not found — running in-process") was printed to stderr as plain text, confusing first-time users who thought the daemon had failed. Now only visible with `RUST_LOG=debug`. (`crates/dreamd-core/src/mcp/mod.rs:583`)
+- **`[dreamd-mcp] Fatal error:` prefix reserved for actual shim crashes.** The JS shim's top-level catch handler printed `Fatal error:` for every error including expected CLI errors from the child process (e.g. "no project root found"). CLI errors (non-zero exit from `execFileSync`) now write `[dreamd-mcp] command exited with code N` without the scary prefix. Actual shim crashes (sha256 mismatch, network failure, signal kill) keep the `Fatal error:` prefix. (`packages/dreamd-mcp/bin/dreamd-mcp.js:334-342`)
+- **`memchr` lockfile bumped v2.8.0 → v2.8.3.** Avoids nightly-toolchain ICE on Windows caused by 2024-edition prelude changes in older patch versions. (`Cargo.lock`)
+
 ## [0.1.0-rc.6] - 2026-07-22
 
 ### Fixed

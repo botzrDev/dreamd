@@ -579,7 +579,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         }
         Err(_) => {
             // Daemon not running — fall through to in-process server.
-            eprintln!(
+            tracing::debug!(
                 "dreamd mcp: daemon not found at {} — running in-process",
                 sock_path.display()
             );
