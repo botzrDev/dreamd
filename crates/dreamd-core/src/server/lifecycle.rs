@@ -130,7 +130,7 @@ impl Supervisor {
         let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
         match check_manifest_version(&manifest_path)? {
             ManifestCheckOutcome::Absent => {
-                tracing::warn!(
+                tracing::info!(
                     path = ?manifest_path,
                     "no index manifest found; treating project as unindexed"
                 );
