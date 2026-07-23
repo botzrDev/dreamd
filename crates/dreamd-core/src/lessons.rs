@@ -74,16 +74,17 @@ pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     write_atomic(path, s.as_bytes())
 }
 
-/// Parse a `LESSONS.md` file written by [`write_lessons_file`].
+struct ParsedFrontmatter {
+    last_updated: DateTime<Utc>,
+    prompt_version: String,
+    cluster_key: String,
+}
+
+/// Parse YAML-style frontmatter from `lines`, starting at index 0.
 ///
-/// Returns [`io::ErrorKind::InvalidData`] if the frontmatter is missing or
-/// malformed, a lesson's `cluster` attribute does not match the file-level
-/// `cluster_key`, or a close marker is absent.
-pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
-    let raw = fs::read_to_string(path)?;
-    // `split('\n')` over a trailing-newline file yields a final empty element;
-    // that's expected and the lesson loop skips blank lines.
-    let lines: Vec<&str> = raw.split('\n').collect();
+/// Returns the parsed fields and the index of the first line after the
+/// closing `---`.
+fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
     let mut idx = 0;
 
     if lines.get(idx).copied() != Some("---") {
@@ -124,41 +125,80 @@ pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
         .map_err(|e| invalid(&format!("invalid last_updated: {e}")))?
         .with_timezone(&Utc);
 
+    Ok((
+        ParsedFrontmatter {
+            last_updated,
+            prompt_version,
+            cluster_key,
+        },
+        idx,
+    ))
+}
+
+/// Parse one HTML-comment-delimited lesson block starting at `idx`.
+///
+/// `idx` must point at the open marker line. Returns the lesson and the
+/// index of the first line after the close marker.
+fn parse_lesson_block(
+    lines: &[&str],
+    idx: usize,
+    cluster_key: &str,
+) -> io::Result<(Lesson, usize)> {
+    let id = parse_open_marker(lines[idx], cluster_key)?;
+    let mut idx = idx + 1;
+
+    let mut content_lines: Vec<&str> = Vec::new();
+    while idx < lines.len() && lines[idx] != CLOSE_MARKER {
+        content_lines.push(lines[idx]);
+        idx += 1;
+    }
+    if idx >= lines.len() {
+        return Err(invalid("lesson close marker not found"));
+    }
+    idx += 1; // past close marker
+
+    // The writer emits `content + '\n' + CLOSE_MARKER`; that trailing '\n'
+    // is consumed as the line separator between content's last line and
+    // the close marker, so `content_lines` already represents the exact
+    // content bytes once joined.
+    let content = content_lines.join("\n");
+    Ok((
+        Lesson {
+            id,
+            content,
+            pinned: false,
+        },
+        idx,
+    ))
+}
+
+/// Parse a `LESSONS.md` file written by [`write_lessons_file`].
+///
+/// Returns [`io::ErrorKind::InvalidData`] if the frontmatter is missing or
+/// malformed, a lesson's `cluster` attribute does not match the file-level
+/// `cluster_key`, or a close marker is absent.
+pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
+    let raw = fs::read_to_string(path)?;
+    // `split('\n')` over a trailing-newline file yields a final empty element;
+    // that's expected and the lesson loop skips blank lines.
+    let lines: Vec<&str> = raw.split('\n').collect();
+
+    let (frontmatter, mut idx) = parse_frontmatter(&lines)?;
     let mut lessons = Vec::new();
     while idx < lines.len() {
         if lines[idx].is_empty() {
             idx += 1;
             continue;
         }
-        let id = parse_open_marker(lines[idx], &cluster_key)?;
-        idx += 1;
-
-        let mut content_lines: Vec<&str> = Vec::new();
-        while idx < lines.len() && lines[idx] != CLOSE_MARKER {
-            content_lines.push(lines[idx]);
-            idx += 1;
-        }
-        if idx >= lines.len() {
-            return Err(invalid("lesson close marker not found"));
-        }
-        idx += 1; // past close marker
-
-        // The writer emits `content + '\n' + CLOSE_MARKER`; that trailing '\n'
-        // is consumed as the line separator between content's last line and
-        // the close marker, so `content_lines` already represents the exact
-        // content bytes once joined.
-        let content = content_lines.join("\n");
-        lessons.push(Lesson {
-            id,
-            content,
-            pinned: false,
-        });
+        let (lesson, next_idx) = parse_lesson_block(&lines, idx, &frontmatter.cluster_key)?;
+        lessons.push(lesson);
+        idx = next_idx;
     }
 
     Ok(LessonsFile {
-        last_updated,
-        prompt_version,
-        cluster_key,
+        last_updated: frontmatter.last_updated,
+        prompt_version: frontmatter.prompt_version,
+        cluster_key: frontmatter.cluster_key,
         lessons,
     })
 }
@@ -198,34 +238,7 @@ fn invalid(msg: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_tmpdir(label: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dreamd-lessons-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            n,
-        ));
-        fs::create_dir_all(&dir).expect("create unique tmpdir");
-        dir
-    }
-
-    struct DirGuard(PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::{unique_tmpdir, DirGuard};
 
     fn fixed_timestamp() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")

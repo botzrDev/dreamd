@@ -261,79 +261,55 @@ mod tests {
     }
 
     #[test]
-    fn agent_dir_is_under_project_root() {
-        assert_eq!(root().agent_dir(), PathBuf::from("/tmp/proj/.agent"));
-    }
-
-    #[test]
-    fn agent_root_resolves_all_seven_subdirs() {
+    fn agent_root_path_methods_resolve_under_agent_dir() {
         let r = root();
-        assert_eq!(r.working_dir(), PathBuf::from("/tmp/proj/.agent/working"));
-        assert_eq!(r.episodic_dir(), PathBuf::from("/tmp/proj/.agent/episodic"));
-        assert_eq!(r.semantic_dir(), PathBuf::from("/tmp/proj/.agent/semantic"));
-        assert_eq!(r.personal_dir(), PathBuf::from("/tmp/proj/.agent/personal"));
-        assert_eq!(r.skills_dir(), PathBuf::from("/tmp/proj/.agent/skills"));
-        assert_eq!(
-            r.protocols_dir(),
-            PathBuf::from("/tmp/proj/.agent/protocols")
-        );
-        assert_eq!(r.dreamd_dir(), PathBuf::from("/tmp/proj/.agent/.dreamd"));
-    }
-
-    #[test]
-    fn canonical_file_paths_are_nested_correctly() {
-        let r = root();
-        assert_eq!(
-            r.episodic_jsonl(),
-            PathBuf::from("/tmp/proj/.agent/episodic/AGENT_LEARNINGS.jsonl"),
-        );
-        assert_eq!(
-            r.lessons_md(),
-            PathBuf::from("/tmp/proj/.agent/semantic/LESSONS.md"),
-        );
-        // Per-project state.json — matches the locked WEG-9 stdout line
-        // "initialized .agent/.dreamd/state.json".
-        assert_eq!(
-            r.state_json(),
-            PathBuf::from("/tmp/proj/.agent/.dreamd/state.json"),
-        );
-    }
-
-    #[test]
-    fn workspace_md_is_under_working_dir() {
-        assert_eq!(
-            root().workspace_md(),
-            PathBuf::from("/tmp/proj/.agent/working/WORKSPACE.md"),
-        );
-    }
-
-    #[test]
-    fn preferences_md_is_under_personal_dir() {
-        assert_eq!(
-            root().preferences_md(),
-            PathBuf::from("/tmp/proj/.agent/personal/PREFERENCES.md"),
-        );
-    }
-
-    #[test]
-    fn decisions_md_is_under_personal_dir() {
-        assert_eq!(
-            root().decisions_md(),
-            PathBuf::from("/tmp/proj/.agent/personal/DECISIONS.md"),
-        );
+        let agent = PathBuf::from("/tmp/proj/.agent");
+        let cases: &[(&str, PathBuf)] = &[
+            ("agent_dir", agent.clone()),
+            ("working_dir", agent.join("working")),
+            ("episodic_dir", agent.join("episodic")),
+            ("semantic_dir", agent.join("semantic")),
+            ("personal_dir", agent.join("personal")),
+            ("skills_dir", agent.join("skills")),
+            ("protocols_dir", agent.join("protocols")),
+            ("dreamd_dir", agent.join(".dreamd")),
+            (
+                "episodic_jsonl",
+                agent.join("episodic/AGENT_LEARNINGS.jsonl"),
+            ),
+            ("lessons_md", agent.join("semantic/LESSONS.md")),
+            ("state_json", agent.join(".dreamd/state.json")),
+            ("workspace_md", agent.join("working/WORKSPACE.md")),
+            ("preferences_md", agent.join("personal/PREFERENCES.md")),
+            ("decisions_md", agent.join("personal/DECISIONS.md")),
+            ("agent_log", agent.join(".dreamd/agent.log")),
+        ];
+        for (name, expected) in cases {
+            let actual = match *name {
+                "agent_dir" => r.agent_dir(),
+                "working_dir" => r.working_dir(),
+                "episodic_dir" => r.episodic_dir(),
+                "semantic_dir" => r.semantic_dir(),
+                "personal_dir" => r.personal_dir(),
+                "skills_dir" => r.skills_dir(),
+                "protocols_dir" => r.protocols_dir(),
+                "dreamd_dir" => r.dreamd_dir(),
+                "episodic_jsonl" => r.episodic_jsonl(),
+                "lessons_md" => r.lessons_md(),
+                "state_json" => r.state_json(),
+                "workspace_md" => r.workspace_md(),
+                "preferences_md" => r.preferences_md(),
+                "decisions_md" => r.decisions_md(),
+                "agent_log" => r.agent_log(),
+                other => panic!("unknown path case: {other}"),
+            };
+            assert_eq!(actual, *expected, "{name}");
+        }
     }
 
     #[test]
     fn agent_root_display_shows_project_root() {
         assert_eq!(root().to_string(), "/tmp/proj");
-    }
-
-    #[test]
-    fn agent_log_is_under_dreamd_dir() {
-        assert_eq!(
-            root().agent_log(),
-            PathBuf::from("/tmp/proj/.agent/.dreamd/agent.log"),
-        );
     }
 
     #[test]

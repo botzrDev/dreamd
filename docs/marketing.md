@@ -17,7 +17,7 @@ AGENTS.md is what you wrote down. dreamd is what your agent learned, across ever
 ## The moment it earns its name
 
 ```text
-~/project $ npx dreamd-mcp init
+~/project $ npx -y dreamd-mcp init
 
 # In Claude Code, Tuesday afternoon:
 you   ▸ axum keeps blowing up when I unwrap in route handlers
@@ -29,6 +29,8 @@ cursor▸ You're unwrapping in a route handler. dreamd has a
         lesson from Tuesday -- axum needs IntoResponse on
         custom Error types. Try `?` and a typed error.
 ```
+
+> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
 
 No re-explaining. No re-pasting. No "as I mentioned before."
 

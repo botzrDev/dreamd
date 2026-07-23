@@ -251,32 +251,8 @@ fn update_state_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{unique_tmpdir, DirGuard};
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_tmpdir(label: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "dreamd-wal-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            n,
-        ))
-    }
-
-    struct DirGuard(PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn setup_root(label: &str) -> (AgentRoot, DirGuard) {
         let dir = unique_tmpdir(label);

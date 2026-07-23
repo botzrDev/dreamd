@@ -7,8 +7,9 @@
 1. **Init the project store**
    ```bash
    cd ~/your-project
-   npx dreamd-mcp init
+   npx -y dreamd-mcp init
    ```
+   > First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
    This scaffolds `.agent/` in your project root.
 
 2. **Start the daemon**

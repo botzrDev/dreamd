@@ -32,6 +32,8 @@ pub mod redaction;
 pub mod registry;
 pub mod salience;
 pub use salience::{salience_with_context, RecurrenceContext};
+#[cfg(test)]
+mod test_support;
 pub mod wal;
 
 pub use collector::{recall, score_by_salience, RecallResult, SalienceCollector};

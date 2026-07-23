@@ -635,6 +635,19 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn mcp_initialize_server_info_version_matches_cargo_pkg_version() {
+        use rmcp::ServerHandler;
+
+        let info = MemoryMcpServer::new().get_info();
+        assert_eq!(info.server_info.name, "dreamd-mcp");
+        assert_eq!(
+            info.server_info.version,
+            env!("CARGO_PKG_VERSION"),
+            "MCP initialize serverInfo.version must track dreamd-cli build version"
+        );
+    }
+
+    #[test]
     fn resolve_sock_path_relative_env_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("DREAMD_SOCK", "relative/path.sock");

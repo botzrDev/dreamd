@@ -752,43 +752,13 @@ mod tests {
     use super::*;
     use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
     use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
+    use crate::test_support::{unique_tmpdir, DirGuard};
     use chrono::{DateTime, Utc};
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tantivy::query::AllQuery;
     use tantivy::ReloadPolicy;
 
     const SAMPLE_ULID_BASE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA";
-
-    fn unique_tmpdir(label: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dreamd-tantivy-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            n,
-        ));
-        std::fs::create_dir_all(&dir).expect("create tmpdir");
-        dir
-    }
-
-    /// RAII cleanup guard: removes the temp dir on drop so tests leave no
-    /// scratch behind even when they panic. Preferred over manual cleanup at
-    /// the end of each test because cleanup still runs on panic / assertion
-    /// failure.
-    struct DirGuard(PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn make_event_id(suffix_char: char) -> EventId {
         // 26-char Crockford ULID, last char varies for ordering tests.

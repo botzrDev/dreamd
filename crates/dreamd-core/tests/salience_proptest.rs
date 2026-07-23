@@ -32,6 +32,103 @@ fn valid_inputs_strategy() -> impl Strategy<Value = (f64, f64, f64, u64)> {
     )
 }
 
+/// Which input axis the monotonicity harness varies.
+#[derive(Debug, Clone, Copy)]
+enum MonotonicAxis {
+    Age,
+    Pain,
+    Importance,
+    Recurrence,
+}
+
+fn axis_strategy() -> impl Strategy<Value = MonotonicAxis> {
+    prop_oneof![
+        Just(MonotonicAxis::Age),
+        Just(MonotonicAxis::Pain),
+        Just(MonotonicAxis::Importance),
+        Just(MonotonicAxis::Recurrence),
+    ]
+}
+
+/// Bundled proptest inputs for the monotonicity harness.
+struct MonotonicCase {
+    axis: MonotonicAxis,
+    age_days: f64,
+    pain: f64,
+    importance: f64,
+    recurrence: u64,
+    age_delta: f64,
+    hi_pain: f64,
+    hi_importance: f64,
+    hi_recurrence: u64,
+}
+
+fn check_monotonicity(case: MonotonicCase) -> Result<(), TestCaseError> {
+    let MonotonicCase {
+        axis,
+        age_days,
+        pain,
+        importance,
+        recurrence,
+        age_delta,
+        hi_pain,
+        hi_importance,
+        hi_recurrence,
+    } = case;
+    match axis {
+        MonotonicAxis::Age => {
+            let age_older = (age_days + age_delta).min(10_000.0);
+            prop_assume!(age_days < age_older);
+            let younger = salience_at_age_days(age_days, pain, importance, recurrence);
+            let older = salience_at_age_days(age_older, pain, importance, recurrence);
+            prop_assert!(
+                younger > older,
+                "younger ({age_days}d → {younger}) must beat older ({age_older}d → {older})"
+            );
+        }
+        MonotonicAxis::Pain => {
+            let (lo, hi) = if pain <= hi_pain {
+                (pain, hi_pain)
+            } else {
+                (hi_pain, pain)
+            };
+            let s_lo = salience_at_age_days(age_days, lo, importance, recurrence);
+            let s_hi = salience_at_age_days(age_days, hi, importance, recurrence);
+            prop_assert!(
+                s_lo <= s_hi,
+                "pain monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
+            );
+        }
+        MonotonicAxis::Importance => {
+            let (lo, hi) = if importance <= hi_importance {
+                (importance, hi_importance)
+            } else {
+                (hi_importance, importance)
+            };
+            let s_lo = salience_at_age_days(age_days, pain, lo, recurrence);
+            let s_hi = salience_at_age_days(age_days, pain, hi, recurrence);
+            prop_assert!(
+                s_lo <= s_hi,
+                "importance monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
+            );
+        }
+        MonotonicAxis::Recurrence => {
+            let (lo, hi) = if recurrence <= hi_recurrence {
+                (recurrence, hi_recurrence)
+            } else {
+                (hi_recurrence, recurrence)
+            };
+            let s_lo = salience_at_age_days(age_days, pain, importance, lo);
+            let s_hi = salience_at_age_days(age_days, pain, importance, hi);
+            prop_assert!(
+                s_lo <= s_hi,
+                "recurrence monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
+            );
+        }
+    }
+    Ok(())
+}
+
 // ── Edge cases (AC-mandated) ─────────────────────────────────────────────────
 
 #[test]
@@ -63,86 +160,28 @@ fn edge_zero_recurrence_ln_factor_is_one() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// Holding pain, importance, and recurrence fixed, younger events outscore
-    /// older ones (strict decrease when age differs).
+    /// Table-driven monotonicity over age (decreasing) and pain, importance,
+    /// recurrence (non-decreasing).
     #[test]
-    fn monotonic_decreasing_in_age(
-        (age_younger, pain, importance, recurrence) in valid_inputs_strategy(),
+    fn monotonicity_holds_per_axis(
+        axis in axis_strategy(),
+        (age_days, pain, importance, recurrence) in valid_inputs_strategy(),
         age_delta in 0.001f64..10_000.0,
+        hi_pain in 0.0f64..=10.0,
+        hi_importance in 0.0f64..=10.0,
+        hi_recurrence in 0u64..=MAX_RECURRENCE,
     ) {
-        let age_older = (age_younger + age_delta).min(10_000.0);
-        prop_assume!(age_younger < age_older);
-
-        let younger = salience_at_age_days(age_younger, pain, importance, recurrence);
-        let older = salience_at_age_days(age_older, pain, importance, recurrence);
-
-        prop_assert!(
-            younger > older,
-            "younger ({age_younger}d → {younger}) must beat older ({age_older}d → {older})"
-        );
-    }
-
-    /// Holding age, importance, and recurrence fixed, higher pain never lowers score.
-    #[test]
-    fn monotonic_non_decreasing_in_pain(
-        (age_days, pain_lo, importance, recurrence) in valid_inputs_strategy(),
-        pain_hi in 0.0f64..=10.0,
-    ) {
-        let (lo, hi) = if pain_lo <= pain_hi {
-            (pain_lo, pain_hi)
-        } else {
-            (pain_hi, pain_lo)
-        };
-
-        let s_lo = salience_at_age_days(age_days, lo, importance, recurrence);
-        let s_hi = salience_at_age_days(age_days, hi, importance, recurrence);
-
-        prop_assert!(
-            s_lo <= s_hi,
-            "pain monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
-        );
-    }
-
-    /// Holding age, pain, and recurrence fixed, higher importance never lowers score.
-    #[test]
-    fn monotonic_non_decreasing_in_importance(
-        (age_days, pain, importance_lo, recurrence) in valid_inputs_strategy(),
-        importance_hi in 0.0f64..=10.0,
-    ) {
-        let (lo, hi) = if importance_lo <= importance_hi {
-            (importance_lo, importance_hi)
-        } else {
-            (importance_hi, importance_lo)
-        };
-
-        let s_lo = salience_at_age_days(age_days, pain, lo, recurrence);
-        let s_hi = salience_at_age_days(age_days, pain, hi, recurrence);
-
-        prop_assert!(
-            s_lo <= s_hi,
-            "importance monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
-        );
-    }
-
-    /// Holding age, pain, and importance fixed, higher recurrence never lowers score.
-    #[test]
-    fn monotonic_non_decreasing_in_recurrence(
-        (age_days, pain, importance, recurrence_lo) in valid_inputs_strategy(),
-        recurrence_hi in 0u64..=MAX_RECURRENCE,
-    ) {
-        let (lo, hi) = if recurrence_lo <= recurrence_hi {
-            (recurrence_lo, recurrence_hi)
-        } else {
-            (recurrence_hi, recurrence_lo)
-        };
-
-        let s_lo = salience_at_age_days(age_days, pain, importance, lo);
-        let s_hi = salience_at_age_days(age_days, pain, importance, hi);
-
-        prop_assert!(
-            s_lo <= s_hi,
-            "recurrence monotonicity violated: lo={lo} ({s_lo}) > hi={hi} ({s_hi})"
-        );
+        check_monotonicity(MonotonicCase {
+            axis,
+            age_days,
+            pain,
+            importance,
+            recurrence,
+            age_delta,
+            hi_pain,
+            hi_importance,
+            hi_recurrence,
+        })?;
     }
 
     /// Valid inputs never produce NaN or Infinity.

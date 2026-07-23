@@ -211,34 +211,13 @@ pub fn run_decay_pruner(
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use chrono::{TimeZone, Utc};
     use dreamd_protocol::EventId;
 
     use crate::layout::AgentRoot;
+    use crate::test_support::{unique_tmpdir, DirGuard};
 
     const SAMPLE_ULID_BASE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA";
-
-    fn unique_tmpdir(label: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dreamd-decay-{}-{}-{}",
-            label,
-            std::process::id(),
-            n,
-        ));
-        std::fs::create_dir_all(&dir).expect("create tmpdir");
-        dir
-    }
-
-    struct DirGuard(std::path::PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn make_event_id(suffix_char: char) -> EventId {
         let raw = format!("evt_{SAMPLE_ULID_BASE}{suffix_char}");

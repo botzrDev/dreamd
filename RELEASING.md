@@ -45,6 +45,7 @@ Verify locally before committing:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+bash scripts/check-npx-floating.sh                 # no hard-pinned dreamd-mcp@ in user-facing docs
 cargo test --all-features --workspace            # cli_help version snaps must be green
 ( cd packages/dreamd-mcp && node --test )        # will FAIL on PENDING shas — expected until step 4
 ```

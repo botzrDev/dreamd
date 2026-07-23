@@ -230,36 +230,11 @@ pub fn rewrite_atomic(
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::DateTime;
     use dreamd_protocol::EventId;
 
-    fn unique_tmpdir(label: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dreamd-episodic-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            n,
-        ));
-        std::fs::create_dir_all(&dir).expect("create tmpdir");
-        dir
-    }
-
-    struct DirGuard(std::path::PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::{unique_tmpdir, DirGuard};
 
     // Fixed "now"/timestamp so records are young (never decay). 2026-07-03Z.
     const NOW_SEC: i64 = 1751500800;

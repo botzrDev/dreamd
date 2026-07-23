@@ -82,7 +82,7 @@ dreamd is **open-core on the GitLab model.**
 
 **A 45-minute screen-share** at a time of your choosing, in which you:
 
-1. `npx dreamd-mcp` on a clean repo of your choice.
+1. `npx -y dreamd-mcp` on a clean repo of your choice.
 2. Run the cross-harness scenario above (we'll bring two harnesses if your setup only has one).
 3. Tell us where the demo lied, where the install pissed you off, where `search_nodes` results were noticeably worse than naive `grep`, and where the JSONL schema doesn't fit something your existing system does cleanly.
 
@@ -95,7 +95,7 @@ We're sending this to two builders we respect specifically. We are not running a
 ## Links + setup
 
 - Repo: [github.com/botzrDev/dreamd](https://github.com/botzrDev/dreamd)
-- Install: `npx dreamd-mcp` (Apache-2.0, ≤30s on a clean machine)
+- Install: `npx -y dreamd-mcp` (Apache-2.0, ≤30s on a clean machine)
 - Spec: [`SPEC.md`](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): RFC-2119 conformance for folder layout, node schema, dream cycle
 - Roadmap: [`ROADMAP.md`](https://github.com/botzrDev/dreamd/blob/main/ROADMAP.md): what shipped, what's next, and the v0.2 direction
 - Contact: Austin at `uveddi@pm.me` for slow-thread, `@wgi_dev` on X for fast

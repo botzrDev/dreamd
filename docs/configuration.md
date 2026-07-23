@@ -137,8 +137,10 @@ Local development only — never set in production MCP configs:
 
 ```bash
 export DREAMD_BIN=~/.cargo/bin/dreamd
-npx dreamd-mcp
+npx -y dreamd-mcp
 ```
+
+> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
 
 See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [../SECURITY.md](../SECURITY.md) for the threat model around both variables.
 

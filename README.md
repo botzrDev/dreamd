@@ -3,17 +3,42 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/v0.1-in%20progress-orange.svg)](#v01-progress)
+[![Status](https://img.shields.io/badge/v0.1-targeting%20Aug%209-orange.svg)](#status)
 
-**A local-first memory layer for AI coding agents.**
+**The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
-dreamd gives multiple coding agents — Claude Code, Cursor, Cline — a shared memory format. One `.agent/` folder in your repo. Every agent reads and writes to it. Sessions, learnings, and skills in plain files, version-controlled alongside your code.
+Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MCP-aware harnesses share it. What one agent learns, the next already knows. You can `cat`, `grep`, `git diff`, and hand-edit every byte.
 
-Every coding agent ships its own memory format. dreamd is what they could share.
+This is not "another memory product." It is a storage-model wedge: the filesystem is the source of truth, and the MCP tools (`search_nodes` / `append_node`) are a thin interface over those files.
 
-AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+**Open core:** Apache-2.0 core today, self-hosted only. Premium features may ship later. Do not read this as free-forever for everything.
 
-Watch this repo for v0.1 release notifications (Aug 9).
+```bash
+npx -y dreamd-mcp init    # scaffold .agent/
+npx -y dreamd-mcp         # MCP server (stdio)
+```
+
+> First run prompts once. Press `y`, or keep using `npx -y dreamd-mcp`.
+
+---
+
+## The moment it earns its name
+
+```text
+~/project $ npx -y dreamd-mcp init
+
+# Claude Code, Tuesday:
+you   > axum keeps blowing up when I unwrap in route handlers
+claude> filed under rust::error_handling::axum_rejection
+
+# Cursor, Friday, fresh session:
+you   > why is this build failing?
+cursor> You're unwrapping in a route handler. dreamd has a
+        lesson from Tuesday: axum needs IntoResponse on
+        custom Error types. Try `?` and a typed error.
+```
+
+No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
 
 ---
 
@@ -22,20 +47,13 @@ Watch this repo for v0.1 release notifications (Aug 9).
 ### npm (recommended)
 
 ```bash
-npx -y dreamd-mcp init    # scaffold .agent/ in your project
-npx -y dreamd-mcp         # MCP server (stdio)
+npx -y dreamd-mcp init
+npx -y dreamd-mcp
 ```
 
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
-### Cargo
-
-```bash
-cargo install --path crates/dreamd-cli   # from a clone
-# or, when published: cargo install dreamd
-```
-
-### From source
+### Cargo / from source
 
 ```bash
 git clone https://github.com/botzrDev/dreamd.git
@@ -50,26 +68,24 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 ## Quick start (< 30 seconds)
 
 ```bash
-cd ~/your-project          # must contain a repo root sentinel
+cd ~/your-project
 npx -y dreamd-mcp init
 
-# Terminal 1 — shared daemon (recommended for multiple agents)
+# Terminal 1: shared daemon (recommended when several agents write)
 dreamd watch
 
-# Terminal 2 — point your harness at the MCP server
+# Terminal 2: MCP server for your harness
 npx -y dreamd-mcp
 ```
 
-In Claude Code, Cursor, or Cline (experimental): ask the agent to search memory for something you just learned. It calls `search_nodes` over MCP and recalls prior context.
-
-Verify the store:
+Ask the agent to search memory for something you just learned. It calls `search_nodes` and recalls prior context.
 
 ```bash
 cat .agent/episodic/AGENT_LEARNINGS.jsonl
 dreamd doctor
 ```
 
-Adapter-specific setup: [adapters/claude-code](./adapters/claude-code/README.md) · [adapters/cursor](./adapters/cursor/README.md)
+Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md)
 
 ---
 
@@ -77,8 +93,8 @@ Adapter-specific setup: [adapters/claude-code](./adapters/claude-code/README.md)
 
 | Location | Contents | Commit? |
 |---|---|---|
-| `<project>/.agent/` | Episodic JSONL, semantic lessons, personal prefs | **Yes** — this is your shared memory |
-| `<project>/.agent/.dreamd/` | Local index, daemon state, config template | No — gitignored by `init` |
+| `<project>/.agent/` | Episodic JSONL, semantic lessons, personal prefs | **Yes** (this is the shared memory) |
+| `<project>/.agent/.dreamd/` | Local index, daemon state, config template | No (gitignored by `init`) |
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
@@ -88,25 +104,41 @@ Adapter-specific setup: [adapters/claude-code](./adapters/claude-code/README.md)
 
 ## Architecture (one paragraph)
 
-Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence), and each hit carries its `source_harness` and `skill_action` — so recall is cross-harness-attributable, not an opaque lookup. The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
+Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence). Each hit carries `source_harness` and `skill_action`, so recall is attributable across harnesses. The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
+
+v0.1 recall is deliberately lexical (BM25 + salience). That is a scope choice, not a scoreboard claim. Semantic / embedding recall is out of scope until after v0.1.
 
 Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md)
 
 ---
 
-## Performance
+## FAQ
 
-Recall latency (warm in-RAM index, Criterion 0.5, WSL2/Linux):
+**Is this the first / only cross-harness memory?** No. Other projects exist (including large ones). dreamd owns the storage-model wedge: plain files you already version-control, not a category claim.
 
-| Corpus size | Mean (warm) |
+**Do I need Rust?** No for the recommended path. `npx -y dreamd-mcp` downloads a prebuilt binary. Rust is only required if you build from source.
+
+**Where does memory live?** In `<project>/.agent/`. The daemon and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL / Markdown by hand; durable appends should go through the daemon / MCP so the writer stays single-writer.
+
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. Uninstall steps: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset).
+
+**Windows?** Not in v0.1. Linux and macOS only. Windows lifecycle is planned for v0.1.1.
+
+**Is everything free forever?** Apache-2.0 core is open. Premium may come later. Self-hosted only in v0.1 (no hosted SaaS).
+
+More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
+
+---
+
+## Roadmap
+
+| When | What |
 |---|---|
-| 1 000 entries   | ~50 µs |
-| 10 000 entries  | ~313 µs |
-| 100 000 entries | ~2.8 ms |
+| **v0.1** (~2026-08-09) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
+| **v0.1.1** | Windows lifecycle, semantic / embedding recall, LLM-assisted dream cycle (not claimed in v0.1) |
+| **Oct 2026** | State-Drift benchmark publish (dreamd is one row; conflict of interest disclosed) |
 
-_Criterion reports mean across 100 samples; used here as the P50 proxy. All three sizes are well under the `<5ms P50 warm` NFR. Run `cargo bench -p dreamd-core` to reproduce._
-
-> **Read-after-write visibility:** up to 5 seconds (the index commit cadence). A just-written event becomes recallable within one commit cycle; recall latency itself is unaffected.
+v0.1.1 features are intentionally not implemented or documented as shipped in v0.1 code.
 
 ---
 
@@ -118,56 +150,47 @@ _Criterion reports mean across 100 samples; used here as the P50 proxy. All thre
 | [docs/README.md](./docs/README.md) | Full documentation index |
 | [docs/http-api.md](./docs/http-api.md) | REST API over Unix socket |
 | [docs/configuration.md](./docs/configuration.md) | TOML config and env vars |
-| [docs/troubleshooting.md](./docs/troubleshooting.md) | FAQ — common failures |
+| [docs/troubleshooting.md](./docs/troubleshooting.md) | Common failures |
 | [docs/glossary.md](./docs/glossary.md) | Domain terms |
-| [docs/ci.md](./docs/ci.md) | CI pipeline and local reproduction |
 | [SPEC.md](./SPEC.md) | On-disk contract |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Engineering decisions |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup and RFC process |
 | [SECURITY.md](./SECURITY.md) | Threat model |
 | [docs/marketing.md](./docs/marketing.md) | Product story and positioning |
 
+Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.md) if you want them. They are not the product pitch.
+
 ---
 
 ## Status
 
-**v0.1 in active development — targeting 2026-08-09.** The daemon builds and runs locally today: `dreamd init`, `dreamd dream`, `dreamd doctor`, `dreamd mcp`, `dreamd watch`, `dreamd reset workspace`, and `dreamd version`. The `npx dreamd-mcp` install path is live on npm as `dreamd-mcp` (`npx -y dreamd-mcp` installs the latest published version). Linux and macOS.
-
-### v0.1 progress
+**v0.1 targeting 2026-08-09.** Daemon commands available today: `init`, `dream`, `doctor`, `mcp`, `watch`, `reset workspace`, `version`. npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
 
 | Layer | Status |
 |---|---|
 | `SPEC.md` v0.1 | Shipped |
 | Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
-| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped — `dreamd-mcp` on npm (floating: `npx -y dreamd-mcp`) |
-| CI / cross-platform matrix | Lint, test, cross-platform build, binary-size gate, DCO check |
-| Conformance test suite | Reference-impl suites shipped (`scripts/alpha/`); no formal certification in v0.1 |
+| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped on npm |
+| CI / cross-platform matrix | Lint, test, build, binary-size gate, DCO |
+| Conformance | Reference-impl alpha suites (`scripts/alpha/`); no formal certification in v0.1 |
 
 ---
 
-## State-Drift benchmark
+## State-Drift benchmark (Oct 2026)
 
-In October 2026, we're publishing a neutral, reproducible benchmark measuring whether AI memory systems correctly update superseded facts — the specific failure where a system "knows" you moved from London to Tokyo but keeps confidently answering "London" because the old fact was never retired.
-
-The benchmark runs Mem0, Zep, Letta, Anthropic's memory, and dreamd through identical scenarios. The same probe question is asked after a fact has changed. Every system is scored by a deterministic oracle — not an LLM judge — so results are identical across runs and independent of model version. dreamd is one row in the results table, published regardless of where it places.
-
-**Transparency:** dreamd's developer built and maintains this benchmark, which creates an obvious conflict of interest. We've taken explicit steps to address it: every system is configured using its maintainer's documented recommended settings; we contact Mem0/Zep/Letta maintainers before publication to verify our configurations; raw per-question outputs for every system are committed to the repo so you can audit every individual answer; and an external engineer independently reproduces results before we publish. There is a scenario subset where dreamd's BM25 retrieval loses to paraphrase-heavy probes — that result is in the table.
-
-The methodology and bake-off harness live in [scripts/benchmark/README.md](./scripts/benchmark/README.md); the public results repo will be linked here when it publishes in October. If you maintain a memory system and want to verify how we configured yours before we publish, open an issue.
+A separate, reproducible eval measuring whether memory systems correctly update superseded facts. dreamd is one row in the table, published regardless of placement. Conflict of interest is disclosed; configs use each maintainer's documented defaults; raw outputs are committed for audit. Methodology: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
 
 ---
 
 ## Platforms
 
-v0.1 supports Linux and macOS. Windows lifecycle support arrives in v0.1.1.
+v0.1: Linux and macOS. Windows in v0.1.1.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, commit conventions, DCO sign-off, and the RFC process.
-
-By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). To report a security issue, see [SECURITY.md](./SECURITY.md) — do not open a public issue for vulnerabilities.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md) (do not open a public issue for vulnerabilities).
 
 ## License
 

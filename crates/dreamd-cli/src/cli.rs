@@ -260,6 +260,357 @@ fn discover_store_or_exit(
     })
 }
 
+fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
+    std::env::current_dir().map_err(|e| {
+        eprintln!("dreamd: error — could not read current directory: {e}");
+        ExitCode::from(1)
+    })
+}
+
+fn resolve_daemon_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".agent"))
+        .unwrap_or_else(|| PathBuf::from(".agent"))
+}
+
+fn run_archive(args: ArchiveArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Resolve the daemon socket the same way `status` does ($DREAMD_SOCK
+    // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
+    // a running daemon can't clobber the rewrite.
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    match commands::archive::run(
+        &cwd,
+        socket.as_deref(),
+        args.force_unpin,
+        args.id.as_deref(),
+        args.all,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage / precondition errors — the user must fix the invocation.
+        Err(commands::archive::ArchiveError::NotFound)
+        | Err(commands::archive::ArchiveError::ForceUnpinRequired)
+        | Err(commands::archive::ArchiveError::NoTarget)
+        | Err(commands::archive::ArchiveError::IdAndAll) => ExitCode::from(2),
+        // Runtime failures — the store/log or a live daemon got in the way.
+        Err(commands::archive::ArchiveError::DaemonRunning)
+        | Err(commands::archive::ArchiveError::UnknownId(_)) => ExitCode::from(1),
+        Err(commands::archive::ArchiveError::Episodic(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::archive::ArchiveError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_doctor() -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let config = match load_config(&cwd) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let agent_root = match discover_store_or_exit(&cwd) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match commands::doctor::run(&config, &agent_root, skip.as_ref(), &mut out) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_dream(args: DreamArgs) -> ExitCode {
+    if let Err(msg) = args.validate() {
+        eprintln!("dreamd: {msg}");
+        return ExitCode::from(2);
+    }
+    if args.auto {
+        eprintln!(
+            "dreamd: --auto is not yet supported at v0.1; \
+             set dream_cycle_mode = \"manual\" in config.toml. \
+             Auto mode ships at v0.1.1."
+        );
+        return ExitCode::from(2);
+    }
+    if args.dry {
+        eprintln!("dreamd: --dry is not yet implemented (ships v0.1.1).");
+        return ExitCode::from(2);
+    }
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let config = match load_config(&cwd) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dreamd: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(msg) = check_dream_mode(&config) {
+        eprintln!("dreamd: {msg}");
+        return ExitCode::from(2);
+    }
+    let agent_root = match discover_store_or_exit(&cwd) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    match commands::dream::run(
+        agent_root.project_root(),
+        &mut std::io::stdout(),
+        args.no_commit,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("dreamd: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_init(args: InitArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let daemon_home = resolve_daemon_home();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let result = if args.uninstall_project {
+        commands::init::uninstall_project(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+    } else {
+        commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
+        Err(commands::init::InitError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_mcp(args: McpArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // --project-root overrides CWD-based agent-root discovery. Required when
+    // an IDE launches the MCP server from a non-project CWD.
+    let effective_root = match args.project_root {
+        Some(p) => p,
+        None => cwd,
+    };
+    let mut config = match load_config(&effective_root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // --manual-only overrides config before the Auto guard runs.
+    if args.manual_only {
+        config.dream_cycle_mode = DreamCycleMode::Manual;
+    }
+    if let Err(msg) = check_dream_mode(&config) {
+        eprintln!("dreamd: error — {msg}");
+        std::process::exit(1);
+    }
+    commands::mcp::run(&effective_root)
+}
+
+fn run_migrate(args: MigrateArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    match commands::migrate::run(&cwd, &args.from, &args.to, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage — no store to migrate; run `dreamd init` first.
+        Err(commands::migrate::MigrateError::NotFound) => ExitCode::from(2),
+        // Runtime — unregistered path (already reported inside run).
+        Err(commands::migrate::MigrateError::NoMigration { .. }) => ExitCode::from(1),
+        // Runtime — a registered transform or a `.bak`/IO write failed.
+        Err(commands::migrate::MigrateError::Apply(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::migrate::MigrateError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_recall(args: RecallArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Query instant: wall clock. Recall derives age_days / salience decay
+    // live from this, so — unlike `dreamd dream` — it is not byte-stable
+    // and takes no SOURCE_DATE_EPOCH override.
+    let now_sec = chrono::Utc::now().timestamp();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    match commands::recall::run(
+        &cwd,
+        &args.query,
+        args.k,
+        args.explain,
+        now_sec,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage / precondition — the user must fix the invocation or init first.
+        Err(commands::recall::RecallError::NotFound) => ExitCode::from(2),
+        // Runtime — the index is not ready, or a search/IO failure.
+        Err(commands::recall::RecallError::IndexUnavailable(_)) => ExitCode::from(1),
+        Err(commands::recall::RecallError::Search(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::recall::RecallError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_score(args: ScoreArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Query instant: wall clock (same as recall — age_days / salience decay).
+    let now_sec = chrono::Utc::now().timestamp();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    match commands::score::run(&cwd, args.n, args.explain, now_sec, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::score::ScoreError::NotFound) => ExitCode::from(2),
+        Err(commands::score::ScoreError::IndexUnavailable(_)) => ExitCode::from(1),
+        Err(commands::score::ScoreError::Search(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::score::ScoreError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_reset_workspace(yes: bool) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    match commands::reset::run_workspace(&cwd, yes, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::reset::ResetError::NotFound)
+        | Err(commands::reset::ResetError::NotATty)
+        | Err(commands::reset::ResetError::Declined) => ExitCode::from(2),
+        Err(commands::reset::ResetError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_status(status_log_tail: &[String]) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
+    // registry resolves off $HOME the same way the tracing log path above does.
+    // The log tail was captured into `status_log_tail` before init_tracing ran.
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    let registry_path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
+        .unwrap_or_else(|| PathBuf::from("registry.toml"));
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match commands::status::run(
+        &cwd,
+        socket.as_deref(),
+        &registry_path,
+        status_log_tail,
+        &mut out,
+    ) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_watch() -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    commands::watch::run(&cwd)
+}
+
+fn run_version() -> ExitCode {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match commands::version::run(&mut out) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// Parse CLI args and dispatch to the matching subcommand handler.
 ///
 /// Returns [`ExitCode`] directly so `main` stays a one-liner.
@@ -302,375 +653,20 @@ pub fn run() -> ExitCode {
     };
 
     match command {
-        Command::Archive(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // Resolve the daemon socket the same way `status` does ($DREAMD_SOCK
-            // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
-            // a running daemon can't clobber the rewrite.
-            let socket = dreamd_core::client::resolve_daemon_socket();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            match commands::archive::run(
-                &cwd,
-                socket.as_deref(),
-                args.force_unpin,
-                args.id.as_deref(),
-                args.all,
-                &mut out,
-                &mut err,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                // Usage / precondition errors — the user must fix the invocation.
-                Err(commands::archive::ArchiveError::NotFound)
-                | Err(commands::archive::ArchiveError::ForceUnpinRequired)
-                | Err(commands::archive::ArchiveError::NoTarget)
-                | Err(commands::archive::ArchiveError::IdAndAll) => ExitCode::from(2),
-                // Runtime failures — the store/log or a live daemon got in the way.
-                Err(commands::archive::ArchiveError::DaemonRunning)
-                | Err(commands::archive::ArchiveError::UnknownId(_)) => ExitCode::from(1),
-                Err(commands::archive::ArchiveError::Episodic(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-                Err(commands::archive::ArchiveError::Io(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Doctor => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let config = match load_config(&cwd) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let agent_root = match discover_store_or_exit(&cwd) {
-                Ok(r) => r,
-                Err(code) => return code,
-            };
-            let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            match commands::doctor::run(&config, &agent_root, skip.as_ref(), &mut out) {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => ExitCode::from(1),
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Dream(args) => {
-            if let Err(msg) = args.validate() {
-                eprintln!("dreamd: {msg}");
-                return ExitCode::from(2);
-            }
-            if args.auto {
-                eprintln!(
-                    "dreamd: --auto is not yet supported at v0.1; \
-                     set dream_cycle_mode = \"manual\" in config.toml. \
-                     Auto mode ships at v0.1.1."
-                );
-                return ExitCode::from(2);
-            }
-            if args.dry {
-                eprintln!("dreamd: --dry is not yet implemented (ships v0.1.1).");
-                return ExitCode::from(2);
-            }
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let config = match load_config(&cwd) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("dreamd: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            if let Err(msg) = check_dream_mode(&config) {
-                eprintln!("dreamd: {msg}");
-                return ExitCode::from(2);
-            }
-            let agent_root = match discover_store_or_exit(&cwd) {
-                Ok(r) => r,
-                Err(code) => return code,
-            };
-            match commands::dream::run(
-                agent_root.project_root(),
-                &mut std::io::stdout(),
-                args.no_commit,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("dreamd: {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Init(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let daemon_home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|h| h.join(".agent"))
-                .unwrap_or_else(|| PathBuf::from(".agent"));
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            let result = if args.uninstall_project {
-                commands::init::uninstall_project(
-                    &cwd,
-                    &daemon_home,
-                    args.quiet,
-                    &mut out,
-                    &mut err,
-                )
-            } else {
-                commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
-            };
-            match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
-                Err(commands::init::InitError::Io(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Mcp(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // --project-root overrides CWD-based agent-root discovery. Required when
-            // an IDE launches the MCP server from a non-project CWD.
-            let effective_root = match args.project_root {
-                Some(p) => p,
-                None => cwd,
-            };
-            let mut config = match load_config(&effective_root) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // --manual-only overrides config before the Auto guard runs.
-            if args.manual_only {
-                config.dream_cycle_mode = DreamCycleMode::Manual;
-            }
-            if let Err(msg) = check_dream_mode(&config) {
-                eprintln!("dreamd: error — {msg}");
-                std::process::exit(1);
-            }
-            commands::mcp::run(&effective_root)
-        }
-        Command::Migrate(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            match commands::migrate::run(&cwd, &args.from, &args.to, &mut out, &mut err) {
-                Ok(()) => ExitCode::SUCCESS,
-                // Usage — no store to migrate; run `dreamd init` first.
-                Err(commands::migrate::MigrateError::NotFound) => ExitCode::from(2),
-                // Runtime — unregistered path (already reported inside run).
-                Err(commands::migrate::MigrateError::NoMigration { .. }) => ExitCode::from(1),
-                // Runtime — a registered transform or a `.bak`/IO write failed.
-                Err(commands::migrate::MigrateError::Apply(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-                Err(commands::migrate::MigrateError::Io(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Recall(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // Query instant: wall clock. Recall derives age_days / salience decay
-            // live from this, so — unlike `dreamd dream` — it is not byte-stable
-            // and takes no SOURCE_DATE_EPOCH override.
-            let now_sec = chrono::Utc::now().timestamp();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            match commands::recall::run(
-                &cwd,
-                &args.query,
-                args.k,
-                args.explain,
-                now_sec,
-                &mut out,
-                &mut err,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                // Usage / precondition — the user must fix the invocation or init first.
-                Err(commands::recall::RecallError::NotFound) => ExitCode::from(2),
-                // Runtime — the index is not ready, or a search/IO failure.
-                Err(commands::recall::RecallError::IndexUnavailable(_)) => ExitCode::from(1),
-                Err(commands::recall::RecallError::Search(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-                Err(commands::recall::RecallError::Io(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Score(args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // Query instant: wall clock (same as recall — age_days / salience decay).
-            let now_sec = chrono::Utc::now().timestamp();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            match commands::score::run(&cwd, args.n, args.explain, now_sec, &mut out, &mut err) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(commands::score::ScoreError::NotFound) => ExitCode::from(2),
-                Err(commands::score::ScoreError::IndexUnavailable(_)) => ExitCode::from(1),
-                Err(commands::score::ScoreError::Search(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-                Err(commands::score::ScoreError::Io(e)) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
+        Command::Archive(args) => run_archive(args),
+        Command::Doctor => run_doctor(),
+        Command::Dream(args) => run_dream(args),
+        Command::Init(args) => run_init(args),
+        Command::Mcp(args) => run_mcp(args),
+        Command::Migrate(args) => run_migrate(args),
+        Command::Recall(args) => run_recall(args),
+        Command::Score(args) => run_score(args),
         Command::Reset(args) => match args.command {
-            ResetCommand::Workspace { yes } => {
-                let cwd = match std::env::current_dir() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("dreamd: error — could not read current directory: {e}");
-                        return ExitCode::from(1);
-                    }
-                };
-                let stdout = std::io::stdout();
-                let stderr = std::io::stderr();
-                let mut out = stdout.lock();
-                let mut err = stderr.lock();
-                match commands::reset::run_workspace(&cwd, yes, &mut out, &mut err) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(commands::reset::ResetError::NotFound)
-                    | Err(commands::reset::ResetError::NotATty)
-                    | Err(commands::reset::ResetError::Declined) => ExitCode::from(2),
-                    Err(commands::reset::ResetError::Io(e)) => {
-                        eprintln!("dreamd: error — {e}");
-                        ExitCode::from(1)
-                    }
-                }
-            }
+            ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
-        Command::Status => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
-            // registry resolves off $HOME the same way the tracing log path above does.
-            // The log tail was captured into `status_log_tail` before init_tracing ran.
-            let socket = dreamd_core::client::resolve_daemon_socket();
-            let registry_path = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
-                .unwrap_or_else(|| PathBuf::from("registry.toml"));
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            match commands::status::run(
-                &cwd,
-                socket.as_deref(),
-                &registry_path,
-                &status_log_tail,
-                &mut out,
-            ) {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => ExitCode::from(1),
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Command::Watch(_args) => {
-            let cwd = match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("dreamd: error — could not read current directory: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            commands::watch::run(&cwd)
-        }
-        Command::Version => {
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            match commands::version::run(&mut out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("dreamd: error — {e}");
-                    ExitCode::from(1)
-                }
-            }
-        }
+        Command::Status => run_status(&status_log_tail),
+        Command::Watch(_args) => run_watch(),
+        Command::Version => run_version(),
     }
 }
 

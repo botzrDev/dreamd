@@ -23,7 +23,8 @@ without MCP — a documentation snippet that teaches the agent the same behavior
 
 For any MCP-capable harness:
 
-1. Initialize the store in the project: `npx dreamd-mcp init` (or `dreamd init`).
+1. Initialize the store in the project: `npx -y dreamd-mcp init` (or `dreamd init`).
+   > First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
    This scaffolds `.agent/`. Harnesses that require an existing `.agent/` (e.g.
    Cline) fail with `no agent root found` until this runs.
 2. Register an MCP server whose `command` is `npx` with `args` `["-y", "dreamd-mcp"]`.

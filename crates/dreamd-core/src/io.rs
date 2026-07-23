@@ -82,34 +82,7 @@ pub(crate) fn write_atomic_with_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_tmpdir(label: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dreamd-io-{}-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos,
-            n,
-        ));
-        fs::create_dir_all(&dir).expect("create unique tmpdir");
-        dir
-    }
-
-    struct DirGuard(PathBuf);
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::{unique_tmpdir, DirGuard};
 
     #[cfg(not(windows))]
     #[test]

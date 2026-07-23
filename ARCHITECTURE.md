@@ -289,7 +289,7 @@ Requests that target a project store must include the `X-Agent-Root` header with
 - **Phase 1 (standalone):** `dreamd mcp` / `npx dreamd-mcp` runs an in-process server when no daemon is reachable. Safe for single-agent or sequential use.
 - **Phase 2 (daemon bridge):** When `dreamd watch` is running, MCP auto-detects the UDS and routes through the shared daemon — the single serialized writer.
 
-For multiple agents writing to the same project simultaneously, run one `dreamd watch` (or `npx dreamd-mcp watch`) per machine.
+For multiple agents writing to the same project simultaneously, run one `dreamd watch` (or `npx -y dreamd-mcp watch`) per machine.
 
 ## Performance targets
 
