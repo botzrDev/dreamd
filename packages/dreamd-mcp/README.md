@@ -24,7 +24,7 @@ npx -y dreamd-mcp
 > run falls back to the last-cached binary. A hard version pin (`dreamd-mcp@0.1.0-rc.3`)
 > is the one form that never picks up new releases.
 
-No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`).
+No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`). **Native Windows is out of scope for v0.1** — use WSL2 or a Linux/macOS host (Windows support is planned for v0.1.1).
 
 Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor)
 
@@ -65,7 +65,7 @@ Set `DREAMD_BIN=/path/to/dreamd` to skip download and use a local build instead 
 
 **Warning:** when `DREAMD_BIN` is set, sha256 verification is skipped. Use this only for local development — never point production MCP configs at an unverified binary.
 
-Build from source:
+Build from source (Linux / macOS only — native Windows is out of scope for v0.1):
 
 ```sh
 cargo install --path crates/dreamd-cli

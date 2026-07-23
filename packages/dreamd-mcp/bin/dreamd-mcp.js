@@ -287,20 +287,32 @@ async function main() {
 
   const target = getPlatformTarget();
   if (!target) {
-    process.stderr.write(
-      `No prebuilt binary for ${process.platform}/${process.arch}. Install via:\n` +
-      `  cargo install --path crates/dreamd-cli\n` +
-      `Then set DREAMD_BIN=/path/to/dreamd and re-run.\n`
-    );
+    if (process.platform === 'win32') {
+      process.stderr.write(
+        `dreamd does not support native Windows in v0.1 (planned for v0.1.1).\n` +
+          `Use WSL2 (Ubuntu) or a Linux/macOS host instead.\n` +
+          `Prebuilt binaries ship for linux-x64, darwin-x64, and darwin-arm64 only.\n`
+      );
+    } else {
+      process.stderr.write(
+        `No prebuilt binary for ${process.platform}/${process.arch}.\n` +
+          `Supported platforms: linux-x64, darwin-x64, darwin-arm64.\n` +
+          `On a supported OS with a source checkout, you can build with:\n` +
+          `  cargo install --path crates/dreamd-cli\n` +
+          `Then set DREAMD_BIN=/path/to/dreamd and DREAMD_BIN_ALLOW_UNVERIFIED=1 and re-run.\n`
+      );
+    }
     process.exit(1);
   }
 
   const binaryEntry = MANIFEST.binaries[target];
   if (!binaryEntry) {
     process.stderr.write(
-      `No prebuilt binary for ${target}. Install via:\n` +
-      `  cargo install --path crates/dreamd-cli\n` +
-      `Then set DREAMD_BIN=/path/to/dreamd and re-run.\n`
+      `No prebuilt binary for ${target} in this package's manifest.\n` +
+        `Supported platforms: linux-x64, darwin-x64, darwin-arm64.\n` +
+        `On a supported OS with a source checkout, you can build with:\n` +
+        `  cargo install --path crates/dreamd-cli\n` +
+        `Then set DREAMD_BIN=/path/to/dreamd and DREAMD_BIN_ALLOW_UNVERIFIED=1 and re-run.\n`
     );
     process.exit(1);
   }
