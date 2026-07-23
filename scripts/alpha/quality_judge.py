@@ -145,10 +145,11 @@ def main():
         subprocess.run([BIN, "init"], cwd=proj, env=env, capture_output=True)
 
         print(f"=== dreamd quality judge (model={MODEL}, sandbox HOME={sandbox}) ===")
-        daemon = subprocess.Popen([BIN, "watch"], env=env,
+        # cwd=proj required: watch discovers AgentRoot from cwd (WEG-512).
+        daemon = subprocess.Popen([BIN, "watch"], cwd=proj, env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         sock = os.path.join(sandbox, ".agent", "dreamd.sock")
-        for _ in range(20):
+        for _ in range(60):
             if os.path.exists(sock):
                 break
             time.sleep(0.5)

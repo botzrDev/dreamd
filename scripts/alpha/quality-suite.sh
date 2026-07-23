@@ -76,10 +76,17 @@ poll_markers() { # <query> <marker...>
 }
 
 # --- Bring up the daemon (Phase 2 shared index; the realistic surface) --------
-"$BIN" watch >"$SANDBOX/daemon.log" 2>&1 &
+# Run from $PROJ so AgentRoot discovery succeeds on CI (no repo `.agent/`).
+# `exec` so $! is dreamd (not a wrapping subshell).
+( cd "$PROJ" && exec "$BIN" watch ) >"$SANDBOX/daemon.log" 2>&1 &
 DAEMON_PID=$!
-for i in $(seq 1 20); do [ -S "$SANDBOX/.agent/dreamd.sock" ] && break; sleep 0.5; done
-[ -S "$SANDBOX/.agent/dreamd.sock" ] && ok "daemon bound socket" || bad "daemon never bound socket"
+for i in $(seq 1 60); do [ -S "$SANDBOX/.agent/dreamd.sock" ] && break; sleep 0.5; done
+if [ -S "$SANDBOX/.agent/dreamd.sock" ]; then ok "daemon bound socket"
+else
+  bad "daemon never bound socket"
+  echo "    --- daemon.log ---"
+  sed 's/^/    /' "$SANDBOX/daemon.log" 2>/dev/null || echo "    (empty)"
+fi
 
 # =============================================================================
 # AXIS 1 — Salience ranking (the wedge claim, end-to-end through MCP)
