@@ -17,6 +17,7 @@
 //! and `append_node` writes the learning durably (WEG-79).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // Remote-backend deps (Unix only) — HTTP-over-UDS client.
 #[cfg(unix)]
@@ -38,6 +39,11 @@ use crate::ingress::{LearnIngress, RecallIngress, RecallResponse, DEFAULT_RECALL
 use crate::privacy::DR413_DISCLOSURE;
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
+
+#[cfg(unix)]
+use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
+#[cfg(unix)]
+use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
 // Error type
 
@@ -126,6 +132,11 @@ pub struct MemoryMcpServer {
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<MemoryMcpServer>,
     backend: Backend,
+    /// Shared Tantivy handles for Phase-1 local recall (WEG-252). Reuses one
+    /// writer-heap allocation across `search_nodes` calls in a session —
+    /// mirrors the daemon's `ProjectIndexMap` path.
+    #[cfg(unix)]
+    index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
 }
 
 #[tool_router]
@@ -136,6 +147,10 @@ impl MemoryMcpServer {
         Self {
             tool_router: Self::tool_router(),
             backend: Backend::Empty,
+            #[cfg(unix)]
+            index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
+                ProjectIndexMapConfig::default(),
+            ))),
         }
     }
 
@@ -145,6 +160,10 @@ impl MemoryMcpServer {
         Self {
             tool_router: Self::tool_router(),
             backend: Backend::LocalReadOnly { agent_root: root },
+            #[cfg(unix)]
+            index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
+                ProjectIndexMapConfig::default(),
+            ))),
         }
     }
 
@@ -158,7 +177,33 @@ impl MemoryMcpServer {
                 agent_root: root,
                 coordinator_tx: tx,
             },
+            #[cfg(unix)]
+            index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
+                ProjectIndexMapConfig::default(),
+            ))),
         }
+    }
+
+    /// Like [`Self::with_coordinator`], but pins a pre-opened index handle so
+    /// appends (via `indexer_tx` already wired into the coordinator) and
+    /// `search_nodes` share one `IndexWriter` (WEG-252 / watch topology).
+    #[cfg(unix)]
+    pub fn with_coordinator_and_index(
+        root: AgentRoot,
+        tx: mpsc::Sender<MemoryCoordinatorMsg>,
+        handle: TantivyIndexHandle,
+    ) -> Result<Self, crate::server::index_map::IndexError> {
+        let project_root = root.project_root().to_path_buf();
+        let mut map = ProjectIndexMap::new(ProjectIndexMapConfig::default());
+        map.get_or_open(&project_root, |_| Ok(handle))?;
+        Ok(Self {
+            tool_router: Self::tool_router(),
+            backend: Backend::Local {
+                agent_root: root,
+                coordinator_tx: tx,
+            },
+            index_map: Arc::new(Mutex::new(map)),
+        })
     }
 
     /// Create a daemon-backed server ([`Backend::Remote`]): tool calls are
@@ -172,7 +217,16 @@ impl MemoryMcpServer {
                 sock_path,
                 agent_root_header,
             },
+            index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
+                ProjectIndexMapConfig::default(),
+            ))),
         }
+    }
+
+    /// Test-only: how many Tantivy handles the Phase-1 map currently holds.
+    #[cfg(all(test, unix))]
+    fn index_map_len(&self) -> usize {
+        self.index_map.lock().expect("index map lock").len()
     }
 
     /// Search episodic memory using BM25 × salience scoring.
@@ -187,7 +241,6 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
         use crate::index::build_schema;
-        use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
         let k = p.k.unwrap_or(DEFAULT_RECALL_K);
         let query = p.query;
@@ -221,15 +274,19 @@ impl MemoryMcpServer {
             }
         };
 
-        // Local read path. Open (or reuse) the Tantivy index for this root.
+        // Local read path via ProjectIndexMap — one IndexWriter per root per
+        // session (WEG-252). Do not call TantivyIndexHandle::open per query.
         let k = k as usize;
-        let handle = match TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE) {
-            Ok(h) => h,
-            Err(e) => {
-                let msg = format!("index open failed: {e}");
-                return Err(McpError::invalid_request(msg, None));
-            }
-        };
+        let mut map = self
+            .index_map
+            .lock()
+            .map_err(|_| McpError::internal_error("index map lock poisoned", None))?;
+        let handle = map
+            .get_or_open(root.project_root(), |p| {
+                TantivyIndexHandle::open(&AgentRoot::new(p.to_path_buf()), DEFAULT_COMMIT_CADENCE)
+            })
+            .map_err(|e| McpError::invalid_request(format!("index open failed: {e}"), None))?;
+        handle.touch();
 
         let reader = handle.reader().clone();
         let (_, schema_fields) = build_schema();
@@ -597,10 +654,30 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     // outlive the serve call; it drops after svc.waiting() returns.
     match AgentRoot::discover(cwd) {
         Ok(root) => {
-            let supervisor = Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None)
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            let tx = supervisor.sender();
-            let svc = MemoryMcpServer::with_coordinator(root, tx)
+            // Mirror `run_watch`: one Tantivy handle for live append indexing
+            // and search_nodes reuse (WEG-252). Without this hand-off, Phase-1
+            // MCP would open a fresh 50 MB IndexWriter on every recall.
+            #[cfg(unix)]
+            let (supervisor, server) = {
+                let handle = TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE)
+                    .map_err(|e| McpRunError::Service(e.to_string()))?;
+                let supervisor =
+                    Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, Some(handle.sender()))
+                        .map_err(|e| McpRunError::Service(e.to_string()))?;
+                let tx = supervisor.sender();
+                let server = MemoryMcpServer::with_coordinator_and_index(root, tx, handle)
+                    .map_err(|e| McpRunError::Service(e.to_string()))?;
+                (supervisor, server)
+            };
+            #[cfg(not(unix))]
+            let (supervisor, server) = {
+                let supervisor = Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None)
+                    .map_err(|e| McpRunError::Service(e.to_string()))?;
+                let tx = supervisor.sender();
+                let server = MemoryMcpServer::with_coordinator(root, tx);
+                (supervisor, server)
+            };
+            let svc = server
                 .serve(rmcp::transport::stdio())
                 .await
                 .map_err(|e| McpRunError::Service(e.to_string()))?;
@@ -608,6 +685,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
                 .await
                 .map_err(|e| McpRunError::Service(e.to_string()))?;
             // supervisor drops here, after serve completes
+            drop(supervisor);
         }
         Err(_) => {
             let svc = MemoryMcpServer::new()
@@ -701,6 +779,36 @@ mod tests {
         assert!(
             results.is_empty(),
             "empty index must return empty results; got: {parsed:?}"
+        );
+    }
+
+    /// WEG-252: repeated Phase-1 `search_nodes` must reuse one Tantivy handle
+    /// (one IndexWriter allocation), not open-per-call.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_reuses_index_handle_across_calls() {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+
+        let server = MemoryMcpServer::with_agent_root(root);
+        assert_eq!(server.index_map_len(), 0, "map starts empty");
+
+        for _ in 0..3 {
+            server
+                .search_nodes(Parameters(SearchNodesParams {
+                    query: "rust".to_string(),
+                    k: Some(3),
+                }))
+                .await
+                .expect("search_nodes ok");
+        }
+
+        assert_eq!(
+            server.index_map_len(),
+            1,
+            "Phase-1 search_nodes must reuse a single ProjectIndexMap entry (no per-call open)"
         );
     }
 
