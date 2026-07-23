@@ -61,10 +61,21 @@ search_call() { # <query>
 # PHASE 2 — daemon up: harness A appends, independent harness B recalls
 # =============================================================================
 echo "--- Phase 2 (daemon / shared index) ---"
-"$BIN" watch >"$SANDBOX/daemon.log" 2>&1 &
+# Must run from $PROJ: `dreamd watch` discovers AgentRoot from cwd. Starting
+# from the repo root fails on CI (no checked-in `.agent/`) with NoProjectRoot
+# — socket never appears, MCP falls back to in-process, and Phase 2 silently
+# stops testing the daemon path (WEG-512).
+# `exec` so $! is the dreamd PID (not a wrapping subshell) — otherwise kill
+# leaves the daemon alive and Phase 1 falsely sees a live socket.
+( cd "$PROJ" && exec "$BIN" watch ) >"$SANDBOX/daemon.log" 2>&1 &
 DAEMON_PID=$!
 for i in $(seq 1 60); do [ -S "$SANDBOX/.agent/dreamd.sock" ] && break; sleep 0.5; done
-if [ -S "$SANDBOX/.agent/dreamd.sock" ]; then ok "daemon bound socket"; else bad "daemon never bound socket"; fi
+if [ -S "$SANDBOX/.agent/dreamd.sock" ]; then ok "daemon bound socket"
+else
+  bad "daemon never bound socket"
+  echo "    --- daemon.log ---"
+  sed 's/^/    /' "$SANDBOX/daemon.log" 2>/dev/null || echo "    (empty)"
+fi
 
 # Harness A (claude-code) appends.
 A_RESP="$(append_call "$CC_CONTENT" "claude-code" "alpha::cross_harness" | python3 "$DRIVER" "$BIN" "$PROJ")"
