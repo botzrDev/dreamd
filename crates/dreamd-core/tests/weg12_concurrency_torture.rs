@@ -6,7 +6,8 @@
 //! [`MemoryCoordinator`] (the DR-114 actor) and asserts durable DR-103 JSONL
 //! integrity: exact line count, every line parseable, all minted ids unique, and
 //! no torn tail. Runs both a small and a near-4-KiB "large" payload, each under a
-//! 10-second wall-clock budget.
+//! wall-clock budget (see `BUDGET_*` — WEG-511 widened the large budget after
+//! loaded CI runners flaked the 10s gate while durability still held).
 //!
 //! Locked to the DIRECT coordinator channel rather than the HTTP learn endpoint:
 //! the Supervisor's HTTP ingress uses a `try_send` with a 100 ms timeout and a
@@ -20,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -38,8 +40,21 @@ const N: usize = 1000;
 /// `timestamp` on every durable append.
 const SAMPLE_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
-/// Wall-clock budget for a single 1000-way fan-out.
-const BUDGET: Duration = Duration::from_secs(10);
+/// Wall-clock budget for the small-payload 1000-way fan-out.
+const BUDGET_SMALL: Duration = Duration::from_secs(10);
+
+/// Wall-clock budget for the near-4-KiB payload fan-out.
+///
+/// WEG-511: the hard gate is durability (`assert_jsonl_intact`). The original
+/// shared 10s budget flaked on loaded ubuntu/windows CI runners (passed on
+/// rerun with no code change) because ~4 KiB × 1000 fsynced appends contend
+/// with the rest of the `cargo test` matrix. 60s keeps a regression signal
+/// without reddening main on runner starvation.
+const BUDGET_LARGE: Duration = Duration::from_secs(60);
+
+/// Serialize the two torture cases so they do not starve each other when
+/// cargo's default test harness runs this binary with multiple threads.
+static TORTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn placeholder_id() -> EventId {
     EventId::parse(&format!("evt_{SAMPLE_ULID}")).expect("placeholder EventId parses")
@@ -156,6 +171,7 @@ fn large_content() -> String {
 
 #[tokio::test]
 async fn concurrent_appends_small_payload_are_durable() {
+    let _guard = TORTURE_LOCK.lock().expect("torture lock");
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     let jsonl = root.join("AGENT_LEARNINGS.jsonl");
@@ -166,14 +182,15 @@ async fn concurrent_appends_small_payload_are_durable() {
 
     assert_jsonl_intact(&jsonl);
     assert!(
-        elapsed < BUDGET,
-        "small-payload fan-out took {elapsed:?}, over the {BUDGET:?} budget"
+        elapsed < BUDGET_SMALL,
+        "small-payload fan-out took {elapsed:?}, over the {BUDGET_SMALL:?} budget"
     );
     println!("small-payload: {N} concurrent appends in {elapsed:?}");
 }
 
 #[tokio::test]
 async fn concurrent_appends_large_payload_are_durable() {
+    let _guard = TORTURE_LOCK.lock().expect("torture lock");
     let content = large_content();
 
     // Sizing guard: the measured serialized line + '\n' must fit the 4 KiB cap
@@ -200,10 +217,12 @@ async fn concurrent_appends_large_payload_are_durable() {
     let elapsed = fanout(&tx, content).await;
     shutdown(tx, handle).await;
 
+    // Durability first (WEG-12 invariant). Wall-clock is a soft CI-load signal
+    // with a widened budget (WEG-511) — never weaken the intact check below.
     assert_jsonl_intact(&jsonl);
     assert!(
-        elapsed < BUDGET,
-        "large-payload fan-out took {elapsed:?}, over the {BUDGET:?} budget"
+        elapsed < BUDGET_LARGE,
+        "large-payload fan-out took {elapsed:?}, over the {BUDGET_LARGE:?} budget"
     );
     println!("large-payload: {N} concurrent appends in {elapsed:?}");
 }
