@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -54,7 +54,8 @@ const BUDGET_LARGE: Duration = Duration::from_secs(60);
 
 /// Serialize the two torture cases so they do not starve each other when
 /// cargo's default test harness runs this binary with multiple threads.
-static TORTURE_LOCK: Mutex<()> = Mutex::new(());
+static TORTURE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn placeholder_id() -> EventId {
     EventId::parse(&format!("evt_{SAMPLE_ULID}")).expect("placeholder EventId parses")
@@ -171,7 +172,7 @@ fn large_content() -> String {
 
 #[tokio::test]
 async fn concurrent_appends_small_payload_are_durable() {
-    let _guard = TORTURE_LOCK.lock().expect("torture lock");
+    let _guard = TORTURE_LOCK.lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     let jsonl = root.join("AGENT_LEARNINGS.jsonl");
@@ -190,7 +191,7 @@ async fn concurrent_appends_small_payload_are_durable() {
 
 #[tokio::test]
 async fn concurrent_appends_large_payload_are_durable() {
-    let _guard = TORTURE_LOCK.lock().expect("torture lock");
+    let _guard = TORTURE_LOCK.lock().await;
     let content = large_content();
 
     // Sizing guard: the measured serialized line + '\n' must fit the 4 KiB cap
