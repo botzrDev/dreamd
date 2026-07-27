@@ -485,9 +485,10 @@ jobs:
         run: cargo build -p dreamd
 
       - name: Run alpha suite (cross-harness append->recall)
-        # Suite polls ~10s for the socket + up to ~18s for the index commit;
+        # Suite polls ~30s for the socket + up to ~18s for the index commit;
         # 180s gives generous headroom. Exit code is authoritative (0 iff zero
         # failures); the suite prints "=== RESULT: N passed, N failed ===".
+        # WEG-512: watch must start with cwd=$PROJ (see alpha-suite.sh).
         run: timeout 180 bash scripts/alpha/alpha-suite.sh
 
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
