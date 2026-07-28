@@ -74,7 +74,7 @@ pub fn run(
         None => {
             writeln!(
                 err,
-                "dreamd: error — no project root found. Run from inside a project directory (must contain .git/, Cargo.toml, package.json, or pyproject.toml)."
+                "dreamd: error — no project root found. Run from inside a project directory (must contain .git/, Cargo.toml, package.json, or pyproject.toml). If this is a new folder, run `git init` first."
             )?;
             return Err(InitError::NoProjectRoot);
         }

@@ -1,9 +1,9 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 48
+assertion_line: 58
 expression: "subcommand_help(\"init\")"
 ---
-Scaffold per-project .agent/ store and register it with the daemon
+Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
 
 Usage: init [OPTIONS]
 

@@ -233,4 +233,8 @@ fn no_project_root_fails_and_skips_scaffold() {
         stderr.contains("no project root found"),
         "stderr must explain the failure; got: {stderr}"
     );
+    assert!(
+        stderr.contains("run `git init` first"),
+        "stderr must include the beginner remediation hint; got: {stderr}"
+    );
 }

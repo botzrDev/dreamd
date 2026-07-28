@@ -78,7 +78,7 @@ pub enum Command {
     /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
     /// prune decayed episodic events.
     Dream(DreamArgs),
-    /// Scaffold per-project .agent/ store and register it with the daemon.
+    /// Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor.
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),

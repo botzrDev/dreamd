@@ -67,6 +67,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 
 ## Quick start (< 30 seconds)
 
+If `~/your-project` is a brand-new folder, run `git init` first (or make sure it contains one of the supported root sentinels).
+
 ```bash
 cd ~/your-project
 npx -y dreamd-mcp init
