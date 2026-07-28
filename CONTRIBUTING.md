@@ -13,6 +13,11 @@ Participation in this project is governed by the [Code of Conduct](./CODE_OF_CON
 - **Spec change:** open an issue using the *RFC* template, with the title prefixed `[RFC]`. Spec changes are decided by discussion on the issue.
 - **Security vulnerability:** **do not** open a public issue. See [SECURITY.md](./SECURITY.md).
 
+### Good first issues
+
+New to the codebase? Start here:
+https://github.com/botzrDev/dreamd/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22
+
 ## Development setup
 
 Requirements:
