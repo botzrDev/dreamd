@@ -57,6 +57,29 @@ git config core.hooksPath .githooks
 
 CI runs the same checks across Linux, macOS, and Windows. PRs must be green before merge.
 
+## Your first contribution in ~15 minutes
+
+A start-to-finish loop for your first PR. Each step links to the section with the details rather than repeating them.
+
+1. **Clone the repo** (see [Development setup](#development-setup) for the requirements):
+
+   ```bash
+   git clone https://github.com/botzrDev/dreamd.git
+   cd dreamd
+   ```
+
+2. **Prove your toolchain works by running the lint gate.** Install `just` first if you don't have it — the [Task runner (`just`)](#task-runner-just) section covers installation and the full recipe table:
+
+   ```bash
+   just lint
+   ```
+
+   This runs formatting + clippy exactly as CI does; a clean pass means your environment is ready. (No `just`? Run the underlying cargo commands from the recipe table instead.)
+
+3. **Pick an issue** from the good-first-issue filter linked in [Good first issues](#good-first-issues).
+
+4. **Make your change and open a PR** following the checklist in [Pull requests](#pull-requests) — topic branch from `main`, one concern per PR, tests, a `CHANGELOG.md` entry for user-visible changes, and DCO sign-off (`git commit -s`).
+
 ## Pull requests
 
 1. Fork the repo and create a topic branch from `main`.
@@ -125,6 +148,12 @@ When your change affects behavior users or contributors see, update the matching
 Add new top-level docs to [`docs/README.md`](./docs/README.md). Story ID legend: [`STORY_IDS.md`](./STORY_IDS.md).
 
 ## Snapshot tests (insta)
+
+Reviewing snapshot diffs requires the [`cargo-insta`](https://github.com/mitsuhiko/insta) CLI. Install it once:
+
+```bash
+cargo install cargo-insta
+```
 
 ### CLI snapshots (help text)
 

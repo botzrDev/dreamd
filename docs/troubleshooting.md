@@ -122,6 +122,32 @@ Point all harnesses at MCP — they auto-bridge to Phase 2 when the socket is up
 
 ---
 
+## `dreamd init` exits 2 — no project root found
+
+**Symptom:** `dreamd init` exits 2 and prints:
+
+```text
+dreamd: error — no project root found. Run from inside a project directory (must contain .git/, Cargo.toml, package.json, or pyproject.toml). If this is a new folder, run `git init` first.
+```
+
+**Cause:** `dreamd init` walks up from the current directory looking for a project-root sentinel — `.git`, `Cargo.toml`, `package.json`, or `pyproject.toml` — and refuses to scaffold if none is found (e.g. a bare empty folder or `mktemp -d`).
+
+**Fix:**
+
+```bash
+# Option A: make this folder a project
+git init
+dreamd init
+
+# Option B: run inside a real project
+cd ~/your-project    # must contain .git/, Cargo.toml, package.json, or pyproject.toml
+dreamd init
+```
+
+**Prevention:** Run `dreamd init` from inside the repo that should own the `.agent/` store; `git init` brand-new folders first.
+
+---
+
 ## No `.agent/` directory found
 
 **Symptom:** `dreamd: no .agent/ store found` or MCP `coordinator unavailable: no agent root found`.

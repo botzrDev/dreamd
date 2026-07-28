@@ -71,7 +71,7 @@ pub struct WatchArgs {}
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Operator maintenance on the episodic log. Today: --force-unpin.
+    /// Maintain the on-disk memory log. Today: unpin entries with --force-unpin.
     Archive(ArchiveArgs),
     /// Run health checks and print status (dream-cycle mode, etc.).
     Doctor,
@@ -84,9 +84,9 @@ pub enum Command {
     Mcp(McpArgs),
     /// Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op).
     Migrate(MigrateArgs),
-    /// BM25 × salience recall as a markdown table (DR-703).
+    /// Search stored memories by query, ranked by relevance and importance (markdown table).
     Recall(RecallArgs),
-    /// Top-N entries by salience with no lexical filter (DR-704).
+    /// List the top-N stored memories by importance, without a search query.
     ///
     /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
     /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
