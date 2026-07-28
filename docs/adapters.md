@@ -42,6 +42,8 @@ Point at an existing adapter rather than duplicating full JSON — each ships a
 - Cursor → [`../adapters/cursor/`](../adapters/cursor/README.md) (also ships a
   `.cursor/rules/` recall rule and a `--project-root` global example)
 - Cline → [`../adapters/cline/`](../adapters/cline/README.md)
+- Aider (documentation-first) → [`../adapters/aider/`](../adapters/aider/README.md)
+  (CONVENTIONS.md template; append via UDS HTTP — no MCP)
 
 ### 2. Documentation-first (no MCP)
 

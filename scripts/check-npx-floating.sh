@@ -32,7 +32,7 @@ check ".mcp.json.example files" \
 # Copy-paste npx one-liners and JSON args arrays in user-facing docs.
 check "user-facing docs" \
   '(npx[^[:alnum:]_-].*dreamd-mcp@|"dreamd-mcp@|\['\''-y'\'', "dreamd-mcp@|\["-y", "dreamd-mcp@)' \
-  README.md GUIDE.md AGENTS.md partner-one-pager.md \
+  README.md GUIDE.md AGENTS.md \
   adapters/ docs/ packages/dreamd-mcp/README.md \
   --glob '*.md' --glob '*.json.example' --glob '*.template' \
   --glob '!docs/spikes/**' \

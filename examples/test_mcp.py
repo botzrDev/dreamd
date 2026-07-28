@@ -2,6 +2,7 @@
 """Test MCP connectivity by sending JSON-RPC over stdio to dreamd mcp."""
 
 import json
+import os
 import subprocess
 import sys
 
@@ -12,7 +13,7 @@ def main():
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        cwd="/home/austingreen/Documents/botzr/projects/dreamd",
+        cwd=os.getcwd(),
     )
 
     # Send initialize request

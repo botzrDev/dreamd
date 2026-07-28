@@ -432,8 +432,8 @@ is read via `SO_PEERCRED` on Linux and `getpeereid` on macOS. **There is no TCP
 listener in v0.1** — there is no remote attack surface to reason about because
 there is no remote. That is the whole posture at this altitude. The canonical
 threat model, the socket-auth middleware detail, and the disclosure policy live
-in [`../SECURITY.md`](../SECURITY.md) — `docs/security.md` is only a redirect
-to it. Do not re-derive the threat model here; link it.
+in [`../SECURITY.md`](../SECURITY.md). Do not re-derive the threat model here;
+link it.
 
 ## Writer-process lifecycle (WEG-21 / DR-118)
 
@@ -546,7 +546,7 @@ and returns `None` rather than failing. `try_init` makes the call idempotent.
 - [`../SPEC.md`](../SPEC.md) — the on-disk `.agent/` contract: folder layout,
   episodic node schema, salience formula, dream-cycle output shape.
 - [`../SECURITY.md`](../SECURITY.md) — canonical threat model, socket auth,
-  disclosure policy (`docs/security.md` redirects here).
+  disclosure policy.
 - [`architecture/durability.md`](architecture/durability.md) — WAL + JSONL
   durability deep-dive.
 - [`architecture/tantivy-migration.md`](architecture/tantivy-migration.md) —

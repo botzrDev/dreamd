@@ -8,7 +8,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 |---|---|---|
 | [../GUIDE.md](../GUIDE.md) | New users | 20-minute linear tutorial (install → crash recovery) |
 | [../STORY_IDS.md](../STORY_IDS.md) | Contributors | DR-/WEG- story ID legend |
-| [../doc/dreamd.1](../doc/dreamd.1) | Power users | Man page |
+| [./dreamd.1](./dreamd.1) | Power users | Man page |
 | [../SPEC.md](../SPEC.md) | Implementers, contributors | On-disk layout, JSON schema, scoring formula, dream-cycle contract |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Contributors | Load-bearing engineering decisions and crate boundaries |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Dev setup, commit conventions, DCO, RFC process |
@@ -48,6 +48,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [../adapters/claude-code/README.md](../adapters/claude-code/README.md) | Claude Code users | MCP config and setup |
 | [../adapters/cursor/README.md](../adapters/cursor/README.md) | Cursor users | MCP config, daemon recommendation, agent rule |
 | [../adapters/cline/README.md](../adapters/cline/README.md) | Cline users | MCP config and verification steps |
+| [../adapters/aider/README.md](../adapters/aider/README.md) | Aider users | Doc-first CONVENTIONS template; append via UDS HTTP |
 | [../adapters/cursor/.cursor/rules/dreamd-recall.mdc](../adapters/cursor/.cursor/rules/dreamd-recall.mdc) | Cursor agent | When and how to recall and append learnings |
 
 ## Examples
@@ -77,7 +78,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [../CHANGELOG.md](../CHANGELOG.md) | Users, contributors | Release history |
 | [v0.1.1-scope.md](./v0.1.1-scope.md) | Maintainers | Frozen v0.1.1 contents, review window, reserve, and cut order |
 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Contributors | Community standards |
-| [security.md](./security.md) | Redirect | Points to [../SECURITY.md](../SECURITY.md) |
+| [../SECURITY.md](../SECURITY.md) | Operators, security reviewers | Threat model, socket auth, disclosure policy |
 | [../tests/README.md](../tests/README.md) | Contributors | Workspace test fixtures |
 
 ## Where to put new docs

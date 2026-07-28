@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MCP tool caller for dreamd. Usage: python3 mcp_tool.py <tool_name> <json_args>"""
 
-import json, subprocess, sys
+import json, os, subprocess, sys
 
 
 def call_tool(tool: str, args: dict) -> dict:
@@ -10,7 +10,7 @@ def call_tool(tool: str, args: dict) -> dict:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        cwd="/home/austingreen/Documents/botzr/projects/dreamd",
+        cwd=os.getcwd(),
     )
 
     init = {
