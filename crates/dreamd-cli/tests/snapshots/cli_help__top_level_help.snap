@@ -7,19 +7,21 @@ Portable memory layer for AI coding agents
 Usage: dreamd [COMMAND]
 
 Commands:
-  archive  Operator maintenance on the episodic log. Today: --force-unpin
-  doctor   Run health checks and print status (dream-cycle mode, etc.)
-  dream    Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
-  init     Scaffold per-project .agent/ store and register it with the daemon
-  mcp      Start the MCP server (bridges to daemon if running, otherwise in-process)
-  migrate  Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
-  recall   BM25 × salience recall as a markdown table (DR-703)
-  score    Top-N entries by salience with no lexical filter (DR-704)
-  reset    Reset scratch state (DR-113). Today only `workspace` is supported
-  status   Print daemon liveness, resolved project, last dream cycle, and recent log
-  watch    Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
-  version  Print structured version information (semver, commit, build date, target, schema)
-  help     Print this message or the help of the given subcommand(s)
+  archive    Operator maintenance on the episodic log. Today: --force-unpin
+  doctor     Run health checks and print status (dream-cycle mode, etc.)
+  dream      Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+  init       Scaffold per-project .agent/ store and register it with the daemon
+  mcp        Start the MCP server (bridges to daemon if running, otherwise in-process)
+  migrate    Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
+  recall     BM25 × salience recall as a markdown table (DR-703)
+  score      Top-N entries by salience with no lexical filter (DR-704)
+  reset      Reset scratch state (DR-113). Today only `workspace` is supported
+  status     Print daemon liveness, resolved project, last dream cycle, and recent log
+  uninstall  Stop local dreamd servers, unregister this project, and clear caches
+  update     Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
+  watch      Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+  version    Print structured version information (semver, commit, build date, target, schema)
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
   -V, --version

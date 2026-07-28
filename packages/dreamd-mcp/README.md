@@ -21,8 +21,8 @@ npx -y dreamd-mcp
 > re-resolves the `latest` dist-tag from the registry, so a floating config always
 > starts the current version. Two caveats: a **running** MCP server or `dreamd watch`
 > daemon keeps the version it started with until you restart it, and an **offline**
-> run falls back to the last-cached binary. A hard version pin (`dreamd-mcp@0.1.0-rc.3`)
-> is the one form that never picks up new releases.
+> run falls back to the last-cached binary. A hard version pin
+> (`dreamd-mcp@0.1.0-rc.3`) is the one form that never picks up new releases.
 
 No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`). **Native Windows is out of scope for v0.1** — use WSL2 or a Linux/macOS host (Windows support is planned for v0.1.1).
 
@@ -80,64 +80,90 @@ npx -y dreamd-mcp
 
 `dreamd-mcp` is never installed globally — it runs straight from the npx cache and
 downloads the native binary into a per-version cache. `npm uninstall -g dreamd-mcp`
-is therefore a no-op. There is **no** `dreamd reset --all` — use the steps below.
+is therefore a no-op. There is no `dreamd reset --all` — use `dreamd uninstall`.
 
-**For floating-npx users:** removing the MCP client config entry and reloading the
-client is what actually stops dreamd. Clearing caches alone does not stop a running
-client or daemon from respawning on the next harness launch.
-
-### Step 0 — stop running processes
-
-Quit or reload your MCP client (Claude Code, Cursor, Cline, …) so it stops spawning
-`dreamd mcp`. Then stop any background daemon and remove the socket:
+### Uninstall
 
 ```sh
+npx -y dreamd-mcp uninstall     # or, with a native binary: dreamd uninstall
+```
+
+One command: stops local `dreamd mcp` / `dreamd watch` processes, removes the
+daemon socket, unregisters the current project from the registry (skipped with a
+benign note when run outside a project root), and clears the native binary cache
+(`~/.cache/dreamd-mcp`) plus the dreamd-mcp-scoped entries under `~/.npm/_npx`.
+Safe to run twice — a second run succeeds with nothing left to do.
+
+| Flag | Effect |
+|---|---|
+| `--keep-caches` | Skip the cache clears |
+| `--all-npx` | Loud: wipe the **entire** `~/.npm/_npx` (every npx-cached package, not just dreamd). Prints a warning before deleting. |
+| `--quiet` / `-q` | Suppress non-essential output |
+
+Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, and every
+project's `.agent/` memory store. To wipe a project's store entirely, see
+[Full fresh store](../../docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
+in the troubleshooting guide — delete `.agent/` and re-run `dreamd init`. That is
+destructive; back up first if the store has value.
+
+**Then remove the client config entry.** Delete the `dreamd` MCP server block from
+your harness config (`.mcp.json`, Cursor settings, Cline
+`cline_mcp_settings.json`, …) and reload the client. Until that entry is gone, the
+harness keeps respawning dreamd on the next session — `uninstall` does not edit
+harness configs.
+
+### Update
+
+```sh
+npx -y dreamd-mcp update        # or: dreamd update
+```
+
+Prints the current version, stops local servers, removes the socket, and clears
+`~/.cache/dreamd-mcp`, then instructs you to re-run `npx -y dreamd-mcp` — the
+floating npx spawn re-resolves `latest` and fetches the new binary.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print the current version and planned actions; change nothing |
+| `--quiet` / `-q` | Suppress non-essential output |
+
+`update` does not touch `~/.npm/_npx`. If you built from source with
+`cargo install --path crates/dreamd-cli`, clearing the cache does not replace that
+binary — rebuild it instead.
+
+### Manual fallback
+
+The same cleanup by hand, if you prefer explicit steps. First quit or reload your
+MCP client so it stops spawning `dreamd mcp`, then:
+
+```sh
+# 1. Stop processes + remove the socket
 pkill -f 'dreamd mcp' || true
 pkill -f 'dreamd watch' || true
 rm -f ~/.agent/dreamd.sock
-```
 
-### Step 1 — remove the client config entry
+# 2. Unregister the project from the registry (run from the project root)
+dreamd init --uninstall-project
 
-Delete the `dreamd` MCP server block from your harness config (`.mcp.json`, Cursor
-settings, Cline `cline_mcp_settings.json`, …) and reload the client. Until this
-entry is gone, the harness will keep launching dreamd on the next session.
+# 3. Native binary cache
+rm -rf ~/.cache/dreamd-mcp                  # macOS/Linux
+#   Windows: Remove-Item -Recurse "$env:LOCALAPPDATA\dreamd-mcp\cache"
 
-### Step 2 — clear caches (optional; force a clean re-download)
-
-Clear **both** the npx shim cache and the native binary cache. Clearing only one is
-a common cause of "it still runs the old version".
-
-**npx shim cache — scoped to dreamd only (recommended):**
-
-```sh
-# macOS/Linux — delete only _npx dirs whose package.json names dreamd-mcp
+# 4. npx shim cache — delete only _npx dirs whose package.json references
+#    dreamd-mcp. npm writes these manifests without a "name" field — the
+#    requested package appears as a dependencies key, e.g.
+#    {"dependencies":{"dreamd-mcp":"^0.1.0-rc.6"}} — so match the quoted
+#    package key, and check each manifest before deleting anything.
 for d in ~/.npm/_npx/*/; do
-  [ -f "$d/package.json" ] && grep -q '"name"[[:space:]]*:[[:space:]]*"dreamd-mcp"' "$d/package.json" && rm -rf "$d"
+  [ -f "$d/package.json" ] && grep -q '"dreamd-mcp"' "$d/package.json" && rm -rf "$d"
 done
 # Windows / WSL with Windows Node — same pattern under:
 #   "$LOCALAPPDATA/npm-cache/_npx"
 ```
 
 > **Warning:** `rm -rf ~/.npm/_npx` deletes **every** npx-cached package on your
-> machine, not just dreamd. Use the scoped loop above unless you intend a full npx reset.
-
-**Native binary cache:**
-
-```sh
-rm -rf ~/.cache/dreamd-mcp                  # macOS/Linux
-#   Windows: Remove-Item -Recurse "$env:LOCALAPPDATA\dreamd-mcp\cache"
-```
-
-### Step 3 — daemon leftovers (optional)
-
-The user-scoped daemon home may still contain:
-
-- `~/.agent/registry.toml` — project registry (remove a single project with
-  `dreamd init --uninstall-project` from that project's root)
-- `~/.agent/dreamd.log` — daemon log (safe to delete when nothing is running)
-
-To wipe a project's memory store entirely, see [Full fresh store](../../docs/troubleshooting.md#how-do-i-reset-or-clear-memory) in the troubleshooting guide — delete `.agent/` and re-run `dreamd init`. That is destructive; back up first if the store has value.
+> machine, not just dreamd. Use the scoped loop — or `dreamd uninstall`, which
+> scopes by default — unless you intend a full npx reset.
 
 ## License
 

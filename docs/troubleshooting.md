@@ -96,12 +96,13 @@ Point all harnesses at MCP — they auto-bridge to Phase 2 when the socket is up
 | Goal | Command |
 |---|---|
 | Clear session scratchpad | `dreamd reset workspace` |
-| Remove project from daemon registry (keep files) | `dreamd init --uninstall-project` |
+| Uninstall dreamd (stop servers, unregister project, clear caches; keeps `.agent/` stores) | `dreamd uninstall` — flags and details: [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
+| Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
+| Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project` |
 | Wipe episodic log | Manually delete/truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then re-init the index (or use *Full fresh store* below for a clean slate) |
 | Full fresh store | Delete `.agent/` and re-run `dreamd init` |
-| Uninstall dreamd-mcp shim / clear npx caches | See [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
 
-**Warning:** Deleting `.agent/` is destructive. Commit or back up first if the store has value. There is **no** `dreamd reset --all`.
+**Warning:** Deleting `.agent/` is destructive. Commit or back up first if the store has value. There is no `dreamd reset --all`.
 
 ---
 

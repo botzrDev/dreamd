@@ -29,6 +29,20 @@ test('doctor/dream/reset pass through verbatim', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['dream', '--no-commit']), ['dream', '--no-commit']);
   assert.deepStrictEqual(resolveDreamdArgs(['reset', 'workspace', '--yes']), ['reset', 'workspace', '--yes']);
 });
+test('uninstall -> dreamd uninstall (AILAB-226: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['uninstall']), ['uninstall']);
+  assert.deepStrictEqual(
+    resolveDreamdArgs(['uninstall', '--keep-caches']),
+    ['uninstall', '--keep-caches'],
+  );
+});
+test('update -> dreamd update (AILAB-226: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['update']), ['update']);
+  assert.deepStrictEqual(
+    resolveDreamdArgs(['update', '--dry-run']),
+    ['update', '--dry-run'],
+  );
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

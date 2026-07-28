@@ -269,7 +269,11 @@ fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), Ini
     Ok(())
 }
 
-fn find_project_root(start: &Path) -> Option<PathBuf> {
+/// Walk up from `start` looking for a project-root sentinel (`.git/`,
+/// `Cargo.toml`, `package.json`, `pyproject.toml`). Shared with
+/// `commands::uninstall`, which uses it to decide whether the registry
+/// unregister step applies or is a benign skip.
+pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = Some(start);
     while let Some(dir) = cur {
         for sentinel in ROOT_SENTINELS {

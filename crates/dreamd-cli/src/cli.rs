@@ -95,6 +95,10 @@ pub enum Command {
     Reset(ResetArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
+    /// Stop local dreamd servers, unregister this project, and clear caches.
+    Uninstall(UninstallArgs),
+    /// Clear the native binary cache so `npx -y dreamd-mcp` fetches latest.
+    Update(UpdateArgs),
     /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
     Watch(WatchArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
@@ -207,6 +211,32 @@ pub enum ResetCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// Arguments for the `dreamd uninstall` subcommand (AILAB-226).
+#[derive(Args)]
+pub struct UninstallArgs {
+    /// Keep the native binary cache (~/.cache/dreamd-mcp) and npx cache entries.
+    #[arg(long)]
+    pub keep_caches: bool,
+    /// Wipe the ENTIRE npx cache (every cached package, not just dreamd-mcp).
+    /// Prints a warning before deleting.
+    #[arg(long)]
+    pub all_npx: bool,
+    /// Suppress non-essential output (errors still print to stderr).
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
+/// Arguments for the `dreamd update` subcommand (AILAB-226).
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// Print the current version and planned actions without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Suppress non-essential output (errors still print to stderr).
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
 }
 
 /// Render the `dreamd(1)` man page from the clap definition.
@@ -591,6 +621,98 @@ fn run_status(status_log_tail: &[String]) -> ExitCode {
     }
 }
 
+/// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`
+/// (parent of the per-version dirs; clearing it drops all versions).
+/// Resolved off `$HOME` the same way `resolve_daemon_home` is. `None` — no
+/// home directory; the commands print a skip note instead.
+fn resolve_shim_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".cache").join("dreamd-mcp"))
+}
+
+/// npx cache root (`~/.npm/_npx`) holding per-package cache entries.
+fn resolve_npx_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".npm").join("_npx"))
+}
+
+/// Best-effort cargo-install detection for `dreamd update` messaging: an
+/// explicit `DREAMD_BIN` override, or the running executable living under
+/// `.cargo/bin`, means clearing the shim cache won't replace this binary.
+fn cargo_install_hint() -> Option<String> {
+    if std::env::var_os("DREAMD_BIN").is_some() {
+        return Some("DREAMD_BIN is set".to_string());
+    }
+    let exe = std::env::current_exe().ok()?;
+    let s = exe.to_string_lossy();
+    if s.contains("/.cargo/bin/") || s.contains("\\.cargo\\bin\\") {
+        return Some(format!("running from {s}"));
+    }
+    None
+}
+
+fn run_uninstall(args: UninstallArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let daemon_home = resolve_daemon_home();
+    // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock),
+    // same as the status arm — never a hardcoded path.
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    let cache_dir = resolve_shim_cache_dir();
+    let npx_dir = resolve_npx_dir();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let req = commands::uninstall::UninstallRequest {
+        cwd: &cwd,
+        daemon_home: &daemon_home,
+        socket: socket.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+        npx_dir: npx_dir.as_deref(),
+        keep_caches: args.keep_caches,
+        all_npx: args.all_npx,
+        quiet: args.quiet,
+    };
+    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    match commands::uninstall::run(&req, &mut stop, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::uninstall::UninstallError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_update(args: UpdateArgs) -> ExitCode {
+    // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock).
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    let cache_dir = resolve_shim_cache_dir();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let req = commands::update::UpdateRequest {
+        socket: socket.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+        dry_run: args.dry_run,
+        quiet: args.quiet,
+        cargo_install_hint: cargo_install_hint(),
+    };
+    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    match commands::update::run(&req, &mut stop, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::update::UpdateError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_watch() -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
@@ -665,6 +787,8 @@ pub fn run() -> ExitCode {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
         Command::Status => run_status(&status_log_tail),
+        Command::Uninstall(args) => run_uninstall(args),
+        Command::Update(args) => run_update(args),
         Command::Watch(_args) => run_watch(),
         Command::Version => run_version(),
     }
@@ -916,12 +1040,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_uninstall_flags() {
+        let cli = Cli::try_parse_from(["dreamd", "uninstall", "--keep-caches", "--all-npx", "-q"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Uninstall(args)) => {
+                assert!(args.keep_caches);
+                assert!(args.all_npx);
+                assert!(args.quiet);
+            }
+            _ => panic!("expected Uninstall"),
+        }
+        let defaults = Cli::try_parse_from(["dreamd", "uninstall"]).unwrap();
+        match defaults.command {
+            Some(Command::Uninstall(args)) => {
+                assert!(!args.keep_caches);
+                assert!(!args.all_npx);
+                assert!(!args.quiet);
+            }
+            _ => panic!("expected Uninstall with default flags"),
+        }
+    }
+
+    #[test]
+    fn parses_update_flags() {
+        let cli = Cli::try_parse_from(["dreamd", "update", "--dry-run", "-q"]).unwrap();
+        match cli.command {
+            Some(Command::Update(args)) => {
+                assert!(args.dry_run);
+                assert!(args.quiet);
+            }
+            _ => panic!("expected Update"),
+        }
+        let defaults = Cli::try_parse_from(["dreamd", "update"]).unwrap();
+        match defaults.command {
+            Some(Command::Update(args)) => {
+                assert!(!args.dry_run);
+                assert!(!args.quiet);
+            }
+            _ => panic!("expected Update with default flags"),
+        }
+    }
+
+    #[test]
     fn render_man_page_includes_binary_name_and_subcommands() {
         let page = String::from_utf8(render_man_page().unwrap()).unwrap();
         assert!(page.contains("dreamd"), "man page must name the binary");
         for sub in [
-            "init", "dream", "mcp", "watch", "doctor", "status", "version", "reset", "archive",
+            "init",
+            "dream",
+            "mcp",
+            "watch",
+            "doctor",
+            "status",
+            "version",
+            "reset",
+            "archive",
             "migrate",
+            "uninstall",
+            "update",
         ] {
             assert!(
                 page.contains(sub),

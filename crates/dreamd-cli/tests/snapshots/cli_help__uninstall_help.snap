@@ -1,0 +1,20 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"uninstall\")"
+---
+Stop local dreamd servers, unregister this project, and clear caches
+
+Usage: uninstall [OPTIONS]
+
+Options:
+      --keep-caches
+          Keep the native binary cache (~/.cache/dreamd-mcp) and npx cache entries
+
+      --all-npx
+          Wipe the ENTIRE npx cache (every cached package, not just dreamd-mcp). Prints a warning before deleting
+
+  -q, --quiet
+          Suppress non-essential output (errors still print to stderr)
+
+  -h, --help
+          Print help

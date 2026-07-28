@@ -2,7 +2,7 @@
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
 //! top-level `--help`, each subcommand `--help` (archive, init, dream, mcp, migrate,
-//! doctor, recall, score, watch, reset, status, version), nested
+//! doctor, recall, score, watch, reset, status, uninstall, update, version), nested
 //! `reset workspace --help`, plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`).
 //!
@@ -106,6 +106,16 @@ fn snapshot_reset_help() {
 #[test]
 fn snapshot_status_help() {
     assert_snapshot!("status_help", subcommand_help("status"));
+}
+
+#[test]
+fn snapshot_uninstall_help() {
+    assert_snapshot!("uninstall_help", subcommand_help("uninstall"));
+}
+
+#[test]
+fn snapshot_update_help() {
+    assert_snapshot!("update_help", subcommand_help("update"));
 }
 
 #[test]

@@ -63,7 +63,8 @@ function validateRedirect(location, currentUrl) {
 // crates/dreamd-cli/src/cli.rs — adding a `dreamd` subcommand without adding it
 // here silently routes `npx dreamd-mcp <newcmd>` to `dreamd mcp <newcmd>`.
 const DREAMD_SUBCOMMANDS = new Set([
-  'init', 'watch', 'doctor', 'dream', 'reset', 'version', 'mcp',
+  'init', 'watch', 'doctor', 'dream', 'reset', 'uninstall', 'update',
+  'version', 'mcp',
 ]);
 
 // A recognized first token is forwarded to `dreamd` verbatim; a bare invocation

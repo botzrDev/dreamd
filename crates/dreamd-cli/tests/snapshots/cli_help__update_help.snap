@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"update\")"
+---
+Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
+
+Usage: update [OPTIONS]
+
+Options:
+      --dry-run
+          Print the current version and planned actions without changing anything
+
+  -q, --quiet
+          Suppress non-essential output (errors still print to stderr)
+
+  -h, --help
+          Print help

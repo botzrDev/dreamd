@@ -110,7 +110,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-07-17
+**Last updated:** 2026-07-27
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -119,8 +119,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Test command:** `cargo test --workspace` / `cargo test --all-features --workspace` (CI)
 **Test convention:** unit tests in `src/**`; integration tests in `crates/*/tests/` (often `wegNN_*.rs`); unix-only suites use `#![cfg(unix)]`; helper bins under `crates/dreamd-core/tests/bin/`
 **Migration dir:** n/a (JSONL + `schema_version: "1.0.0"`; `dreamd migrate` stub via `dreamd-core::migrate` / WEG-133)
-**Spec dir:** `assignments/`, naming `WEG-<n>.v2.md` (v1 often Linear-only; leave v1 intact when a local file exists)
-**Spec v2 convention:** `assignments/WEG-*.v2.md` next to any local v1; established by existing specs
+**Spec dir:** `assignments/`, naming `AILAB-<n>.v2.md` for Botzr-AI-Labs / dreamd-eng tickets (legacy `WEG-<n>.v2.md` still valid if present; v1 often Linear-only)
+**Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
 **Memory location:** `AGENTS.md` (this file) — drift catalog section below
 **Main branch:** `main`
 
