@@ -1,8 +1,9 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 103
 expression: "subcommand_help(\"reset\")"
 ---
-Reset scratch state (DR-113). Today only `workspace` is supported
+Reset scratch state. Today only `workspace` is supported
 
 Usage: reset <COMMAND>
 

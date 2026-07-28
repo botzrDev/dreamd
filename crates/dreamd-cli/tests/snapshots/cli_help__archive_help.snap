@@ -1,8 +1,9 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
+assertion_line: 63
 expression: "subcommand_help(\"archive\")"
 ---
-Operator maintenance on the episodic log. Today: --force-unpin
+Clear pins with --force-unpin so old entries can be pruned
 
 Usage: archive [OPTIONS] [EVENT_ID]
 
