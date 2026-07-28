@@ -140,6 +140,17 @@ npx --yes dreamd-mcp@X.Y.Z init       # scaffolds .agent/ in a project with a ro
 clients automatically via the MCP `initialize` response's `server.instructions`; the
 `adapters/*/AGENTS.md.snippet` files are optional manual copy-ins.
 
+## 8. Publish / update MCP Registry metadata — owner-only (not CI)
+
+Once the npm version is public, refresh the official MCP Registry entry
+(`io.github.botzrDev/dreamd`) so it points at the new version: from
+`packages/dreamd-mcp`, `mcp-publisher login github` (a GitHub identity
+authorized for `botzrDev` — org membership must be public), then
+`mcp-publisher publish server.json`. Full procedure, validation
+(`just mcp-registry-validate`), and the confirming `curl` live in
+`packages/dreamd-mcp/README.md` §Official MCP Registry. Deliberately not
+automated in CI — no workflow holds registry credentials.
+
 ## Why this procedure exists
 
 - **VERSION drift:** `bin/dreamd-mcp.js` once hardcoded `VERSION`, which drove the

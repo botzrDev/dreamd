@@ -39,3 +39,7 @@ release:
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Validate the MCP Registry metadata (read-only; needs mcp-publisher on PATH).
+mcp-registry-validate:
+    cd packages/dreamd-mcp && mcp-publisher validate server.json
