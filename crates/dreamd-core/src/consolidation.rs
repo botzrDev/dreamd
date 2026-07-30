@@ -83,6 +83,24 @@ pub const WINDOW_7_DAYS_SEC: i64 = 7 * 24 * 3600;
 /// Trailing window for slow-burn recurrence detection (seconds).
 pub const WINDOW_30_DAYS_SEC: i64 = 30 * 24 * 3600;
 
+/// Build the `skill_action` prefix tree over `events`: each event contributes
+/// to every `::`-prefix of its key (segments are never re-split on `.` or `-`;
+/// see ARCHITECTURE.md §9). Returns prefix → indices into `events`.
+///
+/// Shared by [`run_cluster_engine`] and `dreamd doctor --cluster-health` so
+/// the prefix rules cannot drift between promotion and diagnostics.
+pub fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
+    let mut depth_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, event) in events.iter().enumerate() {
+        let parts: Vec<&str> = event.skill_action.split("::").collect();
+        for len in 1..=parts.len() {
+            let prefix = parts[..len].join("::");
+            depth_map.entry(prefix).or_default().push(i);
+        }
+    }
+    depth_map
+}
+
 /// Run the cluster engine against `agent_root`'s episodic JSONL.
 ///
 /// `now_sec` is caller-provided for determinism — do not call `Utc::now()`.
@@ -110,14 +128,7 @@ pub fn run_cluster_engine(
 
     // Step 2: build prefix tree. Each event contributes to ALL prefixes of
     // its skill_action. We store event indices to avoid cloning until the end.
-    let mut depth_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, event) in events.iter().enumerate() {
-        let parts: Vec<&str> = event.skill_action.split("::").collect();
-        for len in 1..=parts.len() {
-            let prefix = parts[..len].join("::");
-            depth_map.entry(prefix).or_default().push(i);
-        }
-    }
+    let depth_map = build_prefix_tree(&events);
 
     // Step 3: deepest-wins. Sort prefixes longest-first so each event is
     // claimed by the deepest qualifying cluster on first encounter.

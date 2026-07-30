@@ -51,11 +51,18 @@ struct ScanSkip {
     reason: String,
 }
 
+/// Cap on [`EpisodicLogHealth::malformed_line_numbers`]: only the first N
+/// skipped line numbers are retained (`malformed_line_count` stays uncapped).
+pub const MALFORMED_LINE_NUMBERS_CAP: usize = 5;
+
 /// Episodic log health report for `dreamd doctor` and diagnostics (WEG-132).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EpisodicLogHealth {
     /// `\n`-terminated lines that were blank or failed schema validation.
     pub malformed_line_count: usize,
+    /// 1-indexed line numbers of the first [`MALFORMED_LINE_NUMBERS_CAP`]
+    /// malformed lines.
+    pub malformed_line_numbers: Vec<usize>,
     /// Bytes after the last complete `\n`-terminated line (torn tail at EOF).
     pub torn_tail_bytes: u64,
     /// Well-formed records ingested from complete lines.
@@ -68,6 +75,11 @@ pub fn assess_bytes(bytes: &[u8]) -> EpisodicLogHealth {
     let (records, clean_len, skips) = scan(bytes);
     EpisodicLogHealth {
         malformed_line_count: skips.len(),
+        malformed_line_numbers: skips
+            .iter()
+            .take(MALFORMED_LINE_NUMBERS_CAP)
+            .map(|s| s.line_number)
+            .collect(),
         torn_tail_bytes: bytes.len() as u64 - clean_len,
         valid_record_count: records.len(),
     }
@@ -490,5 +502,50 @@ mod tests {
         let outcome = result.expect("torn tail must not abort the CLI dream path");
         assert_eq!(outcome.kept_count, 2, "both complete records kept");
         assert!(outcome.decayed_ids.is_empty(), "young records do not decay");
+    }
+
+    // ── Test 9: health reports 1-indexed line numbers of malformed lines ───
+    #[test]
+    fn assess_bytes_reports_malformed_line_numbers() {
+        let mut bytes = line_of(&make_learning('A', "one")); // line 1: valid
+        bytes.extend_from_slice(b"{not valid json}\n"); // line 2: malformed
+        bytes.extend_from_slice(&line_of(&make_learning('B', "two"))); // line 3
+        bytes.push(b'\n'); // line 4: blank
+        bytes.extend_from_slice(&line_of(&make_learning('C', "three"))); // line 5
+
+        let health = assess_bytes(&bytes);
+        assert_eq!(health.valid_record_count, 3);
+        assert_eq!(health.malformed_line_count, 2);
+        assert_eq!(health.malformed_line_numbers, vec![2, 4]);
+    }
+
+    // ── Test 10: >CAP malformed lines → numbers capped, count uncapped ─────
+    #[test]
+    fn assess_bytes_caps_malformed_line_numbers() {
+        let mut bytes = line_of(&make_learning('A', "one")); // line 1: valid
+        for _ in 0..MALFORMED_LINE_NUMBERS_CAP + 2 {
+            bytes.extend_from_slice(b"{not valid json}\n"); // lines 2..=8
+        }
+
+        let health = assess_bytes(&bytes);
+        assert_eq!(health.valid_record_count, 1);
+        assert_eq!(
+            health.malformed_line_count,
+            MALFORMED_LINE_NUMBERS_CAP + 2,
+            "count stays uncapped"
+        );
+        assert_eq!(health.malformed_line_numbers, vec![2, 3, 4, 5, 6]);
+    }
+
+    // ── Test 11: clean log → no malformed line numbers ─────────────────────
+    #[test]
+    fn assess_bytes_clean_log_has_no_malformed_line_numbers() {
+        let mut bytes = line_of(&make_learning('A', "one"));
+        bytes.extend_from_slice(&line_of(&make_learning('B', "two")));
+
+        let health = assess_bytes(&bytes);
+        assert_eq!(health.valid_record_count, 2);
+        assert_eq!(health.malformed_line_count, 0);
+        assert!(health.malformed_line_numbers.is_empty());
     }
 }

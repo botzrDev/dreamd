@@ -75,12 +75,12 @@ pub const WRITER_HEAP_BYTES: usize = 50_000_000;
 pub(crate) const DEFAULT_INDEXER_CHANNEL_CAPACITY: usize = 1024;
 
 /// Relative filename for the indexer's commit watermark, joined under the
-/// project's `.dreamd/` directory. WEG-42 owns reads and writes; no other
-/// ticket touches this file.
-pub(crate) const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
+/// project's `.dreamd/` directory. WEG-42 owns reads and writes; `dreamd
+/// doctor --repair` (AILAB-223) clears it when wiping the rebuildable cache.
+pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 
 /// Relative directory holding the per-project Tantivy index segments.
-pub(crate) const INDEX_DIR_NAME: &str = "index";
+pub const INDEX_DIR_NAME: &str = "index";
 
 /// v0.1 index-vs-JSONL contract surface (WEG-42 / DR-202).
 ///

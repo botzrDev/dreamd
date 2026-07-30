@@ -1,6 +1,5 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 53
 expression: top_help()
 ---
 Portable memory layer for AI coding agents
@@ -8,14 +7,14 @@ Portable memory layer for AI coding agents
 Usage: dreamd [COMMAND]
 
 Commands:
-  archive    Operator maintenance on the episodic log. Today: --force-unpin
+  archive    Maintain the on-disk memory log. Today: unpin entries with --force-unpin
   doctor     Run health checks and print status (dream-cycle mode, etc.)
   dream      Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
   init       Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
   mcp        Start the MCP server (bridges to daemon if running, otherwise in-process)
   migrate    Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
-  recall     BM25 × salience recall as a markdown table (DR-703)
-  score      Top-N entries by salience with no lexical filter (DR-704)
+  recall     Search stored memories by query, ranked by relevance and importance (markdown table)
+  score      List the top-N stored memories by importance, without a search query
   reset      Reset scratch state (DR-113). Today only `workspace` is supported
   status     Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall  Stop local dreamd servers, unregister this project, and clear caches

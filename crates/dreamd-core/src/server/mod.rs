@@ -43,6 +43,7 @@ pub use project_resource_map::{ProjectMapResource, ProjectResourceMap, ProjectRe
 pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
 pub use tantivy_handle::{
     assess_index_freshness, IndexFreshness, IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
+    INDEX_DIR_NAME, INDEX_PROGRESS_FILENAME,
 };
 pub use uds::{
     bind_writer_socket, is_daemon_socket_live, try_connect_existing, SocketGuard, UdsBindError,

@@ -22,6 +22,10 @@ workspace = true
 
 [dependencies]
 dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.2" }
+# AILAB-223 — `dreamd doctor` compares stored records against
+# RECORD_SCHEMA_VERSION; also provides typed episodic fixtures in tests.
+# Already linked into the binary transitively via dreamd-core.
+dreamd-protocol = { path = "../dreamd-protocol", version = "0.1.0-rc.2" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
 # WEG-51 / DR-703 — `dreamd recall` opens the per-project index read-only with
@@ -53,5 +57,3 @@ vergen = "=9.0.6"
 [dev-dependencies]
 tempfile = "3"
 insta = { workspace = true }
-# Typed episodic fixtures for the `archive` command tests (AgentLearning/EventId).
-dreamd-protocol = { path = "../dreamd-protocol", version = "0.1.0-rc.2" }

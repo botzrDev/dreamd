@@ -68,13 +68,25 @@ impl DreamArgs {
 #[derive(Args, Debug)]
 pub struct WatchArgs {}
 
+/// Arguments for the `dreamd doctor` subcommand.
+#[derive(Args, Debug, Default)]
+pub struct DoctorArgs {
+    /// Rebuild Tantivy from JSONL; unlink orphaned UDS; clear rebuildable index cache.
+    /// Does not modify AGENT_LEARNINGS.jsonl. Does not delete .tantivy-*.lock files.
+    #[arg(long)]
+    pub repair: bool,
+    /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
+    #[arg(long)]
+    pub cluster_health: bool,
+}
+
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
     /// Maintain the on-disk memory log. Today: unpin entries with --force-unpin.
     Archive(ArchiveArgs),
     /// Run health checks and print status (dream-cycle mode, etc.).
-    Doctor,
+    Doctor(DoctorArgs),
     /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
     /// prune decayed episodic events.
     Dream(DreamArgs),
@@ -346,7 +358,7 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     }
 }
 
-fn run_doctor() -> ExitCode {
+fn run_doctor(args: DoctorArgs) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
@@ -363,9 +375,29 @@ fn run_doctor() -> ExitCode {
         Err(code) => return code,
     };
     let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
+    // Socket via the shared resolver ($DREAMD_SOCK else the daemon-home
+    // socket), same as the status arm — never a hardcoded path.
+    #[cfg(unix)]
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> = None;
     let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
     let mut out = stdout.lock();
-    match commands::doctor::run(&config, &agent_root, skip.as_ref(), &mut out) {
+    let mut err = stderr.lock();
+    let flags = commands::doctor::DoctorFlags {
+        repair: args.repair,
+        cluster_health: args.cluster_health,
+    };
+    match commands::doctor::run(
+        &config,
+        &agent_root,
+        skip.as_ref(),
+        socket.as_deref(),
+        flags,
+        &mut out,
+        &mut err,
+    ) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -776,7 +808,7 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Archive(args) => run_archive(args),
-        Command::Doctor => run_doctor(),
+        Command::Doctor(args) => run_doctor(args),
         Command::Dream(args) => run_dream(args),
         Command::Init(args) => run_init(args),
         Command::Mcp(args) => run_mcp(args),
@@ -1014,11 +1046,32 @@ mod tests {
             let label = match cli.command {
                 Some(Command::Watch(_)) => "watch",
                 Some(Command::Status) => "status",
-                Some(Command::Doctor) => "doctor",
+                Some(Command::Doctor(_)) => "doctor",
                 Some(Command::Version) => "version",
                 _ => panic!("unexpected command for {argv:?}"),
             };
             assert_eq!(label, expect);
+        }
+    }
+
+    #[test]
+    fn parses_doctor_repair_and_cluster_health() {
+        let bare = Cli::try_parse_from(["dreamd", "doctor"]).unwrap();
+        match bare.command {
+            Some(Command::Doctor(args)) => {
+                assert!(!args.repair);
+                assert!(!args.cluster_health);
+            }
+            _ => panic!("expected Doctor"),
+        }
+        let both =
+            Cli::try_parse_from(["dreamd", "doctor", "--repair", "--cluster-health"]).unwrap();
+        match both.command {
+            Some(Command::Doctor(args)) => {
+                assert!(args.repair);
+                assert!(args.cluster_health);
+            }
+            _ => panic!("expected Doctor with both flags"),
         }
     }
 

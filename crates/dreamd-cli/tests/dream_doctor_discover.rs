@@ -124,8 +124,11 @@ fn doctor_with_no_store_errors() {
 #[test]
 fn doctor_from_subdir_uses_parent_store() {
     let tmp = tempfile::tempdir().unwrap();
-    // A bare `.agent/` at the root is enough for discover; doctor only reads.
-    std::fs::create_dir_all(tmp.path().join(".agent")).unwrap();
+    // A `.agent/` at the root is enough for discover; doctor only reads. The
+    // five init-scaffolded subdirs keep the AILAB-223 integrity checks green.
+    for sub in ["working", "episodic", "semantic", "personal", ".dreamd"] {
+        std::fs::create_dir_all(tmp.path().join(".agent").join(sub)).unwrap();
+    }
 
     let sub = tmp.path().join("sub");
     std::fs::create_dir(&sub).unwrap();

@@ -11,7 +11,7 @@
 //! - Mid-file `\n`-terminated garbage is counted as malformed, not ingested.
 
 use chrono::DateTime;
-use dreamd_core::episodic::{assess_bytes, EpisodicLogHealth};
+use dreamd_core::episodic::{assess_bytes, EpisodicLogHealth, MALFORMED_LINE_NUMBERS_CAP};
 use dreamd_protocol::{AgentLearning, EventId};
 use proptest::prelude::*;
 
@@ -56,6 +56,7 @@ fn corpus_bom_prefixed_line_is_malformed() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 1);
     assert_eq!(health.malformed_line_count, 1);
+    assert_eq!(health.malformed_line_numbers, vec![2]);
     assert_eq!(health.torn_tail_bytes, 0);
 }
 
@@ -67,6 +68,7 @@ fn corpus_missing_trailing_newline_halts_at_torn_tail() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 1);
     assert_eq!(health.malformed_line_count, 0);
+    assert!(health.malformed_line_numbers.is_empty());
     assert!(health.torn_tail_bytes > 0);
 }
 
@@ -80,6 +82,7 @@ fn corpus_embedded_nul_midfile_is_malformed() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 2);
     assert_eq!(health.malformed_line_count, 1);
+    assert_eq!(health.malformed_line_numbers, vec![2]);
 }
 
 #[test]
@@ -92,6 +95,7 @@ fn corpus_invalid_utf8_midfile_is_malformed() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 2);
     assert_eq!(health.malformed_line_count, 1);
+    assert_eq!(health.malformed_line_numbers, vec![2]);
 }
 
 #[test]
@@ -102,6 +106,7 @@ fn corpus_truncated_mid_line_is_torn_tail() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 1);
     assert_eq!(health.malformed_line_count, 0);
+    assert!(health.malformed_line_numbers.is_empty());
     assert!(health.torn_tail_bytes > 0);
 }
 
@@ -115,6 +120,7 @@ fn corpus_trailing_whitespace_on_json_is_malformed() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 2);
     assert_eq!(health.malformed_line_count, 1);
+    assert_eq!(health.malformed_line_numbers, vec![2]);
 }
 
 #[test]
@@ -127,6 +133,7 @@ fn corpus_blank_line_is_malformed() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 2);
     assert_eq!(health.malformed_line_count, 1);
+    assert_eq!(health.malformed_line_numbers, vec![2]);
 }
 
 #[test]
@@ -141,6 +148,7 @@ fn corpus_leading_whitespace_on_valid_json_is_accepted() {
     let health = assess_bytes(&bytes);
     assert_eq!(health.valid_record_count, 2);
     assert_eq!(health.malformed_line_count, 0);
+    assert!(health.malformed_line_numbers.is_empty());
 }
 
 // ── Strategies ──────────────────────────────────────────────────────────────
@@ -198,6 +206,12 @@ proptest! {
         // Counts are non-negative and bounded.
         prop_assert!(health.valid_record_count <= bytes.len());
         prop_assert!(health.malformed_line_count <= bytes.len());
+
+        // Retained line numbers are capped, 1-indexed, and never exceed the
+        // uncapped malformed count.
+        prop_assert!(health.malformed_line_numbers.len() <= MALFORMED_LINE_NUMBERS_CAP);
+        prop_assert!(health.malformed_line_numbers.len() <= health.malformed_line_count);
+        prop_assert!(health.malformed_line_numbers.iter().all(|&n| n >= 1));
     }
 
     /// Valid lines interleaved with garbage: valid records survive, garbage is
@@ -222,6 +236,12 @@ proptest! {
         prop_assert_eq!(health.valid_record_count, good_count);
         if good_count > 1 {
             prop_assert_eq!(health.malformed_line_count, good_count - 1);
+            // Garbage lines alternate with valid lines: 2, 4, 6, …
+            let expected: Vec<usize> = (1..good_count)
+                .map(|i| 2 * i)
+                .take(MALFORMED_LINE_NUMBERS_CAP)
+                .collect();
+            prop_assert_eq!(health.malformed_line_numbers, expected);
         }
     }
 }

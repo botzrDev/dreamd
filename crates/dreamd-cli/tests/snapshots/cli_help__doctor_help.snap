@@ -4,8 +4,14 @@ expression: "subcommand_help(\"doctor\")"
 ---
 Run health checks and print status (dream-cycle mode, etc.)
 
-Usage: doctor
+Usage: doctor [OPTIONS]
 
 Options:
+      --repair
+          Rebuild Tantivy from JSONL; unlink orphaned UDS; clear rebuildable index cache. Does not modify AGENT_LEARNINGS.jsonl. Does not delete .tantivy-*.lock files
+
+      --cluster-health
+          Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift
+
   -h, --help
           Print help
