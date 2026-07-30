@@ -565,9 +565,12 @@ fn run_repair(
     }
 
     // Reopen to force a full replay of the episodic log into a fresh index.
-    // The replay commits before `open` returns, so the handle (and its
-    // indexer task) can be dropped immediately afterwards.
-    let rt = match tokio::runtime::Runtime::new() {
+    // A current-thread runtime is enough — the rebuild is one blocking replay,
+    // not a serving daemon — and matches `TantivyIndexHandle::close`.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             writeln!(
@@ -582,7 +585,17 @@ fn run_repair(
         TantivyIndexHandle::open(agent_root, DEFAULT_COMMIT_CADENCE)
     };
     match reopened {
-        Ok(_handle) => actions.push("rebuilt index from the episodic log".to_string()),
+        Ok(handle) => {
+            // Drain and join the indexer task before returning. Dropping the
+            // handle instead leaves that task holding the `IndexWriter`, and
+            // tearing the runtime down around a live writer never completes —
+            // `dreamd doctor --repair` hangs forever instead of exiting.
+            if let Err(e) = rt.block_on(handle.shutdown()) {
+                writeln!(err, "dreamd: error — index rebuild did not drain: {e}")?;
+                return Ok(false);
+            }
+            actions.push("rebuilt index from the episodic log".to_string());
+        }
         Err(e) => {
             writeln!(err, "dreamd: error — index rebuild failed: {e}")?;
             return Ok(false);
