@@ -2,10 +2,10 @@
 //! detection and `--repair` (unlink orphan socket, wipe + rebuild the derived
 //! Tantivy cache, never touch the episodic log).
 //!
-//! Harness modeled on `dream_doctor_discover.rs` (raw `std::process::Command`
-//! + `CARGO_BIN_EXE_dreamd`, injectable `HOME`). The daemon socket is injected
-//! via `DREAMD_SOCK` (absolute), exercising the same resolver the status and
-//! MCP paths use — no hardcoded `~/.agent/dreamd.sock` anywhere.
+//! Harness modeled on `dream_doctor_discover.rs`: raw `std::process::Command`
+//! against `CARGO_BIN_EXE_dreamd` with an injectable `HOME`. The daemon socket
+//! is injected via `DREAMD_SOCK` (absolute), exercising the same resolver the
+//! status and MCP paths use — no hardcoded `~/.agent/dreamd.sock` anywhere.
 
 #![cfg(unix)]
 
