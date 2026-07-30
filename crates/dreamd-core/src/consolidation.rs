@@ -86,10 +86,7 @@ pub const WINDOW_30_DAYS_SEC: i64 = 30 * 24 * 3600;
 /// Build the `skill_action` prefix tree over `events`: each event contributes
 /// to every `::`-prefix of its key (segments are never re-split on `.` or `-`;
 /// see ARCHITECTURE.md §9). Returns prefix → indices into `events`.
-///
-/// Shared by [`run_cluster_engine`] and `dreamd doctor --cluster-health` so
-/// the prefix rules cannot drift between promotion and diagnostics.
-pub fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
+fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
     let mut depth_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, event) in events.iter().enumerate() {
         let parts: Vec<&str> = event.skill_action.split("::").collect();
@@ -126,9 +123,43 @@ pub fn run_cluster_engine(
         return Ok(ClusterOutput { promoted: vec![] });
     }
 
+    let promoted = compute_promoted_clusters(&events, now_sec);
+
+    // Step 5: write recurrence sidecar.
+    let sidecar_clusters: Vec<ClusterCount> = promoted
+        .iter()
+        .map(|c| ClusterCount {
+            skill_action: c.cluster_key.clone(),
+            count: c.events.len() as u32,
+        })
+        .collect();
+    let sidecar = RecurrenceSidecar {
+        schema_version: "1.0".to_string(),
+        clusters: sidecar_clusters,
+    };
+    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
+    std::fs::create_dir_all(agent_root.semantic_dir())?;
+    let sidecar_json = serde_json::to_string_pretty(&sidecar)
+        .map_err(|e| ConsolidationError::Json { line: 0, source: e })?;
+    write_atomic(&sidecar_path, sidecar_json.as_bytes())?;
+
+    Ok(ClusterOutput { promoted })
+}
+
+/// Compute the clusters the dream cycle would promote from `events`, with no
+/// disk access and no sidecar write. Steps 2–4 of [`run_cluster_engine`].
+///
+/// `now_sec` is caller-provided for determinism — do not call `Utc::now()`.
+///
+/// Shared by [`run_cluster_engine`] and `dreamd doctor --cluster-health` so the
+/// promotion rules — threshold windows **and** deepest-wins claiming — cannot
+/// drift between what the dream cycle writes and what doctor audits. Deriving
+/// raw prefix-tree counts instead would report drift on every healthy store,
+/// since the sidecar only ever holds promoted, deepest-wins-claimed counts.
+pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<PromotedCluster> {
     // Step 2: build prefix tree. Each event contributes to ALL prefixes of
     // its skill_action. We store event indices to avoid cloning until the end.
-    let depth_map = build_prefix_tree(&events);
+    let depth_map = build_prefix_tree(events);
 
     // Step 3: deepest-wins. Sort prefixes longest-first so each event is
     // claimed by the deepest qualifying cluster on first encounter.
@@ -145,8 +176,8 @@ pub fn run_cluster_engine(
 
     for prefix in &prefixes {
         let member_indices = &depth_map[prefix];
-        let in_7d = count_in_window(member_indices, &events, now_sec, WINDOW_7_DAYS_SEC);
-        let in_30d = count_in_window(member_indices, &events, now_sec, WINDOW_30_DAYS_SEC);
+        let in_7d = count_in_window(member_indices, events, now_sec, WINDOW_7_DAYS_SEC);
+        let in_30d = count_in_window(member_indices, events, now_sec, WINDOW_30_DAYS_SEC);
         if in_7d < PROMOTION_THRESHOLD && in_30d < PROMOTION_THRESHOLD {
             continue;
         }
@@ -185,25 +216,7 @@ pub fn run_cluster_engine(
         })
         .collect();
 
-    // Step 5: write recurrence sidecar.
-    let sidecar_clusters: Vec<ClusterCount> = promoted
-        .iter()
-        .map(|c| ClusterCount {
-            skill_action: c.cluster_key.clone(),
-            count: c.events.len() as u32,
-        })
-        .collect();
-    let sidecar = RecurrenceSidecar {
-        schema_version: "1.0".to_string(),
-        clusters: sidecar_clusters,
-    };
-    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-    std::fs::create_dir_all(agent_root.semantic_dir())?;
-    let sidecar_json = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| ConsolidationError::Json { line: 0, source: e })?;
-    write_atomic(&sidecar_path, sidecar_json.as_bytes())?;
-
-    Ok(ClusterOutput { promoted })
+    promoted
 }
 
 /// Set `pinned` on episodic entries cited in the freshly-written `LESSONS.md`,

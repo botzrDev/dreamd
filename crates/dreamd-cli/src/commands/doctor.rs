@@ -9,11 +9,15 @@
 //! and last autobiography skip.
 //!
 //! `--repair` unlinks an orphaned daemon socket and rebuilds the derived
-//! Tantivy cache by replaying the episodic log (read-only toward the log;
-//! Tantivy flock files are never unlinked on their own — see
-//! [`check_tantivy_locks`]). `--cluster-health` compares `skill_action`
-//! prefix counts derived from the episodic log against the recurrence
-//! sidecar the dream cycle wrote.
+//! Tantivy cache by replaying the episodic log, which it only ever reads. The
+//! rebuild wipes the whole index dir — the same set the daemon clears on an
+//! index-schema migration — so any `.tantivy-*.lock` living inside it goes
+//! with it. What doctor must never do, and does not, is target those flock
+//! files on their own: flock is advisory, carries no PID, and self-clears when
+//! its holder exits (WEG-24-A / AILAB-402; see [`check_tantivy_locks`]).
+//!
+//! `--cluster-health` recomputes the clusters the dream cycle would promote
+//! and compares them against the recurrence sidecar it last wrote.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
@@ -44,14 +48,20 @@ pub struct DoctorFlags {
 /// `socket` is the resolved daemon UDS path (`$DREAMD_SOCK` else the
 /// daemon-home socket), or `None` when no path could be resolved.
 ///
+/// `now_sec` is caller-provided (unix seconds) so the recurrence windows
+/// `--cluster-health` recomputes stay deterministic under test, matching the
+/// dream cycle's own convention — do not call `Utc::now()` below.
+///
 /// Returns `Ok(true)` if all checks passed (exit 0 caller), `Ok(false)` if any
 /// WARNING or ERROR was emitted or a repair step failed (exit 1 caller).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     config: &Config,
     agent_root: &AgentRoot,
     skip: Option<&AutobiographySkip>,
     socket: Option<&Path>,
     flags: DoctorFlags,
+    now_sec: i64,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<bool> {
@@ -167,11 +177,7 @@ pub fn run(
 
     // WEG-63 — last autobiography skip (if any).
     if let Some(s) = skip {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let elapsed = now.saturating_sub(s.at);
+        let elapsed = now_sec.saturating_sub(s.at);
         let duration_str = format_elapsed(elapsed);
         let file_count = s.files.len();
         writeln!(
@@ -182,7 +188,7 @@ pub fn run(
     }
 
     if flags.cluster_health {
-        all_ok &= check_cluster_health(agent_root, events.as_deref(), out)?;
+        all_ok &= check_cluster_health(agent_root, events.as_deref(), now_sec, out)?;
     }
 
     if flags.repair {
@@ -308,7 +314,11 @@ fn check_orphaned_uds(socket: Option<&Path>, out: &mut impl Write) -> io::Result
         return Ok(true);
     }
     if dreamd_core::server::is_daemon_socket_live(sock) {
-        writeln!(out, "orphaned_uds: none (daemon live at {})", sock.display())?;
+        writeln!(
+            out,
+            "orphaned_uds: none (daemon live at {})",
+            sock.display()
+        )?;
         Ok(true)
     } else {
         writeln!(
@@ -325,6 +335,14 @@ fn check_orphaned_uds(socket: Option<&Path>, out: &mut impl Write) -> io::Result
 fn check_orphaned_uds(_socket: Option<&Path>, out: &mut impl Write) -> io::Result<bool> {
     writeln!(out, "orphaned_uds: n/a (non-unix)")?;
     Ok(true)
+}
+
+/// True only if `path` is present and is a unix-domain socket. Guards the one
+/// destructive step `--repair` takes outside the derived index cache.
+#[cfg(unix)]
+fn is_unix_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
 }
 
 /// Presence report for Tantivy flock files under the index dir. flock is
@@ -347,13 +365,19 @@ fn check_tantivy_locks(agent_root: &AgentRoot, out: &mut impl Write) -> io::Resu
     Ok(())
 }
 
-/// `--cluster-health`: derive `skill_action` prefix counts from the episodic
-/// log (same prefix rules as the cluster engine) and compare against the
-/// recurrence sidecar the dream cycle wrote. An absent sidecar on a
-/// never-dreamed store is benign.
+/// `--cluster-health`: recompute the clusters the dream cycle would promote
+/// from the episodic log and compare them against the recurrence sidecar it
+/// last wrote. An absent sidecar on a never-dreamed store is benign.
+///
+/// The derivation goes through [`consolidation::compute_promoted_clusters`] —
+/// the same threshold-window and deepest-wins rules the engine promotes with —
+/// so a match means the sidecar is current. Comparing raw prefix-tree counts
+/// instead would report drift on every healthy store, because the sidecar only
+/// ever holds promoted, deepest-wins-claimed counts.
 fn check_cluster_health(
     agent_root: &AgentRoot,
     events: Option<&[AgentLearning]>,
+    now_sec: i64,
     out: &mut impl Write,
 ) -> io::Result<bool> {
     let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
@@ -393,10 +417,11 @@ fn check_cluster_health(
         return Ok(false);
     };
 
-    let derived: BTreeMap<String, usize> = consolidation::build_prefix_tree(events)
-        .into_iter()
-        .map(|(prefix, members)| (prefix, members.len()))
-        .collect();
+    let derived: BTreeMap<String, usize> =
+        consolidation::compute_promoted_clusters(events, now_sec)
+            .into_iter()
+            .map(|c| (c.cluster_key, c.events.len()))
+            .collect();
     let sidecar_counts: BTreeMap<&str, u32> = sidecar
         .clusters
         .iter()
@@ -407,7 +432,10 @@ fn check_cluster_health(
     for (key, jsonl_count) in &derived {
         match sidecar_counts.get(key.as_str()) {
             Some(&count) if count as usize == *jsonl_count => {
-                writeln!(out, "cluster_health: {key} jsonl={jsonl_count} sidecar={count}")?;
+                writeln!(
+                    out,
+                    "cluster_health: {key} jsonl={jsonl_count} sidecar={count}"
+                )?;
             }
             Some(&count) => {
                 writeln!(
@@ -483,18 +511,32 @@ fn run_repair(
     let mut actions: Vec<String> = Vec::new();
 
     // The liveness probe above came back dead, so a still-present socket file
-    // is an orphan and safe to unlink.
+    // is an orphan and safe to unlink. Confirm it really is a socket first:
+    // `is_daemon_socket_live` also answers "dead" for a regular file (connect
+    // fails with ENOTSOCK), so an operator pointing $DREAMD_SOCK at the wrong
+    // path must not have that file deleted out from under them.
     if let Some(sock) = socket {
-        match std::fs::remove_file(sock) {
-            Ok(()) => actions.push(format!("unlinked orphaned socket {}", sock.display())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
+        if !is_unix_socket(sock) {
+            if sock.exists() {
                 writeln!(
                     err,
-                    "dreamd: error — could not unlink {}: {e}",
+                    "dreamd: error — {} is not a unix socket; refusing to unlink it.",
                     sock.display()
                 )?;
                 return Ok(false);
+            }
+        } else {
+            match std::fs::remove_file(sock) {
+                Ok(()) => actions.push(format!("unlinked orphaned socket {}", sock.display())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    writeln!(
+                        err,
+                        "dreamd: error — could not unlink {}: {e}",
+                        sock.display()
+                    )?;
+                    return Ok(false);
+                }
             }
         }
     }
@@ -547,11 +589,9 @@ fn run_repair(
         }
     }
 
-    if actions.is_empty() {
-        writeln!(out, "repair: nothing to do")?;
-    } else {
-        writeln!(out, "repair: {}", actions.join("; "))?;
-    }
+    // The rebuild arm above always records an action on success, so `actions`
+    // is never empty here.
+    writeln!(out, "repair: {}", actions.join("; "))?;
     Ok(true)
 }
 
@@ -615,7 +655,7 @@ mod tests {
     ) -> (bool, String, String) {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let ok = run(cfg, root, skip, socket, flags, &mut out, &mut err).expect("run ok");
+        let ok = run(cfg, root, skip, socket, flags, NOW_SEC, &mut out, &mut err).expect("run ok");
         (
             ok,
             String::from_utf8(out).expect("utf8 stdout"),
@@ -711,11 +751,7 @@ mod tests {
         let cfg = Config::default();
         let (root, _dir) = setup_agent_root("skip-some");
         let skip = AutobiographySkip {
-            at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64
-                - 300, // 5 minutes ago
+            at: NOW_SEC - 300, // 5 minutes before the injected clock
             reason: "user_dirty_tree".to_string(),
             files: vec![
                 ".agent/semantic/LESSONS.md".to_string(),
@@ -787,7 +823,9 @@ mod tests {
         let (root, _dir) = setup_agent_root("episodic-lines");
         // Lines 1 and 3 malformed, line 2 valid.
         let mut body = String::from("{not valid json}\n");
-        body.push_str(&serde_json::to_string(&learning('A', "rust::x", RECORD_SCHEMA_VERSION)).unwrap());
+        body.push_str(
+            &serde_json::to_string(&learning('A', "rust::x", RECORD_SCHEMA_VERSION)).unwrap(),
+        );
         body.push('\n');
         body.push_str("{also not valid}\n");
         fs::write(root.episodic_jsonl(), body).unwrap();
@@ -820,7 +858,10 @@ mod tests {
         let cfg = Config::default();
         let (root, _dir) = setup_agent_root("optional-subdirs");
         let (ok, output, _) = run_default(&cfg, &root, None);
-        assert!(ok, "store without skills//protocols/ must be ok; got: {output:?}");
+        assert!(
+            ok,
+            "store without skills//protocols/ must be ok; got: {output:?}"
+        );
         assert!(
             !output.contains("skills") && !output.contains("protocols"),
             "skills//protocols/ must not be flagged; got: {output:?}"
@@ -834,7 +875,9 @@ mod tests {
         seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
         let (ok, output, _) = run_default(&cfg, &root, None);
         assert!(
-            output.contains(&format!("schema_record: ok (1 record(s) at {RECORD_SCHEMA_VERSION}")),
+            output.contains(&format!(
+                "schema_record: ok (1 record(s) at {RECORD_SCHEMA_VERSION}"
+            )),
             "records at the current schema must report ok; got: {output:?}"
         );
         assert!(
@@ -964,7 +1007,10 @@ mod tests {
             output.contains("cluster_health: no sidecar"),
             "absent sidecar must print the benign INFO line; got: {output:?}"
         );
-        assert!(ok, "absent sidecar on a never-dreamed store is not an error");
+        assert!(
+            ok,
+            "absent sidecar on a never-dreamed store is not an error"
+        );
     }
 
     #[test]
@@ -992,10 +1038,6 @@ mod tests {
         };
         let (ok, output, _) = run_with(&cfg, &root, None, None, flags);
         assert!(
-            output.contains("cluster_health: rust jsonl=3 sidecar=(none)  [WARNING: drift]"),
-            "jsonl-only prefix must be flagged; got: {output:?}"
-        );
-        assert!(
             output.contains("cluster_health: rust::borrow jsonl=3 sidecar=2  [WARNING: drift]"),
             "count mismatch must be flagged; got: {output:?}"
         );
@@ -1003,8 +1045,15 @@ mod tests {
             output.contains("cluster_health: python jsonl=(none) sidecar=1  [WARNING: drift]"),
             "sidecar-only key must be flagged; got: {output:?}"
         );
+        // `rust` is a parent of the promoted `rust::borrow` cluster. Deepest-wins
+        // means the engine never writes a `rust` row, so doctor must not derive
+        // one either — deriving raw prefix counts here was the AILAB-223 defect.
         assert!(
-            output.contains("3 drifted key(s)"),
+            !output.contains("cluster_health: rust jsonl="),
+            "unpromoted parent prefix must not be derived; got: {output:?}"
+        );
+        assert!(
+            output.contains("2 drifted key(s)"),
             "drift summary must count all drifted keys; got: {output:?}"
         );
         assert!(!ok, "cluster drift must return all_ok=false");
@@ -1022,10 +1071,11 @@ mod tests {
                 learning('C', "rust::borrow", RECORD_SCHEMA_VERSION),
             ],
         );
+        // Exactly what `run_cluster_engine` writes for three `rust::borrow`
+        // events: one deepest-wins cluster, and no parent `rust` row.
         fs::write(
             root.semantic_dir().join("recurrence_counts.json"),
             r#"{"schema_version":"1.0","clusters":[
-                {"skill_action":"rust","count":3},
                 {"skill_action":"rust::borrow","count":3}]}"#,
         )
         .unwrap();
@@ -1035,10 +1085,78 @@ mod tests {
         };
         let (ok, output, _) = run_with(&cfg, &root, None, None, flags);
         assert!(
-            output.contains("cluster_health: ok (2 prefix(es) match the sidecar)"),
+            output.contains("cluster_health: ok (1 prefix(es) match the sidecar)"),
             "matching sidecar must report ok; got: {output:?}"
         );
-        assert!(ok, "matching sidecar must keep all_ok=true; got: {output:?}");
+        assert!(
+            ok,
+            "matching sidecar must keep all_ok=true; got: {output:?}"
+        );
+    }
+
+    /// The regression that motivated mirroring the engine: let the real cluster
+    /// engine write the sidecar, then audit it. Deriving raw prefix-tree counts
+    /// reported `rust jsonl=3 sidecar=(none) [WARNING: drift]` here and exited 1
+    /// on a store that had just been dreamed.
+    #[test]
+    fn cluster_health_matches_a_sidecar_written_by_the_real_engine() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("ch-engine");
+        seed_events(
+            &root,
+            &[
+                learning('A', "rust::borrow", RECORD_SCHEMA_VERSION),
+                learning('B', "rust::borrow", RECORD_SCHEMA_VERSION),
+                learning('C', "rust::borrow", RECORD_SCHEMA_VERSION),
+            ],
+        );
+        consolidation::run_cluster_engine(&root, NOW_SEC).expect("cluster engine runs");
+
+        let flags = DoctorFlags {
+            cluster_health: true,
+            ..Default::default()
+        };
+        let (ok, output, _) = run_with(&cfg, &root, None, None, flags);
+        assert!(
+            output.contains("cluster_health: ok"),
+            "a freshly-dreamed store must audit clean; got: {output:?}"
+        );
+        assert!(
+            !output.contains("drift"),
+            "no drift may be reported right after a dream cycle; got: {output:?}"
+        );
+        assert!(ok, "freshly-dreamed store must keep all_ok=true");
+    }
+
+    /// Appending past the last dream cycle is the drift the flag exists to
+    /// catch: the sidecar still holds the pre-append count.
+    #[test]
+    fn cluster_health_flags_jsonl_that_moved_past_the_sidecar() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("ch-stale");
+        let mut records = vec![
+            learning('A', "rust::borrow", RECORD_SCHEMA_VERSION),
+            learning('B', "rust::borrow", RECORD_SCHEMA_VERSION),
+            learning('C', "rust::borrow", RECORD_SCHEMA_VERSION),
+        ];
+        seed_events(&root, &records);
+        consolidation::run_cluster_engine(&root, NOW_SEC).expect("cluster engine runs");
+
+        // Two more events land after the cycle; nobody re-dreamed.
+        records.push(learning('D', "rust::borrow", RECORD_SCHEMA_VERSION));
+        records.push(learning('E', "rust::borrow", RECORD_SCHEMA_VERSION));
+        seed_events(&root, &records);
+
+        let flags = DoctorFlags {
+            cluster_health: true,
+            ..Default::default()
+        };
+        let (ok, output, _) = run_with(&cfg, &root, None, None, flags);
+        assert!(
+            output.contains("cluster_health: rust::borrow jsonl=5 sidecar=3  [WARNING: drift]"),
+            "a stale sidecar must be flagged; got: {output:?}"
+        );
+        assert!(!ok, "genuine drift must return all_ok=false");
     }
 
     #[cfg(unix)]
@@ -1063,7 +1181,10 @@ mod tests {
             ..Default::default()
         };
         let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
-        assert!(ok, "repair on a healthy store must succeed; stderr: {err:?}");
+        assert!(
+            ok,
+            "repair on a healthy store must succeed; stderr: {err:?}"
+        );
         assert!(
             output.contains("repair:") && output.contains("rebuilt index from the episodic log"),
             "repair summary must report the rebuild; got: {output:?}"
@@ -1076,8 +1197,16 @@ mod tests {
             index_dir.join("meta.json").exists(),
             "a fresh Tantivy index must exist after rebuild"
         );
-        let manifest =
-            fs::read_to_string(root.dreamd_dir().join(INDEX_MANIFEST_FILENAME)).unwrap();
+        // `meta.json` alone proves only that an index was created — it exists on
+        // an empty one too. The rewritten watermark is what proves the replay
+        // actually ingested the seeded records and committed.
+        let progress =
+            fs::read_to_string(root.dreamd_dir().join("index_progress.json")).expect("watermark");
+        assert!(
+            progress.contains(&evt_id('B')),
+            "replay must commit through the last seeded record; got: {progress:?}"
+        );
+        let manifest = fs::read_to_string(root.dreamd_dir().join(INDEX_MANIFEST_FILENAME)).unwrap();
         assert!(
             manifest.contains(INDEX_SCHEMA_VERSION),
             "manifest must be rewritten at the binary schema; got: {manifest:?}"
@@ -1086,6 +1215,37 @@ mod tests {
             fs::read(root.episodic_jsonl()).unwrap(),
             jsonl_before,
             "repair must leave the episodic log byte-identical"
+        );
+    }
+
+    /// Pins the documented lock-file contract: `--repair` wipes the whole index
+    /// dir, so flock files inside it go as collateral, but doctor never singles
+    /// them out (WEG-24-A / AILAB-402 forbid targeted unlinking, not the wipe).
+    #[cfg(unix)]
+    #[test]
+    fn repair_wipes_index_dir_including_lock_files_as_collateral() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("repair-locks");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        let index_dir = root.dreamd_dir().join("index");
+        fs::create_dir_all(&index_dir).unwrap();
+        fs::write(index_dir.join(".tantivy-writer.lock"), b"").unwrap();
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(ok, "repair must succeed; stderr: {err:?}");
+        assert!(
+            output.contains("removed index dir"),
+            "the wipe must be reported; got: {output:?}"
+        );
+        // Whatever Tantivy recreates on open is its business; what matters is
+        // that no step targeted the lock file by name.
+        assert!(
+            index_dir.join("meta.json").exists(),
+            "index must be rebuilt after the wipe"
         );
     }
 
@@ -1115,6 +1275,34 @@ mod tests {
             "no index wipe may happen before the refusal"
         );
         assert!(sock.exists(), "a live socket must never be unlinked");
+    }
+
+    /// `$DREAMD_SOCK` pointed at a regular file: the liveness probe reports
+    /// "dead" for it too, so only the socket-type guard stops `--repair` from
+    /// deleting an operator's file.
+    #[cfg(unix)]
+    #[test]
+    fn repair_refuses_to_unlink_a_non_socket() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("repair-notsock");
+        let not_a_sock = dir.path().join("important.txt");
+        fs::write(&not_a_sock, b"precious").unwrap();
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, _output, err) = run_with(&cfg, &root, None, Some(&not_a_sock), flags);
+        assert!(!ok, "repair must fail closed on a non-socket path");
+        assert!(
+            err.contains("is not a unix socket"),
+            "stderr must explain the refusal; got: {err:?}"
+        );
+        assert_eq!(
+            fs::read(&not_a_sock).unwrap(),
+            b"precious",
+            "the file must be left untouched"
+        );
     }
 
     #[cfg(unix)]

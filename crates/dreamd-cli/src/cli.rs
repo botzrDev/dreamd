@@ -71,8 +71,9 @@ pub struct WatchArgs {}
 /// Arguments for the `dreamd doctor` subcommand.
 #[derive(Args, Debug, Default)]
 pub struct DoctorArgs {
-    /// Rebuild Tantivy from JSONL; unlink orphaned UDS; clear rebuildable index cache.
-    /// Does not modify AGENT_LEARNINGS.jsonl. Does not delete .tantivy-*.lock files.
+    /// Rebuild Tantivy from JSONL; unlink orphaned UDS. Wipes the whole derived
+    /// index cache dir, including any .tantivy-*.lock inside it, and never targets
+    /// lock files on their own. Does not modify AGENT_LEARNINGS.jsonl.
     #[arg(long)]
     pub repair: bool,
     /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
@@ -389,12 +390,17 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         repair: args.repair,
         cluster_health: args.cluster_health,
     };
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     match commands::doctor::run(
         &config,
         &agent_root,
         skip.as_ref(),
         socket.as_deref(),
         flags,
+        now_sec,
         &mut out,
         &mut err,
     ) {
