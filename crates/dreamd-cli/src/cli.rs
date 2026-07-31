@@ -106,6 +106,8 @@ pub enum Command {
     Score(ScoreArgs),
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
+    /// Front door: scaffold .agent/ (via init) and print the harness wiring next steps.
+    Setup(SetupArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
     /// Stop local dreamd servers, unregister this project, and clear caches.
@@ -224,6 +226,45 @@ pub enum ResetCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// Arguments for the `dreamd setup` subcommand (AILAB-549).
+///
+/// `setup` is the install front door. This slice scaffolds `.agent/` and prints
+/// the wiring next steps; the `.mcp.json` merge writer (AILAB-550) and the TTY
+/// wizard (AILAB-551) land later. Every flag those slices need is parsed here
+/// so the clap surface does not reshuffle under users mid-release.
+#[derive(Args, Debug)]
+pub struct SetupArgs {
+    /// Accept defaults without prompting. `setup` never prompts today, so this
+    /// is accepted and ignored; the interactive wizard ships in a follow-up.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Harness(es) to wire up. Reported now; the MCP config write ships in a
+    /// follow-up release.
+    #[arg(long, value_enum, default_value_t = commands::setup::Harness::Both)]
+    pub harness: commands::setup::Harness,
+    /// Do not write any harness MCP config.
+    #[arg(long)]
+    pub no_write_mcp: bool,
+    /// Start the shared daemon after scaffolding. Parsed now; `setup` still
+    /// only prints the `dreamd watch` command.
+    #[arg(long, overrides_with = "no_start_watch")]
+    pub start_watch: bool,
+    /// Only print the `dreamd watch` command instead of starting it (default).
+    #[arg(long, overrides_with = "start_watch")]
+    pub no_start_watch: bool,
+    /// Print the planned actions without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+impl SetupArgs {
+    /// Resolve the `--start-watch` / `--no-start-watch` pair. Both flags
+    /// override each other in clap, so the last one on the command line wins.
+    pub fn wants_start_watch(&self) -> bool {
+        self.start_watch && !self.no_start_watch
+    }
 }
 
 /// Arguments for the `dreamd uninstall` subcommand (AILAB-226).
@@ -628,6 +669,35 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
     }
 }
 
+fn run_setup(args: SetupArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let daemon_home = resolve_daemon_home();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let req = commands::setup::SetupRequest {
+        cwd: &cwd,
+        daemon_home: &daemon_home,
+        harness: args.harness,
+        write_mcp: !args.no_write_mcp,
+        start_watch: args.wants_start_watch(),
+        dry_run: args.dry_run,
+    };
+    match commands::setup::run(&req, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage — no project root to set up (message already on stderr).
+        Err(commands::setup::SetupError::NoProjectRoot) => ExitCode::from(2),
+        Err(commands::setup::SetupError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_status(status_log_tail: &[String]) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
@@ -824,6 +894,7 @@ pub fn run() -> ExitCode {
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
+        Command::Setup(args) => run_setup(args),
         Command::Status => run_status(&status_log_tail),
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
@@ -1099,6 +1170,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_setup_flags() {
+        let cli = Cli::try_parse_from([
+            "dreamd",
+            "setup",
+            "--yes",
+            "--harness",
+            "none",
+            "--no-write-mcp",
+            "--no-start-watch",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => {
+                assert!(args.yes);
+                assert_eq!(args.harness, commands::setup::Harness::None);
+                assert!(args.no_write_mcp);
+                assert!(!args.wants_start_watch());
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_defaults_write_mcp_for_both_harnesses() {
+        let cli = Cli::try_parse_from(["dreamd", "setup"]).unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => {
+                assert!(!args.yes);
+                assert_eq!(
+                    args.harness,
+                    commands::setup::Harness::Both,
+                    "default harness is both (design: MCP config written by default)"
+                );
+                assert!(!args.no_write_mcp);
+                assert!(!args.wants_start_watch(), "watch is print-only by default");
+                assert!(!args.dry_run);
+            }
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_start_watch_pair_is_last_one_wins() {
+        let on = Cli::try_parse_from(["dreamd", "setup", "--start-watch"]).unwrap();
+        match on.command {
+            Some(Command::Setup(args)) => assert!(args.wants_start_watch()),
+            _ => panic!("expected Setup"),
+        }
+        // Both flags must parse (no conflict error); the last one wins.
+        let off =
+            Cli::try_parse_from(["dreamd", "setup", "--start-watch", "--no-start-watch"]).unwrap();
+        match off.command {
+            Some(Command::Setup(args)) => assert!(!args.wants_start_watch()),
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
     fn parses_uninstall_flags() {
         let cli = Cli::try_parse_from(["dreamd", "uninstall", "--keep-caches", "--all-npx", "-q"])
             .unwrap();
@@ -1158,6 +1289,7 @@ mod tests {
             "migrate",
             "uninstall",
             "update",
+            "setup",
         ] {
             assert!(
                 page.contains(sub),

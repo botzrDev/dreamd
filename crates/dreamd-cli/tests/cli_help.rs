@@ -104,6 +104,11 @@ fn snapshot_reset_help() {
 }
 
 #[test]
+fn snapshot_setup_help() {
+    assert_snapshot!("setup_help", subcommand_help("setup"));
+}
+
+#[test]
 fn snapshot_status_help() {
     assert_snapshot!("status_help", subcommand_help("status"));
 }

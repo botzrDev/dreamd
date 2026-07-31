@@ -3,6 +3,7 @@
 ## Test files
 
 - `init_golden.rs` — byte-exact stdout fixtures for `dreamd init` (first run + re-run + no-project-root).
+- `setup_cmd.rs` — subprocess coverage for `dreamd setup` (AILAB-549): non-interactive scaffold, rerun idempotency, `--dry-run` writes nothing, missing project root exits 2.
 - `version_output.rs` — subprocess regression checks for `--version` / `version` (vergen sentinel leak guard).
 - `cli_help.rs` — WEG-20 (DR-803) **in-process** snapshot tests for every published CLI surface (`--help` for top-level and each subcommand: `init`, `dream`, `mcp`, `doctor`, `watch`, `reset`, `reset workspace`, `version`, plus the `--version` and `version` byte-exact format contract from WEG-18).
 

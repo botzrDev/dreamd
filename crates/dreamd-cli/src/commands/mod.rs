@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod recall;
 pub mod reset;
 pub mod score;
+pub mod setup;
 pub mod status;
 pub mod uninstall;
 pub mod update;
