@@ -82,6 +82,9 @@ npx -y dreamd-mcp
 downloads the native binary into a per-version cache. `npm uninstall -g dreamd-mcp`
 is therefore a no-op. There is no `dreamd reset --all` — use `dreamd uninstall`.
 
+> **Order:** run uninstall (or the manual cleanup steps) → remove the `dreamd`
+> block from your MCP client config → reload the client.
+
 ### Uninstall
 
 ```sh
@@ -133,8 +136,11 @@ binary — rebuild it instead.
 
 ### Manual fallback
 
-The same cleanup by hand, if you prefer explicit steps. First quit or reload your
-MCP client so it stops spawning `dreamd mcp`, then:
+Prefer `npx -y dreamd-mcp uninstall` above — it does all of this in one command.
+If you want the steps by hand, run the cleanup below (stop processes, remove the
+socket, unregister the project, clear caches), **then** remove the `dreamd` block
+from your MCP client config and reload the client — the same order as
+[Uninstall](#uninstall):
 
 ```sh
 # 1. Stop processes + remove the socket
