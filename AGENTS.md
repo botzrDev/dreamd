@@ -190,3 +190,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
   - Recall = `/read` (or equivalent) of `LESSONS.md` / JSONL; append requires a live daemon (`dreamd watch` preferred default).
   - Anti-pattern: any new adapter doc that instructs editing the JSONL file by hand.
 - **Cross-refs:** `coordinator-not-mutex-file`, `agentlearning-placeholder-id`
+
+### cargo-run-dreamd-needs-bin
+
+- **Rule:** Always `cargo run -p dreamd --bin dreamd -- …` (and the same `--bin dreamd` for any help/CLI smoke). Never bare `cargo run -p dreamd -- …`.
+- **Why:** Package `dreamd` (`crates/dreamd-cli`) ships two bins — `dreamd` and `generate_man`. Bare `cargo run -p dreamd` errors with “could not determine which binary to run” and prints nothing on stdout; piping to `grep -c` then yields `0` as a **false pass** (caught in AILAB-495 report-back).
+- **How to apply:** Put `--bin dreamd` in every bare-prompt / v2 verify block that runs the CLI via cargo. Prefer `cargo test -p dreamd --test cli_help` for snapshot gates (no bin ambiguity).
+- **Cross-refs:** none
