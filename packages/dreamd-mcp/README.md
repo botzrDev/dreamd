@@ -122,13 +122,24 @@ npx -y dreamd-mcp update        # or: dreamd update
 ```
 
 Prints the current version, stops local servers, removes the socket, and clears
-`~/.cache/dreamd-mcp`, then instructs you to re-run `npx -y dreamd-mcp` — the
-floating npx spawn re-resolves `latest` and fetches the new binary.
+`~/.cache/dreamd-mcp`, then prints the **restart contract**:
+
+1. **Stop** local `dreamd mcp` / `dreamd watch` if running — `update` does this
+   for you on every non-dry run, and reports whether anything matched.
+2. **Reload your MCP harness** (Claude Code, Cursor, …) so it drops the old
+   binary. Until the harness reloads, it keeps the running process alive and you
+   stay on the old version.
+3. **Re-run `npx -y dreamd-mcp`** — the floating npx spawn re-resolves `latest`
+   and fetches the new binary. Keep the pin floating; a hard version pin never
+   picks up new releases.
+
+`update` never relaunches anything for you — no OS service, no auto-respawn.
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | Print the current version and planned actions; change nothing |
-| `--quiet` / `-q` | Suppress non-essential output |
+| `--dry-run` | Print the current version and the restart contract as a plan; change nothing |
+| `--restart` | Explicitly stop local `dreamd mcp` / `dreamd watch` and say so. Same stop that already runs by default — the flag makes the step loud, and is a no-op if nothing is running |
+| `--quiet` / `-q` | Suppress non-essential output. Version lines and a one-line reload + re-run reminder still print |
 
 `update` does not touch `~/.npm/_npx`. If you built from source with
 `cargo install --path crates/dreamd-cli`, clearing the cache does not replace that

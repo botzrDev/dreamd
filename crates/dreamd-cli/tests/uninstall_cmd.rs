@@ -283,6 +283,7 @@ fn update_dry_run_mutates_nothing_and_prints_version() {
         cache_dir: Some(&cache_tree),
         dry_run: true,
         quiet: false,
+        restart: false,
         cargo_install_hint: None,
     };
     let mut out = Cursor::new(Vec::new());
@@ -332,6 +333,7 @@ fn update_real_path_clears_cache_and_socket() {
         cache_dir: Some(&cache_tree),
         dry_run: false,
         quiet: false,
+        restart: false,
         cargo_install_hint: None,
     };
     let mut out = Cursor::new(Vec::new());
@@ -375,6 +377,7 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         cache_dir: Some(&cache_tree),
         dry_run: false,
         quiet: false,
+        restart: false,
         cargo_install_hint: Some("DREAMD_BIN is set".to_string()),
     };
     let mut out = Cursor::new(Vec::new());
@@ -398,6 +401,7 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         cache_dir: Some(&cache_tree),
         dry_run: true,
         quiet: false,
+        restart: false,
         cargo_install_hint: Some("DREAMD_BIN is set".to_string()),
     };
     let mut dry_out = Cursor::new(Vec::new());

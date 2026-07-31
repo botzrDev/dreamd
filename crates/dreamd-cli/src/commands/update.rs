@@ -51,16 +51,42 @@ pub struct UpdateRequest<'a> {
     pub cache_dir: Option<&'a Path>,
     /// Print the plan without mutating anything.
     pub dry_run: bool,
-    /// Suppress non-essential stdout (before/after version lines stay).
+    /// Suppress non-essential stdout (before/after version lines and the
+    /// compressed restart guidance stay).
     pub quiet: bool,
+    /// `--restart`: the explicit form of the stop step. Update always stops
+    /// local servers (AILAB-226); this only makes the stop loud in the output.
+    pub restart: bool,
     /// Best-effort cargo-install detection done by the caller (`DREAMD_BIN`
     /// set, or the running executable living under `.cargo/bin`). `Some`
     /// carries a short human-readable reason for the guidance line.
     pub cargo_install_hint: Option<String>,
 }
 
+/// Step 2 of the restart contract: the harness holds the old binary open, so
+/// clearing the cache alone is not enough.
+const RELOAD_STEP: &str =
+    "reload your MCP harness (Claude Code, Cursor, …) so it drops the old binary";
+/// Step 3: floating npx only — a hard version pin never picks up `latest`.
+const RERUN_STEP: &str =
+    "re-run `npx -y dreamd-mcp` — the floating spawn re-resolves `latest` and fetches the new binary";
+/// The whole contract on one line, for `--quiet`.
+const COMPRESSED_NEXT: &str =
+    "next: reload your MCP harness, then run `npx -y dreamd-mcp` (floating)";
+
+/// Print the labeled restart contract. `step_one` states what happened (or
+/// would happen) to local `dreamd mcp` / `dreamd watch` processes; steps 2 and
+/// 3 are fixed.
+fn write_contract(out: &mut dyn Write, header: &str, step_one: &str) -> std::io::Result<()> {
+    writeln!(out, "{header}")?;
+    writeln!(out, "  1. {step_one}")?;
+    writeln!(out, "  2. {RELOAD_STEP}")?;
+    writeln!(out, "  3. {RERUN_STEP}")
+}
+
 /// `dreamd update` entry point. Order: before-version → (unless dry-run)
-/// stop servers → remove socket → clear native cache → guidance → after-version.
+/// stop servers → remove socket → clear native cache → restart contract →
+/// after-version.
 pub fn run(
     req: &UpdateRequest<'_>,
     stop: Stopper<'_>,
@@ -83,29 +109,40 @@ pub fn run(
                     "dry-run: would stop dreamd mcp/watch processes and remove the daemon socket (cache location unresolved — no home directory)"
                 )?,
             }
-            writeln!(
-                out,
-                "dry-run: then re-run `npx -y dreamd-mcp` to fetch the latest native binary"
-            )?;
             if let Some(hint) = &req.cargo_install_hint {
                 writeln!(
                     out,
                     "note: this dreamd binary looks cargo-installed ({hint}); clearing the cache does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
                 )?;
             }
+            if req.restart {
+                writeln!(
+                    out,
+                    "dry-run: --restart requested — the stop below would run; nothing is stopped now"
+                )?;
+            }
+            write_contract(
+                out,
+                "restart contract (dry-run — nothing changes):",
+                "would stop local `dreamd mcp` / `dreamd watch` processes if running",
+            )?;
+        } else {
+            writeln!(out, "{COMPRESSED_NEXT}")?;
         }
         writeln!(out, "after: {VERSION_SHORT} (no changes)")?;
         return Ok(());
     }
 
     // Stop servers + remove the socket so a stuck binary/cache can be replaced.
+    // The stop always runs (AILAB-226); `--restart` only announces it — after
+    // the fact, and only when a stop was actually attempted, so the louder
+    // line can never contradict step 1 of the contract below.
     let report = stop(err);
-    if !req.quiet {
-        if report.matched {
-            writeln!(out, "stopped running dreamd mcp/watch process(es)")?;
-        } else if report.attempted {
-            writeln!(out, "no running dreamd mcp/watch processes found")?;
-        }
+    if req.restart && !req.quiet && report.attempted {
+        writeln!(
+            out,
+            "restart: --restart — ran the explicit stop pass for local dreamd mcp/watch"
+        )?;
     }
 
     if let Some(socket) = req.socket {
@@ -163,10 +200,18 @@ pub fn run(
                 "note: this dreamd binary looks cargo-installed ({hint}); clearing the cache does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
             )?;
         }
-        writeln!(
-            out,
-            "next: run `npx -y dreamd-mcp` — the shim downloads and verifies the latest native binary"
-        )?;
+        // Step 1 reports the stop that already ran above. An unattempted stop
+        // (non-unix) must hand the job back to the user, never claim success.
+        let step_one = if report.matched {
+            "stopped local `dreamd mcp` / `dreamd watch` process(es)"
+        } else if report.attempted {
+            "no local `dreamd mcp` / `dreamd watch` processes were running"
+        } else {
+            "stop local `dreamd mcp` / `dreamd watch` yourself — automatic stop is unix-only in v0.1"
+        };
+        write_contract(out, "restart contract:", step_one)?;
+    } else {
+        writeln!(out, "{COMPRESSED_NEXT}")?;
     }
 
     // After line — the running binary cannot change in-process.

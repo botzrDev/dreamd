@@ -291,6 +291,9 @@ pub struct UpdateArgs {
     /// Suppress non-essential output (errors still print to stderr).
     #[arg(short = 'q', long)]
     pub quiet: bool,
+    /// Explicitly stop local `dreamd mcp` / `dreamd watch` (already the default; nothing is relaunched for you).
+    #[arg(long)]
+    pub restart: bool,
 }
 
 /// Render the `dreamd(1)` man page from the clap definition.
@@ -809,6 +812,7 @@ fn run_update(args: UpdateArgs) -> ExitCode {
         cache_dir: cache_dir.as_deref(),
         dry_run: args.dry_run,
         quiet: args.quiet,
+        restart: args.restart,
         cargo_install_hint: cargo_install_hint(),
     };
     let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
@@ -1254,11 +1258,13 @@ mod tests {
 
     #[test]
     fn parses_update_flags() {
-        let cli = Cli::try_parse_from(["dreamd", "update", "--dry-run", "-q"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["dreamd", "update", "--dry-run", "-q", "--restart"]).unwrap();
         match cli.command {
             Some(Command::Update(args)) => {
                 assert!(args.dry_run);
                 assert!(args.quiet);
+                assert!(args.restart);
             }
             _ => panic!("expected Update"),
         }
@@ -1267,6 +1273,7 @@ mod tests {
             Some(Command::Update(args)) => {
                 assert!(!args.dry_run);
                 assert!(!args.quiet);
+                assert!(!args.restart);
             }
             _ => panic!("expected Update with default flags"),
         }

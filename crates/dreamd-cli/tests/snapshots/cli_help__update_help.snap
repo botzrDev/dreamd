@@ -13,5 +13,8 @@ Options:
   -q, --quiet
           Suppress non-essential output (errors still print to stderr)
 
+      --restart
+          Explicitly stop local `dreamd mcp` / `dreamd watch` (already the default; nothing is relaunched for you)
+
   -h, --help
           Print help
