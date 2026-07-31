@@ -15,7 +15,7 @@ Commands:
   migrate    Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
   recall     Search stored memories by query, ranked by relevance and importance (markdown table)
   score      List the top-N stored memories by importance, without a search query
-  reset      Reset scratch state (DR-113). Today only `workspace` is supported
+  reset      Reset scratch state. Today only `workspace` is supported
   status     Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall  Stop local dreamd servers, unregister this project, and clear caches
   update     Clear the native binary cache so `npx -y dreamd-mcp` fetches latest

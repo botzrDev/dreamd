@@ -104,7 +104,7 @@ pub enum Command {
     /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
     /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
     Score(ScoreArgs),
-    /// Reset scratch state (DR-113). Today only `workspace` is supported.
+    /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
