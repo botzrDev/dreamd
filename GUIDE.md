@@ -67,6 +67,8 @@ curl --unix-socket ~/.agent/dreamd.sock \
   http://localhost/api/v1/learn
 ```
 
+> **Socket path:** the default is `~/.agent/dreamd.sock`. To override it, see [`DREAMD_SOCK` in docs/configuration.md](./docs/configuration.md#dreamd_sock).
+
 **What just happened:** The coordinator minted a real `evt_…` ID, redacted secrets (if enabled), appended one JSONL line to `.agent/episodic/AGENT_LEARNINGS.jsonl`, and queued a Tantivy index update.
 
 Inspect the durable record:

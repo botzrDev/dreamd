@@ -119,6 +119,7 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 |---|---|---|---|
 | `DREAMD_SOCK` | `~/.agent/dreamd.sock` | MCP client, `dreamd dream` proxy | Override Unix socket path for daemon API connections |
 | `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. **Skips SHA-256 verification.** |
+| `HOME` | (OS default) | CLI / daemon layout | Resolves every `~/.agent` path (registry, socket, daemon log). Override in tests/CI sandboxes. |
 
 ### `DREAMD_SOCK`
 
@@ -159,6 +160,7 @@ See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [..
 
 ## See also
 
+- [../GUIDE.md](../GUIDE.md) — first-run walkthrough (learn / recall / watch)
 - [http-api.md](./http-api.md) — API affected by `redaction`
 - [../SPEC.md](../SPEC.md) — schema and on-disk layout
 - [../SECURITY.md](../SECURITY.md) — `DREAMD_SOCK` / `DREAMD_BIN` threat model
