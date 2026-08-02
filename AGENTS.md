@@ -195,5 +195,5 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** Always `cargo run -p dreamd --bin dreamd -- …` (and the same `--bin dreamd` for any help/CLI smoke). Never bare `cargo run -p dreamd -- …`.
 - **Why:** Package `dreamd` (`crates/dreamd-cli`) ships two bins — `dreamd` and `generate_man`. Bare `cargo run -p dreamd` errors with “could not determine which binary to run” and prints nothing on stdout; piping to `grep -c` then yields `0` as a **false pass** (caught in AILAB-495 report-back).
-- **How to apply:** Put `--bin dreamd` in every bare-prompt / v2 verify block that runs the CLI via cargo. Prefer `cargo test -p dreamd --test cli_help` for snapshot gates (no bin ambiguity).
+- **How to apply:** Put `--bin dreamd` in every bare-prompt / v2 verify block that runs the CLI via cargo. Prefer `cargo test -p dreamd --test cli_help` for snapshot gates (no bin ambiguity). Unit tests for CLI modules live under **`--lib`**, not `--bin dreamd` — `main.rs` is a thin shim, so `cargo test -p dreamd --bin dreamd` reports `0 passed` and exits 0 (silent false pass; caught in AILAB-550). Use `cargo test -p dreamd --lib <module>` (e.g. `setup_mcp`) or `--test <integration>`.
 - **Cross-refs:** none
