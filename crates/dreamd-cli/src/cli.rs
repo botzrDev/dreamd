@@ -232,12 +232,11 @@ pub enum ResetCommand {
 ///
 /// `setup` is the install front door: it scaffolds `.agent/`, merges the
 /// `mcpServers.dreamd` block into the harness config, and prints the verify
-/// step. The TTY wizard (AILAB-551) lands later, so the clap surface does not
-/// reshuffle under users mid-release.
+/// step. On a TTY without `--yes` the AILAB-551 wizard fills in the answers the
+/// user did not already type as flags; the clap surface itself is unchanged.
 #[derive(Args, Debug)]
 pub struct SetupArgs {
-    /// Accept defaults without prompting. `setup` never prompts today, so this
-    /// is accepted and ignored; the interactive wizard ships in a follow-up.
+    /// Accept defaults without prompting. Required when stdin is not a tty.
     #[arg(short = 'y', long)]
     pub yes: bool,
     /// Harness(es) to wire up: `claude` writes .mcp.json, `cursor` writes
@@ -252,8 +251,7 @@ pub struct SetupArgs {
     /// a config file that is not valid JSON.
     #[arg(long)]
     pub force: bool,
-    /// Start the shared daemon after scaffolding. Parsed now; `setup` still
-    /// only prints the `dreamd watch` command.
+    /// Start the shared daemon in the background after scaffolding.
     #[arg(long, overrides_with = "no_start_watch")]
     pub start_watch: bool,
     /// Only print the `dreamd watch` command instead of starting it (default).
@@ -677,7 +675,34 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
     }
 }
 
-fn run_setup(args: SetupArgs) -> ExitCode {
+/// Was this arg typed on the command line, as opposed to filled in by clap's
+/// default? The wizard skips a prompt only for a flag the user actually typed
+/// (AILAB-551 §1.7) — comparing against the default would wrongly treat
+/// `--harness both` as "unanswered".
+fn from_command_line(m: &clap::ArgMatches, id: &str) -> bool {
+    matches!(
+        m.value_source(id),
+        Some(clap::parser::ValueSource::CommandLine)
+    )
+}
+
+/// Which `setup` prompts survive the flags the user already typed.
+///
+/// `--no-write-mcp` has no prompt of its own — the harness prompt's option 4
+/// covers "skip" — so it only needs to be honoured, which `write_mcp` already
+/// does. Without matches (unreachable from the `Setup` arm) we prompt for
+/// nothing, since we cannot tell an explicit flag from a default.
+fn setup_interactive(m: Option<&clap::ArgMatches>) -> commands::setup::Interactive {
+    let Some(m) = m else {
+        return commands::setup::Interactive::default();
+    };
+    commands::setup::Interactive {
+        ask_harness: !from_command_line(m, "harness"),
+        ask_watch: !(from_command_line(m, "start_watch") || from_command_line(m, "no_start_watch")),
+    }
+}
+
+fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
@@ -695,11 +720,15 @@ fn run_setup(args: SetupArgs) -> ExitCode {
         force: args.force,
         start_watch: args.wants_start_watch(),
         dry_run: args.dry_run,
+        yes: args.yes,
+        interactive,
     };
     match commands::setup::run(&req, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
-        // Usage — no project root to set up (message already on stderr).
-        Err(commands::setup::SetupError::NoProjectRoot) => ExitCode::from(2),
+        // Usage — no project root to set up, or nowhere to ask the questions
+        // (both messages are already on stderr).
+        Err(commands::setup::SetupError::NoProjectRoot)
+        | Err(commands::setup::SetupError::NotATty) => ExitCode::from(2),
         // Conflict / malformed / unwritable MCP config (message already on
         // stderr, with the --force remedy where one exists).
         Err(commands::setup::SetupError::Mcp(_)) => ExitCode::from(1),
@@ -859,7 +888,20 @@ fn run_version() -> ExitCode {
 /// Returns [`ExitCode`] directly so `main` stays a one-liner.
 /// Exit `2` for usage errors; exit `1` for I/O / runtime errors.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
+    // Same parse as `Cli::parse()`, split in two so the `ArgMatches` survives:
+    // `setup`'s wizard needs `value_source` to tell a typed flag from a default
+    // (AILAB-551 §1.7), which the derived struct alone cannot express.
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    // `from_arg_matches` (NOT `from_arg_matches_mut`) is load-bearing, not
+    // stylistic: the `_mut` derive calls `matches.remove_subcommand()`, after
+    // which `matches.subcommand_matches("setup")` below returns `None`, the
+    // wizard silently degrades to `Interactive::default()` (ask nothing), and
+    // `dreamd setup` on a TTY takes clap's defaults without a question. Pinned
+    // by `cli::tests::setup_subcommand_matches_survive_from_arg_matches`.
+    let cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
 
     // WEG-32 / DR-004 — install the tracing subscriber once, before dispatch,
     // so every subcommand's `tracing` callsites land on stderr + ~/.agent/dreamd.log.
@@ -907,7 +949,9 @@ pub fn run() -> ExitCode {
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
-        Command::Setup(args) => run_setup(args),
+        Command::Setup(args) => {
+            run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
+        }
         Command::Status => run_status(&status_log_tail),
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
@@ -1250,6 +1294,100 @@ mod tests {
             Some(Command::Setup(args)) => assert!(!args.wants_start_watch()),
             _ => panic!("expected Setup"),
         }
+    }
+
+    /// Resolve the wizard's prompt plan the way `run()` does: real parse, then
+    /// `value_source` off the subcommand's own matches.
+    fn interactive_for(argv: &[&str]) -> commands::setup::Interactive {
+        let matches = <Cli as clap::CommandFactory>::command()
+            .try_get_matches_from(argv)
+            .unwrap();
+        setup_interactive(matches.subcommand_matches("setup"))
+    }
+
+    /// The seam the whole wizard hangs off. `run()` parses once and then reads
+    /// `value_source` back off `matches.subcommand_matches("setup")`; switching
+    /// that parse to `from_arg_matches_mut` would consume the subcommand
+    /// (`remove_subcommand`), leave `subcommand_matches("setup")` as `None`, and
+    /// delete every prompt — with no other test able to notice, because they all
+    /// build their own `ArgMatches`. This one asserts the real sequence.
+    #[test]
+    fn setup_subcommand_matches_survive_from_arg_matches() {
+        let matches = <Cli as clap::CommandFactory>::command()
+            .try_get_matches_from(["dreamd", "setup"])
+            .unwrap();
+        let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+            .expect("bare `dreamd setup` must parse");
+        assert!(matches!(cli.command, Some(Command::Setup(_))));
+        let sub = matches.subcommand_matches("setup");
+        assert!(
+            sub.is_some(),
+            "`from_arg_matches` must leave the setup subcommand on the matches; \
+             the `_mut` variant removes it and silently disables the wizard"
+        );
+        // And the plan derived from it is the real one, not the empty default.
+        let plan = setup_interactive(sub);
+        assert!(
+            plan.ask_harness && plan.ask_watch,
+            "a surviving subcommand must yield the live prompt plan, not \
+             `Interactive::default()`"
+        );
+
+        // The hazard is real, not hypothetical: the `_mut` variant consumes the
+        // subcommand, and the wizard collapses to asking nothing.
+        let mut consumed = matches;
+        let _ = <Cli as clap::FromArgMatches>::from_arg_matches_mut(&mut consumed)
+            .expect("bare `dreamd setup` must parse");
+        assert!(
+            consumed.subcommand_matches("setup").is_none(),
+            "if this ever stops holding, the comment at the `run()` callsite \
+             needs revisiting"
+        );
+        let degraded = setup_interactive(consumed.subcommand_matches("setup"));
+        assert!(
+            !degraded.ask_harness && !degraded.ask_watch,
+            "the `_mut` path is exactly the silent no-prompt regression this \
+             test exists to catch"
+        );
+    }
+
+    #[test]
+    fn bare_setup_asks_both_questions() {
+        let plan = interactive_for(&["dreamd", "setup"]);
+        assert!(
+            plan.ask_harness,
+            "no --harness typed, so the harness prompt runs \
+             (the clap default `both` must not read as an answer)"
+        );
+        assert!(
+            plan.ask_watch,
+            "no watch flag typed, so the watch prompt runs"
+        );
+    }
+
+    #[test]
+    fn typed_flags_skip_their_prompts() {
+        // AILAB-551 §1.7: a flag the user typed wins over its prompt. Note
+        // `--harness both` IS the clap default — detection must be by source.
+        let plan = interactive_for(&["dreamd", "setup", "--harness", "both"]);
+        assert!(
+            !plan.ask_harness,
+            "--harness both was typed; do not ask again"
+        );
+        assert!(plan.ask_watch, "the watch question is still unanswered");
+
+        for watch_flag in ["--start-watch", "--no-start-watch"] {
+            let plan = interactive_for(&["dreamd", "setup", watch_flag]);
+            assert!(
+                !plan.ask_watch,
+                "{watch_flag} was typed; do not ask the watch question"
+            );
+            assert!(plan.ask_harness, "the harness question is still unanswered");
+        }
+
+        // Both watch flags: last-one-wins in clap, still an explicit answer.
+        let plan = interactive_for(&["dreamd", "setup", "--start-watch", "--no-start-watch"]);
+        assert!(!plan.ask_watch, "an overridden pair is still user-typed");
     }
 
     #[test]

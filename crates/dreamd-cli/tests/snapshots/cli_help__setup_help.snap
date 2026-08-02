@@ -8,7 +8,7 @@ Usage: setup [OPTIONS]
 
 Options:
   -y, --yes
-          Accept defaults without prompting. `setup` never prompts today, so this is accepted and ignored; the interactive wizard ships in a follow-up
+          Accept defaults without prompting. Required when stdin is not a tty
 
       --harness <HARNESS>
           Harness(es) to wire up: `claude` writes .mcp.json, `cursor` writes .cursor/mcp.json, `both` writes both, `none` writes neither
@@ -23,7 +23,7 @@ Options:
           Replace an existing `mcpServers.dreamd` entry that does not run `npx -y dreamd-mcp`. Other MCP servers are preserved. Does not override a config file that is not valid JSON
 
       --start-watch
-          Start the shared daemon after scaffolding. Parsed now; `setup` still only prints the `dreamd watch` command
+          Start the shared daemon in the background after scaffolding
 
       --no-start-watch
           Only print the `dreamd watch` command instead of starting it (default)
