@@ -228,25 +228,30 @@ pub enum ResetCommand {
     },
 }
 
-/// Arguments for the `dreamd setup` subcommand (AILAB-549).
+/// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
 ///
-/// `setup` is the install front door. This slice scaffolds `.agent/` and prints
-/// the wiring next steps; the `.mcp.json` merge writer (AILAB-550) and the TTY
-/// wizard (AILAB-551) land later. Every flag those slices need is parsed here
-/// so the clap surface does not reshuffle under users mid-release.
+/// `setup` is the install front door: it scaffolds `.agent/`, merges the
+/// `mcpServers.dreamd` block into the harness config, and prints the verify
+/// step. The TTY wizard (AILAB-551) lands later, so the clap surface does not
+/// reshuffle under users mid-release.
 #[derive(Args, Debug)]
 pub struct SetupArgs {
     /// Accept defaults without prompting. `setup` never prompts today, so this
     /// is accepted and ignored; the interactive wizard ships in a follow-up.
     #[arg(short = 'y', long)]
     pub yes: bool,
-    /// Harness(es) to wire up. Reported now; the MCP config write ships in a
-    /// follow-up release.
+    /// Harness(es) to wire up: `claude` writes .mcp.json, `cursor` writes
+    /// .cursor/mcp.json, `both` writes both, `none` writes neither.
     #[arg(long, value_enum, default_value_t = commands::setup::Harness::Both)]
     pub harness: commands::setup::Harness,
     /// Do not write any harness MCP config.
     #[arg(long)]
     pub no_write_mcp: bool,
+    /// Replace an existing `mcpServers.dreamd` entry that does not run
+    /// `npx -y dreamd-mcp`. Other MCP servers are preserved. Does not override
+    /// a config file that is not valid JSON.
+    #[arg(long)]
+    pub force: bool,
     /// Start the shared daemon after scaffolding. Parsed now; `setup` still
     /// only prints the `dreamd watch` command.
     #[arg(long, overrides_with = "no_start_watch")]
@@ -687,6 +692,7 @@ fn run_setup(args: SetupArgs) -> ExitCode {
         daemon_home: &daemon_home,
         harness: args.harness,
         write_mcp: !args.no_write_mcp,
+        force: args.force,
         start_watch: args.wants_start_watch(),
         dry_run: args.dry_run,
     };
@@ -694,6 +700,9 @@ fn run_setup(args: SetupArgs) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         // Usage — no project root to set up (message already on stderr).
         Err(commands::setup::SetupError::NoProjectRoot) => ExitCode::from(2),
+        // Conflict / malformed / unwritable MCP config (message already on
+        // stderr, with the --force remedy where one exists).
+        Err(commands::setup::SetupError::Mcp(_)) => ExitCode::from(1),
         Err(commands::setup::SetupError::Io(e)) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)
@@ -1210,9 +1219,19 @@ mod tests {
                     "default harness is both (design: MCP config written by default)"
                 );
                 assert!(!args.no_write_mcp);
+                assert!(!args.force, "conflicts refuse unless --force is given");
                 assert!(!args.wants_start_watch(), "watch is print-only by default");
                 assert!(!args.dry_run);
             }
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_parses_force() {
+        let cli = Cli::try_parse_from(["dreamd", "setup", "--force"]).unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => assert!(args.force),
             _ => panic!("expected Setup"),
         }
     }

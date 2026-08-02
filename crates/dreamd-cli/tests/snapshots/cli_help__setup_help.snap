@@ -1,6 +1,5 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 108
 expression: "subcommand_help(\"setup\")"
 ---
 Front door: scaffold .agent/ (via init) and print the harness wiring next steps
@@ -12,13 +11,16 @@ Options:
           Accept defaults without prompting. `setup` never prompts today, so this is accepted and ignored; the interactive wizard ships in a follow-up
 
       --harness <HARNESS>
-          Harness(es) to wire up. Reported now; the MCP config write ships in a follow-up release
+          Harness(es) to wire up: `claude` writes .mcp.json, `cursor` writes .cursor/mcp.json, `both` writes both, `none` writes neither
           
           [default: both]
           [possible values: claude, cursor, both, none]
 
       --no-write-mcp
           Do not write any harness MCP config
+
+      --force
+          Replace an existing `mcpServers.dreamd` entry that does not run `npx -y dreamd-mcp`. Other MCP servers are preserved. Does not override a config file that is not valid JSON
 
       --start-watch
           Start the shared daemon after scaffolding. Parsed now; `setup` still only prints the `dreamd watch` command

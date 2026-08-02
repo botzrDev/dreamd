@@ -6,8 +6,10 @@
 //! a separate temp `HOME`, so `~/.agent/registry.toml` and the tracing log land
 //! off the project tree. No network, no daemon.
 //!
-//! This slice writes no MCP config (AILAB-550) and runs no wizard (AILAB-551);
-//! the tests assert those stay unwritten.
+//! The MCP merge writer has its own suite (`setup_mcp_merge.rs`); the runs here
+//! opt out of it with `--harness none --no-write-mcp`, so this file asserts the
+//! scaffold, the skip paths, and the exit-code contract. No wizard runs
+//! (AILAB-551).
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -75,14 +77,14 @@ fn non_interactive_setup_scaffolds_agent_dir() {
         "registry must hold this project; got: {registry:?}"
     );
 
-    // This slice writes no MCP config anywhere.
+    // The MCP write was skipped by request (--harness none --no-write-mcp).
     assert!(
         !project.path().join(".mcp.json").exists(),
-        "AILAB-550 owns the MCP writer — setup must not write .mcp.json yet"
+        "--no-write-mcp must skip .mcp.json"
     );
     assert!(
         !project.path().join(".cursor/mcp.json").exists(),
-        "AILAB-550 owns the MCP writer — setup must not write .cursor/mcp.json yet"
+        "--no-write-mcp must skip .cursor/mcp.json"
     );
 
     let stdout = stdout_of(&out);

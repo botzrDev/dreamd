@@ -5,9 +5,9 @@
 //! byte-locked against `tests/fixtures/init.golden.txt` (Clip A): setup wraps
 //! init's lines with its own header/footer and never rewrites them.
 //!
-//! This slice is non-interactive only and writes no MCP config. `--harness` and
-//! `--no-write-mcp` are parsed and reported now so the merge writer (AILAB-550)
-//! and the TTY wizard (AILAB-551) land without reshuffling clap.
+//! Non-interactive only: the harness MCP config is merged by
+//! [`super::setup_mcp`] under the ratified AILAB-548 taxonomy; the TTY wizard
+//! (AILAB-551) lands later without reshuffling clap.
 
 use std::io::Write;
 use std::path::Path;
@@ -15,14 +15,15 @@ use std::path::Path;
 use dreamd_core::{AgentRoot, DaemonHome};
 
 use super::init::{self, find_project_root, InitError};
+use super::setup_mcp::{self, Action, McpError, TargetPlan};
 
 /// Floating-pin MCP server block printed as copy-paste guidance. `npx -y`
 /// re-resolves the `latest` dist-tag on each spawn — never hard-pin here
 /// (AGENTS.md `npm-dreamd-mcp-unscoped`).
 const MCP_BLOCK: &str = r#"{"mcpServers":{"dreamd":{"command":"npx","args":["-y","dreamd-mcp"]}}}"#;
 
-/// Which harness(es) to wire up. Reported this slice; AILAB-550 turns the
-/// choice into an actual `.mcp.json` merge.
+/// Which harness(es) to wire up — i.e. which MCP config files get the
+/// `mcpServers.dreamd` block.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -33,8 +34,9 @@ pub enum Harness {
 
 impl Harness {
     /// Project-relative MCP config files this harness reads (adapter READMEs).
-    /// Empty for [`Harness::None`].
-    fn config_targets(self) -> &'static [&'static str] {
+    /// Empty for [`Harness::None`]. The global `~/.cursor/mcp.json` is out of
+    /// scope by design (AILAB-548 §2) — `setup` only writes inside the project.
+    pub(crate) fn config_targets(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &[".mcp.json"],
             Self::Cursor => &[".cursor/mcp.json"],
@@ -62,6 +64,10 @@ impl std::fmt::Display for Harness {
 pub enum SetupError {
     NoProjectRoot,
     Io(std::io::Error),
+    /// The harness MCP config could not be written (conflict without `--force`,
+    /// malformed existing JSON, or an unwritable path). Details are already on
+    /// stderr; `cli.rs` maps this to exit code 1.
+    Mcp(McpError),
 }
 
 impl From<std::io::Error> for SetupError {
@@ -84,6 +90,7 @@ impl std::fmt::Display for SetupError {
         match self {
             Self::NoProjectRoot => write!(f, "no project root"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::Mcp(e) => write!(f, "{e}"),
         }
     }
 }
@@ -101,6 +108,9 @@ pub struct SetupRequest<'a> {
     pub harness: Harness,
     /// `false` when `--no-write-mcp` was given.
     pub write_mcp: bool,
+    /// `--force`: replace an incompatible `mcpServers.dreamd` entry. Never
+    /// overrides a JSON parse failure (AILAB-548 §6C).
+    pub force: bool,
     /// `--start-watch` was requested. Reported only — this slice never spawns
     /// the daemon.
     pub start_watch: bool,
@@ -132,7 +142,6 @@ pub fn run(
         project_root.display()
     )?;
     writeln!(out, "harness: {}", req.harness)?;
-    write_mcp_status(req, out)?;
 
     if req.dry_run {
         let agent_dir = AgentRoot::new(&project_root).agent_dir();
@@ -150,37 +159,152 @@ pub fn run(
                 DaemonHome::new(req.daemon_home).registry_toml().display()
             )?;
         }
+        wire_mcp(req, &project_root, out, err)?;
         writeln!(out, "dry-run: no changes made")?;
     } else {
         // Reuse init verbatim (non-quiet): the scaffold lines and the DR-413
         // privacy disclosure are exactly what a first-run user needs to see.
         init::run(req.cwd, req.daemon_home, false, out, err)?;
+        wire_mcp(req, &project_root, out, err)?;
     }
 
     write_next_steps(req, out)?;
     Ok(())
 }
 
-/// One line stating what happens to the harness MCP config. No writes this
-/// slice — AILAB-550 owns the merge writer.
-fn write_mcp_status(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
+/// Merge `mcpServers.dreamd` into every harness config target (or report the
+/// dry-run plan). Runs after the scaffold so a refusal here never leaves a
+/// half-made `.agent/`.
+///
+/// `--harness both` is all-or-nothing (AILAB-548 §6A): every target is read and
+/// classified before any of them is written.
+fn wire_mcp(
+    req: &SetupRequest<'_>,
+    project_root: &Path,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), SetupError> {
     let targets = req.harness.config_targets();
     if !req.write_mcp {
-        writeln!(out, "mcp config: skipped (--no-write-mcp)")
-    } else if targets.is_empty() {
-        writeln!(out, "mcp config: skipped (--harness none)")
-    } else {
-        writeln!(
-            out,
-            "mcp config: {} \u{2014} not written yet; automatic wiring ships in a follow-up release",
-            targets.join(", ")
-        )
+        writeln!(out, "mcp config: skipped (--no-write-mcp)")?;
+        return Ok(());
     }
+    if targets.is_empty() {
+        writeln!(out, "mcp config: skipped (--harness none)")?;
+        return Ok(());
+    }
+
+    let mut plans = Vec::with_capacity(targets.len());
+    for label in targets {
+        match setup_mcp::plan(project_root, label) {
+            Ok(planned) => plans.push(planned),
+            // Unparseable config: refuse before writing anything, `--force`
+            // included (AILAB-548 §6C).
+            Err(e) => return Err(report_mcp_error(e, err)?),
+        }
+    }
+
+    if req.dry_run {
+        for planned in &plans {
+            report_dry_run(req, planned, out)?;
+        }
+        return Ok(());
+    }
+
+    if !req.force {
+        let blocker = plans.iter().find_map(|planned| match &planned.action {
+            Action::Conflict(reason) => Some(McpError::Conflict {
+                label: planned.label,
+                reason: reason.clone(),
+            }),
+            _ => None,
+        });
+        if let Some(e) = blocker {
+            return Err(report_mcp_error(e, err)?);
+        }
+    }
+
+    for planned in &plans {
+        if let Err(e) = setup_mcp::apply(planned) {
+            return Err(report_mcp_error(e, err)?);
+        }
+        writeln!(out, "mcp config: {}", applied_status(planned))?;
+    }
+    Ok(())
+}
+
+/// Explain the refusal on stderr, then hand back the error for the exit code.
+fn report_mcp_error(e: McpError, err: &mut dyn Write) -> std::io::Result<SetupError> {
+    writeln!(err, "dreamd: error \u{2014} {e}")?;
+    match &e {
+        McpError::Malformed { .. } => writeln!(
+            err,
+            "dreamd: nothing was written. Fix or remove the file, then re-run \u{2014} --force cannot override a JSON parse error."
+        )?,
+        McpError::Conflict { .. } => writeln!(
+            err,
+            "dreamd: nothing was written. Re-run with --force to replace the \"dreamd\" entry (other MCP servers are preserved)."
+        )?,
+        McpError::Io { .. } => {}
+    }
+    Ok(SetupError::Mcp(e))
+}
+
+/// Status line for a target we just wrote (or deliberately did not).
+fn applied_status(planned: &TargetPlan) -> String {
+    match &planned.action {
+        Action::Create => format!("wrote {}", planned.label),
+        Action::Merge => format!("merged into {}", planned.label),
+        Action::AlreadyWired => format!("{} already wired \u{2014} no change", planned.label),
+        Action::Conflict(reason) => format!(
+            "replaced the conflicting \"dreamd\" entry in {} (--force; was: {reason})",
+            planned.label
+        ),
+    }
+}
+
+/// Per-target dry-run report: the verdict plus the JSON we would write.
+fn report_dry_run(
+    req: &SetupRequest<'_>,
+    planned: &TargetPlan,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    match &planned.action {
+        Action::Create => writeln!(out, "dry-run: would create {}", planned.label)?,
+        Action::Merge => writeln!(out, "dry-run: would merge into {}", planned.label)?,
+        Action::AlreadyWired => writeln!(
+            out,
+            "dry-run: {} already wired \u{2014} no change",
+            planned.label
+        )?,
+        Action::Conflict(reason) => {
+            writeln!(
+                out,
+                "dry-run: CONFLICT: {} \u{2014} {reason}",
+                planned.label
+            )?;
+            if req.force {
+                writeln!(out, "dry-run: --force would replace the \"dreamd\" entry")?;
+            } else {
+                // Nothing would be written here, so do not print a document.
+                return writeln!(
+                    out,
+                    "dry-run: re-run with --force to replace the \"dreamd\" entry"
+                );
+            }
+        }
+    }
+    if let Some(contents) = &planned.contents {
+        write!(out, "{contents}")?;
+    }
+    Ok(())
 }
 
 fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
     let targets = req.harness.config_targets();
-    let show_mcp_step = req.write_mcp && !targets.is_empty();
+    // Only hand out the copy-paste block when we did NOT write the config
+    // ourselves (`--no-write-mcp` / `--harness none`).
+    let show_mcp_step = !req.write_mcp || targets.is_empty();
 
     writeln!(out)?;
     writeln!(out, "next steps:")?;
@@ -195,11 +319,12 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
         )?;
     }
     let verify_step = if show_mcp_step {
-        writeln!(
-            out,
-            "  2. add the dreamd MCP server to {}:",
+        let where_to = if targets.is_empty() {
+            "your harness MCP config".to_string()
+        } else {
             targets.join(" and ")
-        )?;
+        };
+        writeln!(out, "  2. add the dreamd MCP server to {where_to}:")?;
         writeln!(out, "       {MCP_BLOCK}")?;
         3
     } else {
