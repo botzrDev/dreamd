@@ -2,18 +2,22 @@
 
 Quickstart for wiring `dreamd-mcp` into Claude Code.
 
-## 1. Init the project store
+## 1. Set up the project
 
 ```bash
 cd ~/your-project
-npx -y dreamd-mcp init
+npx -y dreamd-mcp setup --harness claude
 ```
+
+Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.mcp.json` at the project root. Add `--yes` for non-interactive shells. `npx -y dreamd-mcp init` is the scaffold-only primitive if you'd rather wire MCP by hand.
 
 ## 2. MCP config
 
-**Project-level (recommended):** copy [`.mcp.json.example`](./.mcp.json.example) to `.mcp.json` at your project root.
+`setup --harness claude` already wrote the project-level config — skip to step 3. Wire it by hand only if you ran `--no-write-mcp` / `--harness none`, or want dreamd in every project.
 
-**User-level (all projects):** merge the `mcpServers` block into `~/.claude/settings.json`.
+**Project-level:** copy [`.mcp.json.example`](./.mcp.json.example) to `.mcp.json` at your project root.
+
+**User-level (all projects):** merge the `mcpServers` block into `~/.claude/settings.json` — `setup` only writes inside the project.
 
 ```json
 {

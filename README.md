@@ -14,8 +14,8 @@ This is not "another memory product." It is a storage-model wedge: the filesyste
 **Open core:** Apache-2.0 core today, self-hosted only. Premium features may ship later. Do not read this as free-forever for everything.
 
 ```bash
-npx -y dreamd-mcp init    # scaffold .agent/
-npx -y dreamd-mcp         # MCP server (stdio)
+npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
+npx -y dreamd-mcp         # MCP server (stdio) — what the harness spawns
 ```
 
 > First run prompts once. Press `y`, or keep using `npx -y dreamd-mcp`.
@@ -25,7 +25,7 @@ npx -y dreamd-mcp         # MCP server (stdio)
 ## The moment it earns its name
 
 ```text
-~/project $ npx -y dreamd-mcp init
+~/project $ npx -y dreamd-mcp setup
 
 # Claude Code, Tuesday:
 you   > axum keeps blowing up when I unwrap in route handlers
@@ -47,11 +47,13 @@ No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
 ### npm (recommended)
 
 ```bash
-npx -y dreamd-mcp init
-npx -y dreamd-mcp
+npx -y dreamd-mcp setup   # scaffold .agent/ + write the harness MCP config
+npx -y dreamd-mcp         # MCP server (stdio) — your harness spawns this
 ```
 
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
+
+`setup` prompts when it has a TTY. In scripts and non-interactive shells, pass `--yes --harness claude|cursor|both` (`--harness none` or `--no-write-mcp` scaffolds without touching any MCP config).
 
 ### Cargo / from source
 
@@ -71,14 +73,13 @@ If `~/your-project` is a brand-new folder, run `git init` first (or make sure it
 
 ```bash
 cd ~/your-project
-npx -y dreamd-mcp init
+npx -y dreamd-mcp setup
 
-# Terminal 1: shared daemon (recommended when several agents write)
+# Optional: shared daemon (recommended when several agents write)
 dreamd watch
-
-# Terminal 2: MCP server for your harness
-npx -y dreamd-mcp
 ```
+
+Reload your harness. `setup` already wired the dreamd MCP server, so the harness spawns `npx -y dreamd-mcp` itself — no config to copy by hand.
 
 Ask the agent to search memory for something you just learned. It calls `search_nodes` and recalls prior context.
 
@@ -100,7 +101,7 @@ Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
-`dreamd init` is idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `dreamd uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `dreamd init --uninstall-project` unregisters the current project and touches nothing else.
+`dreamd setup` scaffolds the store by calling `dreamd init`, then writes the harness MCP config. `init` is the scaffold primitive and still works on its own when you want the store without touching any MCP config. Both are idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `dreamd uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `dreamd init --uninstall-project` unregisters the current project and touches nothing else.
 
 ---
 
@@ -166,7 +167,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v0.1 targeting 2026-08-09.** Daemon commands available today: `init`, `dream`, `doctor`, `mcp`, `watch`, `reset workspace`, `version`. npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
+**v0.1 targeting 2026-08-09.** CLI commands available today: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list). npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
 
 | Layer | Status |
 |---|---|

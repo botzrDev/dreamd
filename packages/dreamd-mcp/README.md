@@ -7,15 +7,17 @@ Node shim for the [dreamd](https://github.com/botzrDev/dreamd) MCP server. Downl
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
 ```sh
-# 1. Scaffold .agent/ into your project
-npx -y dreamd-mcp init
+# 1. Scaffold .agent/ and wire your harness's MCP config
+npx -y dreamd-mcp setup
 
 # 2. Start a shared daemon (recommended when multiple agents write)
 npx -y dreamd-mcp watch
 
-# 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
+# 3. Reload the harness — it now spawns the MCP server itself
 npx -y dreamd-mcp
 ```
+
+`setup` prompts when it has a TTY; in scripts pass `--yes` with `--harness claude|cursor|both|none`. It writes each MCP config as 2-space pretty-printed JSON with a trailing newline and does **not** preserve your original formatting, so an existing `.mcp.json` / `.cursor/mcp.json` can come back reformatted — other MCP servers in the file are kept. `npx -y dreamd-mcp init` remains the scaffold-only primitive (store, no harness config), same as `setup --no-write-mcp`.
 
 > **Leave `npx dreamd-mcp` floating — don't pin.** On a fresh spawn, npx
 > re-resolves the `latest` dist-tag from the registry, so a floating config always

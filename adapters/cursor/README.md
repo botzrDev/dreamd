@@ -2,12 +2,14 @@
 
 Quickstart for wiring `dreamd-mcp` into Cursor with the optional recall agent rule.
 
-## 1. Init the project store
+## 1. Set up the project
 
 ```bash
 cd ~/your-project
-npx -y dreamd-mcp init
+npx -y dreamd-mcp setup --harness cursor
 ```
+
+Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.cursor/mcp.json` in the project. Add `--yes` for non-interactive shells. `npx -y dreamd-mcp init` is the scaffold-only primitive if you'd rather wire MCP by hand.
 
 ## 2. Start the daemon (recommended)
 
@@ -20,9 +22,11 @@ Without a daemon, MCP runs in-process (Phase 1). That works for single queries b
 
 ## 3. MCP config
 
-**Project-level (recommended):** copy [`.mcp.json.example`](./.mcp.json.example) into `.cursor/mcp.json`.
+`setup --harness cursor` already wrote the project-level config — skip to step 4. Wire it by hand only if you ran `--no-write-mcp` / `--harness none`, or want the global config.
 
-**Global (`~/.cursor/mcp.json`):** use [`.mcp.json.global.example`](./.mcp.json.global.example) — adds `--project-root` for non-project CWD launches.
+**Project-level:** copy [`.mcp.json.example`](./.mcp.json.example) into `.cursor/mcp.json`.
+
+**Global (`~/.cursor/mcp.json`):** use [`.mcp.json.global.example`](./.mcp.json.global.example) — adds `--project-root` for non-project CWD launches. `setup` only writes inside the project, so the global file is always a manual step.
 
 Or: Cursor Settings → Tools & Integrations → add MCP server.
 

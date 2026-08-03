@@ -23,13 +23,18 @@ without MCP — a documentation snippet that teaches the agent the same behavior
 
 For any MCP-capable harness:
 
-1. Initialize the store in the project: `npx -y dreamd-mcp init` (or `dreamd init`).
+1. Set the project up: `npx -y dreamd-mcp setup` (or `dreamd setup`).
    > First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
-   This scaffolds `.agent/`. Harnesses that require an existing `.agent/` (e.g.
-   Cline) fail with `no agent root found` until this runs.
+   This scaffolds `.agent/` and writes the dreamd MCP block for the harness you
+   pick (`--harness claude|cursor|both|none`; `--yes` for non-interactive shells).
+   Harnesses that require an existing `.agent/` (e.g. Cline) fail with
+   `no agent root found` until this runs. `npx -y dreamd-mcp init` (or
+   `dreamd init`) is the scaffold-only primitive — store, no harness config.
 2. Register an MCP server whose `command` is `npx` with `args` `["-y", "dreamd-mcp"]`.
-   Leave it floating — npx re-resolves `latest` on each fresh spawn. Pin a version
-   only to reproduce a specific build, never in a general copy-paste example.
+   `setup` writes exactly this block for the harnesses it targets; do it by hand
+   for any harness it doesn't. Leave it floating — npx re-resolves `latest` on
+   each fresh spawn. Pin a version only to reproduce a specific build, never in a
+   general copy-paste example.
 3. Confirm the two tools appear: `search_nodes` and `append_node`. The names are
    fixed (see below) — do not rename or alias them.
 4. Multi-writer setups: run `dreamd watch` so several agents share one daemon

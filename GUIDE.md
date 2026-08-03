@@ -21,14 +21,16 @@ cargo install --path crates/dreamd-cli
 dreamd version
 ```
 
-### Init a project store
+### Set up a project
 
 ```bash
 cd ~/your-project    # must contain .git/, Cargo.toml, package.json, or pyproject.toml
-dreamd init
+dreamd setup         # or: npx -y dreamd-mcp setup
 ```
 
-**What just happened:** dreamd scaffolded `<project>/.agent/` (episodic, semantic, personal, working), wrote a commented config template to `.agent/.dreamd/config.toml`, registered the project in `~/.agent/registry.toml`, and appended `/.agent/.dreamd/` to `.gitignore`.
+**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor.
+
+`setup` prompts when it has a TTY; pass `--yes` (with `--harness claude|cursor|both|none`) in scripts. `dreamd init` is the lower-level scaffold primitive — it creates the store and writes no harness config, which is also what `dreamd setup --no-write-mcp` gives you.
 
 Verify:
 
