@@ -429,10 +429,17 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let socket = dreamd_core::client::resolve_daemon_socket();
     #[cfg(not(unix))]
     let socket: Option<PathBuf> = None;
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles, deliberately — do NOT hoist a `.lock()` out here.
+    // `--repair` reopens the index, and Tantivy's `segment_updater` thread logs
+    // through the tracing console layer, which writes to `std::io::stderr`.
+    // `StdoutLock`/`StderrLock` are process-wide and reentrant only for the
+    // owning thread, so holding one across the rebuild deadlocks: the updater
+    // thread blocks writing its log line while this thread blocks on that same
+    // updater's commit, and `dreamd doctor --repair` never exits
+    // (AILAB-575 / AILAB-561). Each `writeln!` below locks and releases on its
+    // own, so no lock is ever held across `TantivyIndexHandle::open`.
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     let flags = commands::doctor::DoctorFlags {
         repair: args.repair,
         cluster_health: args.cluster_health,

@@ -567,6 +567,14 @@ fn run_repair(
     // Reopen to force a full replay of the episodic log into a fresh index.
     // A current-thread runtime is enough — the rebuild is one blocking replay,
     // not a serving daemon — and matches `TantivyIndexHandle::close`.
+    //
+    // Caller contract (AILAB-575): `out`/`err` must NOT be held
+    // `StdoutLock`/`StderrLock` values. `open` below blocks on Tantivy's
+    // single-threaded `segment_updater`, and that thread emits `tracing` events
+    // which the console layer writes to `std::io::stderr`. A held lock makes the
+    // updater block on this thread while this thread blocks on the updater —
+    // `doctor --repair` then never exits. `run_doctor` in `cli.rs` passes
+    // unlocked `Stdout`/`Stderr` handles for exactly this reason.
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
