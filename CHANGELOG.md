@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0-rc.8] - 2026-08-03
+
+### Added
+
+- **`dreamd setup` front door.** One command scaffolds `.agent/` (via `init`) and wires the harness MCP config — `.mcp.json` for Claude Code / Cursor, `.cursor/mcp.json` for Cursor's native path — with the floating `npx -y dreamd-mcp` pin. Re-running is a no-op. `--harness claude|cursor|both` selects which configs are written. (`crates/dreamd-cli`)
+- **TTY interactive wizard for `setup`.** Without `--yes`, `setup` prompts interactively for harness choice and confirmation; off a TTY it fails fast with exit 2 rather than blocking (AILAB-551).
+- **`setup --force` + MCP-conflict handling (AILAB-548).** A hard-pinned `dreamd-mcp@…` block, a local `command: "dreamd"` build, and unreadable JSON all refuse with exit 1 (no write); `--force` overrides only the pin case, preserving every third-party server. The compatible `--project-root` form is accepted byte-identically, and `--harness both` is atomic — nothing is written if any target conflicts.
+- **`update --restart` flag.** Explicitly stops a running daemon after clearing the cache; `update --dry-run` prints the restart contract without touching anything (AILAB-552).
+- **Install-funnel CI gate.** Sandboxed end-to-end suite covering cold `setup`, `doctor`, idempotence, `update --dry-run`, and the full AILAB-548 conflict taxonomy (`scripts/alpha/install-funnel-suite.sh`).
+
 ## [0.1.0-rc.7] - 2026-07-23
 
 ### Fixed
