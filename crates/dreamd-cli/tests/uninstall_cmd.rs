@@ -413,3 +413,89 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         "dry-run must include the cargo-install rebuild guidance; got: {dry_stdout:?}"
     );
 }
+
+/// (e) A daemon still answering on the socket is a warn-and-continue case for
+/// `uninstall`, not an abort. The stop pass ahead of it is best-effort — no
+/// `pkill` on the box, or the signal denied — so unlinking would leave the
+/// daemon serving on a path no client resolves, silently dropping MCP back to
+/// the in-process backend. The socket stays; everything else still gets
+/// cleaned.
+///
+/// Holds the listener open for the whole call, so this deliberately waits out
+/// `lifecycle_cleanup::STOP_GRACE` (~5s) — that is the refuse path.
+#[cfg(unix)]
+#[test]
+fn uninstall_warns_and_continues_when_daemon_is_live() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    // Swap the fixture's placeholder file for a socket that actually answers.
+    std::fs::remove_file(&socket).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind test listener");
+
+    let req = uninstall_req(&f, &socket, &cache_tree, false, false);
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    uninstall::run(&req, &mut no_op_stop, &mut out, &mut err).unwrap();
+
+    assert!(
+        socket.exists(),
+        "a live daemon's socket must be left in place"
+    );
+    let stderr = String::from_utf8(err.into_inner()).unwrap();
+    assert!(
+        stderr.contains("still live") && stderr.contains("re-run to finish cleanup"),
+        "must warn with recovery guidance; got: {stderr:?}"
+    );
+
+    // Warn-and-continue: the refusal must not abort the rest of the uninstall.
+    assert!(
+        !cache_tree.exists(),
+        "a refused socket must not abort the native cache clear"
+    );
+    assert!(
+        !f.npx_ours().exists(),
+        "a refused socket must not abort the scoped npx clear"
+    );
+}
+
+/// (f) Same contract on the `update` path, with its own recovery wording —
+/// clearing the cache under a live daemon is fine, orphaning its socket is not.
+/// Also waits out `STOP_GRACE`; see (e).
+#[cfg(unix)]
+#[test]
+fn update_warns_and_continues_when_daemon_is_live() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    std::fs::remove_file(&socket).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind test listener");
+
+    let req = update::UpdateRequest {
+        socket: Some(&socket),
+        cache_dir: Some(&cache_tree),
+        dry_run: false,
+        quiet: false,
+        restart: false,
+        cargo_install_hint: None,
+    };
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    update::run(&req, &mut no_op_stop, &mut out, &mut err).unwrap();
+
+    assert!(
+        socket.exists(),
+        "a live daemon's socket must be left in place"
+    );
+    let stderr = String::from_utf8(err.into_inner()).unwrap();
+    assert!(
+        stderr.contains("still live") && stderr.contains("re-run to finish the update"),
+        "must warn with update-specific recovery guidance; got: {stderr:?}"
+    );
+    assert!(
+        !cache_tree.exists(),
+        "a refused socket must not abort the native cache clear"
+    );
+}

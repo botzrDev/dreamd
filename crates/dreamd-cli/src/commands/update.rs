@@ -157,6 +157,19 @@ pub fn run(
                     writeln!(out, "no daemon socket at {}", socket.display())?;
                 }
             }
+            lifecycle_cleanup::SocketRemoval::RefusedLive => {
+                // Still answering after the grace window, so this is not a
+                // daemon mid-shutdown — the best-effort stop pass above did not
+                // land (no pkill on the box, or the signal was denied).
+                // Unlinking a live daemon's socket orphans it: it keeps serving
+                // while every client resolves a path that is gone.
+                writeln!(
+                    err,
+                    "dreamd: warning — a daemon is still live on {}; left the socket in place. \
+                     Stop it (`pkill -f 'dreamd watch'`) and re-run to finish the update.",
+                    socket.display()
+                )?;
+            }
             lifecycle_cleanup::SocketRemoval::Failed(e) => {
                 // Best-effort: warn with the path and continue — an
                 // unremovable socket must not abort the update.

@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Full-argv patterns handed to `pkill -f`, mirroring the documented manual
 /// recipe. Deliberately two-token patterns: a bare `dreamd` would match
@@ -95,23 +96,105 @@ pub enum SocketRemoval {
     Removed,
     /// Nothing to unlink — benign, the socket was already gone.
     NotFound,
+    /// A daemon answered on the socket, so it was left in place. Callers warn
+    /// and continue; see [`remove_socket`] for why this is not an error.
+    RefusedLive,
     /// A real unlink failure (e.g. permission denied). Callers warn on
     /// stderr with the path and continue — an unremovable socket must not
     /// abort the wider uninstall/update flow.
     Failed(std::io::Error),
 }
 
-/// Unlink the daemon socket if present.
+/// Unlink the daemon socket if present, refusing while a daemon still answers
+/// on it.
+///
+/// The liveness guard is the point of this function. Both callers
+/// (`uninstall`, `update`) run it *after* a best-effort [`stop_local_servers`]
+/// pass whose failure is only a stderr warning — so on a box with no `pkill`,
+/// or where the signal is denied, the daemon is still serving. Unlinking then
+/// leaves it alive on an orphaned inode: it keeps working, but every client
+/// resolves a path that no longer exists, so MCP silently falls back to the
+/// in-process Phase 1 backend and cross-harness recall stops with no error.
+/// Refusing is the same rule `dreamd archive` and `dreamd doctor --repair`
+/// already apply before touching a live daemon's state.
 ///
 /// `NotFound` is the only error kind treated as benign; any other unlink
 /// failure is reported as [`SocketRemoval::Failed`] so callers can print an
 /// actionable warning instead of a false "no daemon socket" line.
+///
+/// The probe is not instantaneous: it waits out a daemon that is merely
+/// *stopping*. See [`STOP_GRACE`].
 pub fn remove_socket(socket: &Path) -> SocketRemoval {
+    remove_socket_within(socket, STOP_GRACE)
+}
+
+/// How long a signalled daemon gets to finish unwinding before the socket is
+/// called live.
+///
+/// Without this window the guard misfires on the *common* upgrade path.
+/// `pkill` returns once the signal is **delivered**, not once the target
+/// exits, and `dreamd watch` handles SIGTERM gracefully: it drains the
+/// coordinator and indexer (a Tantivy commit, cadence
+/// `DEFAULT_COMMIT_CADENCE` = 5s) and only then unlinks its own socket. The
+/// listener therefore stays bound and answering for the whole drain, while
+/// `remove_socket` runs microseconds after `pkill` returns. Probing once would
+/// report a daemon that is already shutting down as live, and `dreamd update`
+/// with a running `watch` — the path the 2026-08-03 clean-box audit exercised
+/// as R6 — would print a "still live" warning telling the user to stop a
+/// daemon that is mid-exit.
+///
+/// Matched to the commit cadence because that drain is the slow step. A daemon
+/// that is still answering after this window is genuinely not going away
+/// (no `pkill` on the box, or the signal was denied), which is the case the
+/// guard exists to catch. Costs nothing when the socket is already dead or
+/// absent: the wait only starts once a probe has come back live.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// Re-probe interval while waiting out a stopping daemon.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// [`remove_socket`] with an injectable grace window so tests can pin the
+/// refuse path (`Duration::ZERO`) without waiting out [`STOP_GRACE`].
+fn remove_socket_within(socket: &Path, grace: Duration) -> SocketRemoval {
+    if !wait_until_quiet(socket, grace) {
+        return SocketRemoval::RefusedLive;
+    }
     match std::fs::remove_file(socket) {
         Ok(()) => SocketRemoval::Removed,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => SocketRemoval::NotFound,
         Err(e) => SocketRemoval::Failed(e),
     }
+}
+
+/// Poll until nothing answers on `socket`, or `grace` elapses. `true` means
+/// the socket is safe to unlink; `false` means a daemon outlasted the window.
+fn wait_until_quiet(socket: &Path, grace: Duration) -> bool {
+    if !socket_is_live(socket) {
+        return true;
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        std::thread::sleep(STOP_POLL);
+        if !socket_is_live(socket) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Connect-probe the daemon socket. Delegates to the one canonical probe so
+/// this agrees with `dreamd status`, `dreamd doctor`, `dreamd archive`, and
+/// MCP backend selection rather than becoming a fifth opinion.
+#[cfg(unix)]
+fn socket_is_live(socket: &Path) -> bool {
+    dreamd_core::server::is_daemon_socket_live(socket)
+}
+
+/// Non-unix: there is no UDS daemon in v0.1, so there is nothing live to
+/// protect. Matches the `cfg(not(unix))` stance in `status` and `setup`.
+#[cfg(not(unix))]
+fn socket_is_live(_socket: &Path) -> bool {
+    false
 }
 
 /// Attach the offending path so `dreamd: error — …` output is actionable
@@ -233,6 +316,85 @@ mod tests {
             matches!(remove_socket(&sock), SocketRemoval::NotFound),
             "absent socket must report NotFound"
         );
+    }
+
+    /// A daemon that outlasts the grace window must survive `remove_socket`.
+    /// The stop pass both callers run first is best-effort, so unlinking here
+    /// would leave a live daemon on an orphaned inode — still serving, but on
+    /// a path no client can resolve. Grace is pinned to zero so the refuse
+    /// path is exercised without waiting out `STOP_GRACE`.
+    #[cfg(unix)]
+    #[test]
+    fn remove_socket_refuses_a_daemon_that_outlasts_the_grace_window() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        let _listener = UnixListener::bind(&sock).expect("bind test listener");
+
+        assert!(
+            matches!(
+                remove_socket_within(&sock, Duration::ZERO),
+                SocketRemoval::RefusedLive
+            ),
+            "a socket a daemon still answers on must not be unlinked"
+        );
+        assert!(sock.exists(), "the live socket must be left in place");
+    }
+
+    /// The regression the grace window exists for: `pkill` returns as soon as
+    /// SIGTERM is *delivered*, so on the ordinary `dreamd update`-with-`watch`
+    /// path the daemon is still bound and answering while it drains. Probing
+    /// once would refuse a socket whose daemon is already mid-exit. The guard
+    /// must wait it out and then unlink, not warn.
+    #[cfg(unix)]
+    #[test]
+    fn remove_socket_waits_out_a_daemon_that_is_still_shutting_down() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind test listener");
+
+        // Answers now, goes quiet shortly after — a daemon finishing its drain.
+        let shutting_down = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(listener);
+        });
+
+        assert!(
+            matches!(
+                remove_socket_within(&sock, Duration::from_secs(5)),
+                SocketRemoval::Removed
+            ),
+            "a daemon that exits within the grace window must not be refused"
+        );
+        assert!(
+            !sock.exists(),
+            "the socket must be unlinked once it goes quiet"
+        );
+        shutting_down.join().unwrap();
+    }
+
+    /// The liveness guard must not over-refuse: an orphan socket file — daemon
+    /// gone, file left behind — is the ordinary uninstall case and must still
+    /// unlink. Dropping the listener closes the fd without unlinking the path,
+    /// which is exactly what a SIGKILLed daemon leaves on disk.
+    #[cfg(unix)]
+    #[test]
+    fn remove_socket_unlinks_orphan_socket_file() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        drop(UnixListener::bind(&sock).expect("bind test listener"));
+        assert!(sock.exists(), "orphan socket file expected for the test");
+
+        assert!(
+            matches!(remove_socket(&sock), SocketRemoval::Removed),
+            "an orphan socket file must still be unlinked"
+        );
+        assert!(!sock.exists());
     }
 
     #[test]
