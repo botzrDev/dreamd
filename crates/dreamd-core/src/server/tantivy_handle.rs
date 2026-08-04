@@ -726,9 +726,23 @@ fn try_open_or_create(
     Index::open_or_create(mmap_dir, schema).map_err(tantivy_to_index)
 }
 
+/// Does this open failure mean the on-disk index was written under a different
+/// schema and must be rebuilt? Gates a `remove_dir_all`, so it matches the
+/// exact rendering tantivy gives `TantivyError::SchemaError` (`"Schema error:
+/// '{0}'"`) rather than a bare `"schema"` substring: `tantivy_io_to_index`
+/// embeds the *directory path* in its message, so a store living under a path
+/// containing "schema" would otherwise trip the branch and wipe a healthy
+/// index.
+///
+/// Deliberately does not try to catch `TantivyError::IncompatibleIndex` (a
+/// tantivy index-*format* mismatch). That variant renders through
+/// `Incompatibility`'s hand-written `Debug`, which emits `"Library version: N,
+/// index version: M. …"` — containing neither "incompatible" nor "schema". The
+/// `|| msg.contains("incompatible")` alternative that used to sit here
+/// therefore never matched it and only widened the false-positive surface. A
+/// format mismatch stays a loud startup error, not a silent wipe.
 fn is_schema_incompatible(err: &IndexError) -> bool {
-    let msg = err.0.to_ascii_lowercase();
-    msg.contains("schema") || msg.contains("incompatible")
+    err.0.to_ascii_lowercase().contains("schema error:")
 }
 
 // Error helpers
@@ -1910,5 +1924,58 @@ mod tests {
         assert!(!fresh.stale, "replay must heal freshness: {fresh:?}");
 
         handle2.shutdown().await.expect("shutdown");
+    }
+
+    /// `is_schema_incompatible` gates a `remove_dir_all` of the index cache, so
+    /// it must fire on a real tantivy schema mismatch and on nothing else.
+    /// The false-positive cases below are the reason it matches
+    /// `"schema error:"` rather than a bare `"schema"` substring.
+    #[test]
+    fn schema_incompat_matches_tantivy_schema_error_only() {
+        // The real trigger: tantivy renders SchemaError as "Schema error: '..'",
+        // wrapped by `tantivy_to_index`.
+        let schema_err = tantivy_to_index(tantivy::TantivyError::SchemaError(
+            "field 'skill_action' not found".to_string(),
+        ));
+        assert!(
+            is_schema_incompatible(&schema_err),
+            "a tantivy SchemaError must trigger the rebuild: {schema_err:?}"
+        );
+
+        // A store whose path merely contains "schema" must NOT wipe the index.
+        // `tantivy_io_to_index` embeds the directory path in its message.
+        let path_err = IndexError(
+            "tantivy directory: Failed to open the directory: \
+             '/home/dev/schema-tools/.agent/.dreamd/index'"
+                .to_string(),
+        );
+        assert!(
+            !is_schema_incompatible(&path_err),
+            "a path containing 'schema' must not trigger a wipe: {path_err:?}"
+        );
+
+        // A tantivy index-FORMAT mismatch renders through Incompatibility's
+        // Debug and contains neither "incompatible" nor "schema error:". It
+        // stays a loud error rather than a silent rebuild.
+        let format_err = IndexError(
+            "tantivy: Library version: 6, index version: 5. Change tantivy to a \
+             version compatible with index format 5 (e.g. 0.21.x) and rebuild \
+             your project."
+                .to_string(),
+        );
+        assert!(
+            !is_schema_incompatible(&format_err),
+            "an index-format mismatch must not be treated as a schema rebuild: {format_err:?}"
+        );
+
+        // Plain io failures must never wipe a healthy index.
+        let io_err = io_to_index(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(
+            !is_schema_incompatible(&io_err),
+            "a permission error must not trigger a wipe: {io_err:?}"
+        );
     }
 }
