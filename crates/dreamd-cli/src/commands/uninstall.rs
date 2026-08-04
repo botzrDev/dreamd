@@ -75,11 +75,26 @@ pub fn run(
     err: &mut dyn Write,
 ) -> Result<(), UninstallError> {
     // 1. Stop local servers (best-effort; no match is success).
+    //
+    // `spared` — at least one matching process left running, normally because
+    // it was not attributable to this invocation's $HOME / native cache
+    // (AILAB-584) — gets its own line, pointing at the stderr warnings that
+    // name each pid and its reason. Without it this printed "no running dreamd
+    // mcp/watch processes found" directly above the stderr warning naming the
+    // pid that is still running, which is the one scenario the scoping fix
+    // exists for. `matched` and `spared` are independent: one pass can stop
+    // ours and spare another's.
     let report = stop(err);
     if !req.quiet {
         if report.matched {
             writeln!(out, "stopped running dreamd mcp/watch process(es)")?;
-        } else if report.attempted {
+        }
+        if report.spared {
+            writeln!(
+                out,
+                "left dreamd mcp/watch process(es) running — see the warnings above and stop them yourself if they are yours"
+            )?;
+        } else if !report.matched && report.attempted {
             writeln!(out, "no running dreamd mcp/watch processes found")?;
         }
     }
@@ -100,13 +115,21 @@ pub fn run(
             lifecycle_cleanup::SocketRemoval::RefusedLive => {
                 // Still answering after the grace window, so this is not a
                 // daemon mid-shutdown — the best-effort stop pass above did not
-                // land (no pkill on the box, or the signal was denied).
+                // land: no `kill` on the box, the signal was denied, or (the
+                // common case now) the daemon was deliberately spared as not
+                // attributable to this invocation's $HOME / native cache.
                 // Unlinking a live daemon's socket orphans it: it keeps serving
                 // while every client resolves a path that is gone.
+                //
+                // The remedy is deliberately NOT `pkill -f 'dreamd watch'`:
+                // this branch is reached precisely when scoping mattered, and
+                // that recipe is the machine-global kill AILAB-584 removed.
                 writeln!(
                     err,
                     "dreamd: warning — a daemon is still live on {}; left the socket in place. \
-                     Stop it (`pkill -f 'dreamd watch'`) and re-run to finish cleanup.",
+                     Stop that daemon — `dreamd uninstall` under the $HOME it serves, or \
+                     `kill <pid>` for a pid named in the warnings above — then re-run to \
+                     finish cleanup.",
                     socket.display()
                 )?;
             }

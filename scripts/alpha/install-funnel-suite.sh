@@ -9,8 +9,14 @@
 # / §6 conflict taxonomy against pre-existing MCP config files.
 #
 # Fully sandboxed: HOME is redirected to a temp dir, so the real ~/.agent daemon,
-# registry, and memory are never touched (removed on exit). Nothing long-lived
-# is started — no daemon, no `dreamd watch`, no network.
+# registry, and memory are never touched (removed on exit). No network.
+#
+# One step does start something long-lived: the cross-HOME stop check (AILAB-584)
+# runs a real `dreamd watch` under a *second* sandbox HOME ($SANDBOX/home-a), so
+# that `dreamd update` can be shown sparing another home's daemon and then
+# stopping its own. That daemon is always reaped — the step stops it under its
+# own HOME, and `trap cleanup EXIT` SIGKILLs it unconditionally, so an assertion
+# failure or a Ctrl-C cannot leak it.
 #
 # Usage: scripts/alpha/install-funnel-suite.sh   (run from repo root; needs
 #        target/debug/dreamd — build it with `cargo build -p dreamd`)
@@ -24,7 +30,8 @@ export HOME="$SANDBOX"          # redirect ~/.agent into the sandbox
 # A developer-exported socket override would aim setup's liveness probe and
 # `doctor` at a daemon outside the sandbox. Clear it the way `setup_wizard.rs`
 # does. (`run_watch` ignoring $DREAMD_SOCK is known, pre-existing, and out of
-# scope here — this suite never starts a daemon.)
+# scope here; it binds $HOME/.agent/dreamd.sock, so redirecting HOME — as the
+# cross-HOME step below does for its sandboxed daemon — is the only lever.)
 unset DREAMD_SOCK
 
 OUT="$SANDBOX/last.out"
@@ -35,7 +42,19 @@ pass=0; fail=0
 ok()   { echo "  ✅ $1"; pass=$((pass+1)); }
 bad()  { echo "  ❌ $1"; fail=$((fail+1)); }
 
-cleanup() { rm -rf "$SANDBOX"; }
+# Reaps the cross-HOME step's sandboxed `dreamd watch` before removing the
+# sandbox. Unconditional and SIGKILL: the step is supposed to stop that daemon
+# itself, but a failed assertion, an early `exit`, or a Ctrl-C must not leak a
+# daemon holding a Tantivy writer lock on a directory this trap is about to
+# delete. `wait` reaps the zombie so the pid cannot be recycled under us.
+WATCH_A_PID=""
+cleanup() {
+  if [ -n "$WATCH_A_PID" ]; then
+    kill -KILL "$WATCH_A_PID" 2>/dev/null
+    wait "$WATCH_A_PID" 2>/dev/null
+  fi
+  rm -rf "$SANDBOX"
+}
 trap cleanup EXIT
 
 [ -x "$BIN" ] || { echo "FATAL: $BIN not built (run: cargo build -p dreamd)"; exit 1; }
@@ -50,6 +69,17 @@ command -v python3 >/dev/null || { echo "FATAL: python3 required (JSON assertion
 run_in() { # <dir> <args...>
   local dir="$1"; shift
   ( cd "$dir" || exit 127; "$BIN" "$@" ) >"$OUT" 2>"$ERR" </dev/null
+  RC=$?
+}
+
+# `run_in` with an explicit HOME override. The cross-HOME stop check needs two
+# distinct sandbox homes in one run, and `run_in` always inherits the suite's.
+# The assignment lives inside the subshell rather than prefixing the function
+# call: a `VAR=x fn` prefix on a *function* leaks the variable into the caller
+# in POSIX mode, which would silently re-home every later step.
+run_in_home() { # <home> <dir> <args...>
+  local home="$1" dir="$2"; shift 2
+  ( cd "$dir" || exit 127; HOME="$home" "$BIN" "$@" ) >"$OUT" 2>"$ERR" </dev/null
   RC=$?
 }
 
@@ -166,6 +196,102 @@ else
   bad "update --dry-run did not print the restart contract"
   sed 's/^/      /' "$OUT" | head -10
 fi
+
+# =============================================================================
+# 4b. Live cross-HOME stop (AILAB-584) — the half `--dry-run` cannot reach.
+#
+# `update` used to `pkill -f 'dreamd watch'`, which is machine-global: the
+# 2026-08-03 clean-box audit caught a sandboxed `HOME=/tmp/… dreamd update`
+# SIGTERMing the developer's real Cursor MCP server (AILAB-554 F1). A dry run
+# signals nothing, so only a live daemon can prove the fix.
+#
+# Both directions are asserted, because the spare alone is worthless — a stopper
+# that never signalled anything would pass it. Same daemon, twice:
+#   (1) the suite's $HOME runs `update` → the home-a daemon must survive;
+#   (2) home-a runs `update` → that same daemon must go away.
+# =============================================================================
+echo "--- cross-HOME stop (AILAB-584) ---"
+HOME_A="$SANDBOX/home-a"
+mkdir -p "$HOME_A"
+PROJ_A="$(new_project watch-home-a)"
+SOCK_A="$HOME_A/.agent/dreamd.sock"
+run_in_home "$HOME_A" "$PROJ_A" init
+expect_rc 0 "[cross-home] init the home-a project"
+
+# `exec` so $! is the daemon itself and not a wrapper subshell — the pid is what
+# every assertion and the cleanup trap below signal.
+( cd "$PROJ_A" && HOME="$HOME_A" exec "$BIN" watch ) >"$SANDBOX/watch-a.log" 2>&1 </dev/null &
+WATCH_A_PID=$!
+
+# Bounded wait for the socket to exist *and* answer — `dreamd status` runs the
+# same UDS connect probe the daemon's clients do, so an orphan socket file does
+# not count as up. Bails early if the daemon dies, so a boot failure is a fast
+# error and not a 30-second stall.
+watch_a_live() { run_in_home "$HOME_A" "$PROJ_A" status; grep -q "^daemon: running" "$OUT"; }
+started=0
+for _ in $(seq 1 150); do
+  if watch_a_live; then started=1; break; fi
+  kill -0 "$WATCH_A_PID" 2>/dev/null || break
+  sleep 0.2
+done
+if [ "$started" -eq 1 ]; then
+  ok "[cross-home] sandboxed \`dreamd watch\` answering on home-a's socket"
+else
+  bad "[cross-home] home-a daemon never came up — the rest of this step proves nothing"
+  sed 's/^/      /' "$SANDBOX/watch-a.log" | tail -5
+fi
+
+if [ "$started" -eq 1 ]; then
+  # (1) Another home's non-dry-run update must leave it strictly alone.
+  run_in "$COLD" update
+  expect_rc 0 "[cross-home] update under the suite HOME"
+  # Non-racy half: the warning is printed at decision time, so it proves the
+  # stop pass saw this pid and *refused* it rather than never matching it.
+  #
+  # One anchored phrase, not two independent greps: `$ERR` holds absolute paths
+  # and possibly other spared pids, so a bare `grep -q "$WATCH_A_PID"` matches
+  # inside a longer pid or a path while "not attributable" comes from an
+  # unrelated line. `-F` because the phrase is a literal.
+  if grep -qF "pid $WATCH_A_PID running: not attributable" "$ERR"; then
+    ok "[cross-home] update warned it spared home-a's daemon (pid $WATCH_A_PID)"
+  else
+    bad "[cross-home] update did not report sparing pid $WATCH_A_PID"
+    sed 's/^/      /' "$ERR" | head -5
+  fi
+  # Hold the liveness check open: `kill` returns on signal *delivery*, so a
+  # wrongly-signalled daemon is still alive for a moment afterwards.
+  still_up=1
+  for _ in $(seq 1 5); do
+    kill -0 "$WATCH_A_PID" 2>/dev/null || { still_up=0; break; }
+    watch_a_live || { still_up=0; break; }
+    sleep 0.2
+  done
+  if [ "$still_up" -eq 1 ]; then
+    ok "[cross-home] home-a daemon still running and answering after another HOME's update"
+  else
+    bad "[cross-home] another HOME's update stopped home-a's daemon — AILAB-554 F1 regression"
+  fi
+
+  # (2) Positive control: its own home's update must actually stop it. Bounded
+  # poll, never an instant check — `dreamd watch` drains the coordinator and the
+  # Tantivy indexer (5s commit cadence) after SIGTERM before it exits.
+  run_in_home "$HOME_A" "$PROJ_A" update
+  expect_rc 0 "[cross-home] update under home-a"
+  stopped=0
+  for _ in $(seq 1 100); do
+    kill -0 "$WATCH_A_PID" 2>/dev/null || { stopped=1; break; }
+    sleep 0.2
+  done
+  if [ "$stopped" -eq 1 ]; then
+    ok "[cross-home] home-a's own update stopped its daemon (scope still signals)"
+  else
+    bad "[cross-home] home-a daemon survived its own HOME's update"
+  fi
+fi
+
+kill -KILL "$WATCH_A_PID" 2>/dev/null
+wait "$WATCH_A_PID" 2>/dev/null
+WATCH_A_PID=""
 
 # =============================================================================
 # 5. Conflict taxonomy — every row of AILAB-548 §3, plus §6A/§6C

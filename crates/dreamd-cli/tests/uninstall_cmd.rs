@@ -19,6 +19,7 @@ fn no_op_stop(_: &mut dyn std::io::Write) -> StopReport {
     StopReport {
         attempted: true,
         matched: false,
+        spared: false,
     }
 }
 
@@ -179,6 +180,39 @@ fn uninstall_cleans_everything_and_is_idempotent() {
     );
 }
 
+/// A candidate left running because it was not attributable to this `$HOME` /
+/// native cache (AILAB-584) must be reported as such — never as "no running
+/// dreamd mcp/watch processes found", which is what `attempted && !matched`
+/// printed before `StopReport::spared` existed, directly above the stderr
+/// warning naming the pid that is still running.
+#[test]
+fn uninstall_reports_spared_processes_instead_of_claiming_none_were_found() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    let mut spared_stop = |_: &mut dyn std::io::Write| StopReport {
+        attempted: true,
+        matched: false,
+        spared: true,
+    };
+    let req = uninstall_req(&f, &socket, &cache_tree, false, false);
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    uninstall::run(&req, &mut spared_stop, &mut out, &mut err).unwrap();
+
+    let stdout = String::from_utf8(out.into_inner()).unwrap();
+    assert!(
+        !stdout.contains("no running dreamd mcp/watch processes found"),
+        "a spared process must not be reported as none found; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("left dreamd mcp/watch process(es) running")
+            && stdout.contains("see the warnings above"),
+        "uninstall must say what was left running and point at the detail; got: {stdout:?}"
+    );
+}
+
 /// (b) `--keep-caches` leaves both fake cache trees intact; the socket is
 /// still removed.
 #[test]
@@ -275,6 +309,7 @@ fn update_dry_run_mutates_nothing_and_prints_version() {
         StopReport {
             attempted: true,
             matched: false,
+            spared: false,
         }
     };
 
@@ -325,6 +360,7 @@ fn update_real_path_clears_cache_and_socket() {
         StopReport {
             attempted: true,
             matched: false,
+            spared: false,
         }
     };
 

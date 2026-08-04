@@ -357,9 +357,36 @@ fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
     })
 }
 
-fn resolve_daemon_home() -> PathBuf {
+/// This invocation's `$HOME`, or `None` — **the single place this binary reads
+/// `HOME`**, so the empty-value rule below is stated once.
+///
+/// `HOME` set but *empty* is a real, ordinary environment: `env -i`, a
+/// systemd unit with `Environment=HOME=`, a Docker `ENV HOME=`, several CI
+/// runners. `var_os` returns `Some("")` for it, and every derived path then
+/// silently becomes **relative** — `.agent`, `.cache/dreamd-mcp`,
+/// `.npm/_npx` — which resolves against whatever directory the command happens
+/// to be run from.
+///
+/// For the AILAB-584 stop scope that is not a cosmetic bug: a relative
+/// `cache_dir` is canonicalized against this process's cwd, so a process whose
+/// executable sits under `$PWD/.cache/dreamd-mcp` attributes to us and gets
+/// SIGTERMed no matter whose `$HOME` it serves — the cross-home kill, re-opened
+/// by a blank variable (reproduced under `env HOME= dreamd update`). For
+/// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
+/// clear `./.npm/_npx`, and it *deletes* what it finds there.
+///
+/// Empty is therefore treated exactly like unset everywhere. Callers already
+/// have a defined "no home directory" behaviour (skip with a note, or in
+/// `lifecycle_cleanup` refuse to attribute anything), which is the correct
+/// answer for a process that genuinely has no home.
+fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+}
+
+fn resolve_daemon_home() -> PathBuf {
+    home_dir()
         .map(|h| h.join(".agent"))
         .unwrap_or_else(|| PathBuf::from(".agent"))
 }
@@ -755,8 +782,7 @@ fn run_status(status_log_tail: &[String]) -> ExitCode {
     // registry resolves off $HOME the same way the tracing log path above does.
     // The log tail was captured into `status_log_tail` before init_tracing ran.
     let socket = dreamd_core::client::resolve_daemon_socket();
-    let registry_path = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));
     let stdout = std::io::stdout();
@@ -779,19 +805,28 @@ fn run_status(status_log_tail: &[String]) -> ExitCode {
 
 /// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`
 /// (parent of the per-version dirs; clearing it drops all versions).
-/// Resolved off `$HOME` the same way `resolve_daemon_home` is. `None` — no
+/// Resolved off [`home_dir`] the same way `resolve_daemon_home` is. `None` — no
 /// home directory; the commands print a skip note instead.
 fn resolve_shim_cache_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".cache").join("dreamd-mcp"))
+    home_dir().map(|h| h.join(".cache").join("dreamd-mcp"))
 }
 
-/// npx cache root (`~/.npm/_npx`) holding per-package cache entries.
+/// This invocation's `$HOME`, used as the process-stop attribution scope for
+/// `uninstall` / `update` (AILAB-584): a running `dreamd mcp` / `dreamd watch`
+/// is only ours to signal if its own `HOME=` resolves here. `None` — no home
+/// directory; the stop pass then has nothing to attribute against and skips
+/// with a warning rather than signalling machine-wide, which is what the bare
+/// `pkill -f` it replaced used to do. See [`home_dir`] for why an *empty*
+/// `HOME` counts as no home directory here.
+fn resolve_home() -> Option<PathBuf> {
+    home_dir()
+}
+
+/// npx cache root (`~/.npm/_npx`) holding per-package cache entries. `None` —
+/// no home directory; `uninstall` skips the npx step rather than scanning (and
+/// deleting under) a cwd-relative `./.npm/_npx`.
 fn resolve_npx_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".npm").join("_npx"))
+    home_dir().map(|h| h.join(".npm").join("_npx"))
 }
 
 /// Best-effort cargo-install detection for `dreamd update` messaging: an
@@ -819,6 +854,7 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     // same as the status arm — never a hardcoded path.
     let socket = dreamd_core::client::resolve_daemon_socket();
     let cache_dir = resolve_shim_cache_dir();
+    let home = resolve_home();
     let npx_dir = resolve_npx_dir();
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -834,7 +870,16 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
         all_npx: args.all_npx,
         quiet: args.quiet,
     };
-    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    // AILAB-584 — the stop pass signals only processes attributable to this
+    // invocation's home/cache. The scope is captured here rather than threaded
+    // through `Stopper` so the command modules and their fake stoppers stay
+    // unchanged.
+    let scope = commands::lifecycle_cleanup::StopScope {
+        home: home.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+    };
+    let mut stop =
+        |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(&scope, e);
     match commands::uninstall::run(&req, &mut stop, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::uninstall::UninstallError::Io(e)) => {
@@ -848,6 +893,7 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock).
     let socket = dreamd_core::client::resolve_daemon_socket();
     let cache_dir = resolve_shim_cache_dir();
+    let home = resolve_home();
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -860,7 +906,13 @@ fn run_update(args: UpdateArgs) -> ExitCode {
         restart: args.restart,
         cargo_install_hint: cargo_install_hint(),
     };
-    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    // AILAB-584 — see `run_uninstall`: scoped stop, captured not threaded.
+    let scope = commands::lifecycle_cleanup::StopScope {
+        home: home.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+    };
+    let mut stop =
+        |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(&scope, e);
     match commands::update::run(&req, &mut stop, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::update::UpdateError::Io(e)) => {
@@ -914,10 +966,9 @@ pub fn run() -> ExitCode {
     // so every subcommand's `tracing` callsites land on stderr + ~/.agent/dreamd.log.
     // `_log_guard` MUST live until run() returns — `let _ =` would drop it
     // immediately and discard buffered file logs. Resolve the log path via the
-    // existing HOME idiom (see the Init arm below); None → console-only.
-    let log_file = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
+    // one `home_dir()` helper (empty HOME counts as none); None → console-only.
+    let log_file =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
 
     // WEG-103 — `dreamd status` tails the daemon log, but init_tracing opens it
     // with truncate(true) at startup (as every subcommand does). Capture the

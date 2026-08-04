@@ -160,13 +160,24 @@ pub fn run(
             lifecycle_cleanup::SocketRemoval::RefusedLive => {
                 // Still answering after the grace window, so this is not a
                 // daemon mid-shutdown — the best-effort stop pass above did not
-                // land (no pkill on the box, or the signal was denied).
+                // land: no `kill` on the box, the signal was denied, or (the
+                // common case now) the daemon was deliberately spared as not
+                // attributable to this invocation's $HOME / native cache.
                 // Unlinking a live daemon's socket orphans it: it keeps serving
                 // while every client resolves a path that is gone.
+                //
+                // The remedy is deliberately NOT `pkill -f 'dreamd watch'`.
+                // This branch is reached precisely when scoping mattered, and
+                // that recipe is the machine-global kill AILAB-584 removed —
+                // the same commit's README calls it unsafe. Point at the pid
+                // the stop pass already named on stderr, or at the daemon's own
+                // terminal.
                 writeln!(
                     err,
                     "dreamd: warning — a daemon is still live on {}; left the socket in place. \
-                     Stop it (`pkill -f 'dreamd watch'`) and re-run to finish the update.",
+                     Stop that daemon — `dreamd update` under the $HOME it serves, or \
+                     `kill <pid>` for a pid named in the warnings above — then re-run to \
+                     finish the update.",
                     socket.display()
                 )?;
             }
@@ -215,12 +226,36 @@ pub fn run(
         }
         // Step 1 reports the stop that already ran above. An unattempted stop
         // (non-unix) must hand the job back to the user, never claim success.
-        let step_one = if report.matched {
-            "stopped local `dreamd mcp` / `dreamd watch` process(es)"
-        } else if report.attempted {
-            "no local `dreamd mcp` / `dreamd watch` processes were running"
-        } else {
-            "stop local `dreamd mcp` / `dreamd watch` yourself — automatic stop is unix-only in v0.1"
+        //
+        // `spared` is what keeps this line honest on the AILAB-584 path: a
+        // process that matched but was not attributable to this invocation is
+        // still running, and reporting it as "nothing was running" contradicted
+        // the stderr warning printed seconds earlier in the same output. It is
+        // independent of `matched` — one pass can stop this home's `watch` and
+        // spare another home's `mcp`.
+        //
+        // The line points at those stderr warnings rather than restating the
+        // reason, because `spared` covers both causes (not attributable, or the
+        // signal did not land) and each spared pid carries its own.
+        //
+        // The mixed line is deliberately the matched line plus a clause, not a
+        // rewrite: a mixed sweep is the *ordinary* result on a shared box (any
+        // other home's `dreamd mcp` is a spared candidate), so every assertion
+        // that pins the matched wording must keep holding when one shows up.
+        let step_one = match (report.matched, report.spared, report.attempted) {
+            (true, true, _) => {
+                "stopped local `dreamd mcp` / `dreamd watch` process(es); others were left \
+                 running — see the warnings above"
+            }
+            (true, false, _) => "stopped local `dreamd mcp` / `dreamd watch` process(es)",
+            (false, true, _) => {
+                "left `dreamd mcp` / `dreamd watch` process(es) running — see the warnings above \
+                 and stop them yourself if they are yours"
+            }
+            (false, false, true) => "no local `dreamd mcp` / `dreamd watch` processes were running",
+            (false, false, false) => {
+                "stop local `dreamd mcp` / `dreamd watch` yourself — automatic stop is unix-only in v0.1"
+            }
         };
         write_contract(out, "restart contract:", step_one)?;
     } else {

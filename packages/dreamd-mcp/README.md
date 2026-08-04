@@ -149,16 +149,28 @@ binary — rebuild it instead.
 
 ### Manual fallback
 
-Prefer `npx -y dreamd-mcp uninstall` above — it does all of this in one command.
-If you want the steps by hand, run the cleanup below (stop processes, remove the
-socket, unregister the project, clear caches), **then** remove the `dreamd` block
-from your MCP client config and reload the client — the same order as
-[Uninstall](#uninstall):
+**Use `npx -y dreamd-mcp uninstall` instead of the recipe below** — it does all
+four steps in one command. (`dreamd update` covers steps 1 and 3 only: it never
+unregisters the project and never touches `~/.npm/_npx`.)
+
+Both commands' stop step is scoped: they signal only the `dreamd mcp` /
+`dreamd watch` processes attributable to *this* `$HOME` and *this*
+`~/.cache/dreamd-mcp`. Anything serving another home, another sandbox, or
+another user on the box is left running and named on stderr. A hand-run `pkill`
+has no such scope.
+
+If you still want the steps by hand, run the cleanup below (stop processes,
+remove the socket, unregister the project, clear caches), **then** remove the
+`dreamd` block from your MCP client config and reload the client — the same
+order as [Uninstall](#uninstall):
 
 ```sh
-# 1. Stop processes + remove the socket
-pkill -f 'dreamd mcp' || true
-pkill -f 'dreamd watch' || true
+# 1. Stop your dreamd servers + remove the socket.
+#    `-u "$(id -u)"` keeps the signal inside your own account. Never run a bare
+#    `pkill -f` for these patterns: it is machine-global and SIGTERMs every
+#    matching process on the box, including other users' servers.
+pkill -u "$(id -u)" -f 'dreamd mcp'   || true
+pkill -u "$(id -u)" -f 'dreamd watch' || true
 rm -f ~/.agent/dreamd.sock
 
 # 2. Unregister the project from the registry (run from the project root)
@@ -183,6 +195,12 @@ done
 > **Warning:** `rm -rf ~/.npm/_npx` deletes **every** npx-cached package on your
 > machine, not just dreamd. Use the scoped loop — or `dreamd uninstall`, which
 > scopes by default — unless you intend a full npx reset.
+
+> **Warning:** step 1 is still coarser than `dreamd uninstall`. `pkill -u` stops
+> at the user boundary, not the home boundary, so if you run dreamd under more
+> than one `$HOME` on the same account — a sandbox, a devcontainer, a test rig —
+> it stops those servers too. `dreamd uninstall` / `dreamd update` signal only
+> what belongs to the `$HOME` you run them under.
 
 ## License
 

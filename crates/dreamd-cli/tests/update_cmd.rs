@@ -74,14 +74,30 @@ fn run_update(
 const ATTEMPTED_NO_MATCH: StopReport = StopReport {
     attempted: true,
     matched: false,
+    spared: false,
 };
 const MATCHED: StopReport = StopReport {
     attempted: true,
     matched: true,
+    spared: false,
 };
 const NOT_ATTEMPTED: StopReport = StopReport {
     attempted: false,
     matched: false,
+    spared: false,
+};
+/// The AILAB-584 shape: a `dreamd mcp` / `dreamd watch` matched but belonged to
+/// another `$HOME`, so it was deliberately left running.
+const SPARED: StopReport = StopReport {
+    attempted: true,
+    matched: false,
+    spared: true,
+};
+/// Mixed sweep: this home's daemon stopped, another home's spared.
+const MATCHED_AND_SPARED: StopReport = StopReport {
+    attempted: true,
+    matched: true,
+    spared: true,
 };
 
 /// The dry-run plan spells out the whole restart contract — stop, reload the
@@ -150,6 +166,48 @@ fn update_reports_when_no_servers_were_running() {
     assert!(
         stdout.contains("no local `dreamd mcp` / `dreamd watch` processes were running"),
         "step 1 must report the benign no-match; got: {stdout:?}"
+    );
+}
+
+/// A process that matched but was **spared** as not attributable to this
+/// `$HOME` / native cache must never be reported as "nothing was running"
+/// (AILAB-584). That stdout line used to print directly above a stderr warning
+/// naming the pid that was still running — the tool contradicting itself on
+/// exactly the scenario the scoping fix exists for.
+#[test]
+fn update_reports_spared_processes_instead_of_claiming_none_were_running() {
+    let f = Fixture::new();
+    let (_, stdout) = run_update(&f, false, false, false, SPARED);
+
+    assert!(
+        !stdout.contains("no local `dreamd mcp` / `dreamd watch` processes were running"),
+        "a spared process must not be reported as nothing running; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("left `dreamd mcp` / `dreamd watch` process(es) running"),
+        "step 1 must say what was left running; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("see the warnings above"),
+        "step 1 must point at the stderr detail naming each pid; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("stopped local"),
+        "nothing was stopped; got: {stdout:?}"
+    );
+
+    // Mixed sweep: the stop that happened is still reported, and the spare is
+    // not swallowed by it.
+    let g = Fixture::new();
+    let (_, mixed) = run_update(&g, false, false, false, MATCHED_AND_SPARED);
+    // The mixed line must stay a superset of the matched line: a mixed sweep is
+    // the ordinary result on a box that has any other home's `dreamd mcp`
+    // running, so `update_stops_servers_and_reports_matched_processes` and the
+    // cross-`$HOME` integration suite must both keep matching.
+    assert!(
+        mixed.contains("stopped local `dreamd mcp` / `dreamd watch` process(es)")
+            && mixed.contains("others were left running"),
+        "a mixed sweep must report both halves; got: {mixed:?}"
     );
 }
 
