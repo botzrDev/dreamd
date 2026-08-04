@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **A healthy index is no longer wiped by a false schema-mismatch match.** `is_schema_incompatible` gates a `remove_dir_all` of the index cache but matched a bare `"schema"` substring anywhere in the error text. `tantivy_io_to_index` embeds the *directory path* in its message, so any store living under a path containing "schema" (e.g. `~/dev/schema-tools/`) tripped the branch and silently rebuilt a healthy index. It now matches tantivy's exact `SchemaError` rendering (`"Schema error: '…'"`). The companion `|| msg.contains("incompatible")` alternative was removed: `TantivyError::IncompatibleIndex` renders through `Incompatibility`'s hand-written `Debug` as `"Library version: N, index version: M. …"`, so it never matched that variant and only widened the false-positive surface — an index-*format* mismatch stays a loud startup error rather than a silent wipe. (`crates/dreamd-core/src/server/tantivy_handle.rs`)
+
 ## [0.1.0-rc.8] - 2026-08-03
 
 ### Added
