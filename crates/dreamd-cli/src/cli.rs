@@ -400,6 +400,12 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
     // a running daemon can't clobber the rewrite.
     let socket = dreamd_core::client::resolve_daemon_socket();
+    // lock-ok (AILAB-583): archive never opens a Tantivy index — it only reads
+    // and rewrites the episodic JSONL. The liveness probe below does spawn a
+    // thread and block on it, but that closure only connects to the socket —
+    // it emits no tracing, and the wait is bounded by LIVENESS_PROBE_TIMEOUT —
+    // so it cannot wait on a thread that wants the stderr lock we hold.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -549,6 +555,9 @@ fn run_init(args: InitArgs) -> ExitCode {
         Err(code) => return code,
     };
     let daemon_home = resolve_daemon_home();
+    // lock-ok (AILAB-583): init never opens a Tantivy index — it scaffolds or
+    // removes `.agent/` files and the registry entry.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -602,6 +611,9 @@ fn run_migrate(args: MigrateArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    // lock-ok (AILAB-583): migrate never opens a Tantivy index — it reads the
+    // index manifest JSON only (`dreamd_core::index::check_manifest_version`).
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -633,10 +645,13 @@ fn run_recall(args: RecallArgs) -> ExitCode {
     // live from this, so — unlike `dreamd dream` — it is not byte-stable
     // and takes no SOURCE_DATE_EPOCH override.
     let now_sec = chrono::Utc::now().timestamp();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles (AILAB-583): recall opens the Tantivy index (read-only
+    // `Index::open_in_dir` + `reader()`, whose reload policy owns a background
+    // watcher thread). No writer today, but per AGENTS.md
+    // `no-hoisted-stdio-lock-across-tantivy` an index-opening arm never holds a
+    // hoisted lock that a logging index thread could deadlock on (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     match commands::recall::run(
         &cwd,
         &args.query,
@@ -669,10 +684,13 @@ fn run_score(args: ScoreArgs) -> ExitCode {
     };
     // Query instant: wall clock (same as recall — age_days / salience decay).
     let now_sec = chrono::Utc::now().timestamp();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles (AILAB-583): score opens the Tantivy index the same way
+    // recall does (read-only `Index::open_in_dir` + `reader()`, background
+    // watcher thread). Per AGENTS.md `no-hoisted-stdio-lock-across-tantivy` an
+    // index-opening arm never holds a hoisted lock that a logging index thread
+    // could deadlock on (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     match commands::score::run(&cwd, args.n, args.explain, now_sec, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::score::ScoreError::NotFound) => ExitCode::from(2),
@@ -693,6 +711,11 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    // lock-ok (AILAB-583): reset never opens a Tantivy index — it rewrites
+    // `working/WORKSPACE.md` on disk. Note the confirm prompt holds these locks
+    // across a blocking stdin read: safe only while nothing under reset logs
+    // from another thread, so keep it index-free.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -742,10 +765,13 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
         Err(code) => return code,
     };
     let daemon_home = resolve_daemon_home();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles (AILAB-583): the success-path doctor beat calls into
+    // `doctor::run` (`setup::report_doctor`), which is writer-free only while
+    // `repair: false`. Doctor buffers its own output, but `StderrLock` is
+    // process-wide — a hoisted lock here would still deadlock against Tantivy's
+    // logging threads if any check under setup ever opens the index (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     let req = commands::setup::SetupRequest {
         cwd: &cwd,
         daemon_home: &daemon_home,
@@ -785,6 +811,9 @@ fn run_status(status_log_tail: &[String]) -> ExitCode {
     let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));
+    // lock-ok (AILAB-583): status never opens a Tantivy index — it probes the
+    // daemon socket and reads registry.toml, the WAL, and the captured log tail.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match commands::status::run(
@@ -856,6 +885,9 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
     let npx_dir = resolve_npx_dir();
+    // lock-ok (AILAB-583): uninstall never opens a Tantivy index — it signals
+    // this user's local servers and removes home/cache files.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -894,6 +926,9 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     let socket = dreamd_core::client::resolve_daemon_socket();
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
+    // lock-ok (AILAB-583): update never opens a Tantivy index — it signals this
+    // user's local servers and clears the native-binary cache.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -931,6 +966,9 @@ fn run_watch() -> ExitCode {
 }
 
 fn run_version() -> ExitCode {
+    // lock-ok (AILAB-583): version never opens a Tantivy index — it prints
+    // compile-time build metadata only.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match commands::version::run(&mut out) {
