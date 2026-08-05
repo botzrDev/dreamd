@@ -139,7 +139,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 |---|---|
 | **v0.1** (~2026-08-09) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
 | **v0.1.1** | Windows lifecycle, semantic / embedding recall, LLM-assisted dream cycle (not claimed in v0.1) |
-| **Oct 2026** | State-Drift benchmark publish (dreamd is one row; conflict of interest disclosed) |
+| **Oct 2026** | WasTrue benchmark publish (dreamd is one row; conflict of interest disclosed) |
 
 v0.1.1 features are intentionally not implemented or documented as shipped in v0.1 code.
 
@@ -179,7 +179,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ---
 
-## State-Drift benchmark (Oct 2026)
+## WasTrue benchmark (Oct 2026)
 
 A separate, reproducible eval measuring whether memory systems correctly update superseded facts. dreamd is one row in the table, published regardless of placement. Conflict of interest is disclosed; configs use each maintainer's documented defaults; raw outputs are committed for audit. Methodology: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
 

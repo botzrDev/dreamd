@@ -11,4 +11,4 @@ set -a
 source "$ENV_FILE"
 set +a
 cd "$(dirname "$0")/../.."
-exec python3 scripts/benchmark/state_drift_bench.py --bakeoff
+exec python3 scripts/benchmark/wastrue_bench.py --bakeoff
