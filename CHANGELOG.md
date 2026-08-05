@@ -4,7 +4,12 @@ All notable changes to dreamd are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-05
+
+### Changed
+
+- **CLI arms that open the Tantivy index no longer hoist a `stdout` / `stderr` lock.** A hoisted `StdoutLock` / `StderrLock` is process-wide, so a command holding one across an index open could deadlock against Tantivy's own logging threads — the root cause behind the `doctor --repair` hang (AILAB-575). `recall`, `score`, and `setup` now write through unlocked `std::io::stdout()` / `stderr()` handles, which lock and release per `writeln!`. The eight arms that still hoist — `archive`, `init`, `migrate`, `reset workspace`, `status`, `uninstall`, `update`, `version` — each carry an inline `// lock-ok (AILAB-583):` rationale naming why they never open an index, and `AGENTS.md` now requires that rationale so a new or changed arm cannot silently reintroduce the hang. No user-visible output change. (AILAB-583 — `crates/dreamd-cli/src/cli.rs`, `AGENTS.md`)
+- **The State-Drift benchmark is now the WasTrue benchmark.** The Oct-2026 third-party eval scaffold was renamed throughout: `scripts/benchmark/state_drift_bench.py` → `wastrue_bench.py`, along with its `--demo` / `--verify-determinism` / `--bakeoff` command references, the benchmark README, and the root README's roadmap row and methodology section. Repository tooling and documentation only — nothing in the shipped `dreamd` binary or the `dreamd-mcp` package changes. (AILAB-593 — `scripts/benchmark/`, `README.md`)
 
 ### Fixed
 
@@ -139,7 +144,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.4...HEAD
+[0.1.0]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.8...v0.1.0
 [0.1.0-rc.4]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.1...v0.1.0-rc.2

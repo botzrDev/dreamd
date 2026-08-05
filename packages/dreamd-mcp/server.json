@@ -6,12 +6,12 @@
     "url": "https://github.com/botzrDev/dreamd",
     "source": "github"
   },
-  "version": "0.1.0-rc.8",
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "dreamd-mcp",
-      "version": "0.1.0-rc.8",
+      "version": "0.1.0",
       "transport": {
         "type": "stdio"
       }
