@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/v0.1-targeting%20Aug%209-orange.svg)](#status)
+[![Status](https://img.shields.io/badge/v0.1.0-released-brightgreen.svg)](#status)
 
 **The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
@@ -137,7 +137,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 | When | What |
 |---|---|
-| **v0.1** (~2026-08-09) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
+| **v0.1** (released) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
 | **v0.1.1** | Windows lifecycle, semantic / embedding recall, LLM-assisted dream cycle (not claimed in v0.1) |
 | **Oct 2026** | WasTrue benchmark publish (dreamd is one row; conflict of interest disclosed) |
 
@@ -167,7 +167,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v0.1 targeting 2026-08-09.** CLI commands available today: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list). npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
+**v0.1.0 is out.** npm package `dreamd-mcp` has held the `latest` dist-tag since 2026-08-06. CLI commands available today: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list). npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
 
 | Layer | Status |
 |---|---|
