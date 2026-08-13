@@ -55,8 +55,8 @@ A fully commented project config parses successfully and yields built-in default
 | Key | Type | Default | Layer | Effect |
 |---|---|---|---|---|
 | `redaction` | boolean | `true` | user, project | When `true`, `POST /api/v1/learn` redacts secrets and PII patterns from `content` before durable write |
-| `log_level` | string | `"info"` | user, project | Daemon log filter: `trace`, `debug`, `info`, `warn`, `error` |
-| `dream_cycle_mode` | string | `"manual"` | user, project | `"manual"` or `"auto"`. v0.1 hard-locks to manual — auto scheduling arrives in v0.1.1 |
+| `log_level` | string | `"info"` | user, project | **Parsed but unused in v0.1.** The live log filter is the `DREAMD_LOG` env var, not this TOML key. |
+| `dream_cycle_mode` | string | `"manual"` | user, project | `"manual"` or `"auto"`. v0.1 is manual-only: `dreamd watch` **hard-errors** if mode is `"auto"` (not a silent ignore). Auto scheduling arrives in v0.1.1 |
 | `provider` | string | `""` | user, project | LLM provider id. **Inert at v0.1** — reserved for v0.1.1 |
 | `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id. **Inert at v0.1** |
 | `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap. **Inert at v0.1** |
@@ -76,18 +76,24 @@ redaction = false
 
 | Value | Meaning |
 |---|---|
-| `manual` | Dream cycles run only when invoked (`dreamd dream`, `POST /api/v1/dream`, MCP) |
-| `auto` | Scheduled cycles (v0.1.1; parsed but not acted on in v0.1) |
+| `manual` | Dream cycles run only when invoked (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. |
+| `auto` | Not supported in v0.1. `dreamd watch` exits with an error if this value is set. |
+
+---
+
+### `log_level`
+
+Present in the init template and merged like any other key, but **no runtime path reads it**. Setting `log_level = "debug"` does not change daemon logs. Use `DREAMD_LOG` instead.
 
 ---
 
 ## Example overrides
 
-**Project-level log verbosity:**
+**Project-level log verbosity (env, not TOML):**
 
-```toml
-# .agent/.dreamd/config.toml
-log_level = "debug"
+```bash
+export DREAMD_LOG=debug
+npx -y dreamd-mcp watch
 ```
 
 **User-wide redaction off (all projects on this machine):**
@@ -97,7 +103,7 @@ log_level = "debug"
 redaction = false
 ```
 
-**Project overrides user for `log_level`, inherits user for `redaction`:**
+**Project overrides user for `log_level` (parsed only), inherits user for `redaction`:**
 
 ```toml
 # ~/.config/dreamd/config.toml
@@ -106,7 +112,8 @@ redaction = false
 
 # .agent/.dreamd/config.toml
 log_level = "debug"
-# → effective: log_level=debug, redaction=false
+# → effective parsed config: log_level=debug, redaction=false
+# → live logs still follow DREAMD_LOG (default info)
 ```
 
 ---
@@ -117,31 +124,35 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 
 | Variable | Default | Used by | Purpose |
 |---|---|---|---|
-| `DREAMD_SOCK` | `~/.agent/dreamd.sock` | MCP client, `dreamd dream` proxy | Override Unix socket path for daemon API connections |
-| `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. **Skips SHA-256 verification.** |
+| `DREAMD_SOCK` | `~/.agent/dreamd.sock` | MCP client, `dreamd dream` proxy, `status`, `archive` | Override Unix socket path for **clients** connecting to the daemon. **`dreamd watch` ignores this** and always binds `$HOME/.agent/dreamd.sock`. |
+| `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. Requires `DREAMD_BIN_ALLOW_UNVERIFIED=1` or the shim exits 1. Skips SHA-256 verification. |
+| `DREAMD_BIN_ALLOW_UNVERIFIED` | unset | `npx dreamd-mcp` shim only | Must be `1` alongside `DREAMD_BIN` to accept an unverified local binary. |
+| `DREAMD_LOG` | `info` | CLI / daemon tracing | Live log filter (`trace`, `debug`, `info`, `warn`, `error`). Not a TOML key. |
 | `HOME` | (OS default) | CLI / daemon layout | Resolves every `~/.agent` path (registry, socket, daemon log). Override in tests/CI sandboxes. |
 
 ### `DREAMD_SOCK`
 
-Useful for testing, multiple daemon instances, or non-standard install layouts:
+**Clients** (MCP, `dreamd dream` when proxying, `status`, `archive`) honor this variable. **`dreamd watch` does not** — it always binds `$HOME/.agent/dreamd.sock`. Setting `DREAMD_SOCK` and then running `watch` leaves clients pointing at a socket the daemon never created.
 
 ```bash
+# Client override only — the daemon must already be listening at this path
 export DREAMD_SOCK=/tmp/my-dreamd.sock
-dreamd watch
+npx -y dreamd-mcp              # connects here
 ```
 
-MCP and CLI clients that proxy to the daemon read this variable before connecting.
+To run a daemon on a non-default path in v0.1, change `$HOME` (which relocates the whole daemon home, including the socket).
 
 ### `DREAMD_BIN`
 
-Local development only — never set in production MCP configs:
+Local development only — never set in production MCP configs. Both variables are required:
 
 ```bash
 export DREAMD_BIN=~/.cargo/bin/dreamd
+export DREAMD_BIN_ALLOW_UNVERIFIED=1
 npx -y dreamd-mcp
 ```
 
-> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+Without `DREAMD_BIN_ALLOW_UNVERIFIED=1` the shim prints an error and exits 1.
 
 See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [../SECURITY.md](../SECURITY.md) for the threat model around both variables.
 
@@ -153,8 +164,7 @@ See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [..
 |---|---|---|
 | Index commit cadence | 5 seconds | Fixed; not user-configurable |
 | Socket permissions | `0600` | Fixed |
-| HTTP bind address | Unix socket only | TCP requires `--insecure` (not in v0.1 release path) |
-| `DREAMD_LOG` | — | Planned; not implemented in config loader yet |
+| HTTP bind address | Unix socket only | No TCP bind and no `--insecure` flag in v0.1 |
 
 ---
 

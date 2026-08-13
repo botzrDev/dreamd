@@ -26,7 +26,7 @@ hit first. The day-to-day view lives in the issue tracker; this is the shape.
 - **Windows lifecycle** — service install and crash-safe atomic writes (see
   [`docs/windows.md`](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
 - **More harness adapters**, including OpenCode.
-- **Semantic indexing** alongside lexical recall.
+- **Semantic indexing** alongside lexical recall — the `LESSONS.md` document layer in the Tantivy index (still BM25 × salience, not embeddings).
 - **LLM-assisted dream cycle** as an opt-in alternative to the deterministic default.
 - Hardening and hot-fixes from launch feedback.
 

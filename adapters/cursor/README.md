@@ -14,11 +14,10 @@ Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.cursor/mcp.j
 ## 2. Start the daemon (recommended)
 
 ```bash
-dreamd watch &
-# or: npx -y dreamd-mcp watch &
+npx -y dreamd-mcp watch &
 ```
 
-Without a daemon, MCP runs in-process (Phase 1). That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
+Without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
 
 ## 3. MCP config
 
@@ -38,7 +37,7 @@ Copy [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) to y
 
 Open a new agent session. Confirm `dreamd` in the MCP tools list with `append_node` and `search_nodes`.
 
-Stderr from the MCP server should show `Phase 2 (Remote backend)` when the daemon is running.
+Stderr from the MCP server should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is running. If no daemon is running there is no default-stderr fallback line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`).
 
 ## 6. Verify
 

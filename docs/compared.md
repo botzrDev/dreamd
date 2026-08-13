@@ -29,7 +29,7 @@ Pulled from [AGENTS.md](../AGENTS.md) v0.1 scope — not a marketing softener:
 - **No vector embeddings at v0.1.** Recall is Tantivy BM25 × salience. Semantic / embedding recall is out of scope until later.
 - **Linux + macOS only at v0.1.** Windows is deferred.
 - **Deterministic-only consolidation at v0.1.** The dream cycle does not call an LLM; LLM-assisted consolidation is later.
-- **No auto dream cycle at v0.1.** `dream_cycle_mode = "auto"` is parsed but not acted on; cycles run when you invoke them (`dreamd dream`, HTTP, MCP). See [configuration.md](./configuration.md).
+- **No auto dream cycle at v0.1.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
 
 Maturity is also a gap: dreamd is a small open-source project (star count date-stamped in the table). On dense-vector recall benchmarks today, we lose — that is intentional substrate work, not a denied shortfall. See [marketing.md](./marketing.md) on natural language vs embeddings.
 

@@ -2,10 +2,11 @@
 
 > **AGENTS.md is what you wrote down. `.agent/` is what your agent learned — across every tool.**
 
-These are two complete, populated `.agent/` workspaces. Clone the repo, open
+These are five complete, populated `.agent/` workspaces. Clone the repo, open
 them, and you can see exactly what dreamd produces — no install, no daemon, no
 API key. Everything here is the file system of truth: plain Markdown and JSONL
-you could edit by hand.
+you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
+`echo >>` the JSONL.
 
 ## Scenarios
 

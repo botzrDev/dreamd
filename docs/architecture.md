@@ -186,9 +186,10 @@ covers the **derived index cache**, which self-heals as described above.
 **durable** store: every persisted episodic record carries
 `schema_version: "1.0.0"` and daemon `state.json` carries
 `schema_version: "1.0"`, on independent version streams, and a `dreamd migrate`
-path must exist before either version changes. `dreamd migrate` is
-unimplemented (DR-108 / v0.1.1). It is the durable store's problem, not the
-index's — do not cite it as a prerequisite for an index schema bump.
+path must exist before either version changes. `dreamd migrate --from 1.0.0 --to 1.0.0`
+is the shipped no-op stub (episodic `RECORD_SCHEMA_VERSION` only). It is the
+durable store's problem, not the index's — do not cite it as a prerequisite for
+an index schema bump.
 
 ### Query-time salience
 
@@ -472,7 +473,7 @@ All API handlers must call `Supervisor::try_send` rather than cloning the raw `t
 `CoordinatorSendError::Full`, which the Axum layer maps to HTTP 503 +
 `Retry-After: 1` and emits a structured tracing event
 (`dreamd_event="shed_load" route=... queue_depth=...`). On `CoordinatorSendError::Closed`
-the daemon is shutting down; the response is 503 with no retry header.
+the daemon is shutting down; the response is 500 `"coordinator unavailable"` with no retry header.
 
 **Why a method, not `sender()`:** `sender()` exists for the UDS connection pattern where
 each task owns a raw clone and manages its own lifetime. HTTP handlers hold

@@ -64,7 +64,7 @@ Each result carries `metadata.skill_action` (its cluster key) and `metadata.sour
 | `importance`       | number | no       | 0–10. How broadly applicable is this? Default 5.0.                                                                |
 | `client_dedup_key` | string | no       | Idempotency key. First 60 chars of content, lowercased, spaces → underscores. Prevents duplicate writes on retry. |
 
-Returns 201 after `fdatasync`. The write is durable before the response arrives.
+Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d the JSONL line (fdatasync-equivalent on Unix). The HTTP learn path returns 201; the MCP tool does not.
 
 **Call `append_node` when:**
 
@@ -138,13 +138,9 @@ append_node({
 
 ## The dream cycle
 
-dreamd periodically consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. When a `skill_action` cluster recurs enough (≥ 3 events in a 7- or 30-day window), dreamd writes a lesson to `LESSONS.md`. You can trigger this manually:
+dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. Clusters with ≥ 3 events in a 7- or 30-day window are promotion candidates; each cycle writes **one** lesson — the highest-salience exemplar from the top cluster. Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install).
 
-```
-dreamd dream
-```
-
-You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Your edits are respected on the next read.
+You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Hand-edits are visible until the next dream cycle, which replaces the file wholesale. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
 
 ---
 
@@ -154,11 +150,11 @@ You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Your edits ar
 .agent/
   episodic/AGENT_LEARNINGS.jsonl   # append-only event log — written by append_node
   semantic/LESSONS.md              # consolidated lessons — written by dream cycle
-  personal/PREFERENCES.md          # user preferences — never leaves your machine
+  personal/PREFERENCES.md          # user preferences — committed with `.agent/` unless you gitignore it
   .dreamd/                         # implementation state — gitignored
 ```
 
-All files are UTF-8 plaintext. `.agent/` is checked into git. You can `cat`, `grep`, `git diff`, and hand-edit any file. The agent reads your edits.
+All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`). You can `cat`, `grep`, and `git diff` the store. Durable appends go through `append_node`; the dream cycle overwrites `LESSONS.md`.
 
 ---
 
@@ -166,7 +162,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git. You can `cat`, `gr
 
 - Not a replacement for `AGENTS.md` or `SKILL.md`. Those are human-authored project rules; `.agent/` is machine-written runtime memory. They work together.
 - Not a vector database. v0.1 uses BM25 lexical recall. Semantic/embedding recall is on the roadmap.
-- Not a hosted service. v0.1 makes zero network calls. Everything stays on your machine.
+- Not a hosted service. The daemon makes zero network calls in v0.1. (`npx` downloads the prebuilt binary from GitHub on first run.) Everything in `.agent/` stays on your machine.
 
 ---
 

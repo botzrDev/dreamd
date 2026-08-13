@@ -76,7 +76,7 @@ export DREAMD_BIN_ALLOW_UNVERIFIED=1
 npx -y dreamd-mcp
 ```
 
-> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+> First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
 
 ## Uninstall / reset
 
@@ -107,8 +107,8 @@ Safe to run twice — a second run succeeds with nothing left to do.
 
 Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, and every
 project's `.agent/` memory store. To wipe a project's store entirely, see
-[Full fresh store](../../docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
-in the troubleshooting guide — delete `.agent/` and re-run `dreamd init`. That is
+[Full fresh store](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
+in the troubleshooting guide — delete `.agent/` and re-run `npx -y dreamd-mcp init`. That is
 destructive; back up first if the store has value.
 
 **Then remove the client config entry.** Delete the `dreamd` MCP server block from

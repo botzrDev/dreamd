@@ -181,6 +181,15 @@ pub enum IndexerMsg {
         event_ids: Vec<EventId>,
         response: oneshot::Sender<Result<(), IndexError>>,
     },
+    /// Dream-cycle hook (DR-211 / AILAB-205): re-read `semantic/LESSONS.md`,
+    /// replace every `layer=semantic` document with the file's current lesson
+    /// set, then commit. Lets a running daemon pick up the lessons consolidation
+    /// just wrote without waiting for a restart. Never touches episodic
+    /// documents or the episodic watermark. Resolves after the commit completes.
+    IndexSemanticLessons {
+        agent_root: AgentRoot,
+        response: oneshot::Sender<Result<(), IndexError>>,
+    },
 }
 
 /// Owning handle for the spawned indexer task. Constructed inside
@@ -264,14 +273,32 @@ impl TantivyIndexHandle {
             add_document(&mut writer, &fields, event, count)?;
             latest_committed = Some(event.id.as_str().to_owned());
         }
-        if !to_index.is_empty() {
+        // DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same rebuild,
+        // after the episodic replay and before the single commit below. One
+        // insertion point covers three recovery paths — cold start, the
+        // schema-migration rebuild above, and `dreamd doctor --repair` (which
+        // reopens through this same function, so `doctor.rs` needs no change).
+        let semantic = index_semantic_lessons(&mut writer, &fields, agent_root)?;
+
+        // The semantic pass has its own reason to commit: after a crash between
+        // the LESSONS.md write and the Tantivy commit, the episodic watermark is
+        // already current, so `to_index` is empty and the old
+        // `!to_index.is_empty()` gate would have skipped the commit and dropped
+        // the replayed lessons on the floor.
+        let needs_commit = !to_index.is_empty() || semantic.touched;
+        if needs_commit {
             writer.commit().map_err(tantivy_to_index)?;
-            write_progress(
-                &progress_path,
-                &IndexProgress {
-                    last_indexed_id: latest_committed.clone(),
-                },
-            )?;
+            // Watermark tracks the episodic log only. The semantic pass is a
+            // wholesale delete-then-add and is idempotent by construction, so it
+            // deliberately has no watermark of its own (AILAB-205 §3 step 3).
+            if !to_index.is_empty() {
+                write_progress(
+                    &progress_path,
+                    &IndexProgress {
+                        last_indexed_id: latest_committed.clone(),
+                    },
+                )?;
+            }
             // The reader was created before this replay commit and uses the
             // default `ReloadPolicy::OnCommitWithDelay`, so the first query
             // after open would otherwise see a stale (pre-replay) view until
@@ -357,6 +384,28 @@ impl TantivyIndexHandle {
             .sender()
             .send(IndexerMsg::PruneDecayedEvents {
                 event_ids,
+                response: tx,
+            })
+            .await
+            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
+        rx.await
+            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+    }
+
+    /// Re-index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
+    /// documents (DR-211 / AILAB-205). Called by the dream cycle after
+    /// consolidation rewrites the file so a live daemon serves the new lessons
+    /// without a restart.
+    ///
+    /// Idempotent: the pass deletes every semantic document and re-adds the
+    /// file's current lesson set, so running it twice is indistinguishable from
+    /// running it once. A missing LESSONS.md is a silent no-op.
+    pub async fn index_semantic_lessons(&self, agent_root: AgentRoot) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.indexer
+            .sender()
+            .send(IndexerMsg::IndexSemanticLessons {
+                agent_root,
                 response: tx,
             })
             .await
@@ -468,6 +517,18 @@ async fn run_indexer(
                             &fields,
                             &agent_root,
                         );
+                        let _ = response.send(result);
+                    }
+                    Some(IndexerMsg::IndexSemanticLessons { agent_root, response }) => {
+                        let result = (|| -> Result<(), IndexError> {
+                            let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root)?;
+                            // No delete/add was issued (missing or unreadable
+                            // LESSONS.md) — nothing to commit.
+                            if outcome.touched {
+                                writer.commit().map_err(tantivy_to_index)?;
+                            }
+                            Ok(())
+                        })();
                         let _ = response.send(result);
                     }
                     Some(IndexerMsg::PruneDecayedEvents { event_ids, response }) => {
@@ -595,6 +656,176 @@ fn apply_recurrence_sidecar_inner(
     writer.commit().map_err(tantivy_to_index)?;
     Ok(())
 }
+
+/// What one semantic (LESSONS.md) indexing pass did.
+///
+/// `touched` records whether the pass issued any delete/add operation, so the
+/// caller knows a commit is required. It is `true` from the wholesale delete
+/// onward — even when every lesson was skipped, because the delete alone
+/// changes the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SemanticPassOutcome {
+    /// Lessons added as `layer=semantic` documents.
+    pub(crate) indexed: usize,
+    /// Lessons dropped because their exemplar event was not in the episodic log.
+    pub(crate) skipped: usize,
+    /// `true` once the pass has mutated the writer (delete and/or add).
+    pub(crate) touched: bool,
+}
+
+/// Identity token for a lesson document: the exemplar's id in a distinct
+/// namespace (DR-211 / AILAB-205).
+///
+/// Load-bearing, not cosmetic. Both existing delete sites key on the raw
+/// `event_id` term — the decay pruner and the recurrence sidecar — so a lesson
+/// carrying its exemplar's id verbatim would be deleted alongside the event,
+/// and the sidecar would re-add only the episodic document. A separate
+/// namespace keeps both paths correct without touching either. It also keeps
+/// lessons out of decay entirely: the pruner's candidate ids come from the
+/// JSONL, which holds no `lsn_` records.
+fn semantic_event_id(lesson_id: &str) -> String {
+    format!("lsn_{lesson_id}")
+}
+
+/// Count the episodic events belonging to `cluster_key`, using the same prefix
+/// semantics `consolidation` promotes with.
+///
+/// `compute_promoted_clusters` promotes at the *deepest* prefix that met the
+/// threshold, so member events routinely carry longer leaf keys — three events
+/// under `rust::eh::unwrap` and two under `rust::eh::expect` can promote as
+/// `rust::eh`. An exact-match count would report 0 members for exactly those
+/// clusters, and `recurrence` feeds the salience product.
+fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
+    let child_prefix = format!("{cluster_key}::");
+    events
+        .iter()
+        .filter(|ev| ev.skill_action == cluster_key || ev.skill_action.starts_with(&child_prefix))
+        .count() as u64
+}
+
+/// Index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
+/// documents (DR-211 / AILAB-205).
+///
+/// Wholesale replace: delete every semantic document, then add the file's
+/// current lesson set. LESSONS.md is rewritten in full each dream cycle, so the
+/// index mirrors that — a lesson dropped between cycles disappears, and a
+/// cluster that stops recurring retires structurally with no expiry logic.
+///
+/// Does **not** commit. The caller owns the commit so this pass can share the
+/// episodic replay's single commit inside [`TantivyIndexHandle::open`].
+///
+/// Tolerate-and-report, in the posture `episodic::read_all` uses: a missing
+/// LESSONS.md is the normal pre-first-dream state and returns an untouched
+/// outcome silently; an unreadable or malformed one logs at `warn!` and also
+/// returns untouched. The parse deliberately happens **before** the delete, so
+/// a corrupt file can never drop the previously indexed lessons.
+fn index_semantic_lessons(
+    writer: &mut IndexWriter<TantivyDocument>,
+    fields: &SchemaFields,
+    agent_root: &AgentRoot,
+) -> Result<SemanticPassOutcome, IndexError> {
+    let lessons_path = agent_root.lessons_md();
+    let lessons_file = match crate::lessons::read_lessons_file(&lessons_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Pre-first-dream state, not an error and not worth a log line.
+            return Ok(SemanticPassOutcome::default());
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %lessons_path.display(),
+                error = %e,
+                "LESSONS.md unreadable; leaving the index untouched"
+            );
+            return Ok(SemanticPassOutcome::default());
+        }
+    };
+
+    // Only read the episodic log once we know there is a LESSONS.md to index,
+    // so a project that has never dreamed pays no extra I/O here.
+    let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
+    let exemplars: HashMap<&str, &AgentLearning> =
+        events.iter().map(|ev| (ev.id.as_str(), ev)).collect();
+    let member_count = cluster_member_count(&events, &lessons_file.cluster_key);
+
+    // `layer` is STRING (raw-tokenized), so this exact-match term hits every
+    // semantic document and zero episodic ones. Deleting by the file's
+    // clustering key instead would take every episodic event in it as well.
+    let term = tantivy::Term::from_field_text(fields.layer, Layer::Semantic.as_str());
+    writer.delete_term(term);
+
+    let mut outcome = SemanticPassOutcome {
+        indexed: 0,
+        skipped: 0,
+        touched: true,
+    };
+    for lesson in &lessons_file.lessons {
+        let Some(exemplar) = exemplars.get(lesson.id.as_str()) else {
+            tracing::warn!(
+                lesson_id = %lesson.id,
+                cluster_key = %lessons_file.cluster_key,
+                path = %lessons_path.display(),
+                "lesson exemplar is not in the episodic log; skipping the lesson \
+                 (indexing it without the exemplar's pain/importance would produce \
+                 a document that scores 0.0 and can never rank)"
+            );
+            outcome.skipped += 1;
+            continue;
+        };
+        add_semantic_document(
+            writer,
+            fields,
+            &lessons_file,
+            lesson,
+            exemplar,
+            member_count,
+        )?;
+        outcome.indexed += 1;
+    }
+
+    Ok(outcome)
+}
+
+/// Map one [`crate::lessons::Lesson`] onto a `layer=semantic` Tantivy document.
+///
+/// `pain` and `importance` are inherited from the exemplar event because a
+/// lesson has none of its own: `collector::recall` reads both fast fields with
+/// `unwrap_or(0.0)` and the salience product multiplies by each, so a lesson
+/// indexed without them would score exactly 0.0 and never surface.
+///
+/// `source_harness` is the literal `"dreamd"` rather than the exemplar's
+/// harness — a promoted cluster spans harnesses, so attributing the synthesized
+/// lesson to one contributor would misreport provenance. The exemplar (and its
+/// harness) stay one hop away through `event_id`.
+fn add_semantic_document(
+    writer: &mut IndexWriter<TantivyDocument>,
+    fields: &SchemaFields,
+    lessons_file: &crate::lessons::LessonsFile,
+    lesson: &crate::lessons::Lesson,
+    exemplar: &AgentLearning,
+    member_count: u64,
+) -> Result<(), IndexError> {
+    let last_updated_sec = lessons_file.last_updated.timestamp() as u64;
+    let doc = doc!(
+        fields.content => lesson.content.clone(),
+        fields.timestamp_sec => exemplar.timestamp.timestamp() as u64,
+        fields.pain => exemplar.pain as f64,
+        fields.importance => exemplar.importance as f64,
+        fields.recurrence => member_count,
+        fields.layer => Layer::Semantic.as_str().to_string(),
+        fields.last_updated_sec => last_updated_sec,
+        fields.cited_event_count => member_count,
+        fields.event_id => semantic_event_id(&lesson.id),
+        fields.skill_action => lessons_file.cluster_key.clone(),
+        fields.source_harness => SEMANTIC_SOURCE_HARNESS.to_string(),
+    );
+    writer.add_document(doc).map_err(tantivy_to_index)?;
+    Ok(())
+}
+
+/// `source_harness` stamped on every lesson document. The dream cycle authored
+/// it, not any one harness.
+const SEMANTIC_SOURCE_HARNESS: &str = "dreamd";
 
 /// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
 /// `layer` is always [`Layer::Episodic`] in v0.1; semantic indexing is WEG-136.
@@ -1976,6 +2207,187 @@ mod tests {
         assert!(
             !is_schema_incompatible(&io_err),
             "a permission error must not trigger a wipe: {io_err:?}"
+        );
+    }
+
+    // DR-211 / AILAB-205 — semantic (LESSONS.md) pass, pure-helper unit level.
+    // End-to-end recall behavior lives in tests/semantic_indexing.rs.
+
+    /// In-RAM writer, so these cases exercise the pass without a 50 MB
+    /// on-disk writer heap or a tokio task.
+    fn ram_writer() -> (Index, IndexWriter<TantivyDocument>, SchemaFields) {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let writer = index.writer(15_000_000).expect("create writer");
+        (index, writer, fields)
+    }
+
+    fn write_lessons(
+        agent_root: &AgentRoot,
+        cluster_key: &str,
+        lessons: Vec<crate::lessons::Lesson>,
+    ) {
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        crate::lessons::write_lessons_file(
+            &agent_root.lessons_md(),
+            &crate::lessons::LessonsFile {
+                last_updated: DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
+                cluster_key: cluster_key.to_string(),
+                lessons,
+            },
+        )
+        .expect("write LESSONS.md");
+    }
+
+    fn lesson(id: &str, content: &str) -> crate::lessons::Lesson {
+        crate::lessons::Lesson {
+            id: id.to_string(),
+            content: content.to_string(),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn cluster_member_count_counts_children_by_prefix() {
+        // consolidation promotes at the deepest prefix that met the threshold,
+        // so leaf events must count toward the promoted parent.
+        let events = vec![
+            sample_learning(make_event_id('0'), "rust::eh", "a"),
+            sample_learning(make_event_id('1'), "rust::eh::unwrap", "b"),
+            sample_learning(make_event_id('2'), "rust::eh::expect", "c"),
+            // Sibling with a shared textual prefix but a different segment —
+            // must NOT count.
+            sample_learning(make_event_id('3'), "rust::ehlers", "d"),
+            sample_learning(make_event_id('4'), "python::pytest", "e"),
+        ];
+        assert_eq!(cluster_member_count(&events, "rust::eh"), 3);
+        assert_eq!(cluster_member_count(&events, "rust::eh::unwrap"), 1);
+        assert_eq!(cluster_member_count(&events, "python::pytest"), 1);
+        assert_eq!(cluster_member_count(&events, "go::testing"), 0);
+    }
+
+    #[test]
+    fn semantic_event_id_namespaces_the_exemplar_id() {
+        let raw = make_event_id('0');
+        let id = semantic_event_id(raw.as_str());
+        assert!(
+            id.starts_with("lsn_"),
+            "lesson ids carry the lsn_ namespace"
+        );
+        assert_ne!(
+            id,
+            raw.as_str(),
+            "a lesson must never carry its exemplar's raw id — both delete \
+             paths key on event_id"
+        );
+        assert!(
+            id.ends_with(raw.as_str()),
+            "provenance stays one hop away: the exemplar id is recoverable"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_is_untouched_when_lessons_md_is_missing() {
+        let dir = unique_tmpdir("sem-missing");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(outcome, SemanticPassOutcome::default());
+        assert!(
+            !outcome.touched,
+            "pre-first-dream state must not force a commit"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_is_untouched_when_lessons_md_is_malformed() {
+        let dir = unique_tmpdir("sem-malformed");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        std::fs::write(agent_root.lessons_md(), b"not frontmatter\n").unwrap();
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert!(
+            !outcome.touched,
+            "a malformed LESSONS.md must not delete the already-indexed lessons"
+        );
+        assert_eq!(outcome.indexed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn semantic_pass_skips_a_lesson_whose_exemplar_is_absent() {
+        let dir = unique_tmpdir("sem-no-exemplar");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let present = make_event_id('0');
+        prime_jsonl(
+            &dir,
+            &[sample_learning(
+                present.clone(),
+                "rust::eh",
+                "borrow checker",
+            )],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(present.as_str(), "prefer ? over unwrap"),
+                lesson("evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ", "orphaned lesson"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(outcome.indexed, 1);
+        assert_eq!(
+            outcome.skipped, 1,
+            "a lesson with no exemplar has no pain/importance to inherit and \
+             must be skipped, not indexed at score 0.0"
+        );
+        assert!(outcome.touched);
+    }
+
+    #[test]
+    fn semantic_pass_reports_indexed_count_for_a_full_file() {
+        let dir = unique_tmpdir("sem-full");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let a = make_event_id('0');
+        let b = make_event_id('1');
+        prime_jsonl(
+            &dir,
+            &[
+                sample_learning(a.clone(), "rust::eh", "one"),
+                sample_learning(b.clone(), "rust::eh::unwrap", "two"),
+            ],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(a.as_str(), "lesson one"),
+                lesson(b.as_str(), "lesson two"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(
+            outcome,
+            SemanticPassOutcome {
+                indexed: 2,
+                skipped: 0,
+                touched: true
+            }
         );
     }
 }

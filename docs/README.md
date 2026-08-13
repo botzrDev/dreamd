@@ -24,6 +24,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [troubleshooting.md](./troubleshooting.md) | Users | FAQ — symptom → cause → fix |
 | [operator-handbook.md](./operator-handbook.md) | Operators | Manual store-maintenance runbook (e.g. `archive --force-unpin`) |
 | [migrate.md](./migrate.md) | Operators | `dreamd migrate` — episodic schema migration (v0.1 no-op stub), `--from`/`--to` tokens, `.bak` behavior |
+| [windows.md](./windows.md) | Operators | v0.1.1 deferral — why native Windows is out of scope in v0.1 |
 | [glossary.md](./glossary.md) | Everyone | Domain term definitions |
 
 ## Marketing & narrative

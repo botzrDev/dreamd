@@ -1,10 +1,10 @@
 # HTTP API reference
 
-dreamd exposes a small REST API over a **Unix domain socket** at `~/.agent/dreamd.sock` (override with `DREAMD_SOCK`). There is no TCP listener in v0.1.
+dreamd exposes a small REST API over a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`). There is no TCP listener in v0.1.
 
 All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header. On Unix, the daemon also enforces **peer UID matching** via `SO_PEERCRED` / `getpeereid` — only the user who started the daemon may connect.
 
-**Canonical source:** `crates/dreamd-core/src/server/http.rs`
+**Canonical source:** `crates/dreamd-core/src/server/http/` (`router.rs`, `handlers/`)
 
 ---
 
@@ -86,7 +86,7 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 | `timestamp` | string (RFC 3339) | Yes | Placeholder accepted; server overwrites with daemon-minted UTC timestamp at durable write |
 | `pain` | number | Yes | `0.0`–`10.0` inclusive |
 | `importance` | number | Yes | `0.0`–`10.0` inclusive |
-| `pinned` | boolean | No | Default `false`; reserved for v0.2 |
+| `pinned` | boolean | No | Default `false`. Live in v0.1: dream-cycle pin union keeps pinned events through decay; `dreamd archive --force-unpin` clears pins. |
 | `skill_action` | string | Yes | Clustering key; normalized and validated (see below) |
 | `source_harness` | string | Yes | Provenance tag, e.g. `"cursor"`, `"claude-code"` |
 | `content` | string | Yes | Free-text body; max ~4 KiB serialized line (413 if exceeded) |

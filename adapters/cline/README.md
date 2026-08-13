@@ -2,14 +2,13 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Round-trip works in both Phase 1 (in-process) and Phase 2 (daemon) as of v0.1.0-rc.3.
+> **Status:** Round-trip works both in-process and via the daemon proxy as of v0.1.0. Native Windows is out of scope for v0.1 — use WSL2 or a Linux/macOS host. The Windows settings path below is for Cline-on-Windows only; dreamd itself does not run natively there yet.
 
 ## 1. Init the project store
 
 ```bash
 cd ~/your-project
-dreamd init
-# or: npx -y dreamd-mcp init
+npx -y dreamd-mcp init
 ```
 
 Cline must open a project that already has `.agent/`. Without it, `append_node` errors with `coordinator unavailable: no agent root found`.
@@ -60,18 +59,18 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
 
 ## 3. Daemon (optional)
 
-Phase 1 (no daemon) is enough to validate the append → search round-trip. For multi-agent or high-frequency recall, start:
+In-process (no daemon) is enough to validate the append → search round-trip. For multi-agent or high-frequency recall, start:
 
 ```bash
-dreamd watch
+npx -y dreamd-mcp watch
 ```
 
 Check Cline's output channel for:
 
 | Stderr line | Meaning |
 |---|---|
-| `Phase 2 (Remote backend)` | Daemon connected |
-| `Phase 1 fallback` | In-process server |
+| `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` | Daemon connected |
+| (no default-stderr line; `DREAMD_LOG=debug` logs `daemon not found … running in-process`) | In-process server |
 
 ## 4. Reload Cline
 

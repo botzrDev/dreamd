@@ -24,7 +24,7 @@ without MCP — a documentation snippet that teaches the agent the same behavior
 For any MCP-capable harness:
 
 1. Set the project up: `npx -y dreamd-mcp setup` (or `dreamd setup`).
-   > First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+   > First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
    This scaffolds `.agent/` and writes the dreamd MCP block for the harness you
    pick (`--harness claude|cursor|both|none`; `--yes` for non-interactive shells).
    Harnesses that require an existing `.agent/` (e.g. Cline) fail with
@@ -57,8 +57,11 @@ a `CONVENTIONS.md`, or an agent-rule file — that tells the agent to:
 
 - **Recall** by reading `.agent/semantic/LESSONS.md` (and, if needed, the episodic
   log `.agent/episodic/AGENT_LEARNINGS.jsonl`) before starting work.
-- **Append** new learnings in the `AgentLearning` shape from [`SPEC.md`](../SPEC.md),
-  including `source_harness` and a `skill_action` cluster key.
+- **Append** new learnings via Unix-socket `POST /api/v1/learn` (placeholder
+  `EventId` / `timestamp` / `schema_version`; see [http-api.md](./http-api.md)).
+  Never `echo >>` or hand-edit `AGENT_LEARNINGS.jsonl` — durable appends go
+  through the coordinator. Include `source_harness` and a `skill_action` cluster
+  key.
 
 In-repo patterns to copy from:
 

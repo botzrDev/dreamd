@@ -195,6 +195,9 @@ async fn run_index_phases(
             if !decay_result.decayed_ids.is_empty() {
                 prune_decayed_events(&sender, decay_result.decayed_ids.clone()).await?;
             }
+            // DR-211: consolidation rewrote LESSONS.md earlier in this cycle;
+            // fold the new lesson set into the live index without a restart.
+            index_semantic_lessons(agent_root, &sender).await?;
             Ok(())
         }
         IndexBackend::FreshHandle => {
@@ -210,6 +213,10 @@ async fn run_index_phases(
                     .prune_decayed_events(decay_result.decayed_ids.clone())
                     .await?;
             }
+            // `open()` above already ran the semantic pass; re-running it after
+            // the sidecar and prune commits is idempotent (delete every semantic
+            // document, re-add the current lesson set).
+            handle.index_semantic_lessons(agent_root.clone()).await?;
             Ok(())
         }
     }
@@ -231,6 +238,37 @@ async fn apply_recurrence_sidecar_if_present(
     let (tx, rx) = oneshot::channel();
     sender
         .send(IndexerMsg::ApplyRecurrenceSidecar {
+            agent_root: agent_root.clone(),
+            response: tx,
+        })
+        .await
+        .map_err(|_| crate::server::index_map::IndexError("indexer channel closed".to_string()))?;
+    rx.await.map_err(|_| {
+        crate::server::index_map::IndexError("indexer dropped response".to_string())
+    })??;
+    Ok(())
+}
+
+/// Ask the live indexer to re-index `semantic/LESSONS.md` (DR-211 / AILAB-205).
+/// Sender-only mirror of [`TantivyIndexHandle::index_semantic_lessons`] for the
+/// daemon path, which holds a channel rather than the handle.
+///
+/// Unconditional: unlike the recurrence sidecar there is no "file present"
+/// pre-check, because the pass must also run to clear stale semantic documents
+/// after a cycle that removed LESSONS.md.
+///
+/// [`TantivyIndexHandle::index_semantic_lessons`]: crate::server::TantivyIndexHandle::index_semantic_lessons
+#[cfg(unix)]
+async fn index_semantic_lessons(
+    agent_root: &AgentRoot,
+    sender: &tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>,
+) -> Result<(), DreamCycleError> {
+    use crate::server::tantivy_handle::IndexerMsg;
+    use tokio::sync::oneshot;
+
+    let (tx, rx) = oneshot::channel();
+    sender
+        .send(IndexerMsg::IndexSemanticLessons {
             agent_root: agent_root.clone(),
             response: tx,
         })

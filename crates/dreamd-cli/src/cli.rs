@@ -302,7 +302,7 @@ pub struct UpdateArgs {
 /// Render the `dreamd(1)` man page from the clap definition.
 ///
 /// Used by the `generate_man` bin; exposed so tests can assert the page
-/// renders without writing `doc/dreamd.1`.
+/// renders without writing `docs/dreamd.1`.
 pub fn render_man_page() -> std::io::Result<Vec<u8>> {
     use clap::CommandFactory;
     use clap_mangen::Man;

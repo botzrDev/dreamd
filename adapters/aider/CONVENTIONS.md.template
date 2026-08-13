@@ -38,7 +38,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 ```
 
 - `pain` and `importance` are 0.0–10.0. Higher = more salient.
-- `skill_action` follows the `language::domain::specific` convention — see [SPEC.md](../../SPEC.md) (`AgentLearning` table) for full rules. Lowercase `[a-z0-9_]` segments joined by `::`. Examples: `rust::error_handling`, `python::api_design`, `typescript::types::branded`.
+- `skill_action` follows the `language::domain::specific` convention — see [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md) (`AgentLearning` table) for full rules. Lowercase `[a-z0-9_]` segments joined by `::`. Examples: `rust::error_handling`, `python::api_design`, `typescript::types::branded`.
 - `source_harness` is `"aider"`. This lets dreamd attribute learnings across harnesses.
 - `id` and `schema_version` are placeholders — the daemon overwrites them. `timestamp` is also overwritten at durable write.
 - `X-Client-Dedup-Key` is optional. If two appends share the same key in the same project, the second returns the original `id` with `"deduplicated": true`.

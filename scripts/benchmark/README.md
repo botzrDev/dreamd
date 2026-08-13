@@ -15,6 +15,6 @@ export ZEP_API_KEY=...
 python3 scripts/benchmark/wastrue_bench.py --bakeoff
 ```
 
-`dreamd` uses a throwaway `HOME` sandbox (see `scripts/alpha/alpha-suite.sh`). Build the binary first: `cargo build -p dreamd-cli`.
+`dreamd` uses a throwaway `HOME` sandbox (see `scripts/alpha/alpha-suite.sh`). Build the binary first: `cargo build -p dreamd --bin dreamd`. The harness looks for it at `target/debug/dreamd`, so this must be a debug build.
 
 Design doc: [Linear — bake-off harness v0](https://linear.app/wegetit/document/state-drift-benchmark-bake-off-harness-v0-scaffold-verified-d5babfc6700a).

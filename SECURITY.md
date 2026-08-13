@@ -17,11 +17,12 @@ We follow a coordinated-disclosure model: please give us a reasonable window to 
 
 ## Supported versions
 
-`dreamd` is pre-release. Until v0.1.0, only the `main` branch is supported and only the latest commit receives security fixes. After v0.1.0 this table will be updated to reflect supported minor versions.
+Security fixes land on `main` and the latest `0.1.x` release.
 
 | Version | Supported |
 |---|---|
-| `main` (pre-v0.1) | Yes |
+| `0.1.0` | Yes |
+| `main` | Yes |
 | Anything else | No |
 
 ## Threat model (summary)

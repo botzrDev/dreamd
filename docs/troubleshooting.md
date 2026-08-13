@@ -2,6 +2,8 @@
 
 Symptom → cause → fix → prevention. For deeper reference see [http-api.md](./http-api.md), [configuration.md](./configuration.md), and [SECURITY.md](../SECURITY.md).
 
+Commands below use the cargo-installed `dreamd` binary. On the npm path the shim does **not** put `dreamd` on `PATH` — use `npx -y dreamd-mcp <cmd>` for `init`, `setup`, `watch`, `doctor`, `dream`, `reset`, `uninstall`, `update`, and `version`. The shim does **not** forward `status`, `recall`, `score`, `archive`, or `migrate`; those need `cargo install --path crates/dreamd-cli`.
+
 ---
 
 ## Daemon won't start — address already in use
@@ -35,21 +37,21 @@ dreamd watch
 
 1. `npx dreamd-mcp` not installed / wrong package name (`dreamd-mcp`, not scoped)
 2. No `.agent/` in the project — server boots empty backend
-3. Daemon expected but not running (Phase 2)
-4. Wrong `DREAMD_SOCK` override pointing at a dead path
+3. Daemon expected but not running (Remote / daemon proxy)
+4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`)
 
 **Fix:**
 
 ```bash
-dreamd init                    # creates .agent/ + registry entry
-dreamd watch &                 # if you want Phase 2 daemon bridge
-npx -y dreamd-mcp      # test stdio server manually
-dreamd doctor                  # verify store health
+npx -y dreamd-mcp init         # creates .agent/ + registry entry
+npx -y dreamd-mcp watch &      # if you want the daemon proxy
+npx -y dreamd-mcp              # test stdio server manually
+npx -y dreamd-mcp doctor       # verify store health
 ```
 
-Check MCP stderr for `Phase 1 fallback` vs `Phase 2 (Remote backend)`.
+Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)`. If no daemon is running there is no default-stderr fallback line; `DREAMD_LOG=debug` logs `daemon not found … running in-process`.
 
-**Prevention:** Run `dreamd init` before first MCP session. For multi-agent setups, start `dreamd watch` once per machine.
+**Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per machine.
 
 ---
 
@@ -62,8 +64,10 @@ Check MCP stderr for `Phase 1 fallback` vs `Phase 2 (Remote backend)`.
 **Fix:** Restart the daemon or run any command that triggers WAL recovery:
 
 ```bash
-dreamd watch          # recovers on startup before serving
-dreamd doctor         # inspect last_dream_cycle_status
+npx -y dreamd-mcp watch    # recovers on startup before serving
+dreamd status              # last_dream_cycle (cargo-installed `dreamd`; npm shim does not forward `status`)
+# or: cat .agent/.dreamd/state.json
+npx -y dreamd-mcp doctor   # dream-cycle mode + index health; use --repair to rebuild a stale index
 ```
 
 Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `failed`. See [examples/crash-recovery/](../examples/crash-recovery/).
@@ -76,18 +80,18 @@ Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `
 
 **Symptom:** Torn JSONL lines, interleaved records, or lost appends.
 
-**Cause:** Two **standalone** MCP servers (Phase 1) writing to the same `.agent/` without a shared daemon.
+**Cause:** Two **standalone** in-process MCP servers writing to the same `.agent/` without a shared daemon.
 
 **Fix:**
 
 ```bash
 # One serialized writer for the machine
-dreamd watch
+npx -y dreamd-mcp watch
 ```
 
-Point all harnesses at MCP — they auto-bridge to Phase 2 when the socket is up.
+Point all harnesses at MCP — they auto-bridge to the daemon proxy when the socket is up.
 
-**Prevention:** Never run two `dreamd mcp` / `npx dreamd-mcp` processes against one project without `dreamd watch`. See [GUIDE.md](../GUIDE.md) §6.
+**Prevention:** Never run two `npx -y dreamd-mcp` / `dreamd mcp` processes against one project without a shared `watch` daemon. See [GUIDE.md](../GUIDE.md) §6.
 
 ---
 
@@ -179,7 +183,7 @@ For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (s
 | Read-after-write window | Wait up to 5 s after append (index commit cadence) |
 | Query mismatch | Try broader terms from known `content` |
 | Wrong project | Verify `X-Agent-Root` / MCP project discovery points at this repo |
-| Index stale | `dreamd doctor`; rebuild index if needed |
+| Index stale | `npx -y dreamd-mcp doctor`; rebuild with `dreamd doctor --repair` (cargo-installed `dreamd`, or `npx -y dreamd-mcp doctor --repair`) |
 
 **Fix:**
 
@@ -196,7 +200,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ## Still stuck?
 
-1. `dreamd doctor` — cycle status, config mode
+1. `npx -y dreamd-mcp doctor` — dream-cycle mode and index health; `dreamd status` for last cycle (cargo-installed binary)
 2. [docs/ci.md](./ci.md) — reproduce CI gates locally
 3. [GitHub Discussions](https://github.com/botzrDev/dreamd/discussions) for usage questions
 4. [SECURITY.md](../SECURITY.md) for vulnerability reports (not public issues)

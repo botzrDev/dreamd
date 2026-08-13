@@ -9,8 +9,8 @@ Linux and macOS.
 **Windows durable writes land in v0.1.1.** Until then, the atomic-write path
 returns [`std::io::ErrorKind::Unsupported`] on Windows rather than silently
 falling back to a non-atomic write that could corrupt the store on a crash.
-The daemon, MCP server, and read paths are otherwise portable; only the
-crash-safe write path is gated.
 
-Windows lifecycle support (service install, atomic writes) is tracked in the
-v0.1.1 milestone.
+Native Windows is out of scope for v0.1: `dreamd watch` and the UDS MCP Remote
+path are Unix-only (`#![cfg(unix)]`). Use WSL2 or a Linux/macOS host. Windows
+lifecycle support (service install, atomic writes, TCP + `auth.json`) is tracked
+in the v0.1.1 milestone.

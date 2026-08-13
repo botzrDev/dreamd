@@ -35,8 +35,7 @@ Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.mcp.json` at
 For a single agent, the in-process MCP server is sufficient. If **several agents write to the same project simultaneously**, start one shared daemon:
 
 ```bash
-dreamd watch
-# or: npx -y dreamd-mcp watch
+npx -y dreamd-mcp watch
 ```
 
 ## 4. Reload Claude Code

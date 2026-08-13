@@ -9,12 +9,12 @@
    cd ~/your-project
    npx -y dreamd-mcp init
    ```
-   > First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+   > First run prints a local-only privacy disclosure.
    This scaffolds `.agent/` in your project root.
 
 2. **Start the daemon**
    ```bash
-   dreamd watch
+   npx -y dreamd-mcp watch
    ```
    Or keep another harness's MCP session running (Claude Code, Cursor, Cline) — they all share the same daemon and `.agent/` folder.
 
