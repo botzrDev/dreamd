@@ -225,10 +225,20 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-205 — the AC asked for "dual-document scoring: episodic and semantic docs ranked together" without saying where a lesson's pain/importance comes from. A lesson has neither natively. The failure is silent: the document indexes fine, commits fine, matches the BM25 query fine, and then scores 0.0 and never appears in results. `test_zero_pain_produces_zero_score` (`collector.rs:400-413`) already pins the behavior.
 - **How to apply:**
   - Lessons inherit **pain and importance** from the exemplar event named by `Lesson.id` (`lessons.rs:24`); `recurrence` = promoted-cluster size.
-  - Exemplar lookup is live JSONL → `.agent/.dreamd/snapshots/*.jsonl` → skip+WARN. Decayed records are archived, not deleted (`decay.rs:163-179`), and the effective decay gate is `!pinned && age > 90d`, so without the snapshot leg every lesson dies at 90 days.
+  - Exemplar lookup is the live JSONL only; missing → skip + WARN. Do **not** add a snapshot fallback — cited exemplars are pinned and never decay (see `pin-is-the-decay-exemption`), so the recovery path it would buy is unreachable on the normal route.
   - Never index with defaulted scores when the exemplar is unfindable — skip the document instead.
   - Do not "fix" this by changing the formula: ARCHITECTURE.md decision #2 and `salience.rs:9-11` lock the arithmetic shape verbatim.
 - **Cross-refs:** `layer-semantic-is-not-embeddings`, `delete-term-must-target-a-unique-field`, `recency-of-a-derived-doc-is-its-derivation-time`
+
+### pin-is-the-decay-exemption
+
+- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `apply_pin_unpin` sets `event.pinned |= cited_ids.contains(...)` (`consolidation.rs:245`) on every exemplar a lesson cites, `should_decay` returns `false` immediately for pinned records (`decay.rs:33-35`), and consolidation runs before the pruner inside one WAL envelope (`dream_cycle.rs:106-107`) — so the pin always lands first. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
+- **Why:** AILAB-205 rev 2 specced a snapshot-fallback lookup on the premise that every exemplar decays at ~90 days, giving lessons a hard lifetime. The premise was false and the step was cut in rev 3. Cost: a scope expansion approved on bad evidence, plus in-flight dev work. The reasoning error was reading `should_decay`'s age and salience gates while skipping the `pinned` short-circuit three lines above them.
+- **How to apply:**
+  - Before claiming a record decays, check `pinned` first — it is the outermost gate in `should_decay`, ahead of both age and salience.
+  - `dreamd archive --force-unpin` (`cli.rs:87,132`) is the supported way to clear a pin, so "unpinned then pruned" is reachable — but it is an explicit operator action, not the default lifecycle.
+  - The real lifecycle gap runs the other way: nothing retires a stale lesson (AILAB-699). When reasoning about a derived artifact's lifetime, check the *never-removed* direction too.
+- **Cross-refs:** `semantic-docs-need-inherited-pain-importance`, `recency-of-a-derived-doc-is-its-derivation-time`
 
 ### recency-of-a-derived-doc-is-its-derivation-time
 

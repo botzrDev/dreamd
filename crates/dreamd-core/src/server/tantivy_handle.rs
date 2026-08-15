@@ -714,6 +714,12 @@ fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
 /// Does **not** commit. The caller owns the commit so this pass can share the
 /// episodic replay's single commit inside [`TantivyIndexHandle::open`].
 ///
+/// Exemplar lookup is the live episodic log only; a miss skips the lesson with
+/// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `apply_pin_unpin`
+/// pins every cited exemplar and `should_decay` short-circuits on `pinned`, so
+/// a cited exemplar does not age out). A lesson is never indexed with defaulted
+/// pain/importance: that document would score exactly 0.0 and could never rank.
+///
 /// Tolerate-and-report, in the posture `episodic::read_all` uses: a missing
 /// LESSONS.md is the normal pre-first-dream state and returns an untouched
 /// outcome silently; an unreadable or malformed one logs at `warn!` and also
@@ -793,6 +799,14 @@ fn index_semantic_lessons(
 /// `unwrap_or(0.0)` and the salience product multiplies by each, so a lesson
 /// indexed without them would score exactly 0.0 and never surface.
 ///
+/// `timestamp_sec` is the file's `last_updated` — the consolidation time — and
+/// deliberately **not** the exemplar's timestamp. Salience decays as
+/// `exp(-age_days/14)`, which asks "how stale is this claim?"; for an event that
+/// is when it fired, but for a lesson it is when consolidation last re-affirmed
+/// it. A lesson distilled today from a 90-day-old exemplar would otherwise score
+/// `exp(-6.43) ~= 0.0016` and rank two orders of magnitude below any fresh
+/// event — indexed, matching, and permanently buried.
+///
 /// `source_harness` is the literal `"dreamd"` rather than the exemplar's
 /// harness — a promoted cluster spans harnesses, so attributing the synthesized
 /// lesson to one contributor would misreport provenance. The exemplar (and its
@@ -805,10 +819,11 @@ fn add_semantic_document(
     exemplar: &AgentLearning,
     member_count: u64,
 ) -> Result<(), IndexError> {
+    // Consolidation time, not the exemplar's timestamp — see the fn docs.
     let last_updated_sec = lessons_file.last_updated.timestamp() as u64;
     let doc = doc!(
         fields.content => lesson.content.clone(),
-        fields.timestamp_sec => exemplar.timestamp.timestamp() as u64,
+        fields.timestamp_sec => last_updated_sec,
         fields.pain => exemplar.pain as f64,
         fields.importance => exemplar.importance as f64,
         fields.recurrence => member_count,
@@ -2354,6 +2369,65 @@ mod tests {
              must be skipped, not indexed at score 0.0"
         );
         assert!(outcome.touched);
+    }
+
+    /// Commit `writer` and pull `timestamp_sec` off every document in an in-RAM
+    /// index, via the same fast field the salience collector reads.
+    fn read_timestamps(index: &Index, writer: &mut IndexWriter<TantivyDocument>) -> Vec<u64> {
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        let searcher = reader.searcher();
+        let mut out = Vec::new();
+        for segment in searcher.segment_readers() {
+            let ts = segment
+                .fast_fields()
+                .u64(crate::index::TIMESTAMP_SEC_FIELD)
+                .unwrap()
+                .first_or_default_col(0);
+            for doc in segment.doc_ids_alive() {
+                out.push(ts.get_val(doc));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn semantic_doc_timestamp_is_the_consolidation_time() {
+        let dir = unique_tmpdir("sem-timestamp");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id = make_event_id('0');
+        prime_jsonl(&dir, &[sample_learning(id.clone(), "rust::eh", "exemplar")]);
+        // `write_lessons` stamps last_updated = 2026-05-20T00:00:00Z, six days
+        // after `sample_learning`'s 2026-05-14T08:00:00Z timestamp.
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![lesson(id.as_str(), "prefer ? over unwrap")],
+        );
+        let exemplar_sec = DateTime::parse_from_rfc3339("2026-05-14T08:00:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let consolidated_sec = DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let (index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let timestamps = read_timestamps(&index, &mut writer);
+        assert_eq!(timestamps.len(), 1);
+        assert_eq!(
+            timestamps[0], consolidated_sec,
+            "recency asks how stale the claim is; for a lesson that is when \
+             consolidation last re-affirmed it"
+        );
+        assert_ne!(
+            timestamps[0], exemplar_sec,
+            "inheriting the exemplar's timestamp buries the lesson under \
+             exp(-age/14)"
+        );
     }
 
     #[test]

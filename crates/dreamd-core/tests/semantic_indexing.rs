@@ -11,12 +11,17 @@
 //! (prefix counting, the `lsn_` identity shape, the pass outcome) lives in
 //! `server::tantivy_handle`'s unit tests.
 //!
-//! Two cases are regression guards on delete bugs and must fail against the
-//! naive designs:
-//!   * [`semantic_pass_preserves_every_episodic_event_in_the_cluster`] fails if
-//!     the pass deletes by `skill_action`/cluster key.
-//!   * [`decay_prune_of_the_exemplar_leaves_the_lesson_indexed`] fails if a
-//!     lesson carries its exemplar's raw `event_id`.
+//! Test names carry their `§3 step 5` case number so the spec-to-suite mapping
+//! is readable straight off the `cargo test` output.
+//!
+//! Three cases are regression guards and must fail against the naive designs:
+//!   * [`case_04_semantic_pass_preserves_every_episodic_event_in_the_cluster`]
+//!     fails if the pass deletes by `skill_action`/cluster key.
+//!   * [`case_05_decay_prune_of_the_exemplar_leaves_the_lesson_indexed`] fails
+//!     if a lesson carries its exemplar's raw `event_id`.
+//!   * [`case_09_lesson_recency_is_consolidation_time_not_exemplar_age`] fails
+//!     if `timestamp_sec` is inherited from the exemplar (observed ratio
+//!     0.00161 against a fresh event, versus 1.0 once corrected).
 
 use chrono::{DateTime, Utc};
 use dreamd_core::collector::RecallResult;
@@ -109,7 +114,7 @@ fn query(handle: &TantivyIndexHandle, q: &str, layer: Option<Layer>) -> Vec<Reca
 // Case 1 — the fact-6 guard.
 
 #[tokio::test]
-async fn lesson_is_recalled_as_semantic_with_a_non_zero_score() {
+async fn case_01_lesson_is_recalled_as_semantic_with_a_non_zero_score() {
     let (_dir, root) = scaffold();
     let exemplar = event_id('0');
     write_jsonl(
@@ -166,7 +171,7 @@ async fn lesson_is_recalled_as_semantic_with_a_non_zero_score() {
 // Case 2 — one ranked result set.
 
 #[tokio::test]
-async fn episodic_and_semantic_results_rank_together() {
+async fn case_02_episodic_and_semantic_results_rank_together() {
     let (_dir, root) = scaffold();
     let exemplar = event_id('0');
     write_jsonl(
@@ -215,7 +220,7 @@ async fn episodic_and_semantic_results_rank_together() {
 // Case 3 — the layer filter still filters.
 
 #[tokio::test]
-async fn episodic_layer_filter_still_excludes_lessons() {
+async fn case_03_episodic_layer_filter_still_excludes_lessons() {
     let (_dir, root) = scaffold();
     let exemplar = event_id('0');
     write_jsonl(
@@ -249,7 +254,7 @@ async fn episodic_layer_filter_still_excludes_lessons() {
 // Case 4 — regression: the pass must not delete by cluster key.
 
 #[tokio::test]
-async fn semantic_pass_preserves_every_episodic_event_in_the_cluster() {
+async fn case_04_semantic_pass_preserves_every_episodic_event_in_the_cluster() {
     let (_dir, root) = scaffold();
     let events: Vec<AgentLearning> = ['0', '1', '2']
         .into_iter()
@@ -305,7 +310,7 @@ async fn semantic_pass_preserves_every_episodic_event_in_the_cluster() {
 // Case 5 — regression: the lsn_ namespace keeps decay off the lesson.
 
 #[tokio::test]
-async fn decay_prune_of_the_exemplar_leaves_the_lesson_indexed() {
+async fn case_05_decay_prune_of_the_exemplar_leaves_the_lesson_indexed() {
     let (_dir, root) = scaffold();
     let exemplar = event_id('0');
     write_jsonl(
@@ -348,7 +353,7 @@ async fn decay_prune_of_the_exemplar_leaves_the_lesson_indexed() {
 // Case 6 — wholesale replace across cycles.
 
 #[tokio::test]
-async fn second_cycle_replaces_the_previous_lesson_set() {
+async fn case_06_second_cycle_replaces_the_previous_lesson_set() {
     let (_dir, root) = scaffold();
     let first = event_id('0');
     let second = event_id('1');
@@ -403,7 +408,7 @@ async fn second_cycle_replaces_the_previous_lesson_set() {
 // Case 7 — crash recovery. This is what the commit gate in `open` exists for.
 
 #[tokio::test]
-async fn reopen_after_index_wipe_recovers_lessons_with_a_current_watermark() {
+async fn case_07_reopen_after_index_wipe_recovers_lessons_with_a_current_watermark() {
     let (_dir, root) = scaffold();
     let exemplar = event_id('0');
     write_jsonl(
@@ -451,7 +456,7 @@ async fn reopen_after_index_wipe_recovers_lessons_with_a_current_watermark() {
 // Case 8 — pre-first-dream state.
 
 #[tokio::test]
-async fn missing_lessons_file_leaves_episodic_recall_intact() {
+async fn case_08_missing_lessons_file_leaves_episodic_recall_intact() {
     let (_dir, root) = scaffold();
     write_jsonl(
         &root,
@@ -477,10 +482,82 @@ async fn missing_lessons_file_leaves_episodic_recall_intact() {
     handle.shutdown().await.expect("shutdown");
 }
 
-// Case 9 — an exemplar-less lesson is skipped, never indexed at score 0.
+// Case 9 — recency is consolidation time, not the exemplar's age.
 
 #[tokio::test]
-async fn lesson_without_an_exemplar_is_skipped_not_indexed() {
+async fn case_09_lesson_recency_is_consolidation_time_not_exemplar_age() {
+    let (_dir, root) = scaffold();
+    let aged_exemplar = event_id('0');
+    let fresh = event_id('1');
+    // Identical text, cluster, pain and importance across all three documents,
+    // so BM25 and every salience factor except `exp(-age_days/14)` cancels out
+    // of the ratios below. What is left measures recency and nothing else.
+    const TEXT: &str = "gasket torque drifted overnight";
+    write_jsonl(
+        &root,
+        &[
+            learning(
+                aged_exemplar.clone(),
+                "rust::eh",
+                TEXT,
+                NOW_SEC - 90 * DAY_SECS,
+            ),
+            learning(fresh.clone(), "rust::eh", TEXT, NOW_SEC),
+        ],
+    );
+    // `write_lessons` stamps `last_updated = NOW_SEC`: consolidation re-affirmed
+    // this lesson just now, from a 90-day-old exemplar.
+    write_lessons(&root, "rust::eh", vec![lesson(&aged_exemplar, TEXT)]);
+
+    let handle = open(&root);
+    let results = query(&handle, "gasket", None);
+    assert_eq!(results.len(), 3, "two events + one lesson: {results:?}");
+
+    let lesson_hit = results
+        .iter()
+        .find(|r| r.layer == Layer::Semantic)
+        .expect("the lesson must be indexed");
+    let fresh_hit = results
+        .iter()
+        .find(|r| r.event_id == fresh.as_str())
+        .expect("the fresh event must be indexed");
+    let aged_hit = results
+        .iter()
+        .find(|r| r.event_id == aged_exemplar.as_str())
+        .expect("the aged exemplar must be indexed");
+
+    assert_eq!(
+        lesson_hit.timestamp_sec, NOW_SEC as u64,
+        "a lesson's recency is when consolidation last re-affirmed it, not when \
+         its exemplar fired"
+    );
+
+    // Sanity leg: the decay factor really does bury a 90-day-old claim. This is
+    // the number the lesson itself would have scored under exemplar sourcing.
+    let aged_ratio = aged_hit.score / fresh_hit.score;
+    assert!(
+        aged_ratio < 0.01,
+        "a 90-day-old event must decay hard for this test to mean anything, \
+         got {aged_ratio}"
+    );
+
+    let lesson_ratio = lesson_hit.score / fresh_hit.score;
+    assert!(
+        lesson_ratio > 0.9,
+        "a freshly consolidated lesson must rank comparably to a fresh event, \
+         got {lesson_ratio} — stamping the exemplar's timestamp yields \
+         exp(-90/14) ~= 0.0016 and buries the lesson"
+    );
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+// Case 10 — an exemplar missing from the live episodic log is skipped, never
+// indexed at score 0. Rev 3 cut the snapshot fallback, so this is the whole
+// answer for the narrow paths where an exemplar can still vanish.
+
+#[tokio::test]
+async fn case_10_lesson_without_an_exemplar_is_skipped_not_indexed() {
     let (_dir, root) = scaffold();
     write_jsonl(
         &root,
@@ -491,7 +568,9 @@ async fn lesson_without_an_exemplar_is_skipped_not_indexed() {
             NOW_SEC - DAY_SECS,
         )],
     );
-    // Exemplar id that is not in the episodic log (e.g. decayed out of it).
+    // An exemplar id the live log does not hold — `archive --force-unpin`, a
+    // hand-edited `pinned: false`, or a crash between `write_lessons_file` and
+    // `apply_pin_unpin`.
     let orphan = event_id('9');
     write_lessons(
         &root,
