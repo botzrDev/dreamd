@@ -4,9 +4,10 @@
 //! Prints one line per check to stdout. Exit 0 if all checks pass; exit 1 if
 //! any check emits a WARNING or ERROR. Default checks (when applicable):
 //! dream-cycle mode, scaffolded subdirs, on-disk index freshness vs JSONL
-//! watermark, episodic log health (malformed lines / torn tail), record and
-//! index schema versions, orphaned daemon socket, Tantivy lock-file presence,
-//! and last autobiography skip.
+//! watermark, lessons the last semantic pass could not index, episodic log
+//! health (malformed lines / torn tail), record and index schema versions,
+//! orphaned daemon socket, Tantivy lock-file presence, and last autobiography
+//! skip.
 //!
 //! `--repair` unlinks an orphaned daemon socket and rebuilds the derived
 //! Tantivy cache by replaying the episodic log, which it only ever reads. The
@@ -109,6 +110,44 @@ pub fn run(
                     "index_freshness: error  [WARNING: could not assess: {e}]"
                 )?;
                 all_ok = false;
+            }
+        }
+
+        // AILAB-700 — lessons the last semantic pass could not index because
+        // their exemplar event was gone from the episodic log. Read from the
+        // sidecar the pass writes, never recomputed here: doctor re-resolving
+        // LESSONS.md would be a second parser for the same rule. Absent file
+        // (never dreamed) or an empty list prints nothing — a healthy store
+        // stays quiet.
+        match dreamd_core::server::read_semantic_pass_record(agent_root) {
+            Ok(Some(record)) if !record.skipped_lesson_ids.is_empty() => {
+                let count = record.skipped_lesson_ids.len();
+                let first = record.skipped_lesson_ids[0].as_str();
+                let and_more = match count - 1 {
+                    0 => String::new(),
+                    n => format!(" and {n} more"),
+                };
+                writeln!(
+                    out,
+                    "semantic_lessons: {count} not indexed  [WARNING: exemplar event \
+                     missing from the episodic log for lesson {first}{and_more} \
+                     (cluster {}); recall cannot return these lessons. Likely an \
+                     unpinned or archived exemplar — see `dreamd archive \
+                     --force-unpin`.]",
+                    record.cluster_key,
+                )?;
+                all_ok = false;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Informational on purpose: an unreadable sidecar says nothing
+                // about the index itself, so it reports without moving the
+                // exit code (same posture as `tantivy_lock`).
+                writeln!(
+                    out,
+                    "semantic_lessons: unreadable  [INFO: could not read the semantic \
+                     pass report: {e}]"
+                )?;
             }
         }
     }
@@ -856,6 +895,76 @@ mod tests {
             "must surface first-N malformed line numbers; got: {output:?}"
         );
         assert!(!ok);
+    }
+
+    // AILAB-700 — lessons the semantic pass could not index. Note these are
+    // NOT the `AutobiographySkip` lines above: that skip is the dirty-tree git
+    // commit skip and has nothing to do with the semantic layer.
+
+    /// Write `.dreamd/semantic_pass.json` by hand — the writer lives in
+    /// `dreamd-core` and is private to the pass, so the CLI side asserts
+    /// against the on-disk contract, which is the thing that has to hold.
+    fn seed_semantic_pass(root: &AgentRoot, json: &str) {
+        fs::write(root.dreamd_dir().join("semantic_pass.json"), json).unwrap();
+    }
+
+    #[test]
+    fn doctor_semantic_lessons_warns_when_skipped() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("sem-skipped");
+        seed_semantic_pass(
+            &root,
+            r#"{"skipped_lesson_ids":["evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ",
+                "evt_01ARZ3NDEKTSV4RRFFQ69G5FZY"],
+                "cluster_key":"rust::eh","indexed":1}"#,
+        );
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(
+            output.contains("semantic_lessons: 2 not indexed"),
+            "the count must lead the line; got: {output:?}"
+        );
+        assert!(
+            output.contains("evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ") && output.contains("and 1 more"),
+            "one id must be named outright, the rest counted; got: {output:?}"
+        );
+        assert!(
+            output.contains("rust::eh") && output.contains("WARNING"),
+            "the cluster and the WARNING marker must appear; got: {output:?}"
+        );
+        assert!(
+            !ok,
+            "un-indexable lessons are silently missing from recall, so doctor \
+             must exit non-zero; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_semantic_lessons_silent_when_empty() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("sem-empty");
+        seed_semantic_pass(
+            &root,
+            r#"{"skipped_lesson_ids":[],"cluster_key":"rust::eh","indexed":2}"#,
+        );
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(
+            !output.contains("semantic_lessons"),
+            "a clean pass prints nothing at all — no 'ok' line; got: {output:?}"
+        );
+        assert!(ok, "a clean pass must not fail doctor; got: {output:?}");
+    }
+
+    #[test]
+    fn doctor_semantic_lessons_silent_when_absent() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("sem-absent");
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(
+            !output.contains("semantic_lessons"),
+            "a store that never dreamed has no report and is not unhealthy; \
+             got: {output:?}"
+        );
+        assert!(ok, "absent report must not fail doctor; got: {output:?}");
     }
 
     #[test]

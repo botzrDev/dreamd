@@ -28,7 +28,9 @@ use dreamd_core::collector::RecallResult;
 use dreamd_core::index::{build_schema, Layer};
 use dreamd_core::layout::AgentRoot;
 use dreamd_core::lessons::{write_lessons_file, Lesson, LessonsFile};
-use dreamd_core::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+use dreamd_core::server::tantivy_handle::{
+    read_semantic_pass_record, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, SEMANTIC_PASS_FILENAME,
+};
 use dreamd_protocol::{AgentLearning, EventId};
 
 /// Fixed query-time clock — no wall-clock reads, same invariant as `recall`.
@@ -668,6 +670,64 @@ async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
         "every episodic event survives retirement; only the derived doc goes: \
          {after:?}"
     );
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+// Case 12 — AILAB-700: the skip in case 10 is silent. Recall simply returns
+// nothing and no operator can tell a missing lesson from an unlucky query.
+// This drives the whole channel the sidecar exists to be — both consumers of
+// `index_semantic_lessons` (the `open` rebuild and the live indexer task) —
+// and asserts what `dreamd doctor` will read back off disk.
+
+#[tokio::test]
+async fn case_12_skipped_lesson_is_recorded_for_doctor() {
+    let (_dir, root) = scaffold();
+    write_jsonl(
+        &root,
+        &[learning(
+            event_id('0'),
+            "rust::eh",
+            "gasket torque drifted overnight",
+            NOW_SEC - DAY_SECS,
+        )],
+    );
+    let orphan = event_id('9');
+    write_lessons(
+        &root,
+        "rust::eh",
+        vec![lesson(&orphan, "Re-torque the gasket after every cycle.")],
+    );
+
+    // Consumer 1: the rebuild inside `open` (also the cold-start and
+    // `doctor --repair` path).
+    let handle = open(&root);
+    assert!(
+        root.dreamd_dir().join(SEMANTIC_PASS_FILENAME).exists(),
+        "the rebuild pass must leave a report for doctor to read with the \
+         daemon down"
+    );
+
+    // Consumer 2: the post-consolidation pass on the live indexer task.
+    handle
+        .index_semantic_lessons(root.clone())
+        .await
+        .expect("re-index lessons");
+
+    let record = read_semantic_pass_record(&root)
+        .expect("read the semantic pass report")
+        .expect("a pass over a real LESSONS.md leaves a report");
+    assert_eq!(
+        record.skipped_lesson_ids,
+        vec![orphan.as_str().to_string()],
+        "doctor names the lesson, so the id has to survive the trip through \
+         the sidecar: {record:?}"
+    );
+    assert_eq!(
+        record.cluster_key, "rust::eh",
+        "the cluster is what an operator greps LESSONS.md by"
+    );
+    assert_eq!(record.indexed, 0, "the only lesson in the file was skipped");
 
     handle.shutdown().await.expect("shutdown");
 }

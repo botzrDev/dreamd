@@ -311,6 +311,15 @@ index untouched, because a corrupt file must never wipe the semantic layer. The
 cited exemplars **stay pinned** — retirement removes the derived document, not
 the source events.
 
+Every pass that resolves lessons records the ones it could **not** index — a
+lesson whose exemplar is no longer in the episodic log is skipped rather than
+indexed at score 0.0 — to `<project>/.agent/.dreamd/semantic_pass.json`
+(`SemanticPassRecord`, `server/tantivy_handle.rs`). `dreamd doctor` reads that
+sidecar and names the skipped lessons, so a silently un-recallable lesson is
+visible without the daemon running and without doctor re-parsing `LESSONS.md`
+(AILAB-700). The malformed case writes nothing: the index was untouched, so the
+previous record still describes it.
+
 Pins are **unioned, never unset**. `apply_pin_unpin` computes
 `event.pinned = event.pinned || cited_ids.contains(...)` (`:221`), so a cycle
 can pin an event it cites but can never clear a pin it did not set

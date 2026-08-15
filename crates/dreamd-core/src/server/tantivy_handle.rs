@@ -82,6 +82,11 @@ pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 /// Relative directory holding the per-project Tantivy index segments.
 pub const INDEX_DIR_NAME: &str = "index";
 
+/// Relative filename for the semantic pass's report of lessons it could not
+/// index, joined under the project's `.dreamd/` directory. Written by
+/// [`index_semantic_lessons`], read by `dreamd doctor` (AILAB-700).
+pub const SEMANTIC_PASS_FILENAME: &str = "semantic_pass.json";
+
 /// v0.1 index-vs-JSONL contract surface (WEG-42 / DR-202).
 ///
 /// Compares the JSONL tail against `index_progress.json`. `stale == true` when
@@ -131,6 +136,45 @@ pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, 
         last_indexed_id: progress.last_indexed_id,
         unindexed_count,
     })
+}
+
+/// What the last semantic (LESSONS.md) pass could not index (AILAB-700).
+///
+/// Lives at `<agent_root>/.agent/.dreamd/semantic_pass.json`. It exists so
+/// `dreamd doctor` can report un-indexable lessons without opening the index
+/// and without re-resolving LESSONS.md against the episodic log — a second
+/// parser for the same rule is exactly the drift this avoids.
+///
+/// Deliberately carries **no timestamp**: `dream` reads wall-clock, which would
+/// make the file non-deterministic for no operator benefit. Doctor reports the
+/// current state of the store, not when that state was measured.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticPassRecord {
+    /// `lesson.id`s dropped because the exemplar was not in the episodic log.
+    pub skipped_lesson_ids: Vec<String>,
+    /// The clustering key of the LESSONS.md those lessons came from.
+    pub cluster_key: String,
+    /// Lessons successfully added as `layer=semantic` documents.
+    pub indexed: usize,
+}
+
+/// Read the semantic pass report for `agent_root` without opening Tantivy.
+///
+/// `Ok(None)` when the file is absent — a store that has never dreamed has no
+/// report, which is a fact and not a fault. Same shape as
+/// [`assess_index_freshness`]: `dreamd doctor` is most valuable when the daemon
+/// is down, so this path opens no index and takes no lock.
+pub fn read_semantic_pass_record(
+    agent_root: &AgentRoot,
+) -> Result<Option<SemanticPassRecord>, IndexError> {
+    let path = agent_root.dreamd_dir().join(SEMANTIC_PASS_FILENAME);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| IndexError(format!("parse {SEMANTIC_PASS_FILENAME}: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(IndexError(format!("read {SEMANTIC_PASS_FILENAME}: {e}"))),
+    }
 }
 
 /// Crash-recovery watermark recording the daemon-assigned `EventId` of the
@@ -732,6 +776,14 @@ fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
 ///   lessons may still be there behind a torn write. It logs at `warn!` and
 ///   returns untouched, so a corrupt file can never wipe the layer. The parse
 ///   deliberately happens **before** the delete for the same reason.
+///
+/// Every path that resolves lessons also writes a [`SemanticPassRecord`] to
+/// `.dreamd/semantic_pass.json` so `dreamd doctor` can name the skipped lessons
+/// (AILAB-700). The write lives here, not at the call sites, because both
+/// consumers — the [`TantivyIndexHandle::open`] rebuild and the indexer task's
+/// `IndexSemanticLessons` handler — go through this one function. The malformed
+/// path deliberately writes nothing: it did not touch the index, so the prior
+/// record still describes it.
 fn index_semantic_lessons(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
@@ -755,6 +807,10 @@ fn index_semantic_lessons(
             // just remove this file?" signal threaded down here.
             let term = tantivy::Term::from_field_text(fields.layer, Layer::Semantic.as_str());
             writer.delete_term(term);
+            // A retired file has no un-indexable lessons, so clear any prior
+            // report (AILAB-700) — otherwise doctor keeps naming lessons that
+            // no longer exist.
+            write_semantic_pass_record(agent_root, &SemanticPassRecord::default());
             return Ok(SemanticPassOutcome {
                 indexed: 0,
                 skipped: 0,
@@ -767,6 +823,8 @@ fn index_semantic_lessons(
                 error = %e,
                 "LESSONS.md unreadable; leaving the index untouched"
             );
+            // Deliberately no report write: the index was not touched, so the
+            // prior record is still the truth about what is in it.
             return Ok(SemanticPassOutcome::default());
         }
     };
@@ -789,6 +847,10 @@ fn index_semantic_lessons(
         skipped: 0,
         touched: true,
     };
+    // Kept local rather than on `SemanticPassOutcome`: that type is `Copy` and
+    // built with struct-literal syntax at every return, and a `Vec` field would
+    // break both (AILAB-700).
+    let mut skipped_lesson_ids: Vec<String> = Vec::new();
     for lesson in &lessons_file.lessons {
         let Some(exemplar) = exemplars.get(lesson.id.as_str()) else {
             tracing::warn!(
@@ -800,6 +862,7 @@ fn index_semantic_lessons(
                  a document that scores 0.0 and can never rank)"
             );
             outcome.skipped += 1;
+            skipped_lesson_ids.push(lesson.id.clone());
             continue;
         };
         add_semantic_document(
@@ -812,6 +875,18 @@ fn index_semantic_lessons(
         )?;
         outcome.indexed += 1;
     }
+
+    // Written on every full pass, including the zero-skip one: without that,
+    // a store whose exemplars were restored would keep reporting yesterday's
+    // skips forever (AILAB-700).
+    write_semantic_pass_record(
+        agent_root,
+        &SemanticPassRecord {
+            skipped_lesson_ids,
+            cluster_key: lessons_file.cluster_key.clone(),
+            indexed: outcome.indexed,
+        },
+    );
 
     Ok(outcome)
 }
@@ -947,6 +1022,34 @@ fn write_progress(path: &Path, progress: &IndexProgress) -> Result<(), IndexErro
     write_atomic(path, &bytes)
         .map_err(|e| IndexError(format!("write {INDEX_PROGRESS_FILENAME}: {e}")))?;
     Ok(())
+}
+
+/// Record what the semantic pass could not index, for `dreamd doctor`
+/// (AILAB-700).
+///
+/// Best-effort by design, unlike [`write_progress`]: the watermark is
+/// crash-recovery state, this is a diagnostic. A store whose `.dreamd/` is
+/// read-only must still open its index and serve recall, so a failure here
+/// logs and returns rather than failing the pass — doctor then reports the
+/// previous pass, which is a stale hint, not a wrong index.
+fn write_semantic_pass_record(agent_root: &AgentRoot, record: &SemanticPassRecord) {
+    let dir = agent_root.dreamd_dir();
+    let path = dir.join(SEMANTIC_PASS_FILENAME);
+    let written = serde_json::to_vec(record)
+        .map_err(|e| format!("serialize {SEMANTIC_PASS_FILENAME}: {e}"))
+        .and_then(|bytes| {
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| write_atomic(&path, &bytes))
+                .map_err(|e| format!("write {SEMANTIC_PASS_FILENAME}: {e}"))
+        });
+    if let Err(e) = written {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not record the semantic pass report; `dreamd doctor` will \
+             report the previous pass until the next one lands"
+        );
+    }
 }
 
 fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
@@ -2564,6 +2667,146 @@ mod tests {
                 skipped: 0,
                 touched: true
             }
+        );
+    }
+
+    // AILAB-700 — the `.dreamd/semantic_pass.json` channel from the pass to
+    // `dreamd doctor`.
+
+    /// A `SemanticPassRecord` naming one skipped lesson, for the tests that
+    /// need a *prior* report on disk to prove a path did or did not clear it.
+    fn stale_record() -> SemanticPassRecord {
+        SemanticPassRecord {
+            skipped_lesson_ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ".to_string()],
+            cluster_key: "rust::eh".to_string(),
+            indexed: 3,
+        }
+    }
+
+    #[test]
+    fn semantic_pass_records_the_skipped_lesson_for_doctor() {
+        let dir = unique_tmpdir("sem-sidecar-skip");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let present = make_event_id('0');
+        let orphan = "evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ";
+        prime_jsonl(
+            &dir,
+            &[sample_learning(
+                present.clone(),
+                "rust::eh",
+                "borrow checker",
+            )],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(present.as_str(), "prefer ? over unwrap"),
+                lesson(orphan, "orphaned lesson"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("a pass over a real LESSONS.md must leave a report");
+        assert_eq!(
+            record,
+            SemanticPassRecord {
+                skipped_lesson_ids: vec![orphan.to_string()],
+                cluster_key: "rust::eh".to_string(),
+                indexed: 1,
+            },
+            "doctor needs the lesson id and its cluster to name the condition; \
+             the count alone cannot be acted on"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_clears_the_record_when_every_exemplar_resolves() {
+        let dir = unique_tmpdir("sem-sidecar-clean");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let a = make_event_id('0');
+        let b = make_event_id('1');
+        prime_jsonl(
+            &dir,
+            &[
+                sample_learning(a.clone(), "rust::eh", "one"),
+                sample_learning(b.clone(), "rust::eh::unwrap", "two"),
+            ],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(a.as_str(), "lesson one"),
+                lesson(b.as_str(), "lesson two"),
+            ],
+        );
+        // A prior pass reported a skip; this one must overwrite it.
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert!(
+            record.skipped_lesson_ids.is_empty(),
+            "writing on the zero-skip path is load-bearing: a restored exemplar \
+             must stop doctor reporting yesterday's skip, forever otherwise; \
+             got: {record:?}"
+        );
+        assert_eq!(record.indexed, 2);
+    }
+
+    #[test]
+    fn semantic_pass_clears_the_record_when_lessons_md_is_missing() {
+        let dir = unique_tmpdir("sem-sidecar-missing");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert_eq!(
+            record,
+            SemanticPassRecord::default(),
+            "AILAB-699 retirement removes the lessons themselves, so there is \
+             nothing left that could not be indexed"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_leaves_the_record_alone_when_lessons_md_is_malformed() {
+        let dir = unique_tmpdir("sem-sidecar-malformed");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        std::fs::write(agent_root.lessons_md(), b"not frontmatter\n").unwrap();
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert_eq!(
+            record,
+            stale_record(),
+            "a malformed file leaves the index untouched, so the prior report \
+             is still the truth about what is in it — overwriting it here would \
+             claim a clean pass that never happened"
         );
     }
 }

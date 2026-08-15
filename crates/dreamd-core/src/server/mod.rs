@@ -42,8 +42,9 @@ pub use lifecycle::{
 pub use project_resource_map::{ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig};
 pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
 pub use tantivy_handle::{
-    assess_index_freshness, IndexFreshness, IndexerMsg, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE,
-    INDEX_DIR_NAME, INDEX_PROGRESS_FILENAME,
+    assess_index_freshness, read_semantic_pass_record, IndexFreshness, IndexerMsg,
+    SemanticPassRecord, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME,
+    INDEX_PROGRESS_FILENAME, SEMANTIC_PASS_FILENAME,
 };
 pub use uds::{
     bind_writer_socket, is_daemon_socket_live, try_connect_existing, SocketGuard, UdsBindError,
