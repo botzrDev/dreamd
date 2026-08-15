@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Public docs now match shipped 0.1.0 behavior.** Status/GA dates, npm vs cargo CLI invocation (`npx -y dreamd-mcp` does not put `dreamd` on `PATH`), MCP Remote stderr strings, dream-cycle top-cluster + salience-first exemplar, `DREAMD_SOCK`/`DREAMD_LOG`/`DREAMD_BIN` operator facts, live `pinned`, and the `docs/dreamd.1` man page (generator now writes that path). Docs and man-page generator only — no binary behavior change.
 
+### Fixed
+
+- **`docs/architecture.md` no longer overstates the episodic decay gate.** The Decay subsection described the pruner as firing only when the 90-day age threshold **and** `DECAY_SALIENCE_THRESHOLD = 2.0` both hold. The live gate is age-only: `!pinned && age > 90d`. `should_decay` scores through `RecurrenceContext::decay()`, which is hardcoded to recurrence `0`, so past 90 days the recency term alone caps salience at `exp(-90/14) ≈ 0.0016` — below `2.0` at any pain and importance — and the threshold comparison can never discriminate. The constant is now documented as a defensive floor that keeps a future change to decay-phase recurrence from silently archiving high-salience records, not as a current filter. Contributor docs only — `decay.rs` and `salience.rs` are unchanged and shipped behavior is unaffected. (AILAB-698 — `docs/architecture.md`)
+
 ## [0.1.0] - 2026-08-05
 
 ### Changed

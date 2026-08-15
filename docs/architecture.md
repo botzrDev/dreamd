@@ -312,10 +312,17 @@ your head:
   the half-life of that curve is ~9.7 days, and calling it one is a factual
   error. It is evaluated at query time and never moves a record on disk.
 - The **decay pruner** (`decay.rs`) is what actually archives records off the
-  hot path. It fires only when `DECAY_AGE_THRESHOLD_SEC = 90 days`
-  (`decay.rs:20`) **and** `DECAY_SALIENCE_THRESHOLD = 2.0` (`decay.rs:26`)
-  both hold — old-and-uninteresting, not merely old. Pinned records are
-  **never** archived (`decay.rs:33-35`).
+  hot path. Its effective gate is **`!pinned && age > 90d`**
+  (`DECAY_AGE_THRESHOLD_SEC`, `decay.rs:20`) — age alone, not age plus
+  interest. Pinned records are **never** archived (`decay.rs:33-35`).
+- `DECAY_SALIENCE_THRESHOLD = 2.0` (`decay.rs:26`) is evaluated
+  (`decay.rs:40-47`) but **cannot currently discriminate**. The pruner scores
+  through `RecurrenceContext::decay()`, hardcoded to recurrence `0`
+  (`salience.rs:54-57`, `:64`), so past 90 days the recency term alone caps
+  salience at `exp(-90/14) ≈ 0.0016` — below `2.0` even at maximum pain and
+  importance. Read the constant as a **defensive floor**, not a live filter:
+  it is retained so a future change to decay-phase recurrence cannot silently
+  start archiving high-salience records.
 
 ### Autobiography
 
