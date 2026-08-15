@@ -140,14 +140,17 @@ pub fn run(
             }
             Ok(_) => {}
             Err(e) => {
-                // Informational on purpose: an unreadable sidecar says nothing
-                // about the index itself, so it reports without moving the
-                // exit code (same posture as `tantivy_lock`).
+                // Fails the check: an unreadable sidecar means doctor cannot
+                // answer the question it was asked — whether any lesson is
+                // missing from recall — and silence there is indistinguishable
+                // from a clean pass. `index_freshness`'s own error arm above
+                // already takes the same posture.
                 writeln!(
                     out,
-                    "semantic_lessons: unreadable  [INFO: could not read the semantic \
+                    "semantic_lessons: unreadable  [WARNING: could not read the semantic \
                      pass report: {e}]"
                 )?;
+                all_ok = false;
             }
         }
     }
@@ -952,6 +955,24 @@ mod tests {
             "a clean pass prints nothing at all — no 'ok' line; got: {output:?}"
         );
         assert!(ok, "a clean pass must not fail doctor; got: {output:?}");
+    }
+
+    #[test]
+    fn doctor_semantic_lessons_warns_when_unreadable() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("sem-unreadable");
+        seed_semantic_pass(&root, "\u{0}not json at all\u{1}");
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(
+            output.contains("semantic_lessons: unreadable") && output.contains("WARNING"),
+            "an unparseable sidecar must report as unreadable under WARNING; \
+             got: {output:?}"
+        );
+        assert!(
+            !ok,
+            "doctor cannot tell an unreadable report from a clean one, so it \
+             must not claim health; got: {output:?}"
+        );
     }
 
     #[test]
