@@ -522,8 +522,9 @@ async fn run_indexer(
                     Some(IndexerMsg::IndexSemanticLessons { agent_root, response }) => {
                         let result = (|| -> Result<(), IndexError> {
                             let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root)?;
-                            // No delete/add was issued (missing or unreadable
-                            // LESSONS.md) — nothing to commit.
+                            // No delete/add was issued (unreadable or malformed
+                            // LESSONS.md) — nothing to commit. A *missing* file
+                            // does issue a delete: it retires the layer.
                             if outcome.touched {
                                 writer.commit().map_err(tantivy_to_index)?;
                             }
@@ -720,11 +721,17 @@ fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
 /// a cited exemplar does not age out). A lesson is never indexed with defaulted
 /// pain/importance: that document would score exactly 0.0 and could never rank.
 ///
-/// Tolerate-and-report, in the posture `episodic::read_all` uses: a missing
-/// LESSONS.md is the normal pre-first-dream state and returns an untouched
-/// outcome silently; an unreadable or malformed one logs at `warn!` and also
-/// returns untouched. The parse deliberately happens **before** the delete, so
-/// a corrupt file can never drop the previously indexed lessons.
+/// Tolerate-and-report, in the posture `episodic::read_all` uses — but the two
+/// failure modes are deliberately **not** symmetric (AILAB-699):
+///
+/// * **Missing** LESSONS.md is a *fact*, not a failure: either the store has
+///   never dreamed, or a no-promotion cycle retired the file. Both mean zero
+///   lessons, so the pass deletes the semantic layer and reports `touched`,
+///   silently and with no log line.
+/// * **Unreadable or malformed** LESSONS.md is a failure of unknown extent: the
+///   lessons may still be there behind a torn write. It logs at `warn!` and
+///   returns untouched, so a corrupt file can never wipe the layer. The parse
+///   deliberately happens **before** the delete for the same reason.
 fn index_semantic_lessons(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
@@ -734,8 +741,25 @@ fn index_semantic_lessons(
     let lessons_file = match crate::lessons::read_lessons_file(&lessons_path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Pre-first-dream state, not an error and not worth a log line.
-            return Ok(SemanticPassOutcome::default());
+            // An absent LESSONS.md means "zero lessons", not "skip the pass"
+            // (AILAB-699). A no-promotion dream cycle *unlinks* the file — that
+            // unlink is the whole retirement mechanism, and without this delete
+            // the retired lesson keeps answering recall out of the live index
+            // until the daemon restarts. Same STRING exact-match term as the
+            // wholesale replace below, so it hits every semantic document and
+            // zero episodic ones.
+            //
+            // `touched: true` is what makes the caller commit. On a store that
+            // has never dreamed this costs one delete of an empty layer plus a
+            // commit; that is the accepted price of not needing a "did a cycle
+            // just remove this file?" signal threaded down here.
+            let term = tantivy::Term::from_field_text(fields.layer, Layer::Semantic.as_str());
+            writer.delete_term(term);
+            return Ok(SemanticPassOutcome {
+                indexed: 0,
+                skipped: 0,
+                touched: true,
+            });
         }
         Err(e) => {
             tracing::warn!(
@@ -2305,17 +2329,95 @@ mod tests {
     }
 
     #[test]
-    fn semantic_pass_is_untouched_when_lessons_md_is_missing() {
+    fn semantic_pass_clears_the_layer_when_lessons_md_is_missing() {
         let dir = unique_tmpdir("sem-missing");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
         let (_index, mut writer, fields) = ram_writer();
 
         let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
-        assert_eq!(outcome, SemanticPassOutcome::default());
-        assert!(
-            !outcome.touched,
-            "pre-first-dream state must not force a commit"
+        assert_eq!(
+            outcome,
+            SemanticPassOutcome {
+                indexed: 0,
+                skipped: 0,
+                touched: true,
+            },
+            "AILAB-699: an absent LESSONS.md means zero lessons, so the pass \
+             deletes the semantic layer and reports touched — otherwise a \
+             retired lesson keeps answering recall until restart. On a store \
+             that never dreamed this is an empty-layer delete plus a commit."
+        );
+    }
+
+    /// Commit `writer`, then count the live documents carrying `layer`.
+    ///
+    /// `layer` is STRING (raw-tokenized), so a `TermQuery` over it is the same
+    /// exact match the pass deletes with.
+    fn count_layer(
+        index: &Index,
+        writer: &mut IndexWriter<TantivyDocument>,
+        fields: &SchemaFields,
+        layer: Layer,
+    ) -> usize {
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        let term = tantivy::Term::from_field_text(fields.layer, layer.as_str());
+        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
+        reader
+            .searcher()
+            .search(&query, &tantivy::collector::Count)
+            .unwrap()
+    }
+
+    #[test]
+    fn semantic_pass_retires_an_indexed_lesson_when_lessons_md_is_unlinked() {
+        let dir = unique_tmpdir("sem-retire");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let exemplar = make_event_id('0');
+        let mate = make_event_id('1');
+        // Both episodic events sit in the lesson's cluster: if retirement
+        // deleted by cluster_key instead of layer it would take them too.
+        let events = [
+            sample_learning(exemplar.clone(), "rust::eh", "unwrap panicked"),
+            sample_learning(mate.clone(), "rust::eh::unwrap", "and again"),
+        ];
+        prime_jsonl(&dir, &events);
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![lesson(exemplar.as_str(), "prefer ? over unwrap")],
+        );
+        let (index, mut writer, fields) = ram_writer();
+        for event in &events {
+            add_document(&mut writer, &fields, event, 1).expect("index episodic event");
+        }
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("first pass ok");
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Semantic),
+            1,
+            "the lesson is indexed before retirement"
+        );
+
+        // The no-promotion dream cycle's unlink.
+        std::fs::remove_file(agent_root.lessons_md()).expect("unlink LESSONS.md");
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert!(outcome.touched, "the retiring pass must force a commit");
+
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Semantic),
+            0,
+            "unlinking LESSONS.md must retire the lesson from the live index; \
+             leaving it is the AILAB-205 hole AILAB-699 closes"
+        );
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Episodic),
+            2,
+            "episodic cluster mates must survive the layer delete"
         );
     }
 

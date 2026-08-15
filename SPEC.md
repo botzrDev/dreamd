@@ -135,9 +135,11 @@ cluster_key: "<skill_action>"
 
 The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the cycle run), `prompt_version` (implementation-defined; use `"deterministic-only"` for the network-free fallback), and `cluster_key` (the promoted cluster's full `skill_action` string). The `<!-- dreamd:lesson -->` opening tag MUST carry an `id` attribute set to the exemplar event's `id` and a `cluster` attribute set to the cluster's full `skill_action` string. The closing `<!-- /dreamd:lesson -->` tag MUST appear on its own line immediately after the lesson body. Implementations MAY emit multiple lesson blocks (one per promoted cluster) separated by blank lines.
 
+**Retirement.** If a cycle promotes no cluster, `semantic/LESSONS.md` MUST be absent when the cycle returns: an implementation MUST NOT write an empty-frontmatter placeholder, and MUST remove a file left by an earlier promoting cycle. Removing the lesson MUST NOT unpin the exemplar events it cited — retirement discards the derived document, not the source events.
+
 **Distillation modes.** An implementation MAY use an LLM to author the lesson body. An implementation MUST also support a deterministic, network-free fallback. In deterministic mode the reference implementation writes **one** lesson: the `content` of the exemplar from the highest-`salience_sum` promoted cluster. The exemplar is the event with highest query-time salience, then highest `pain`, then highest `importance`, then lowest `id`. Implementations MAY use richer deterministic strategies (extractive summarization, template merging) provided they remain pure functions of the input.
 
-**Idempotency.** Running the cycle twice on identical input — including `pinned` state set by previous runs — MUST produce byte-identical `LESSONS.md` output.
+**Idempotency.** Running the cycle twice on identical input — including `pinned` state set by previous runs — MUST produce byte-identical `LESSONS.md` output. Two consecutive no-promotion cycles over the same input MUST likewise agree: the first leaves the file absent (removing one if present) and the second is a no-op.
 
 **Pruning.** The dream cycle MAY prune unpinned episodic events whose salience falls below an implementation-defined threshold. Pruned events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted, retaining the ability to reverse a prune. Pinned events MUST NOT be pruned.
 

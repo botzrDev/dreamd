@@ -593,3 +593,81 @@ async fn case_10_lesson_without_an_exemplar_is_skipped_not_indexed() {
 
     handle.shutdown().await.expect("shutdown");
 }
+
+// Case 11 — AILAB-699: a cluster that stops recurring retires from recall.
+//
+// The full loop through the real seam: a promoting cycle writes the lesson and
+// recall serves it; one later cycle past the 30-day window promotes nothing,
+// unlinks LESSONS.md, and the post-cycle semantic pass clears the layer. Fails
+// against the pre-699 code twice over — `run_deterministic_dream_cycle` left
+// the file on disk, and `index_semantic_lessons` treated `NotFound` as
+// "untouched" so even a hand-unlinked file left the lesson answering queries.
+
+#[tokio::test]
+async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
+    use dreamd_core::consolidation::{
+        run_deterministic_dream_cycle, PROMOTION_THRESHOLD, WINDOW_30_DAYS_SEC,
+    };
+
+    let (_dir, root) = scaffold();
+    // Enough events inside the 7-day window to clear PROMOTION_THRESHOLD.
+    let events: Vec<AgentLearning> = ['0', '1', '2']
+        .into_iter()
+        .take(PROMOTION_THRESHOLD)
+        .map(|c| {
+            learning(
+                event_id(c),
+                "rust::eh",
+                "gasket torque drifted overnight",
+                NOW_SEC - DAY_SECS,
+            )
+        })
+        .collect();
+    write_jsonl(&root, &events);
+
+    // Cycle 1 — the real consolidation path writes LESSONS.md.
+    run_deterministic_dream_cycle(&root, NOW_SEC).expect("promoting cycle");
+    assert!(
+        root.lessons_md().exists(),
+        "the promoting cycle must write a lesson for this test to mean anything"
+    );
+
+    let handle = open(&root);
+    assert_eq!(
+        query(&handle, "gasket", Some(Layer::Semantic)).len(),
+        1,
+        "the lesson is recallable before retirement"
+    );
+
+    // Cycle 2 — same corpus, clock advanced past the 30-day window, so the
+    // events fall out of BOTH recurrence windows and nothing promotes. Driven
+    // by time, not by deleting events: retirement must follow from recurrence
+    // stopping, which is what actually happens in a real store.
+    let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;
+    run_deterministic_dream_cycle(&root, later).expect("no-promotion cycle");
+    assert!(
+        !root.lessons_md().exists(),
+        "the no-promotion cycle must unlink LESSONS.md"
+    );
+
+    // The post-phase pass the dream cycle runs unconditionally.
+    handle
+        .index_semantic_lessons(root.clone())
+        .await
+        .expect("re-index lessons");
+
+    let after = query(&handle, "gasket", None);
+    assert!(
+        after.iter().all(|r| r.layer != Layer::Semantic),
+        "a retired lesson must not survive in the live index — recall would \
+         keep serving it until the daemon restarted: {after:?}"
+    );
+    assert_eq!(
+        after.len(),
+        PROMOTION_THRESHOLD,
+        "every episodic event survives retirement; only the derived doc goes: \
+         {after:?}"
+    );
+
+    handle.shutdown().await.expect("shutdown");
+}

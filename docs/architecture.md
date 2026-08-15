@@ -296,6 +296,21 @@ exemplar (`:270-285`). `pick_exemplar` ranks salience → pain → importance �
 reverse `EventId` (`:316-318`). A cycle is therefore a narrow instrument: at
 most one lesson per run, not a batch summarisation pass.
 
+A cycle that promotes **no** cluster **unlinks** `semantic/LESSONS.md` if it is
+present (`run_deterministic_dream_cycle`, `consolidation.rs`) rather than
+writing an empty file — the never-dreamed state and the retired state are both
+"the file is absent". Retirement is therefore structural, not scheduled: a
+cluster that stops recurring simply fails the window test on the next cycle,
+drops out of the file, and the post-cycle semantic pass turns that absence into
+`delete_term(layer="semantic")` and a commit (`index_semantic_lessons`,
+`server/tantivy_handle.rs`), so recall stops serving the stale lesson without a
+daemon restart. There is no expiry timer, no age filter, and no read-time
+staleness check — one cycle run past the trailing window is the whole
+mechanism. A malformed `LESSONS.md` is the deliberate exception: it leaves the
+index untouched, because a corrupt file must never wipe the semantic layer. The
+cited exemplars **stay pinned** — retirement removes the derived document, not
+the source events.
+
 Pins are **unioned, never unset**. `apply_pin_unpin` computes
 `event.pinned = event.pinned || cited_ids.contains(...)` (`:221`), so a cycle
 can pin an event it cites but can never clear a pin it did not set

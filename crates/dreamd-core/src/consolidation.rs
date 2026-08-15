@@ -278,6 +278,12 @@ pub enum DreamCycleError {
 ///
 /// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
 /// top promoted cluster (highest `salience_sum`). No network calls are made.
+///
+/// If **no** cluster is promoted, the cycle *retires* instead: any existing
+/// `LESSONS.md` is unlinked (AILAB-699). Absence — not an empty frontmatter
+/// file — is the canonical "nothing promoted" state, so a store that stops
+/// recurring converges on the same shape as one that never dreamed. Cited
+/// exemplars keep their pins.
 #[must_use = "dream cycle errors must be handled"]
 pub fn run_deterministic_dream_cycle(
     agent_root: &AgentRoot,
@@ -288,6 +294,33 @@ pub fn run_deterministic_dream_cycle(
     let cluster_output = run_cluster_engine(agent_root, now_sec)?;
 
     if cluster_output.promoted.is_empty() {
+        // AILAB-699: retirement is structural, not an expiry timer. When no
+        // cluster clears `PROMOTION_THRESHOLD` in either window any more, the
+        // `LESSONS.md` an earlier promoting cycle wrote is stale — leaving it
+        // meant recall served that lesson forever. Unlink it rather than write
+        // an empty `LessonsFile`: that would need a synthetic `cluster_key`,
+        // and `deterministic_cycle_empty_jsonl_no_lessons_md` pins *absence* as
+        // the never-promoted state, so retirement must land in the same shape.
+        //
+        // No `WalIntent`: recovery only cleans up intent temps (`wal.rs`), and
+        // an unlink of the live file is itself the desired post-state — crash
+        // after it and the lesson is retired, crash before and the file
+        // remains for the next cycle to retire.
+        //
+        // Pins are untouched. `apply_pin_unpin` is union-only, so calling it
+        // here would rewrite the JSONL for no effect; the exemplars this
+        // lesson cited stay pinned (SPEC §67 / WEG-426).
+        //
+        // The index side is handled by the post-cycle semantic pass, which
+        // runs unconditionally and turns the now-absent file into
+        // `delete_term(layer="semantic")` (`server::tantivy_handle`).
+        match std::fs::remove_file(agent_root.lessons_md()) {
+            Ok(()) => {}
+            // Already gone — the common never-promoted case, or a racing
+            // remover. Either way the post-state is the one we wanted.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         return Ok(());
     }
 
@@ -790,6 +823,68 @@ mod tests {
         // JSONL still exercises the no-promotion path.
         write_jsonl(&root, &[]);
         run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        assert!(!root.lessons_md().exists());
+    }
+
+    // --- AILAB-699: a cycle that promotes nothing retires LESSONS.md ---
+
+    #[test]
+    fn deterministic_cycle_no_promotion_retires_lessons_md_and_keeps_pins() {
+        let dir = unique_tmpdir("dc-retire");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        // Cycle 1: PROMOTION_THRESHOLD events at NOW_SEC — inside the 7-day
+        // window, so the cluster promotes and a lesson is written.
+        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
+            .map(|i| make_event_at(i as u32, "rust::types", NOW_SEC))
+            .collect();
+        write_jsonl(&root, &events);
+
+        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+
+        assert!(
+            root.lessons_md().exists(),
+            "a promoting cycle must write LESSONS.md"
+        );
+        let exemplar_id = read_lessons_file(&root.lessons_md()).unwrap().lessons[0]
+            .id
+            .clone();
+        let pinned_after_promote = |id: &str| {
+            episodic::read_all(&root.episodic_jsonl())
+                .unwrap()
+                .into_iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("exemplar is in the log")
+                .pinned
+        };
+        assert!(
+            pinned_after_promote(&exemplar_id),
+            "apply_pin_unpin must pin the cited exemplar on the promoting cycle"
+        );
+
+        // Cycle 2: one later run whose `now_sec` is past the 30-day window. The
+        // same events now fall outside BOTH windows (`count_in_window` keeps
+        // `ts >= now_sec - window`), so nothing promotes. No hysteresis, no
+        // second no-promotion cycle needed.
+        let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;
+        run_deterministic_dream_cycle(&root, later).unwrap();
+
+        assert!(
+            !root.lessons_md().exists(),
+            "a no-promotion cycle must unlink the stale LESSONS.md, not leave \
+             it (AILAB-699) and not replace it with an empty frontmatter file"
+        );
+        assert!(
+            pinned_after_promote(&exemplar_id),
+            "retirement removes the derived doc, never the pin on its source \
+             event — the retire path must not call apply_pin_unpin or clear \
+             `pinned` (option 3 is out of scope)"
+        );
+
+        // Idempotent: a second no-promotion cycle over the same input is a
+        // no-op, not an error on the already-absent file.
+        run_deterministic_dream_cycle(&root, later).unwrap();
         assert!(!root.lessons_md().exists());
     }
 
