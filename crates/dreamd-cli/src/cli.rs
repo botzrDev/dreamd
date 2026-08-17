@@ -385,6 +385,19 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Which subcommands own the shared daemon log at `~/.agent/dreamd.log`.
+///
+/// Only the daemon does. `init_tracing` opens the path with `truncate(true)`,
+/// so any short-lived invocation that got a path would wipe a running daemon's
+/// accumulated log — and, `archive` aside, no CLI one-shot emits a single
+/// `tracing` event into it anyway. `mcp` is long-running but is deliberately
+/// excluded: IDEs spawn several concurrently, so a file layer there would have
+/// two MCP servers truncating each other's log; its stderr already lands in the
+/// IDE's own MCP log. Everything else runs console-only on stderr. AILAB-184.
+fn wants_daemon_log(command: Option<&Command>) -> bool {
+    matches!(command, Some(Command::Watch(_)))
+}
+
 fn resolve_daemon_home() -> PathBuf {
     home_dir()
         .map(|h| h.join(".agent"))
@@ -799,30 +812,30 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
     }
 }
 
-fn run_status(status_log_tail: &[String]) -> ExitCode {
+fn run_status() -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
     };
     // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
-    // registry resolves off $HOME the same way the tracing log path above does.
-    // The log tail was captured into `status_log_tail` before init_tracing ran.
+    // registry and the daemon log both resolve off $HOME via the one `home_dir()`
+    // helper. AILAB-184: `status` no longer installs a file layer, so nothing in
+    // this process truncates the log — the tail is read here, in-command, rather
+    // than pre-read in `run()` before `init_tracing` (the retired WEG-103 dance).
     let socket = dreamd_core::client::resolve_daemon_socket();
     let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));
+    let log_tail = home_dir()
+        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
+        .map(|p| commands::status::read_log_tail(&p))
+        .unwrap_or_default();
     // lock-ok (AILAB-583): status never opens a Tantivy index — it probes the
-    // daemon socket and reads registry.toml, the WAL, and the captured log tail.
+    // daemon socket and reads registry.toml, the WAL, and the daemon log tail.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match commands::status::run(
-        &cwd,
-        socket.as_deref(),
-        &registry_path,
-        status_log_tail,
-        &mut out,
-    ) {
+    match commands::status::run(&cwd, socket.as_deref(), &registry_path, &log_tail, &mut out) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -1001,24 +1014,18 @@ pub fn run() -> ExitCode {
     };
 
     // WEG-32 / DR-004 — install the tracing subscriber once, before dispatch,
-    // so every subcommand's `tracing` callsites land on stderr + ~/.agent/dreamd.log.
+    // so every subcommand's `tracing` callsites land on stderr. AILAB-184: only
+    // the daemon (`dreamd watch`) additionally gets the file layer at
+    // ~/.agent/dreamd.log; see `wants_daemon_log` for why every other
+    // invocation passes None and stays console-only. The log path is resolved
+    // via the one `home_dir()` helper (empty HOME counts as none).
     // `_log_guard` MUST live until run() returns — `let _ =` would drop it
-    // immediately and discard buffered file logs. Resolve the log path via the
-    // one `home_dir()` helper (empty HOME counts as none); None → console-only.
-    let log_file =
-        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
-
-    // WEG-103 — `dreamd status` tails the daemon log, but init_tracing opens it
-    // with truncate(true) at startup (as every subcommand does). Capture the
-    // tail BEFORE that truncation so status can surface a running daemon's real
-    // recent lines rather than the empty file it just cleared.
-    let status_log_tail = if matches!(cli.command, Some(Command::Status)) {
-        log_file
-            .as_deref()
-            .map(commands::status::read_log_tail)
-            .unwrap_or_default()
+    // immediately and discard buffered file logs — and it is still
+    // load-bearing whenever a file layer is installed.
+    let log_file = if wants_daemon_log(cli.command.as_ref()) {
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
     } else {
-        Vec::new()
+        None
     };
 
     let _log_guard = dreamd_core::observability::init_tracing(log_file);
@@ -1048,7 +1055,7 @@ pub fn run() -> ExitCode {
         Command::Setup(args) => {
             run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
         }
-        Command::Status => run_status(&status_log_tail),
+        Command::Status => run_status(),
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
         Command::Watch(_args) => run_watch(),
@@ -1282,6 +1289,43 @@ mod tests {
             };
             assert_eq!(label, expect);
         }
+    }
+
+    /// AILAB-184 — only the daemon owns `~/.agent/dreamd.log`. Everything else,
+    /// including the long-running `mcp` server (several run concurrently under
+    /// an IDE), stays console-only so nothing truncates the daemon's file.
+    #[test]
+    fn wants_daemon_log_true_for_watch_only() {
+        let watch = Cli::try_parse_from(["dreamd", "watch"]).unwrap();
+        assert!(
+            wants_daemon_log(watch.command.as_ref()),
+            "watch is the daemon and must get the file layer"
+        );
+
+        for argv in [
+            vec!["dreamd", "status"],
+            vec!["dreamd", "mcp"],
+            vec!["dreamd", "init"],
+            vec!["dreamd", "doctor"],
+            vec!["dreamd", "version"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(
+                !wants_daemon_log(cli.command.as_ref()),
+                "{argv:?} must stay console-only"
+            );
+        }
+    }
+
+    /// Bare `dreamd --version` leaves `command == None` and must not open the
+    /// daemon log either (AILAB-184 consequence #2).
+    #[test]
+    fn wants_daemon_log_false_without_subcommand() {
+        assert!(!wants_daemon_log(None));
+
+        let bare = Cli::try_parse_from(["dreamd", "--version"]).unwrap();
+        assert!(bare.command.is_none());
+        assert!(!wants_daemon_log(bare.command.as_ref()));
     }
 
     #[test]

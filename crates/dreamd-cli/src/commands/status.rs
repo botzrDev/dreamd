@@ -19,10 +19,12 @@ pub(crate) const LOG_TAIL_LINES: usize = 5;
 /// Read the last [`LOG_TAIL_LINES`] lines of the daemon log for the report.
 ///
 /// Returns an empty vec when the file is absent or unreadable (`status` then
-/// prints "recent log: (none)"). The caller MUST invoke this *before* the
-/// tracing subscriber is installed: `init_tracing` opens the same log path with
-/// `truncate(true)` at startup, so reading afterward would always see an empty
-/// file. See `cli::run`.
+/// prints "recent log: (none)"). There is no ordering constraint against the
+/// tracing subscriber any more (AILAB-184): only `dreamd watch` passes a log
+/// path to `init_tracing`, so a `status` process never opens that file with
+/// `truncate(true)` and never has to race its own startup to read it. The read
+/// happens in-command, in `cli::run_status`; what it sees is whatever a running
+/// daemon has written.
 pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
     let Ok(contents) = std::fs::read_to_string(log_file) else {
         return Vec::new();

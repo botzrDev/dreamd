@@ -60,12 +60,17 @@ unpin, then start it again. Check daemon liveness with `dreamd status`.
 
 ### Audit trail
 
-Every id that is actually cleared is recorded with a `WARN`-level log line so there
-is a durable record of a deliberate, destructive-adjacent action:
+Every id that is actually cleared is recorded with a `WARN`-level log line, so a
+deliberate, destructive-adjacent action is at least announced:
 
 ```
 WARN archive: force-unpinned episodic entry event_id=evt_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
-These land wherever the daemon log is configured (`~/.agent/dreamd.log` by
-default; see [configuration.md](./configuration.md)).
+**This line goes to stderr only — it is not persisted.** `dreamd archive` is a
+one-shot, and since AILAB-184 only the daemon (`dreamd watch`) writes to
+`~/.agent/dreamd.log`; a one-shot is console-only. Nor was it durable before:
+the file layer opened that log with `truncate(true)`, so the next `dreamd`
+invocation of any kind erased the line. If you need to keep it, redirect stderr
+yourself (`dreamd archive … 2>> unpin-audit.log`). A real append-mode/rotating
+daemon log is tracked as AILAB-285.

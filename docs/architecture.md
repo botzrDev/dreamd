@@ -556,12 +556,20 @@ Two layers:
   TTY-conditional: pretty human-readable text when stderr is a terminal, JSON
   when it is not (CI, service-managed daemon). Detection uses
   `std::io::IsTerminal` — no `atty` crate.
-- **File → `~/.agent/dreamd.log`, JSON always.** Written through a non-blocking
-  appender (`tracing-appender`). The returned `WorkerGuard` is bound as
-  `_log_guard` in `run()` and held until the process exits; dropping it early
-  discards buffered file logs. The file is **truncated at startup** for v0.1 —
-  log rotation is deferred to v0.1.1. The path is resolved via
-  `DaemonHome::log_file()`, never hardcoded.
+- **File → `~/.agent/dreamd.log`, JSON always — daemon only.** Only `dreamd
+  watch`, the long-running daemon, installs this layer; every other invocation
+  (`init`, `status`, `doctor`, `dream`, `reset`, `mcp`, bare `--version`, …)
+  passes `None` and is console-only on stderr. The gate is
+  `cli::wants_daemon_log` (AILAB-184). The reason is the next sentence: the
+  daemon's file is **truncated at startup** for v0.1 — log rotation is deferred
+  to v0.1.1 — so a short-lived one-shot that opened the same path would erase a
+  running daemon's accumulated log while writing nothing of its own into it.
+  `mcp` is long-running but excluded too: IDEs spawn several concurrently, and
+  they would truncate each other. Written through a non-blocking appender
+  (`tracing-appender`); the returned `WorkerGuard` is bound as `_log_guard` in
+  `run()` and held until the process exits, since dropping it early discards
+  buffered file logs. The path is resolved via `DaemonHome::log_file()`, never
+  hardcoded.
 
 Level comes from the `DREAMD_LOG` env var (`error|warn|info|debug|trace`,
 standard `EnvFilter` syntax), defaulting to `info`. `DREAMD_LOG` is owned here
