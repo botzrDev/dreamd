@@ -3,7 +3,6 @@
 use axum::extract::{Extension, Json, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
-use dreamd_protocol::AgentLearning;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
@@ -15,6 +14,41 @@ use super::super::router::{error_400, error_500};
 use super::super::state::AppState;
 use super::super::types::LearnResponse;
 
+/// Wire body for `POST /api/v1/learn`.
+///
+/// Deliberately NOT the domain [`AgentLearning`]: `id`, `schema_version`, and
+/// `timestamp` are daemon-owned (minted and stamped in `coordinator.rs` on every
+/// durable write), but `AgentLearning` is also the *disk* record, where `id` is
+/// authoritative and must keep parsing strictly (`episodic.rs`). One
+/// `Deserialize` impl cannot serve both surfaces, so the wire gets its own type
+/// rather than the protocol struct gaining a `skip_deserializing` that would
+/// weaken the disk read. AILAB-175.
+///
+/// No `deny_unknown_fields`: a client that still sends `id` (every shipped doc
+/// example did until this change) must be **ignored, not rejected** — that is
+/// the acceptance criterion, and serde's default ignore-unknown gives it for
+/// free.
+///
+/// [`AgentLearning`]: dreamd_protocol::AgentLearning
+#[derive(serde::Deserialize)]
+pub(crate) struct AppendLearningRequest {
+    /// 0.0..=10.0 subjective friction. Required — unlike MCP, HTTP has never
+    /// defaulted it, and `Some(..)` below keeps that contract.
+    pub pain: f32,
+    /// 0.0..=10.0 long-term relevance. Required, same reasoning as `pain`.
+    pub importance: f32,
+    /// Sticky flag; the only field with a serde default, matching
+    /// `AgentLearning::pinned`. Client-settable and preserved (see below).
+    #[serde(default)]
+    pub pinned: bool,
+    /// Clustering key; validated and normalised at ingress.
+    pub skill_action: String,
+    /// Provenance tag, e.g. `"cursor"`, `"claude-code"`.
+    pub source_harness: String,
+    /// Free-text body; redacted at ingress, 4 KiB cap enforced downstream.
+    pub content: String,
+}
+
 /// `POST /api/v1/learn` — append one episodic learning durably.
 ///
 /// # Headers
@@ -23,8 +57,10 @@ use super::super::types::LearnResponse;
 /// * `X-Client-Dedup-Key` (optional) — idempotency key scoped per project
 ///
 /// # Body
-/// [`AgentLearning`] JSON; inbound `id`, `schema_version`, and `timestamp` are
-/// server-stamped on durable write.
+/// [`AppendLearningRequest`] JSON. `id`, `schema_version`, and `timestamp` are
+/// **not accepted from the client** — they are daemon-owned and server-stamped
+/// on durable write. A body that still carries them is accepted and those
+/// values ignored, never rejected.
 ///
 /// # Responses
 /// * `201` — `{"id","timestamp","deduplicated"}`
@@ -35,7 +71,7 @@ pub(crate) async fn post_learn(
     State(state): State<AppState>,
     Extension(project): Extension<ProjectEntry>,
     headers: HeaderMap,
-    Json(mut learning): Json<AgentLearning>,
+    Json(req): Json<AppendLearningRequest>,
 ) -> axum::response::Response {
     tracing::debug!(project_root = %project.root, "POST /api/v1/learn");
 
@@ -44,11 +80,27 @@ pub(crate) async fn post_learn(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    // Validate, normalise, and redact via shared learn ingress.
+    // Map the wire body onto the domain type through the same shared seam the
+    // MCP path uses: validate, normalise, redact, and stamp the placeholder id.
     // Sole skill_action gate (ARCHITECTURE.md §9); coordinator does not re-check.
-    if let Err(e) = LearnIngress::prepare_agent_learning(&mut learning, state.config.redaction) {
-        return error_400(&e.to_string());
-    }
+    // `Some(..)` (never `None`) preserves the HTTP contract — the optional
+    // validators apply the same 0.0..=10.0 check, and MCP's `unwrap_or(5.0)`
+    // default is unreachable from here.
+    let mut learning = match LearnIngress::build_agent_learning(
+        &req.content,
+        &req.source_harness,
+        &req.skill_action,
+        Some(req.pain as f64),
+        Some(req.importance as f64),
+        state.config.redaction,
+    ) {
+        Ok(l) => l,
+        Err(e) => return error_400(&e.to_string()),
+    };
+    // `build_agent_learning` hardcodes `pinned: false` for MCP, which has no
+    // such param; HTTP clients have always been able to set it, so carry it
+    // across. Pinned by `learn_client_pinned_true_is_preserved`.
+    learning.pinned = req.pinned;
 
     // Resolve the coordinator that OWNS this project root (WEG-272),
     // then build and dispatch. Routing on `project.root` is what keeps a

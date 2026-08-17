@@ -77,19 +77,18 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 | `Content-Type` | Yes | `application/json` |
 | `X-Client-Dedup-Key` | No | Idempotency key (see below) |
 
-#### Request body (`AgentLearning`)
+#### Request body (`AppendLearningRequest`)
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `schema_version` | string | Yes | Client may send any value; server overwrites with `"1.0.0"` |
-| `id` | string | Yes | Placeholder accepted; server overwrites with daemon-minted `evt_<ULID>` |
-| `timestamp` | string (RFC 3339) | Yes | Placeholder accepted; server overwrites with daemon-minted UTC timestamp at durable write |
 | `pain` | number | Yes | `0.0`–`10.0` inclusive |
 | `importance` | number | Yes | `0.0`–`10.0` inclusive |
 | `pinned` | boolean | No | Default `false`. Live in v0.1: dream-cycle pin union keeps pinned events through decay; `dreamd archive --force-unpin` clears pins. |
 | `skill_action` | string | Yes | Clustering key; normalized and validated (see below) |
 | `source_harness` | string | Yes | Provenance tag, e.g. `"cursor"`, `"claude-code"` |
 | `content` | string | Yes | Free-text body; max ~4 KiB serialized line (413 if exceeded) |
+
+**Daemon-owned fields:** `id`, `schema_version`, and `timestamp` are **not part of the request body**. The daemon mints the `evt_<ULID>` id and stamps the schema version and the UTC persistence timestamp on every durable write, so there is nothing useful a client can send. A body that still includes them — earlier versions of this document told you to — is **accepted and those values ignored**, never rejected. All three come back in the response.
 
 **`skill_action` rules:** Trimmed, lowercased, whitespace collapsed to `_`, segments joined by `::`. Each segment must match `[a-z0-9_]+`. Max 256 bytes. Examples: `rust::error_handling`, `rust::cargo::test`. Rejects `.`, `/`, `-`, and empty segments.
 
@@ -117,9 +116,6 @@ curl --unix-socket ~/.agent/dreamd.sock \
   -H "Content-Type: application/json" \
   -H "X-Client-Dedup-Key: axum_unwrap_in_handler" \
   -d '{
-    "schema_version": "1.0.0",
-    "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "timestamp": "2026-06-23T12:00:00Z",
     "pain": 7.0,
     "importance": 8.0,
     "skill_action": "rust::error_handling::axum_rejection",
