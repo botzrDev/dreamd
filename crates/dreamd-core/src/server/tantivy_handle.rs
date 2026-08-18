@@ -458,6 +458,30 @@ impl TantivyIndexHandle {
             .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
     }
 
+    /// Force a Tantivy commit + progress-file update and wait for it.
+    ///
+    /// Promoted from the test-only helper for AILAB-162: `run_watch`'s
+    /// shutdown drain prefers [`Self::shutdown`], but that consumes `self` and
+    /// the primary handle is an `Arc` shared with `AppState`. When
+    /// `Arc::try_unwrap` cannot recover sole ownership, this is the drain — it
+    /// rides the existing [`IndexerMsg::Flush`] path, so there is exactly one
+    /// commit implementation (`commit_and_persist`) and no second, shutdown-only
+    /// code path that could drift from it.
+    ///
+    /// Unlike `shutdown` it leaves the indexer task running. That is the point:
+    /// a shared handle has other owners, and the process is about to exit
+    /// anyway — what must not be lost is the batch already accumulated in the
+    /// writer, which this commits.
+    pub(crate) async fn flush(&self) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender()
+            .send(IndexerMsg::Flush { ack: tx })
+            .await
+            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
+        rx.await
+            .map_err(|_| IndexError("indexer task dropped ack sender".to_string()))?
+    }
+
     /// Async drain path. Drops the indexer sender, awaits task completion
     /// (which performs a final commit before exiting). Preferred over
     /// [`IndexHandle::close`] when called from an async context — sidesteps
@@ -1230,13 +1254,9 @@ mod tests {
     }
 
     async fn flush(handle: &TantivyIndexHandle) -> Result<(), IndexError> {
-        let (tx, rx) = oneshot::channel();
-        handle
-            .sender()
-            .send(IndexerMsg::Flush { ack: tx })
-            .await
-            .expect("send flush");
-        rx.await.expect("flush ack")
+        // Delegates to the promoted `pub(crate)` method (AILAB-162) so tests
+        // and the shutdown drain exercise the same flush path.
+        handle.flush().await
     }
 
     // AC-1

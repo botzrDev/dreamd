@@ -16,6 +16,7 @@ pub mod coordinator;
 /// Shared outbound HTTP-over-UDS transport to the dreamd daemon.
 #[cfg(unix)]
 pub mod daemon_client;
+pub mod daemon_state;
 pub mod decay;
 pub mod dream_cycle;
 pub mod episodic;

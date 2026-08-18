@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use git2::{ErrorCode, Repository, Signature, Status};
 use serde::{Deserialize, Serialize};
 
+use crate::daemon_state::{update_daemon_state, DaemonStateError};
 use crate::layout::AgentRoot;
 
 const COMMITTER_NAME: &str = "dreamd";
@@ -45,6 +46,15 @@ pub enum AutobiographyError {
     Serde(#[from] serde_json::Error),
 }
 
+impl From<DaemonStateError> for AutobiographyError {
+    fn from(e: DaemonStateError) -> Self {
+        match e {
+            DaemonStateError::Io(e) => AutobiographyError::Io(e),
+            DaemonStateError::Json(e) => AutobiographyError::Serde(e),
+        }
+    }
+}
+
 /// Outcome of an autobiography attempt. `Committed` is the happy path;
 /// `NoRepo` and `Skipped` are capability absences / safety holds.
 #[derive(Debug)]
@@ -65,13 +75,10 @@ pub enum SkipReason {
     NoRepo,
 }
 
-/// State.json field that surfaces in `dreamd doctor`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutobiographySkip {
-    pub at: i64,
-    pub reason: String,
-    pub files: Vec<String>,
-}
+/// State.json field that surfaces in `dreamd doctor`. Owned by
+/// [`crate::daemon_state`] (AILAB-167) so both `state.json` writers can name
+/// it without a module cycle; re-exported here for existing call sites.
+pub use crate::daemon_state::AutobiographySkip;
 
 /// Check if any of the two tracked paths have unstaged or staged user edits
 /// relative to HEAD. Called at CYCLE START, before the cycle runs.
@@ -199,32 +206,17 @@ fn write_skip_marker(
     agent_root: &AgentRoot,
     skip: AutobiographySkip,
 ) -> Result<(), AutobiographyError> {
-    let path = agent_root.state_json();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut state: serde_json::Value = if path.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&path)?)?
-    } else {
-        serde_json::json!({})
-    };
-    state["last_autobiography_skip"] = serde_json::to_value(&skip)?;
-    let bytes = serde_json::to_vec_pretty(&state)?;
-    crate::io::write_atomic(&path, &bytes)?;
+    update_daemon_state(agent_root, |s| s.last_autobiography_skip = Some(skip))?;
     Ok(())
 }
 
 fn clear_skip_marker(agent_root: &AgentRoot) -> Result<(), AutobiographyError> {
-    let path = agent_root.state_json();
-    if !path.exists() {
+    // Early return preserved: clearing a marker that was never written must not
+    // create `state.json`.
+    if !agent_root.state_json().exists() {
         return Ok(());
     }
-    let mut state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-    if let Some(obj) = state.as_object_mut() {
-        obj.remove("last_autobiography_skip");
-    }
-    let bytes = serde_json::to_vec_pretty(&state)?;
-    crate::io::write_atomic(&path, &bytes)?;
+    update_daemon_state(agent_root, |s| s.last_autobiography_skip = None)?;
     Ok(())
 }
 

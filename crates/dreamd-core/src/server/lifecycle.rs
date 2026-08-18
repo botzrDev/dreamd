@@ -201,16 +201,59 @@ impl Supervisor {
     /// would return a typed `mpsc::error::SendError` — see
     /// [`SupervisorSendError`].
     pub async fn shutdown(self) {
+        self.drain().await;
+        drop(self.tx);
+        let _ = self.handle.await;
+    }
+
+    /// Drain the coordinator **without consuming `self`** (AILAB-162).
+    ///
+    /// This is the production shutdown path. `run_watch` only ever holds an
+    /// `Arc<Supervisor>` — `AppState::supervisor` is `Arc`-wrapped and the
+    /// state is moved into `build_router`, so live connection tasks may still
+    /// hold clones when the shutdown signal lands. That makes
+    /// [`Supervisor::shutdown`] unreachable there: it takes `self` by value
+    /// and would need an `Arc::try_unwrap` that is not guaranteed to succeed.
+    /// `drain` needs no unwrap and no exclusive ownership.
+    ///
+    /// Semantics are the first half of `shutdown`: send `Shutdown` on the
+    /// supervisor's retained `tx` and await the acknowledgement. Everything
+    /// already queued **ahead of** that message is handled normally by the
+    /// coordinator's main loop before it dequeues `Shutdown`, so an append
+    /// accepted before the signal is persisted before this returns.
+    ///
+    /// What the coordinator does **not** do is process anything enqueued
+    /// *behind* `Shutdown`: that arm is `rx.close()` followed by a
+    /// receive-and-discard loop, so a late append is dropped and its
+    /// `response_tx` resolves with a `RecvError`. This is unchanged from
+    /// [`Supervisor::shutdown`], whose documented contract — drop every issued
+    /// sender before calling — exists precisely to make that window empty.
+    /// `drain` cannot enforce that contract, because `run_watch` has no way to
+    /// join axum's spawned per-connection tasks, so it inherits the window. It
+    /// relaxes the *liveness* requirement only (it completes with senders
+    /// outstanding); it does not weaken, and does not strengthen, the
+    /// no-lost-append property. Callers that can drop their senders first
+    /// still should.
+    ///
+    /// What it deliberately does **not** do, and why `shutdown` is kept for
+    /// tests: it does not drop `self.tx` and does not join the coordinator's
+    /// `JoinHandle`. Neither is possible through a shared reference. Callers
+    /// that need the task joined (every existing test) must keep using
+    /// `shutdown`.
+    ///
+    /// Idempotent in the only way that matters: a second call finds the
+    /// channel closed, the send fails, and it returns without blocking.
+    pub async fn drain(&self) {
         let (sh_tx, sh_rx) = oneshot::channel();
-        // If the coordinator already exited (e.g., panicked), the send
-        // returns an error; swallow it because there's nothing to drain.
+        // If the coordinator already exited (e.g., panicked, or a previous
+        // drain landed), the send returns an error; swallow it because there
+        // is nothing left to drain. Awaiting `sh_rx` after a failed send
+        // would resolve immediately with a `RecvError` for the same reason.
         let _ = self
             .tx
             .send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
             .await;
         let _ = sh_rx.await;
-        drop(self.tx);
-        let _ = self.handle.await;
     }
 
     /// Test-only helper: synchronously wait on the join handle without
@@ -388,6 +431,92 @@ mod tests {
             1,
             "drained append must land on disk before coordinator exit"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn drain_persists_in_flight_append_behind_arc_with_live_sender_clone() {
+        // AC (AILAB-162): the `&self` drain must persist a queued append in the
+        // shape `run_watch` actually has — the supervisor behind an `Arc` with
+        // at least one clone outstanding, and a client sender still alive.
+        // `shutdown(self)` cannot be reached from here at all: `Arc::try_unwrap`
+        // would fail, and its documented contract requires every issued sender
+        // to have been dropped first. `drain` requires neither.
+        let dir = unique_tmp_dir("drain-arc");
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let supervisor =
+            std::sync::Arc::new(Supervisor::start(&agent_root, 8, None).expect("start supervisor"));
+        // A second Arc owner, standing in for the clone `build_router` moved
+        // into `AppState`.
+        let state_arc = std::sync::Arc::clone(&supervisor);
+
+        // A client sender that is deliberately NOT dropped — an in-flight
+        // connection task at signal time.
+        let client_tx = supervisor.sender();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        client_tx
+            .send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: None,
+                response_tx: resp_tx,
+            })
+            .await
+            .expect("send append");
+
+        // Do NOT await `resp_rx` first: AppendLearning and Shutdown must both
+        // be queued, AppendLearning first, or this does not test drain.
+        supervisor.drain().await;
+
+        let minted = resp_rx
+            .await
+            .expect("append oneshot must be resolved by drain")
+            .expect("append must succeed under drain")
+            .id;
+        assert!(minted.as_str().starts_with("evt_"));
+
+        let raw = std::fs::read_to_string(agent_root.episodic_jsonl()).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "drained append must land on disk before the coordinator exits"
+        );
+
+        // The two conditions that make `shutdown(self)` unusable here were
+        // still true across the drain.
+        assert_eq!(
+            std::sync::Arc::strong_count(&supervisor),
+            2,
+            "Arc::try_unwrap would have failed at drain time"
+        );
+        // The client sender was live for the whole drain — it is closed now
+        // only because the coordinator closed its own `rx` and exited, which
+        // is exactly the property `shutdown`'s drop-every-sender contract
+        // would otherwise have required the caller to arrange.
+        assert!(
+            client_tx.is_closed(),
+            "coordinator must have exited under drain"
+        );
+        drop(client_tx);
+        drop(state_arc);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn drain_on_already_shut_down_coordinator_returns() {
+        // Second drain finds the channel closed; it must return rather than
+        // block on an acknowledgement that will never come.
+        let dir = unique_tmp_dir("drain-twice");
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let supervisor = Supervisor::start(&agent_root, 4, None).expect("start supervisor");
+        supervisor.drain().await;
+        supervisor.drain().await;
 
         let _ = std::fs::remove_dir_all(&dir);
     }

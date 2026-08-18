@@ -281,3 +281,48 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-698 Linear AC cited `CHANGELOG.md:113`; live line is `:119` under `[0.1.0-rc.1]`, not `[0.1.0]`. Line numbers on CHANGELOG rot; the section heading is the identity.
 - **How to apply:** Identify the bullet by heading + wording, not by AC line number. Leave rc.* / released entries byte-identical unless the user explicitly authorizes a historical rewrite.
 - **Cross-refs:** none
+
+### daemon-state-module-avoids-wal-autobiography-cycle
+
+- **Rule:** Shared `state.json` types (`DaemonState`, `AutobiographySkip`) live in a third module both `wal` and `autobiography` depend on. Do not put `DaemonState` in `wal.rs` and `AutobiographySkip` in `autobiography.rs`.
+- **Why:** AILAB-167 pre-flight: the typed writer must be callable from both modules, and `DaemonState` needs `Option<AutobiographySkip>`. Splitting those two types across `wal.rs` / `autobiography.rs` is a compile-time cycle.
+- **How to apply:**
+  - New `crates/dreamd-core/src/daemon_state.rs`; `pub mod daemon_state` in `lib.rs`.
+  - Move `STATE_SCHEMA_VERSION` there and `pub use` it from `wal.rs` so `crate::wal::STATE_SCHEMA_VERSION` citations keep compiling (`migrate-from-to-is-record-schema`).
+  - Re-export `AutobiographySkip` from `autobiography` so `doctor.rs` / `cli.rs` / `setup.rs` do not churn.
+- **Cross-refs:** `migrate-from-to-is-record-schema`
+
+### weg378-skip-midfile-halt-torn-tail
+
+- **Rule:** Episodic JSONL policy is SPEC §88 / WEG-378: skip `\n`-terminated blank or unparseable mid-file lines; halt only a no-`\n` torn tail (`episodic::scan` / `read_all` / `recover`). Halt-at-blank is a regression.
+- **Why:** AILAB-166 Linear AC still said unify to halt-at-blank, but `read_all` + consolidation/decay/indexer already share that skip policy. Re-queuing 166 would have undone `read_all_skips_blank_midfile_line`. Closed as shipped 2026-08-18.
+- **How to apply:** Before queuing a JSONL-reader ticket, grep `fn read_all` and the skip tests. Quarantine-to-sidecar is AILAB-163 (still open), not a reader-unification ticket.
+- **Cross-refs:** `jsonl-torn-tail-validation`, `linear-todo-can-already-be-on-main`
+
+### ailab-162-drain-not-sigterm
+
+- **Rule:** SIGTERM + socket unlink shipped in AILAB-301 / WEG-268. The remaining AILAB-162 hole was the post-`select!` coordinator/indexer drain (the comment that named it WEG-283). That drain is now in the working tree: unlink first, then `drain_daemon` (coordinator `Shutdown`, then index `try_unwrap`→`shutdown` or `flush`). Do not re-queue "add SIGTERM".
+- **Why:** 2026-08-18 look-ahead almost re-queued SIGTERM over `weg268_sigterm_socket`. The drain itself is unbounded (Shutdown can sit behind `RunDreamCycle`); a drain timeout or second-SIGTERM re-arm is a grace window (AILAB-210 / spec §8), not a 162 follow-on in the same commit.
+- **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown `supervisor_map`. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `no-hoisted-stdio-lock-across-tantivy`, `indexer-shed-is-not-replay-healed`
+
+### indexer-shed-is-not-replay-healed
+
+- **Rule:** An `IndexerMsg::Append` the coordinator `try_send`s and sheds on `Full` is **not** recovered by next-startup replay. `replay_two_pass` keeps only `ev.id.as_str() > last_indexed_id`; a gap followed by any later indexed event is skipped forever.
+- **Why:** AILAB-162 first-pass docs claimed shed appends are "healed by next-startup replay". The same false reassurance is still in `coordinator.rs` (`try_route_to_indexer` warn text). Watermark is the newest indexed id, not a contiguous prefix.
+- **How to apply:** Do not document or design a drain/backpressure path as if replay closes that hole. Closing it is its own ticket (contiguous watermark, or not shedding). The warn text is a separate doc-fix if queued.
+- **Cross-refs:** `ailab-162-drain-not-sigterm`
+
+### git-diff-name-only-misses-untracked
+
+- **Rule:** An anti-pattern allowlist that is `git diff --name-only | grep -vE '^(allowed files)$'` cannot see untracked files. A new module the spec *requires* will not appear, and a new file the spec *forbids* will not fail the gate.
+- **Why:** AILAB-167 report-back: `daemon_state.rs` was `??` and the allowlist line was empty of it. The only red hit was PM-side `AGENTS.md`. The spec's own file-scope grep was structurally blind to the ticket's main deliverable.
+- **How to apply:** Pair `git diff --name-only` with `git ls-files --others --exclude-standard` (or `git status --porcelain`). Do not treat an empty `git diff --name-only` allowlist as proof that only the listed paths changed.
+- **Cross-refs:** none
+
+### init-is-a-create-only-statejson-writer
+
+- **Rule:** `dreamd init` has its own private `State` in `commands/init.rs` that scaffolds `state.json`. It is a third writer, but create-only — not a rebuild of an existing file. AILAB-167's "single writer" AC is `wal` + `autobiography` only.
+- **Why:** Linear AILAB-167 names those two files. Folding `init.rs` in would also retouch `init_golden.rs` (651 B stdout lock) without changing the eat-on-cycle bug.
+- **How to apply:** Do not queue `init.rs` onto a state.json RMW ticket unless the user expands scope. `fs::write` at scaffold time is acceptable; cycle mutations go through the typed RMW writer.
+- **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`
