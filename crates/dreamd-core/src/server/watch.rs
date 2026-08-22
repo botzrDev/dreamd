@@ -16,15 +16,17 @@
 //!
 //! ## Signal handling
 //!
-//! Blocks until SIGINT (`ctrl_c`) or SIGTERM, then drains the boot coordinator
-//! and the primary index before unlinking `~/.agent/dreamd.sock` — see
-//! [`drain_daemon`]. Lazily-opened per-project coordinators and index handles
-//! are not touched on this path; eviction reaps them on drop (AILAB-306).
+//! Blocks until SIGINT (`ctrl_c`) or SIGTERM, then unlinks
+//! `~/.agent/dreamd.sock` and drains the boot coordinator and the primary
+//! index, bounded by [`DRAIN_TIMEOUT`] — see [`drain_daemon`]. Lazily-opened
+//! per-project coordinators and index handles are not touched on this path;
+//! eviction reaps them on drop (AILAB-306).
 
 #![cfg(unix)]
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -151,10 +153,10 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
     // anyway (bind_socket_raw), but a service-managed daemon stopped via
     // SIGTERM must not leave ~/.agent/dreamd.sock behind (WEG-268).
     //
-    // Ordering against the drain is deliberate. The drain below has no
-    // deadline, and a `Shutdown` queued behind an in-progress dream cycle can
-    // take as long as that cycle does — so putting the unlink after it would
-    // put a shipped guarantee behind an unbounded await, and systemd's
+    // Ordering against the drain is deliberate. The drain below is bounded by
+    // DRAIN_TIMEOUT (AILAB-748), but a `Shutdown` queued behind an in-progress
+    // dream cycle can still hold it for the full bound — so putting the unlink
+    // after it would put a shipped guarantee behind that wait, and systemd's
     // `TimeoutStopSec` SIGKILL could land first and strand the socket. AILAB-162
     // requires only that the drain happen before process exit, not before the
     // unlink. A client that connects in the window between the two gets
@@ -164,10 +166,35 @@ pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
     // Drain the boot coordinator and the primary index (AILAB-162). Appends
     // already accepted are only durable once the coordinator has processed
     // them and the index writer has committed; returning here without
-    // draining would drop the uncommitted batch.
-    drain_daemon(drain_supervisor, drain_index).await;
+    // draining would drop the uncommitted batch. Bounded by DRAIN_TIMEOUT
+    // (AILAB-748): a drain that overruns the cap is logged and abandoned —
+    // the JSONL append is already durable, so a lost final commit costs a
+    // rebuild on next open, not data.
+    let _ = with_drain_timeout(DRAIN_TIMEOUT, drain_daemon(drain_supervisor, drain_index)).await;
 
     outcome.map_err(WatchError::from)
+}
+
+/// Upper bound on the post-signal coordinator/index drain (AILAB-748).
+/// Past this, `run_watch` logs and exits anyway — JSONL is already durable;
+/// a lost final commit costs a rebuild on next open.
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Await `fut` up to `limit`. Returns `true` if it finished, `false` on timeout.
+pub(crate) async fn with_drain_timeout<F>(limit: Duration, fut: F) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    match tokio::time::timeout(limit, fut).await {
+        Ok(()) => true,
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_secs = limit.as_secs(),
+                "dreamd watch: drain timed out; exiting without waiting further"
+            );
+            false
+        }
+    }
 }
 
 /// Shutdown drain for the boot project (AILAB-162). Split out of [`run_watch`]
@@ -446,5 +473,19 @@ mod tests {
             matches!(result, Err(WatchError::DreamMode(_))),
             "expected DreamMode error, got: {result:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn with_drain_timeout_completes_when_inner_finishes() {
+        // AC (AILAB-748): a drain that finishes inside the bound reports so.
+        assert!(with_drain_timeout(Duration::from_millis(50), async {}).await);
+    }
+
+    #[tokio::test]
+    async fn with_drain_timeout_returns_false_when_inner_hangs() {
+        // AC (AILAB-748): a drain that outlives the bound is abandoned —
+        // `false`, not a hang and not an error.
+        let hung = tokio::time::sleep(Duration::from_secs(5));
+        assert!(!with_drain_timeout(Duration::from_millis(50), hung).await);
     }
 }
