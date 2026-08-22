@@ -171,9 +171,11 @@ pub fn read_semantic_pass_record(
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|e| IndexError(format!("parse {SEMANTIC_PASS_FILENAME}: {e}"))),
+            .map_err(|e| IndexError::Other(format!("parse {SEMANTIC_PASS_FILENAME}: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(IndexError(format!("read {SEMANTIC_PASS_FILENAME}: {e}"))),
+        Err(e) => Err(IndexError::Other(format!(
+            "read {SEMANTIC_PASS_FILENAME}: {e}"
+        ))),
     }
 }
 
@@ -290,7 +292,7 @@ impl TantivyIndexHandle {
                 std::fs::create_dir_all(&index_dir).map_err(io_to_index)?;
             }
             Err(ManifestVersionError::TooNew { manifest, binary }) => {
-                return Err(IndexError(format!(
+                return Err(IndexError::Other(format!(
                     "index schema {manifest:?} is newer than binary {binary:?}; \
                      upgrade dreamd, or wipe the index dir to rebuild under this binary"
                 )));
@@ -414,9 +416,8 @@ impl TantivyIndexHandle {
                 response: tx,
             })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
@@ -431,9 +432,8 @@ impl TantivyIndexHandle {
                 response: tx,
             })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Re-index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
@@ -453,9 +453,8 @@ impl TantivyIndexHandle {
                 response: tx,
             })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Force a Tantivy commit + progress-file update and wait for it.
@@ -477,9 +476,8 @@ impl TantivyIndexHandle {
         self.sender()
             .send(IndexerMsg::Flush { ack: tx })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped ack sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Async drain path. Drops the indexer sender, awaits task completion
@@ -490,7 +488,7 @@ impl TantivyIndexHandle {
         let IndexerHandle { tx, join } = self.indexer;
         drop(tx);
         join.await
-            .map_err(|e| IndexError(format!("indexer task join: {e}")))?;
+            .map_err(|e| IndexError::Other(format!("indexer task join: {e}")))?;
         Ok(())
     }
 }
@@ -522,7 +520,7 @@ impl IndexHandle for TantivyIndexHandle {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|e| IndexError(format!("build runtime for close: {e}")))?;
+                    .map_err(|e| IndexError::Other(format!("build runtime for close: {e}")))?;
                 rt.block_on(async move {
                     let _ = join.await;
                 });
@@ -682,9 +680,9 @@ fn apply_recurrence_sidecar_inner(
     // 1. Read and parse the sidecar.
     let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
     let sidecar_json = std::fs::read_to_string(&sidecar_path)
-        .map_err(|e| IndexError(format!("read recurrence_counts.json: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("read recurrence_counts.json: {e}")))?;
     let sidecar: RecurrenceSidecar = serde_json::from_str(&sidecar_json)
-        .map_err(|e| IndexError(format!("parse recurrence_counts.json: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("parse recurrence_counts.json: {e}")))?;
 
     // 2. Walk the JSONL (shared episodic scan, WEG-378) and bucket by skill_action.
     let jsonl_path = agent_root.episodic_jsonl();
@@ -998,7 +996,7 @@ fn add_document(
 // Replay (two-pass)
 
 fn read_jsonl_events(jsonl_path: &Path) -> Result<Vec<AgentLearning>, IndexError> {
-    crate::episodic::read_all(jsonl_path).map_err(|e| IndexError(format!("read jsonl: {e}")))
+    crate::episodic::read_all(jsonl_path).map_err(|e| IndexError::Other(format!("read jsonl: {e}")))
 }
 
 fn replay_two_pass(
@@ -1034,17 +1032,19 @@ fn replay_two_pass(
 fn read_progress(path: &Path) -> Result<IndexProgress, IndexError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|e| IndexError(format!("parse {INDEX_PROGRESS_FILENAME}: {e}"))),
+            .map_err(|e| IndexError::Other(format!("parse {INDEX_PROGRESS_FILENAME}: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(IndexProgress::default()),
-        Err(e) => Err(IndexError(format!("read {INDEX_PROGRESS_FILENAME}: {e}"))),
+        Err(e) => Err(IndexError::Other(format!(
+            "read {INDEX_PROGRESS_FILENAME}: {e}"
+        ))),
     }
 }
 
 fn write_progress(path: &Path, progress: &IndexProgress) -> Result<(), IndexError> {
     let bytes = serde_json::to_vec(progress)
-        .map_err(|e| IndexError(format!("serialize {INDEX_PROGRESS_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("serialize {INDEX_PROGRESS_FILENAME}: {e}")))?;
     write_atomic(path, &bytes)
-        .map_err(|e| IndexError(format!("write {INDEX_PROGRESS_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("write {INDEX_PROGRESS_FILENAME}: {e}")))?;
     Ok(())
 }
 
@@ -1082,9 +1082,9 @@ fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
     }
     let manifest = IndexManifest::current();
     let bytes = serde_json::to_vec(&manifest)
-        .map_err(|e| IndexError(format!("serialize {INDEX_MANIFEST_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("serialize {INDEX_MANIFEST_FILENAME}: {e}")))?;
     write_atomic(path, &bytes)
-        .map_err(|e| IndexError(format!("write {INDEX_MANIFEST_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("write {INDEX_MANIFEST_FILENAME}: {e}")))?;
     Ok(())
 }
 
@@ -1124,12 +1124,14 @@ fn try_open_or_create(
 }
 
 /// Does this open failure mean the on-disk index was written under a different
-/// schema and must be rebuilt? Gates a `remove_dir_all`, so it matches the
-/// exact rendering tantivy gives `TantivyError::SchemaError` (`"Schema error:
-/// '{0}'"`) rather than a bare `"schema"` substring: `tantivy_io_to_index`
-/// embeds the *directory path* in its message, so a store living under a path
-/// containing "schema" would otherwise trip the branch and wipe a healthy
-/// index.
+/// schema and must be rebuilt? Gates a `remove_dir_all`, so it is narrowed
+/// twice. First by variant: only [`IndexError::Tantivy`] can qualify, which
+/// excludes `tantivy_io_to_index`'s [`IndexError::TantivyDirectory`] outright —
+/// that payload embeds the *directory path*, so a store living under a path
+/// containing "schema" must never reach the substring test. Then by substring:
+/// the exact rendering tantivy gives `TantivyError::SchemaError` (`"Schema
+/// error: '{0}'"`) rather than a bare `"schema"`, since a `Tantivy` payload may
+/// mention a schema without being a schema mismatch.
 ///
 /// Deliberately does not try to catch `TantivyError::IncompatibleIndex` (a
 /// tantivy index-*format* mismatch). That variant renders through
@@ -1139,21 +1141,24 @@ fn try_open_or_create(
 /// therefore never matched it and only widened the false-positive surface. A
 /// format mismatch stays a loud startup error, not a silent wipe.
 fn is_schema_incompatible(err: &IndexError) -> bool {
-    err.0.to_ascii_lowercase().contains("schema error:")
+    match err {
+        IndexError::Tantivy(s) => s.to_ascii_lowercase().contains("schema error:"),
+        _ => false,
+    }
 }
 
 // Error helpers
 
 fn io_to_index(e: std::io::Error) -> IndexError {
-    IndexError(format!("io: {e}"))
+    IndexError::Io(format!("{e}"))
 }
 
 fn tantivy_to_index<E: std::fmt::Display>(e: E) -> IndexError {
-    IndexError(format!("tantivy: {e}"))
+    IndexError::Tantivy(format!("{e}"))
 }
 
 fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryError) -> IndexError {
-    IndexError(format!("tantivy directory: {e}"))
+    IndexError::TantivyDirectory(format!("{e}"))
 }
 
 // Tests
@@ -2337,8 +2342,8 @@ mod tests {
 
         // A store whose path merely contains "schema" must NOT wipe the index.
         // `tantivy_io_to_index` embeds the directory path in its message.
-        let path_err = IndexError(
-            "tantivy directory: Failed to open the directory: \
+        let path_err = IndexError::TantivyDirectory(
+            "Failed to open the directory: \
              '/home/dev/schema-tools/.agent/.dreamd/index'"
                 .to_string(),
         );
@@ -2350,8 +2355,8 @@ mod tests {
         // A tantivy index-FORMAT mismatch renders through Incompatibility's
         // Debug and contains neither "incompatible" nor "schema error:". It
         // stays a loud error rather than a silent rebuild.
-        let format_err = IndexError(
-            "tantivy: Library version: 6, index version: 5. Change tantivy to a \
+        let format_err = IndexError::Tantivy(
+            "Library version: 6, index version: 5. Change tantivy to a \
              version compatible with index format 5 (e.g. 0.21.x) and rebuild \
              your project."
                 .to_string(),

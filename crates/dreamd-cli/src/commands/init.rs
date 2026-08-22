@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use dreamd_core::config::CONFIG_TEMPLATE;
-use dreamd_core::io::write_atomic;
+use dreamd_core::io::{lock_exclusive, write_atomic};
 use dreamd_core::privacy::DR413_DISCLOSURE;
 use dreamd_core::registry::{ProjectEntry, Registry};
 use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
@@ -152,6 +152,28 @@ pub fn uninstall_project(
     let daemon = DaemonHome::new(daemon_home);
     let registry_path = daemon.registry_toml();
 
+    // Fast no-op when nothing has ever been registered. Do **not** create
+    // `daemon_home` just to take the flock — uninstall must not scaffold
+    // `~/.agent/` as a locking side effect. Gate on `registry.toml`, not on
+    // `daemon_home.exists()`: the latter is a TOCTOU against a concurrent
+    // first `dreamd init` that creates the home between the check and the RMW
+    // (AILAB-161 report-back). A false-negative here (init wins the race) is
+    // fine — the user re-runs uninstall.
+    if !registry_path.exists() {
+        if !quiet {
+            writeln!(
+                out,
+                "dreamd: project not registered \u{2014} nothing to do."
+            )?;
+        }
+        return Ok(());
+    }
+
+    // Registry present ⇒ its parent exists. Serialize the whole RMW against
+    // concurrent `dreamd init` / uninstall. `write_atomic` is durability, not
+    // exclusion (AILAB-161). Re-check existence under the lock: a racer may
+    // have removed the file between the probe above and `flock`.
+    let _guard = lock_exclusive(&daemon.registry_lock())?;
     if !registry_path.exists() {
         if !quiet {
             writeln!(
@@ -202,7 +224,16 @@ pub fn uninstall_project(
 
 fn register_project(daemon_home: &Path, project_root: &Path) -> Result<(), InitError> {
     fs::create_dir_all(daemon_home)?;
-    let registry_path = DaemonHome::new(daemon_home).registry_toml();
+    let daemon = DaemonHome::new(daemon_home);
+    // Serialize the whole read → parse → push → write_atomic → chmod cycle
+    // against a concurrent `dreamd init` or `dreamd ... uninstall`, the other
+    // writer of this file. Two unlocked cycles read the same snapshot and the
+    // later rename silently drops the earlier writer's project root
+    // (AILAB-161). `create_dir_all` stays outside the lock — it is the
+    // precondition for creating the lockfile at all. Silent: no stdout line,
+    // `tests/fixtures/init.golden.txt` is byte-locked.
+    let _guard = lock_exclusive(&daemon.registry_lock())?;
+    let registry_path = daemon.registry_toml();
 
     let mut registry: Registry = if registry_path.exists() {
         let raw = fs::read_to_string(&registry_path)?;
@@ -304,4 +335,133 @@ fn append_gitignore(path: &Path) -> std::io::Result<()> {
     }
     f.write_all(GITIGNORE_SNIPPET.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    /// Two concurrent `register_project` calls against one daemon home must
+    /// both survive. Unlocked, both threads read the same empty snapshot and
+    /// the second `write_atomic` clobbers the first — the lost update the
+    /// AILAB-161 registry flock fixes.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_register_project_keeps_both_roots() {
+        let home = tempfile::tempdir().expect("daemon home tempdir");
+        let daemon_home = home.path().to_path_buf();
+
+        let projects = tempfile::tempdir().expect("project roots tempdir");
+        let root_a = projects.path().join("alpha");
+        let root_b = projects.path().join("beta");
+        fs::create_dir_all(&root_a).expect("create alpha");
+        fs::create_dir_all(&root_b).expect("create beta");
+
+        // Barrier so both threads hit the read-modify-write window together.
+        let start = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [root_a.clone(), root_b.clone()]
+            .into_iter()
+            .map(|root| {
+                let daemon_home = daemon_home.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    register_project(&daemon_home, &root).expect("register_project ok");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("register thread joined");
+        }
+
+        let registry_path = DaemonHome::new(&daemon_home).registry_toml();
+        let raw = fs::read_to_string(&registry_path).expect("registry.toml written");
+        let registry: Registry = toml::from_str(&raw).expect("registry.toml parses");
+        let roots: Vec<&str> = registry.projects.iter().map(|p| p.root.as_str()).collect();
+
+        for root in [&root_a, &root_b] {
+            let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            let canonical = canonical.to_string_lossy().into_owned();
+            assert!(
+                roots.contains(&canonical.as_str()),
+                "lost update: {canonical} missing from {roots:?}"
+            );
+        }
+        assert_eq!(
+            roots.len(),
+            2,
+            "expected exactly both project roots, got {roots:?}"
+        );
+
+        // The flock target is a plain neighbour file that is never unlinked.
+        assert!(
+            DaemonHome::new(&daemon_home).registry_lock().exists(),
+            "lockfile must remain on disk after both writers finish"
+        );
+    }
+
+    /// First-ever `register_project` racing `uninstall_project` against a
+    /// daemon home that does not exist yet must not drop the registered root.
+    ///
+    /// The broken shape gated the flock on `daemon_home.exists()`: uninstall
+    /// took `None`, then saw the registry `init` just created and ran the RMW
+    /// unlocked — the exact lost-update AILAB-161 closed for init∥init.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_first_init_and_uninstall_keeps_registered_root() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        // Path must not exist yet — that was the TOCTOU precondition.
+        let daemon_home = parent.path().join("agent-home");
+        assert!(
+            !daemon_home.exists(),
+            "precondition: daemon home must be absent before the race"
+        );
+
+        let projects = tempfile::tempdir().expect("project roots tempdir");
+        let root_a = projects.path().join("alpha");
+        let root_b = projects.path().join("beta");
+        fs::create_dir_all(&root_a).expect("create alpha");
+        fs::create_dir_all(&root_b).expect("create beta");
+        fs::write(root_a.join("Cargo.toml"), b"[package]\n").expect("alpha Cargo.toml");
+        fs::write(root_b.join("Cargo.toml"), b"[package]\n").expect("beta Cargo.toml");
+
+        let start = Arc::new(Barrier::new(2));
+        let reg_home = daemon_home.clone();
+        let reg_root = root_a.clone();
+        let reg_start = Arc::clone(&start);
+        let reg = std::thread::spawn(move || {
+            reg_start.wait();
+            register_project(&reg_home, &reg_root).expect("register_project ok");
+        });
+
+        let un_home = daemon_home.clone();
+        let un_cwd = root_b.clone();
+        let un_start = Arc::clone(&start);
+        let un = std::thread::spawn(move || {
+            un_start.wait();
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            uninstall_project(&un_cwd, &un_home, true, &mut out, &mut err)
+                .expect("uninstall_project ok");
+        });
+
+        reg.join().expect("register thread joined");
+        un.join().expect("uninstall thread joined");
+
+        let registry_path = DaemonHome::new(&daemon_home).registry_toml();
+        assert!(
+            registry_path.exists(),
+            "register must have created registry.toml"
+        );
+        let raw = fs::read_to_string(&registry_path).expect("registry.toml readable");
+        let registry: Registry = toml::from_str(&raw).expect("registry.toml parses");
+        let canonical_a = fs::canonicalize(&root_a).unwrap_or_else(|_| root_a.clone());
+        let canonical_a = canonical_a.to_string_lossy().into_owned();
+        let roots: Vec<&str> = registry.projects.iter().map(|p| p.root.as_str()).collect();
+        assert!(
+            roots.contains(&canonical_a.as_str()),
+            "lost update: registered root missing after init∥uninstall race: {roots:?}"
+        );
+    }
 }

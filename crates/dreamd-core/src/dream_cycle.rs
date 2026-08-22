@@ -242,10 +242,9 @@ async fn apply_recurrence_sidecar_if_present(
             response: tx,
         })
         .await
-        .map_err(|_| crate::server::index_map::IndexError("indexer channel closed".to_string()))?;
-    rx.await.map_err(|_| {
-        crate::server::index_map::IndexError("indexer dropped response".to_string())
-    })??;
+        .map_err(|_| crate::server::index_map::IndexError::ChannelClosed)?;
+    rx.await
+        .map_err(|_| crate::server::index_map::IndexError::TaskDropped)??;
     Ok(())
 }
 
@@ -273,10 +272,9 @@ async fn index_semantic_lessons(
             response: tx,
         })
         .await
-        .map_err(|_| crate::server::index_map::IndexError("indexer channel closed".to_string()))?;
-    rx.await.map_err(|_| {
-        crate::server::index_map::IndexError("indexer dropped response".to_string())
-    })??;
+        .map_err(|_| crate::server::index_map::IndexError::ChannelClosed)?;
+    rx.await
+        .map_err(|_| crate::server::index_map::IndexError::TaskDropped)??;
     Ok(())
 }
 
@@ -295,10 +293,9 @@ async fn prune_decayed_events(
             response: tx,
         })
         .await
-        .map_err(|_| crate::server::index_map::IndexError("indexer channel closed".to_string()))?;
-    rx.await.map_err(|_| {
-        crate::server::index_map::IndexError("indexer dropped response".to_string())
-    })??;
+        .map_err(|_| crate::server::index_map::IndexError::ChannelClosed)?;
+    rx.await
+        .map_err(|_| crate::server::index_map::IndexError::TaskDropped)??;
     Ok(())
 }
 

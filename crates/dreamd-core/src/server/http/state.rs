@@ -100,9 +100,7 @@ impl AppState {
     fn lock_index_map(
         &self,
     ) -> Result<MutexGuard<'_, ProjectIndexMap<TantivyIndexHandle>>, IndexError> {
-        self.index_map
-            .lock()
-            .map_err(|_| IndexError("index map lock poisoned".to_string()))
+        self.index_map.lock().map_err(|_| IndexError::LockPoisoned)
     }
 
     /// Resolve the live index handle for `root` and run `f` against it.
@@ -191,8 +189,7 @@ impl AppState {
 
         // Non-boot root: recover any stale WAL before opening indexes or coordinators.
         let agent_root = crate::layout::AgentRoot::new(root);
-        crate::wal::recover_on_startup(&agent_root)
-            .map_err(|e| IndexError(format!("wal recovery: {e}")))?;
+        crate::wal::recover_on_startup(&agent_root).map_err(|e| IndexError::Wal(format!("{e}")))?;
 
         // Wire the per-root coordinator to the per-root indexer (the same handle
         // recall/dream use) so its appends become searchable. Resolve + release
@@ -202,7 +199,7 @@ impl AppState {
         let mut map = self
             .supervisor_map
             .lock()
-            .map_err(|_| IndexError("supervisor map lock poisoned".to_string()))?;
+            .map_err(|_| IndexError::LockPoisoned)?;
         map.get_or_start(root, || {
             Supervisor::start(
                 &agent_root,
@@ -210,6 +207,6 @@ impl AppState {
                 Some(indexer_tx),
             )
         })
-        .map_err(|e| IndexError(format!("supervisor start failed: {e}")))
+        .map_err(|e| IndexError::Supervisor(format!("{e}")))
     }
 }

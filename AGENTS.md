@@ -306,6 +306,20 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown `supervisor_map`. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `no-hoisted-stdio-lock-across-tantivy`, `indexer-shed-is-not-replay-healed`
 
+### indexerror-lives-in-index-map
+
+- **Rule:** `IndexError` is defined in `server/index_map.rs`, not `tantivy_handle.rs`. Linear AILAB-161 still names the handle file as the type's home.
+- **Why:** The tuple struct is the map's error type; `tantivy_handle` / `dream_cycle` / `http/state` only construct it. Queuing "change IndexError in tantivy_handle.rs" misses the definition and the other two construction files.
+- **How to apply:** Grep `pub struct IndexError` / `pub enum IndexError` first. AILAB-170 owns the typed `SchemaIncompatible` wipe-gate and the module split; a 161-sized enum is ChannelClosed vs terminal, not that split.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `indexer-shed-is-not-replay-healed`
+
+### replay-two-pass-already-filters
+
+- **Rule:** `replay_two_pass` already does one `episodic::read_all` and `events.into_iter().filter(|ev| id > watermark)`. Do not re-queue "remove the double-parse."
+- **Why:** AILAB-161 item 2 (June audit) shipped with the WEG-378 shared scan. Re-doing it is a no-op; a second `read_jsonl_events` would be a regression.
+- **How to apply:** Read `fn replay_two_pass` before queuing any replay/index-error cleanup. The remaining 161 work is the enum + registry lockfile.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `weg378-skip-midfile-halt-torn-tail`
+
 ### indexer-shed-is-not-replay-healed
 
 - **Rule:** An `IndexerMsg::Append` the coordinator `try_send`s and sheds on `Full` is **not** recovered by next-startup replay. `replay_two_pass` keeps only `ev.id.as_str() > last_indexed_id`; a gap followed by any later indexed event is skipped forever.
@@ -326,3 +340,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** Linear AILAB-167 names those two files. Folding `init.rs` in would also retouch `init_golden.rs` (651 B stdout lock) without changing the eat-on-cycle bug.
 - **How to apply:** Do not queue `init.rs` onto a state.json RMW ticket unless the user expands scope. `fs::write` at scaffold time is acceptable; cycle mutations go through the typed RMW writer.
 - **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`
+
+### registry-flock-gates-on-registry-not-home-exists
+
+- **Rule:** `uninstall_project` may skip the registry flock only when `registry.toml` is absent (true no-op). Any RMW takes `lock_exclusive` first and re-checks existence under the lock. Never gate the flock on `daemon_home.exists()` alone.
+- **Why:** AILAB-161 report-back: `if daemon_home.exists() { Some(lock) } else { None }` left a TOCTOU against a concurrent first `dreamd init` that created the home+registry after uninstall skipped the lock, then ran the RMW unlocked.
+- **How to apply:** Probe `registry_toml()` for the early return; lock then re-probe before read/retain/write/chmod. Do not `create_dir_all` the daemon home from uninstall just to take the lock. Regression: `concurrent_first_init_and_uninstall_keeps_registered_root` in `commands/init.rs`.
+- **Cross-refs:** `indexerror-lives-in-index-map`

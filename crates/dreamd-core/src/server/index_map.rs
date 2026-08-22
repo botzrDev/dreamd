@@ -19,12 +19,55 @@ use crate::server::project_resource_map::{
     ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig,
 };
 
-/// Error surfaced when an index handle fails to close cleanly. Concrete
-/// implementations decide what's "fatal" vs "logged" — the skeleton holds
-/// only the string form.
+/// Error surfaced when an index handle fails to open, commit, or close
+/// cleanly. Variants separate the failures a caller can sensibly retry
+/// (see [`IndexError::is_retryable`]) from terminal ones, and give the
+/// schema-incompatibility wipe gate in [`crate::server::tantivy_handle`] a
+/// typed source to match on instead of the whole rendered string.
 #[derive(Debug, thiserror::Error)]
-#[error("index error: {0}")]
-pub struct IndexError(pub String);
+pub enum IndexError {
+    /// The indexer task's mpsc receiver is gone — the send never landed.
+    #[error("index error: indexer channel closed")]
+    ChannelClosed,
+    /// The indexer task accepted the message then dropped the oneshot
+    /// sender without replying.
+    #[error("index error: indexer task dropped response sender")]
+    TaskDropped,
+    /// A `std::sync::Mutex` guarding a per-project map was poisoned.
+    #[error("index error: index map lock poisoned")]
+    LockPoisoned,
+    /// Write-ahead-log recovery failed while resolving a project.
+    #[error("index error: wal recovery: {0}")]
+    Wal(String),
+    /// A per-project coordinator supervisor failed to start.
+    #[error("index error: supervisor start failed: {0}")]
+    Supervisor(String),
+    /// Filesystem failure.
+    #[error("index error: io: {0}")]
+    Io(String),
+    /// A `tantivy` operation failed. The payload is tantivy's own rendering;
+    /// `is_schema_incompatible` matches `"schema error:"` inside it.
+    #[error("index error: tantivy: {0}")]
+    Tantivy(String),
+    /// Opening the tantivy `MmapDirectory` failed. Distinct from
+    /// [`IndexError::Tantivy`] because its payload embeds the directory
+    /// *path*, which must never be searched for schema keywords.
+    #[error("index error: tantivy directory: {0}")]
+    TantivyDirectory(String),
+    /// Everything else — sidecar/progress/manifest parse and write failures,
+    /// task joins, runtime construction.
+    #[error("index error: {0}")]
+    Other(String),
+}
+
+impl IndexError {
+    /// Is this failure worth retrying? Only the two channel-shaped failures
+    /// are: everything else is a terminal disk, schema, or parse fault that
+    /// a retry would reproduce.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::ChannelClosed | Self::TaskDropped)
+    }
+}
 
 /// Per-project search-index handle managed by [`ProjectIndexMap`].
 ///
@@ -510,5 +553,31 @@ mod tests {
             let _ = map.get_or_open(Path::new("/p/b"), &open).unwrap();
         }
         assert_eq!(log.closes(), 2, "Drop must close every open handle");
+    }
+
+    /// `is_retryable` is the whole point of splitting the enum: only the two
+    /// channel-shaped failures are worth a second attempt. A disk, tantivy, or
+    /// parse fault would reproduce, so retrying it is a hot loop, not a heal.
+    #[test]
+    fn is_retryable_covers_channel_failures_only() {
+        assert!(
+            IndexError::ChannelClosed.is_retryable(),
+            "a closed indexer channel is retryable"
+        );
+        assert!(
+            IndexError::TaskDropped.is_retryable(),
+            "a dropped response sender is retryable"
+        );
+
+        for terminal in [
+            IndexError::Tantivy("Schema error: 'x' not found".to_string()),
+            IndexError::Io("permission denied".to_string()),
+            IndexError::Other("parse index_progress.json: eof".to_string()),
+        ] {
+            assert!(
+                !terminal.is_retryable(),
+                "terminal failure must not be retryable: {terminal:?}"
+            );
+        }
     }
 }
