@@ -196,7 +196,7 @@ async fn compose_lesson_body<B: LlmBackend>(
         Ok(completion) => LessonBodySource::Llm {
             // Trim only the envelope whitespace; the prose itself is the model's.
             content: completion.text.trim().to_string(),
-            prompt_version: llm::UNVERSIONED_PROMPT_ID.to_string(),
+            prompt_version: llm::VERSIONED_PROMPT_ID.to_string(),
         },
         Err(e) => {
             tracing::warn!(
@@ -517,8 +517,8 @@ mod tests {
         assert_eq!(lesson.content, COMPOSED, "body must be the model's prose");
         assert_eq!(
             file.prompt_version,
-            crate::llm::UNVERSIONED_PROMPT_ID,
-            "frontmatter must name the LLM producer"
+            crate::llm::VERSIONED_PROMPT_ID,
+            "frontmatter must name the versioned prompt file that composed the body"
         );
         assert_eq!(
             lesson.id, expected_id,

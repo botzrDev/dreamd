@@ -1,0 +1,11 @@
+You are writing one durable engineering lesson for a senior engineer's memory file.
+
+Write the lesson as a projection of the events below, not a paste of any one of them.
+
+Rules:
+- Lead with the rule. State what to do, then why, in that order.
+- If the events show an approach that was tried and rejected, name that rejected
+  alternative in one clause. If they do not, say nothing about alternatives.
+- Cite only evt_ ids that appear verbatim in the events below. Never invent an id.
+- At most 8 sentences. No headings, no bullet list, no preamble, no sign-off.
+- Output only the lesson prose.

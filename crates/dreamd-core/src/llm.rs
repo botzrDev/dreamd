@@ -6,15 +6,20 @@
 //! error path here is a fallback signal, not a cycle error. Callers translate
 //! `Err` / empty text into [`crate::consolidation::LessonBodySource::Deterministic`].
 //!
+//! Since AILAB-201 this module also owns the composition prompt itself:
+//! [`crate::llm::LESSON_PROMPT`] and the [`crate::llm::VERSIONED_PROMPT_ID`]
+//! stamped on every LLM-composed `LESSONS.md`. (Paths are fully qualified
+//! because `lib.rs` carries an outer doc comment on `pub mod llm;`, which makes
+//! rustdoc resolve this block in `lib.rs` scope — the same trap the unresolved
+//! `LlmBackend` link on the line above has been sitting in.)
+//!
 //! ## What this module does NOT own
 //!
 //! * Token accounting / the `cost_cap_usd` spend cap — AILAB-196. No tokenizer
 //!   crate is a dependency here; the token counts reported at INFO come from the
 //!   provider's own usage block.
-//! * The versioned prompt file — AILAB-201. This module never loads a prompt from
-//!   disk; it carries a throwaway inline constant under [`UNVERSIONED_PROMPT_ID`]
-//!   that AILAB-201 deletes.
-//! * Citation validation (`evt_` ids the model made up) — AILAB-200.
+//! * Citation validation (`evt_` ids the model made up) — AILAB-200. The prompt
+//!   *asks* for verbatim `evt_` ids; nothing here checks that the model complied.
 //! * Personal-layer redaction of prompt inputs — AILAB-199.
 //!
 //! ## Credentials
@@ -35,9 +40,19 @@ use serde::Deserialize;
 use crate::config::Config;
 
 /// `prompt_version` written to `LESSONS.md` frontmatter when the body came from
-/// the throwaway inline prompt below. AILAB-201 replaces this with a versioned,
-/// file-backed prompt id and deletes [`UNVERSIONED_LESSON_PROMPT`].
-pub const UNVERSIONED_PROMPT_ID: &str = "llm-unversioned";
+/// the model (AILAB-201).
+///
+/// The date is the **bundle** date of [`LESSON_PROMPT`], not the cycle date: two
+/// stores that composed with the same binary carry the same id, so a lesson's
+/// frontmatter names the prompt that produced it rather than the night it ran.
+/// The two halves move independently — edit `v1.1.txt` in place and only the
+/// date moves; add a `src/prompts/vN.N.txt` and both do. Either way the id
+/// changes in the same commit as the bytes, or frontmatter starts lying about
+/// its own provenance.
+///
+/// The deterministic arm stamps [`crate::consolidation::DETERMINISTIC_PROMPT_ID`]
+/// instead — no model, no prompt, no version to carry.
+pub const VERSIONED_PROMPT_ID: &str = "dream-cycle/v1.1@2026-08-23";
 
 /// INFO line emitted when the cycle falls back for lack of credentials.
 ///
@@ -243,32 +258,29 @@ fn read_secrets_toml(path: &Path) -> Option<SecretsToml> {
 
 // ── Prompt ───────────────────────────────────────────────────────────────────
 
-/// Throwaway instruction block. Shape is dictated by `assignments/14-day-blitz.md`
-/// §"Lesson shape": rule first, one rejected alternative when the cluster shows
-/// one, never invent `evt_` ids, at most eight sentences.
+/// Versioned instruction block (AILAB-201). Shape is dictated by
+/// `assignments/14-day-blitz.md` §"Lesson shape": rule first, one rejected
+/// alternative when the cluster shows one, never invent `evt_` ids, at most
+/// eight sentences.
 ///
-/// AILAB-201 replaces this with a versioned file loaded at build time and
-/// deletes this constant along with [`UNVERSIONED_PROMPT_ID`].
-pub const UNVERSIONED_LESSON_PROMPT: &str = "\
-You are writing one durable engineering lesson for a senior engineer's memory file.
-
-Write the lesson as a projection of the events below, not a paste of any one of them.
-
-Rules:
-- Lead with the rule. State what to do, then why, in that order.
-- If the events show an approach that was tried and rejected, name that rejected
-  alternative in one clause. If they do not, say nothing about alternatives.
-- Cite only evt_ ids that appear verbatim in the events below. Never invent an id.
-- At most 8 sentences. No headings, no bullet list, no preamble, no sign-off.
-- Output only the lesson prose.";
+/// The bytes live in a `.txt` file rather than a string literal so a prompt edit
+/// is a reviewable one-file diff and so [`VERSIONED_PROMPT_ID`] names something a
+/// reader can open. `include_str!` rather than a runtime read: an installed
+/// `dreamd` has no source tree to read from, and a prompt that can go missing at
+/// run time is a cycle that fails for a reason the operator cannot fix.
+///
+/// A unit snapshot makes an edit here **loud**, not impossible — it fails review,
+/// but `cargo insta accept` will still land it with [`VERSIONED_PROMPT_ID`]
+/// stale. Moving the id is a reviewer's job, not the test harness's.
+pub const LESSON_PROMPT: &str = include_str!("prompts/v1.1.txt");
 
 /// Build the composition prompt for one promoted cluster.
 ///
 /// Event bodies are included verbatim; redaction of the personal layer is
 /// AILAB-199 and is not applied here.
 pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> String {
-    let mut s = String::with_capacity(UNVERSIONED_LESSON_PROMPT.len() + 256 * events.len());
-    s.push_str(UNVERSIONED_LESSON_PROMPT);
+    let mut s = String::with_capacity(LESSON_PROMPT.len() + 256 * events.len());
+    s.push_str(LESSON_PROMPT);
     s.push_str("\n\nCluster: ");
     s.push_str(cluster_key);
     s.push_str("\n\nEvents:\n");
@@ -691,7 +703,7 @@ mod tests {
         ];
         let prompt = build_lesson_prompt("rust::error_handling", &events);
 
-        assert!(prompt.starts_with(UNVERSIONED_LESSON_PROMPT));
+        assert!(prompt.starts_with(LESSON_PROMPT));
         assert!(prompt.contains("Cluster: rust::error_handling"));
         assert!(prompt.contains(events[0].id.as_str()));
         assert!(prompt.contains(events[1].id.as_str()));
@@ -699,6 +711,34 @@ mod tests {
         // Shape contract from assignments/14-day-blitz.md.
         assert!(prompt.contains("Never invent an id."));
         assert!(prompt.contains("At most 8 sentences."));
+    }
+
+    /// Pins the bundled prompt body, so an edit to `src/prompts/v1.1.txt` shows
+    /// up in review as a snapshot diff next to the [`VERSIONED_PROMPT_ID`] that
+    /// is supposed to move with it.
+    #[test]
+    fn v1_1_prompt_body_is_pinned() {
+        insta::assert_snapshot!("v1_1_prompt", LESSON_PROMPT);
+    }
+
+    /// insta normalizes with `trim_end` on both sides, so the snapshot above is
+    /// blind to trailing whitespace — and trailing whitespace is exactly what
+    /// [`build_lesson_prompt`] concatenates against. Pin the seam separately.
+    #[test]
+    fn v1_1_prompt_ends_with_exactly_one_newline() {
+        assert!(
+            LESSON_PROMPT.ends_with("- Output only the lesson prose.\n"),
+            "prompt must end with the final rule plus the POSIX newline"
+        );
+        assert!(
+            !LESSON_PROMPT.ends_with("\n\n"),
+            "a second trailing newline silently widens the gap before `Cluster:`"
+        );
+    }
+
+    #[test]
+    fn versioned_prompt_id_is_the_v1_1_bundle_id() {
+        assert_eq!(VERSIONED_PROMPT_ID, "dream-cycle/v1.1@2026-08-23");
     }
 
     #[test]

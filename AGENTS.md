@@ -271,7 +271,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 ### linear-todo-can-already-be-on-main
 
 - **Rule:** Before queuing the only Linear Todo, grep the live tree for the feature. A Todo is not proof the work is unshipped.
-- **Why:** 2026-08-15 paired-dev pull: AILAB-205 was the sole dreamd-eng Todo, but `IndexerMsg::IndexSemanticLessons`, `lsn_`, and `tests/semantic_indexing.rs` (cases 01–10) were already on `main` (`787e957`, `5e66918`). Re-queuing would have burned an AFK session on shipped code.
+- **Why:** 2026-08-15 paired-dev pull: AILAB-205 was the sole dreamd-eng Todo, but `IndexerMsg::IndexSemanticLessons`, `lsn_`, and `tests/semantic_indexing.rs` (cases 01–10) were already on `main` (`787e957`, `5e66918`). Re-queuing would have burned an AFK session on shipped code. Recurred 2026-08-23: AILAB-748 still **In Progress** on Linear while `DRAIN_TIMEOUT` / `with_drain_timeout` around `drain_daemon` are on `main` (`5afb741`).
 - **How to apply:** Search for the ticket id, the new type/msg variant, and the named test file. If present and the spec's test cases exist, close Linear and pick the next Backlog ticket instead of writing a second implement prompt.
 - **Cross-refs:** none
 
@@ -375,3 +375,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-204 report-back: main had ~0.81 MB of headroom under the old 15 MB gate; `genai 0.6.5` lands the stripped binary at **16.77 MB**. Founder raised the gate to 20 MB on 2026-08-23 rather than feature-gating genai (which would falsify 204 for the released binary) or cutting Tantivy/git2. AILAB-196 (`tiktoken-rs`) will grow it again.
 - **How to apply:** Measure a stripped copy of `target/release/dreamd` before queueing any crate that pulls reqwest/rustls. Raising the gate again is a founder call. Soft warn is 16 MB; at 16.77 MB the warn fires on purpose.
 - **Cross-refs:** `config-llm-keys-are-flat`
+
+### v2-beats-linear-ac
+
+- **Rule:** For dreamd-eng tickets that have `assignments/AILAB-*.v2.md`, implement the v2, not Linear AC as written.
+- **Why:** AILAB-204 Linear still said `genai`, `[dream.llm]`, and env-only after the v2 spec and the ship. The implementing tree followed the v2 file. Next tickets (201, 196, 200) inherit those reconciliations.
+- **How to apply:** If `assignments/AILAB-NNN.v2.md` exists, that file is the contract. Treat Linear bullets as historical. Do not re-introduce `[dream.llm]`, `tiktoken-rs` on 201, or env-only credentials.
+- **Cross-refs:** `config-llm-keys-are-flat`, `linear-201-ac-is-pre-llm-module`
+
+### linear-201-ac-is-pre-llm-module
+
+- **Rule:** AILAB-201 Linear AC names `crates/dreamd-core/src/dream/prompts/v1.1.txt`, per-lesson `LESSONS.md` frontmatter, and `prompt_version`. Live (shipped 2026-08-23): crate `dreamd-core`, `LESSON_PROMPT = include_str!("prompts/v1.1.txt")`, `VERSIONED_PROMPT_ID = "dream-cycle/v1.1@2026-08-23"`, artifact `.agent/semantic/LESSONS.md` with **file-level** `prompt_version`. `UNVERSIONED_PROMPT_ID` / `UNVERSIONED_LESSON_PROMPT` / `"llm-unversioned"` are gone from `crates/dreamd-core/src/`.
+- **Why:** May 2026 AC predates AILAB-204's `llm.rs` module and the shipped LESSONS.md schema. Implementing Linear as written would add a phantom `src/dream/` module and a second frontmatter shape.
+- **How to apply:** Do not re-introduce the throwaway constants. Citation validation and a `citations:` frontmatter key are AILAB-200. A prompt-byte edit must move `VERSIONED_PROMPT_ID` in the same commit (reviewer, not insta).
+- **Cross-refs:** `v2-beats-linear-ac`, `posix-trailing-nl-widens-prompt-seam`
+
+### posix-trailing-nl-widens-prompt-seam
+
+- **Rule:** Moving a Rust `"` `\`-string into a `.txt` file adds a POSIX trailing newline the literal did not have. If the assembler still concatenates `"\n\nCluster: "`, the seam gains a blank line. insta's `trim_end` snapshot is blind to that.
+- **Why:** AILAB-201: HEAD literal 594 B → file 595 B (`+0x0a`). `build_lesson_prompt` kept `"\n\nCluster: "`, so `prose\n\nCluster:` became `prose\n\n\nCluster:`. Spec allowed the newline; a dedicated `ends_with("...\n") && !ends_with("\n\n")` test pinned the seam.
+- **How to apply:** When extracting prompt/config bytes into a file, assert the assembler seam, not only an insta snapshot. Do not `.trim_end()` in `build_lesson_prompt` to hide it.
+- **Cross-refs:** `linear-201-ac-is-pre-llm-module`
