@@ -357,7 +357,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### config-llm-keys-are-flat
 
-- **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. Linear AILAB-204 still says `[dream.llm]`.
+- **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. Linear AILAB-204 originally said `[dream.llm]`; the issue description was reconciled to flat keys when 204 moved to Done (2026-08-23).
 - **Why:** WEG-14 / DR-112 shipped flat keys and a commented template; a nested table would break `CONFIG_TEMPLATE` parse tests and every existing `config.toml`.
 - **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. `cost_cap_usd` stays unread until AILAB-196.
 - **Cross-refs:** `migrate-from-to-is-record-schema`
