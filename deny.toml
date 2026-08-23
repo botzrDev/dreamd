@@ -29,6 +29,15 @@ allow = [
 # modifying the MPL-licensed source itself, which we do not.
 exceptions = [
     { name = "option-ext", allow = ["MPL-2.0"] },
+    # AILAB-204 — webpki-root-certs is the Mozilla CA root-certificate bundle,
+    # reached via genai -> reqwest -> rustls-platform-verifier. CDLA-Permissive-2.0
+    # is the Linux Foundation's permissive *data* license: it grants unrestricted
+    # use/modification/redistribution of the data and imposes no obligation on the
+    # code that links it, so it does not reach dreamd's Apache-2.0 source. Scoped
+    # to this crate deliberately — any OTHER CDLA-licensed dependency still fails
+    # the gate and gets its own review. Reviewed 2026-08-22 (founder sign-off).
+    # Removable if genai ever exposes a root store under an allow-listed license.
+    { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 # Reject any dependency whose license is not in the allow list above.

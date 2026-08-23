@@ -47,6 +47,9 @@ pub struct DreamArgs {
     /// only the git2 commit step is skipped. Useful in CI.
     #[arg(long)]
     pub no_commit: bool,
+    /// Force deterministic mode even when an API key is present.
+    #[arg(long)]
+    pub no_llm: bool,
 }
 
 impl DreamArgs {
@@ -549,10 +552,15 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         Ok(r) => r,
         Err(code) => return code,
     };
+    // lock-ok (AILAB-583 / AILAB-204): `&mut std::io::stdout()` stays UNLOCKED.
+    // The cycle opens a Tantivy index and — since AILAB-204 — may sit on a
+    // network call for up to 90s; holding a std stream lock across either is the
+    // documented deadlock. See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     match commands::dream::run(
         agent_root.project_root(),
         &mut std::io::stdout(),
         args.no_commit,
+        args.no_llm,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -1095,6 +1103,7 @@ mod tests {
             dry: true,
             auto: true,
             no_commit: false,
+            no_llm: false,
         };
         let err = args.validate().unwrap_err();
         assert!(
@@ -1109,6 +1118,7 @@ mod tests {
             dry: true,
             auto: false,
             no_commit: false,
+            no_llm: false,
         }
         .validate()
         .is_ok());
@@ -1116,6 +1126,7 @@ mod tests {
             dry: false,
             auto: true,
             no_commit: false,
+            no_llm: false,
         }
         .validate()
         .is_ok());
@@ -1123,6 +1134,15 @@ mod tests {
             dry: false,
             auto: false,
             no_commit: true,
+            no_llm: false,
+        }
+        .validate()
+        .is_ok());
+        assert!(DreamArgs {
+            dry: false,
+            auto: false,
+            no_commit: false,
+            no_llm: true,
         }
         .validate()
         .is_ok());
@@ -1143,6 +1163,35 @@ mod tests {
                 assert!(args.no_commit);
                 assert!(!args.dry);
                 assert!(!args.auto);
+                assert!(!args.no_llm, "--no-llm defaults off");
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    #[test]
+    fn parses_dream_no_llm() {
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--no-llm"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.no_llm);
+                assert!(!args.no_commit, "--no-llm must not imply --no-commit");
+                assert!(!args.dry);
+                assert!(!args.auto);
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    #[test]
+    fn parses_dream_no_llm_with_no_commit() {
+        // AILAB-204 §3.4 — the two flags are compatible and independent.
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--no-llm", "--no-commit"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.no_llm);
+                assert!(args.no_commit);
+                assert!(args.validate().is_ok(), "--no-llm + --no-commit is legal");
             }
             _ => panic!("expected Dream"),
         }

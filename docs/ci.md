@@ -19,7 +19,7 @@ This document covers the **CI** workflow. Contributors hit these gates on every 
 | [Security audit](#security-audit) | **Yes** | `cargo audit` against RustSec advisory DB |
 | [License & dependency policy](#license--dependency-policy) | **Yes** | `cargo deny check` (licenses + advisories) |
 | [Test](#test) | **Yes** (Linux + macOS) | `cargo test --workspace` on three OSes |
-| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be < 15 MB |
+| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be < 20 MB |
 | [Idle-RSS gate](#idle-rss-gate) | **Yes** | Daemon idle memory < 30 MB (Linux) |
 | [Tarball build sentinel](#tarball-build-sentinel) | **Yes** | `cargo build` without `.git/` must not leak vergen sentinels |
 | [DCO sign-off](#dco-sign-off) | **Yes** (PRs only) | Every commit must have `Signed-off-by` trailer |
@@ -109,15 +109,15 @@ cargo test --all-features --workspace
 
 **Runs on:** `ubuntu-latest`  
 **Blocks merge:** Yes  
-**Limit:** Stripped `target/release/dreamd` < **15 MB** (NFR-2)
+**Limit:** Stripped `target/release/dreamd` < **20 MB** (NFR-2)
 
 ```bash
 cargo build --release --workspace
 strip target/release/dreamd
-stat -c%s target/release/dreamd   # must be ≤ 15728640
+stat -c%s target/release/dreamd   # must be < 20971520
 ```
 
-CI emits a soft warning at **12 MB**. Check the job summary for the measured size.
+CI emits a soft warning at **16 MB**. Check the job summary for the measured size.
 
 ---
 

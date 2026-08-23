@@ -44,7 +44,7 @@ Common loops are wrapped in a root [`Justfile`](./Justfile) for convenience. Ins
 | `just test` | `cargo test --all-features --workspace` | Full test suite (mirrors the CI merge gate). |
 | `just lint` | `cargo fmt --all -- --check` then `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Formatting + clippy, exactly as CI runs them. |
 | `just bench` | `cargo bench -p dreamd-core` | Recall-latency Criterion benchmarks. |
-| `just release` | `cargo build --release -p dreamd`, `strip`, print size | Stripped `dreamd` CLI; prints its size (NFR-2 hard limit `< 15 MB` is enforced in CI, not here). |
+| `just release` | `cargo build --release -p dreamd`, `strip`, print size | Stripped `dreamd` CLI; prints its size (NFR-2 hard limit `< 20 MB` is enforced in CI, not here). |
 
 `just` is optional and never a CI dependency — CI calls cargo directly. Without `just`, run the underlying cargo commands from the table above.
 

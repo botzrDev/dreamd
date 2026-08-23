@@ -274,33 +274,65 @@ pub enum DreamCycleError {
     Lessons(#[from] std::io::Error),
 }
 
-/// Orchestrate the full dream cycle in `--no-llm` deterministic mode (DR-308).
+/// `prompt_version` written when the lesson body is the exemplar's own text.
+pub const DETERMINISTIC_PROMPT_ID: &str = "deterministic-only";
+
+/// Where a lesson body came from (AILAB-204).
 ///
-/// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
-/// top promoted cluster (highest `salience_sum`). No network calls are made.
+/// Only the body text and the frontmatter `prompt_version` differ between the
+/// two — the WAL intent, the `cluster_key`, the pin pass, and above all the
+/// [`Lesson::id`] (always the exemplar's `evt_` id) are shared, so semantic
+/// indexing inherits the same pain/importance whichever path composed the prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LessonBodySource {
+    /// Copy the exemplar's own `content` verbatim. `prompt_version` is
+    /// [`DETERMINISTIC_PROMPT_ID`].
+    Deterministic,
+    /// Use model-composed prose. Empty `content` degrades to
+    /// [`LessonBodySource::Deterministic`] — a model that returned nothing must
+    /// not blank out `LESSONS.md`.
+    Llm {
+        content: String,
+        prompt_version: String,
+    },
+}
+
+/// The cluster this cycle will write a lesson for, before a body is chosen.
 ///
-/// If **no** cluster is promoted, the cycle *retires* instead: any existing
-/// `LESSONS.md` is unlinked (AILAB-699). Absence — not an empty frontmatter
-/// file — is the canonical "nothing promoted" state, so a store that stops
-/// recurring converges on the same shape as one that never dreamed. Cited
-/// exemplars keep their pins.
-#[must_use = "dream cycle errors must be handled"]
-pub fn run_deterministic_dream_cycle(
+/// Produced by [`select_lesson_or_retire`] and consumed by
+/// [`write_selected_lesson`]. Splitting the cycle here is what lets an `await`
+/// on a network call sit between cluster selection and the `LESSONS.md` write
+/// while both paths still share one exemplar id and one WAL envelope.
+#[derive(Debug, Clone)]
+pub struct SelectedLesson {
+    /// File-level cluster key of the winning (highest `salience_sum`) cluster.
+    pub cluster_key: String,
+    /// `EventId` of the exemplar. This becomes [`Lesson::id`] on **both** paths.
+    pub exemplar_id: String,
+    /// The exemplar's own body — the deterministic lesson text.
+    pub exemplar_content: String,
+    /// Every member event of the winning cluster, for prompt construction.
+    pub events: Vec<AgentLearning>,
+}
+
+/// Cluster, then either select the winning cluster's exemplar or retire.
+///
+/// `Ok(None)` means **nothing promoted**: any existing `LESSONS.md` has already
+/// been unlinked (AILAB-699) and the caller must not write one. Absence — not an
+/// empty frontmatter file — is the canonical "nothing promoted" state, so a
+/// store that stops recurring converges on the same shape as one that never
+/// dreamed. Cited exemplars keep their pins.
+pub fn select_lesson_or_retire(
     agent_root: &AgentRoot,
     now_sec: i64,
-) -> Result<(), DreamCycleError> {
-    let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
-
+) -> Result<Option<SelectedLesson>, DreamCycleError> {
     let cluster_output = run_cluster_engine(agent_root, now_sec)?;
 
     if cluster_output.promoted.is_empty() {
         // AILAB-699: retirement is structural, not an expiry timer. When no
         // cluster clears `PROMOTION_THRESHOLD` in either window any more, the
         // `LESSONS.md` an earlier promoting cycle wrote is stale — leaving it
-        // meant recall served that lesson forever. Unlink it rather than write
-        // an empty `LessonsFile`: that would need a synthetic `cluster_key`,
-        // and `deterministic_cycle_empty_jsonl_no_lessons_md` pins *absence* as
-        // the never-promoted state, so retirement must land in the same shape.
+        // meant recall served that lesson forever.
         //
         // No `WalIntent`: recovery only cleans up intent temps (`wal.rs`), and
         // an unlink of the live file is itself the desired post-state — crash
@@ -321,7 +353,7 @@ pub fn run_deterministic_dream_cycle(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        return Ok(());
+        return Ok(None);
     }
 
     let top_cluster = cluster_output
@@ -335,9 +367,44 @@ pub fn run_deterministic_dream_cycle(
         .unwrap(); // safe: promoted.is_empty() guarded above
 
     let exemplar = pick_exemplar(&top_cluster.events, now_sec);
+
+    Ok(Some(SelectedLesson {
+        cluster_key: top_cluster.cluster_key.clone(),
+        exemplar_id: exemplar.id.as_str().to_string(),
+        exemplar_content: exemplar.content.clone(),
+        events: top_cluster.events.clone(),
+    }))
+}
+
+/// Write `LESSONS.md` for `selected` with the chosen body, then apply pins.
+///
+/// Records the `ReplaceSemanticMemory` intent into the orchestrator-owned WAL
+/// envelope before touching the file, exactly as the single-path version did.
+pub fn write_selected_lesson(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    selected: &SelectedLesson,
+    body: LessonBodySource,
+) -> Result<(), DreamCycleError> {
+    // An LLM body that is empty (or whitespace) is not a body. Falling through
+    // to the exemplar text keeps `LESSONS.md` non-empty and keeps the
+    // frontmatter honest about which producer actually wrote the prose.
+    let (content, prompt_version) = match body {
+        LessonBodySource::Llm {
+            content,
+            prompt_version,
+        } if !content.trim().is_empty() => (content, prompt_version),
+        _ => (
+            selected.exemplar_content.clone(),
+            DETERMINISTIC_PROMPT_ID.to_string(),
+        ),
+    };
+
     let lessons = vec![Lesson {
-        id: exemplar.id.as_str().to_string(),
-        content: exemplar.content.clone(),
+        // Always the exemplar id — never minted here. Semantic indexing
+        // inherits pain/importance from this event (AILAB-204 §1.7).
+        id: selected.exemplar_id.clone(),
+        content,
         pinned: false,
     }];
 
@@ -356,8 +423,8 @@ pub fn run_deterministic_dream_cycle(
     let last_updated = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap_or_default();
     let lessons_file = LessonsFile {
         last_updated,
-        prompt_version: "deterministic-only".to_string(),
-        cluster_key: top_cluster.cluster_key.clone(),
+        prompt_version,
+        cluster_key: selected.cluster_key.clone(),
         lessons,
     };
     std::fs::create_dir_all(agent_root.semantic_dir())?;
@@ -368,6 +435,36 @@ pub fn run_deterministic_dream_cycle(
     apply_pin_unpin(agent_root)?;
 
     Ok(())
+}
+
+/// Orchestrate the full dream cycle in `--no-llm` deterministic mode (DR-308).
+///
+/// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
+/// top promoted cluster (highest `salience_sum`). No network calls are made.
+///
+/// If **no** cluster is promoted, the cycle *retires* instead: any existing
+/// `LESSONS.md` is unlinked (AILAB-699).
+///
+/// Byte-for-byte identical to the pre-AILAB-204 single-function version — the
+/// dream-cycle snapshot fixtures pin that. The LLM path is the same two steps
+/// with a different [`LessonBodySource`]; see
+/// [`crate::dream_cycle::run_filesystem_phases`].
+#[must_use = "dream cycle errors must be handled"]
+pub fn run_deterministic_dream_cycle(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+) -> Result<(), DreamCycleError> {
+    let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
+
+    let Some(selected) = select_lesson_or_retire(agent_root, now_sec)? else {
+        return Ok(());
+    };
+    write_selected_lesson(
+        agent_root,
+        now_sec,
+        &selected,
+        LessonBodySource::Deterministic,
+    )
 }
 
 /// Pick the cluster exemplar: highest salience, then pain, then importance,

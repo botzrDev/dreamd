@@ -38,7 +38,19 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
     fs::create_dir_all(root.dreamd_dir()).unwrap();
 
     let cycle_date = cycle_date_from_now_sec(NOW_SEC);
-    dream_cycle::run_filesystem_phases(&root, NOW_SEC, &cycle_date)
+    // `run_filesystem_phases` is async since AILAB-204 (the LLM call is awaited
+    // inside the WAL envelope). `no_llm = true` keeps these snapshots pinned to
+    // the deterministic bytes and network-free, whatever the runner's env holds.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for snapshot cycle")
+        .block_on(dream_cycle::run_filesystem_phases(
+            &root,
+            NOW_SEC,
+            &cycle_date,
+            true,
+        ))
         .expect("dream cycle must succeed on valid fixture");
 
     (dir, root)

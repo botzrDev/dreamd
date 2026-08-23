@@ -25,6 +25,8 @@ pub mod ingress;
 pub mod io;
 pub mod layout;
 pub mod lessons;
+/// AILAB-204 / DR-304 — LLM client wrapper with deterministic auto-fallback.
+pub mod llm;
 pub mod mcp;
 pub mod migrate;
 pub mod observability;

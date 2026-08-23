@@ -40,10 +40,11 @@ This is the exact template written by `dreamd init` (`CONFIG_TEMPLATE`):
 # log_level = "info"            # trace | debug | info | warn | error
 # dream_cycle_mode = "manual"   # "manual" | "auto" — v0.1 is manual-only (DR-315)
 
-# --- LLM keys: present but inert until v0.1.1 ---
-# provider = ""                 # LLM provider id
+# --- LLM keys: read by the dream cycle (AILAB-204) ---
+# provider = ""                 # "anthropic" | "openai"; empty infers from model
 # model = "claude-haiku-4-5"    # model id
-# cost_cap_usd = 0.10           # hard per-cycle spend cap (DR-307)
+# endpoint = ""                 # base URL override; empty uses the provider default
+# cost_cap_usd = 0.10           # hard per-cycle spend cap — still inert (AILAB-196)
 ```
 
 A fully commented project config parses successfully and yields built-in defaults.
@@ -57,9 +58,10 @@ A fully commented project config parses successfully and yields built-in default
 | `redaction` | boolean | `true` | user, project | When `true`, `POST /api/v1/learn` redacts secrets and PII patterns from `content` before durable write |
 | `log_level` | string | `"info"` | user, project | **Parsed but unused in v0.1.** The live log filter is the `DREAMD_LOG` env var, not this TOML key. |
 | `dream_cycle_mode` | string | `"manual"` | user, project | `"manual"` or `"auto"`. v0.1 is manual-only: `dreamd watch` **hard-errors** if mode is `"auto"` (not a silent ignore). Auto scheduling arrives in v0.1.1 |
-| `provider` | string | `""` | user, project | LLM provider id. **Inert at v0.1** — reserved for v0.1.1 |
-| `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id. **Inert at v0.1** |
-| `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap. **Inert at v0.1** |
+| `provider` | string | `""` | user, project | LLM provider id — `"anthropic"` or `"openai"`. Empty (default) infers the provider from the model name. Read by the dream cycle (AILAB-204) |
+| `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id used to compose `LESSONS.md` bodies. Read by the dream cycle (AILAB-204) |
+| `endpoint` | string | `""` | user, project | Base URL override for the LLM provider. Empty (default) uses the provider's own endpoint. Read by the dream cycle (AILAB-204) |
+| `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap. **Still inert** — enforcement is AILAB-196 |
 
 ### `redaction`
 

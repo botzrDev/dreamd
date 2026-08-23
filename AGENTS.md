@@ -354,3 +354,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-748 report-back (third instance logged by the implementing agent): copying the four-line §3 Step 2 form failed §5 grep #1; the single-line call site is semantically identical and rustfmt-stable.
 - **How to apply:** Before handing a bare prompt, dry-run every §5 line against the §3 snippets as if they were already in the tree. Prefer greps that match across `\n` (`rg -U`) only when intentional; otherwise keep call-site examples single-line when a same-line guard exists.
 - **Cross-refs:** none
+
+### config-llm-keys-are-flat
+
+- **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. Linear AILAB-204 still says `[dream.llm]`.
+- **Why:** WEG-14 / DR-112 shipped flat keys and a commented template; a nested table would break `CONFIG_TEMPLATE` parse tests and every existing `config.toml`.
+- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. `cost_cap_usd` stays unread until AILAB-196.
+- **Cross-refs:** `migrate-from-to-is-record-schema`
+
+### no-llm-must-not-skip-daemon-proxy
+
+- **Rule:** `--no-llm` threads through `POST /api/v1/dream` as `x-dreamd-no-llm: 1`. It does not skip the daemon proxy. Only `--no-commit` skips the proxy (existing CI path).
+- **Why:** Skipping the proxy while `dreamd watch` owns the JSONL races the coordinator (WEG-271). Linear AILAB-204 asked for a CLI flag without an HTTP channel; the live proxy POSTs an empty body.
+- **How to apply:** `client::proxy_dream_cycle(..., no_llm)` sets the header; `RunDreamCycle { no_llm, ... }` on the coordinator. See `assignments/AILAB-204.v2.md`.
+- **Cross-refs:** `coordinator-not-mutex-file`
+
+### nfr-2-stripped-binary-is-20mb
+
+- **Rule:** CI `size-gate` fails if stripped `target/release/dreamd` is **> 20 MB** (`MAX_BYTES=$((20 * 1024 * 1024))` in `.github/workflows/ci.yml`; soft warn at 16 MB). Do not assume there is headroom for a new HTTP/LLM crate.
+- **Why:** AILAB-204 report-back: main had ~0.81 MB of headroom under the old 15 MB gate; `genai 0.6.5` lands the stripped binary at **16.77 MB**. Founder raised the gate to 20 MB on 2026-08-23 rather than feature-gating genai (which would falsify 204 for the released binary) or cutting Tantivy/git2. AILAB-196 (`tiktoken-rs`) will grow it again.
+- **How to apply:** Measure a stripped copy of `target/release/dreamd` before queueing any crate that pulls reqwest/rustls. Raising the gate again is a founder call. Soft warn is 16 MB; at 16.77 MB the warn fires on purpose.
+- **Cross-refs:** `config-llm-keys-are-flat`

@@ -1,13 +1,20 @@
 //! Dream cycle orchestration — single owner of the full phase graph.
 //!
 //! Phase order (load-bearing):
-//!   1. Consolidation — cluster → LESSONS.md → pin/unpin
+//!   1. Consolidation — cluster → lesson body → LESSONS.md → pin/unpin
 //!   2. Decay — archive + JSONL prune
 //!   3. Index — recurrence sidecar apply → prune decayed docs
 //!   4. Autobiography — best-effort git commit
 //!
 //! [`run_filesystem_phases`] opens and commits the single WAL envelope that
 //! spans consolidation + decay (one cycle = one atomic region).
+//!
+//! AILAB-204 made phase 1 async: the LLM call that composes the lesson body is
+//! `await`ed **inside** that same WAL envelope, between cluster selection and the
+//! `LESSONS.md` write. That is deliberate — it keeps the 409 in-progress guard
+//! honest and keeps the coordinator the single writer. It also means a manual
+//! cycle serializes `AppendLearning` for the duration of the model call; HTTP
+//! callers see 503 + `Retry-After` rather than a lost write.
 //!
 //! Entry points (`dreamd dream`, `POST /api/v1/dream`) are thin adapters over
 //! this module. The coordinator actor calls [`run_filesystem_phases`] only so it
@@ -16,9 +23,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::autobiography::{self, AutobiographyOutcome};
-use crate::consolidation::{self, DreamCycleError as ConsolidationError};
+use crate::consolidation::{
+    self, DreamCycleError as ConsolidationError, LessonBodySource, SelectedLesson,
+};
 use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
+use crate::llm::{self, LlmBackend};
 use crate::wal::{self, WalError};
 
 /// Unified error type for dream-cycle orchestration.
@@ -92,10 +102,62 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 /// Opens one WAL envelope before consolidation and commits it after decay so the
 /// full cycle is a single atomic region (ARCH-2). Called by the coordinator
 /// actor, which must reopen its append fd afterward.
-pub fn run_filesystem_phases(
+///
+/// `no_llm` forces the deterministic body even when credentials exist. When it is
+/// `false`, the backend is resolved from the project's [`crate::config::Config`]
+/// plus [`llm::resolve_llm_credentials`]; absent credentials log
+/// [`llm::NO_API_KEY_FALLBACK`] and fall through to the same deterministic path.
+pub async fn run_filesystem_phases(
     agent_root: &AgentRoot,
     now_sec: i64,
     cycle_date: &str,
+    no_llm: bool,
+) -> Result<DecayResult, DreamCycleError> {
+    if no_llm {
+        // Turbofish only names the type the `None` needs; no client is built.
+        return filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None).await;
+    }
+
+    // A broken config.toml must not fail a cycle that would otherwise run
+    // deterministically — degrade to defaults and say so.
+    let config = crate::config::load_config(agent_root.project_root()).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "config load failed; using defaults for the LLM phase");
+        crate::config::Config::default()
+    });
+
+    match llm::resolve_backend(&config) {
+        Some(backend) => {
+            filesystem_phases(
+                agent_root,
+                now_sec,
+                cycle_date,
+                Some((&backend, config.model.as_str())),
+            )
+            .await
+        }
+        None => filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None).await,
+    }
+}
+
+/// [`run_filesystem_phases`] with an explicit backend — the seam tests use to
+/// drive the LLM path with a fake and no network.
+pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    cycle_date: &str,
+    backend: &B,
+    model: &str,
+) -> Result<DecayResult, DreamCycleError> {
+    filesystem_phases(agent_root, now_sec, cycle_date, Some((backend, model))).await
+}
+
+/// The one WAL envelope. `llm` is `None` for every deterministic trigger
+/// (`--no-llm`, no credentials, or a test that wants today's bytes).
+async fn filesystem_phases<B: LlmBackend>(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    cycle_date: &str,
+    llm_target: Option<(&B, &str)>,
 ) -> Result<DecayResult, DreamCycleError> {
     // ARCH-2: ONE WAL envelope spans BOTH filesystem phases. begin_cycle guards
     // `.agent/` existence (WEG-281) and sets state=in_progress; commit_cycle sets
@@ -103,10 +165,48 @@ pub fn run_filesystem_phases(
     // BEFORE commit, leaving an uncommitted WAL for next-startup recovery
     // (state=failed) — so no half-finished cycle is ever recorded "complete".
     wal::begin_cycle(agent_root, now_sec)?;
-    consolidation::run_deterministic_dream_cycle(agent_root, now_sec)?;
+
+    // Consolidation, split so the model call can sit between selection and the
+    // write while both still share one exemplar id, one WAL intent, one pin pass.
+    // `None` = nothing promoted; `select_lesson_or_retire` already unlinked any
+    // stale LESSONS.md (AILAB-699) and decay still runs below.
+    if let Some(selected) = consolidation::select_lesson_or_retire(agent_root, now_sec)? {
+        let body = compose_lesson_body(&selected, llm_target).await;
+        consolidation::write_selected_lesson(agent_root, now_sec, &selected, body)?;
+    }
+
     let decay = decay::run_decay_pruner(agent_root, now_sec, cycle_date)?;
     wal::commit_cycle(agent_root, now_sec)?;
     Ok(decay)
+}
+
+/// Compose the lesson body. **Infallible by construction** — every LLM failure
+/// mode resolves to [`LessonBodySource::Deterministic`], so a model outage can
+/// never abort a cycle or leave `LESSONS.md` unwritten.
+async fn compose_lesson_body<B: LlmBackend>(
+    selected: &SelectedLesson,
+    llm_target: Option<(&B, &str)>,
+) -> LessonBodySource {
+    let Some((backend, model)) = llm_target else {
+        return LessonBodySource::Deterministic;
+    };
+
+    let prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
+    match llm::complete_with_retries(backend, model, &prompt).await {
+        Ok(completion) => LessonBodySource::Llm {
+            // Trim only the envelope whitespace; the prose itself is the model's.
+            content: completion.text.trim().to_string(),
+            prompt_version: llm::UNVERSIONED_PROMPT_ID.to_string(),
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                cluster_key = %selected.cluster_key,
+                "llm lesson composition failed; writing the deterministic body"
+            );
+            LessonBodySource::Deterministic
+        }
+    }
 }
 
 /// Index + autobiography phases. Async because Tantivy ops run on the indexer task.
@@ -139,24 +239,32 @@ pub async fn run_post_phases(opts: PostPhaseOptions<'_>) -> Result<Option<()>, D
 }
 
 /// Full in-process cycle for the CLI (`--no-commit` or no daemon).
+///
+/// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
+/// filesystem phases are async too (they `await` the model call), so they share
+/// the runtime that already existed for the index phases — building a second one
+/// inside the first would panic at the nested `block_on`.
 pub fn run_in_process(
     project_root: &Path,
     now_sec: i64,
     no_commit: bool,
+    no_llm: bool,
     dirty_at_cycle_start: Vec<PathBuf>,
 ) -> Result<DreamCycleResult, DreamCycleError> {
     let agent_root = AgentRoot::new(project_root);
     let cycle_date = cycle_date_from_now_sec(now_sec);
 
-    let decay = run_filesystem_phases(&agent_root, now_sec, &cycle_date)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for dream cycle");
 
-    #[cfg(unix)]
-    {
-        let autobiography = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime for dream cycle index phases")
-            .block_on(run_post_phases(PostPhaseOptions {
+    runtime.block_on(async {
+        let decay = run_filesystem_phases(&agent_root, now_sec, &cycle_date, no_llm).await?;
+
+        #[cfg(unix)]
+        {
+            let autobiography = run_post_phases(PostPhaseOptions {
                 agent_root: &agent_root,
                 project_root,
                 cycle_date: &cycle_date,
@@ -164,22 +272,24 @@ pub fn run_in_process(
                 dirty_at_cycle_start: &dirty_at_cycle_start,
                 commit_autobiography: !no_commit,
                 index: IndexBackend::FreshHandle,
-            }))?;
+            })
+            .await?;
 
-        Ok(DreamCycleResult {
-            decay,
-            autobiography,
-        })
-    }
+            Ok(DreamCycleResult {
+                decay,
+                autobiography,
+            })
+        }
 
-    #[cfg(not(unix))]
-    {
-        let _ = (no_commit, dirty_at_cycle_start, project_root);
-        Ok(DreamCycleResult {
-            decay,
-            autobiography: None,
-        })
-    }
+        #[cfg(not(unix))]
+        {
+            let _ = (no_commit, &dirty_at_cycle_start, project_root);
+            Ok(DreamCycleResult {
+                decay,
+                autobiography: None,
+            })
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -321,12 +431,20 @@ mod tests {
         (dir, root)
     }
 
-    #[test]
-    fn filesystem_phases_produces_lessons_on_fixture() {
-        let (_dir, root) = scaffold_fixture();
-        let cycle_date = cycle_date_from_now_sec(NOW_SEC);
+    /// Deterministic backend for every pre-AILAB-204 assertion: `no_llm = true`
+    /// keeps these tests network-free and byte-identical to the old behavior
+    /// regardless of whether the developer running them has an API key exported.
+    async fn run_deterministic(root: &AgentRoot) -> DecayResult {
+        run_filesystem_phases(root, NOW_SEC, &cycle_date_from_now_sec(NOW_SEC), true)
+            .await
+            .expect("filesystem phases")
+    }
 
-        run_filesystem_phases(&root, NOW_SEC, &cycle_date).expect("filesystem phases");
+    #[tokio::test]
+    async fn filesystem_phases_produces_lessons_on_fixture() {
+        let (_dir, root) = scaffold_fixture();
+
+        run_deterministic(&root).await;
 
         assert!(root.lessons_md().exists(), "LESSONS.md must exist");
         let sidecar = root.semantic_dir().join("recurrence_counts.json");
@@ -338,18 +456,17 @@ mod tests {
         let (_dir, root) = scaffold_fixture();
         let project_root = root.project_root().to_path_buf();
 
-        let result = run_in_process(&project_root, NOW_SEC, true, Vec::new())
+        let result = run_in_process(&project_root, NOW_SEC, true, true, Vec::new())
             .expect("full in-process cycle");
 
         assert!(root.lessons_md().exists());
         assert!(!result.decay.decayed_ids.is_empty() || result.decay.kept_count > 0);
     }
 
-    #[test]
-    fn single_wal_envelope_committed_and_cleaned_after_full_cycle() {
+    #[tokio::test]
+    async fn single_wal_envelope_committed_and_cleaned_after_full_cycle() {
         let (_dir, root) = scaffold_fixture();
-        run_filesystem_phases(&root, NOW_SEC, &cycle_date_from_now_sec(NOW_SEC))
-            .expect("filesystem phases");
+        run_deterministic(&root).await;
         assert!(
             !root.wal_path().exists(),
             "single envelope committed + WAL cleaned"
@@ -359,6 +476,121 @@ mod tests {
             "complete",
             "exactly one transition to complete, at the end"
         );
+    }
+
+    // ── AILAB-204: LLM body composition ──────────────────────────────────────
+
+    /// Read the single lesson the cycle wrote, with its frontmatter.
+    fn read_only_lesson(root: &AgentRoot) -> (crate::lessons::LessonsFile, crate::lessons::Lesson) {
+        let file = crate::lessons::read_lessons_file(&root.lessons_md()).expect("LESSONS.md reads");
+        let lesson = file.lessons.first().cloned().expect("one lesson");
+        (file, lesson)
+    }
+
+    /// The exemplar the deterministic path would have picked, for comparison.
+    fn deterministic_exemplar(root: &AgentRoot) -> consolidation::SelectedLesson {
+        consolidation::select_lesson_or_retire(root, NOW_SEC)
+            .expect("cluster engine")
+            .expect("fixture promotes a cluster")
+    }
+
+    #[tokio::test]
+    async fn llm_success_writes_model_text_but_keeps_the_exemplar_id() {
+        const COMPOSED: &str = "Return `?` from fallible handlers; \
+            the rejected alternative was `.unwrap()`, which panicked the request task.";
+
+        let (_dir, root) = scaffold_fixture();
+        let expected_id = deterministic_exemplar(&root).exemplar_id;
+        let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
+
+        run_filesystem_phases_with_backend(
+            &root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("llm cycle");
+
+        let (file, lesson) = read_only_lesson(&root);
+        assert_eq!(lesson.content, COMPOSED, "body must be the model's prose");
+        assert_eq!(
+            file.prompt_version,
+            crate::llm::UNVERSIONED_PROMPT_ID,
+            "frontmatter must name the LLM producer"
+        );
+        assert_eq!(
+            lesson.id, expected_id,
+            "Lesson.id stays the exemplar evt_ id — semantic indexing inherits \
+             pain/importance from it, so a minted id would break recall ranking"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_error_writes_the_same_bytes_as_the_deterministic_cycle() {
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        let fake = crate::llm::fake::FakeLlm::failing("connection reset by peer");
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("a failing model must NEVER fail the cycle");
+        let fallback_bytes = fs::read(root_b.lessons_md()).expect("fallback LESSONS.md");
+
+        assert_eq!(
+            fallback_bytes, deterministic_bytes,
+            "fallback output must be byte-identical to the deterministic cycle"
+        );
+        assert_eq!(
+            crate::wal::read_last_cycle_status(&root_b).unwrap(),
+            "complete",
+            "the cycle still committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_completion_falls_back_to_deterministic() {
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        let fake = crate::llm::fake::FakeLlm::ok("   \n\t ");
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("empty completion must not fail the cycle");
+
+        assert_eq!(
+            fs::read(root_b.lessons_md()).unwrap(),
+            deterministic_bytes,
+            "an empty completion must not blank out LESSONS.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_llm_never_calls_the_backend() {
+        let (_dir, root) = scaffold_fixture();
+        // `run_filesystem_phases(.., no_llm = true)` short-circuits before any
+        // credential lookup or client construction; prove the deterministic
+        // frontmatter lands even so.
+        run_deterministic(&root).await;
+        let (file, _) = read_only_lesson(&root);
+        assert_eq!(file.prompt_version, consolidation::DETERMINISTIC_PROMPT_ID);
     }
 
     #[test]

@@ -120,6 +120,9 @@ pub enum MemoryCoordinatorMsg {
     RunDreamCycle {
         now_sec: i64,
         cycle_date: String,
+        /// Force the deterministic lesson body even when credentials exist
+        /// (AILAB-204). Set from the `x-dreamd-no-llm: 1` request header.
+        no_llm: bool,
         response_tx: oneshot::Sender<Result<crate::decay::DecayResult, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
@@ -229,9 +232,16 @@ impl MemoryCoordinator {
                 MemoryCoordinatorMsg::RunDreamCycle {
                     now_sec,
                     cycle_date,
+                    no_llm,
                     response_tx,
                 } => {
-                    let result = self.handle_run_dream_cycle(now_sec, &cycle_date);
+                    // AILAB-204: awaited here, in the actor loop, so the cycle
+                    // (LLM call included) stays inside the coordinator's single
+                    // -writer window. Appends queue behind it; they are not
+                    // raced by a second writer.
+                    let result = self
+                        .handle_run_dream_cycle(now_sec, &cycle_date, no_llm)
+                        .await;
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -325,14 +335,20 @@ impl MemoryCoordinator {
     /// live inode regardless of whether either step actually rewrote the file.
     /// The cycle writes a well-formed file via atomic rename, so no
     /// `episodic::recover` scan is needed on reopen.
-    fn handle_run_dream_cycle(
+    async fn handle_run_dream_cycle(
         &mut self,
         now_sec: i64,
         cycle_date: &str,
+        no_llm: bool,
     ) -> Result<crate::decay::DecayResult, CoordinatorError> {
-        let decay =
-            crate::dream_cycle::run_filesystem_phases(&self.agent_root, now_sec, cycle_date)
-                .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+        let decay = crate::dream_cycle::run_filesystem_phases(
+            &self.agent_root,
+            now_sec,
+            cycle_date,
+            no_llm,
+        )
+        .await
+        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
 
         self.file = OpenOptions::new()
             .read(true)

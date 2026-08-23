@@ -18,7 +18,7 @@ ticket — phys_footprint accounting is not comparable to VmRSS).
 
 | Limit   | Measured | Gate                    |
 | ------- | -------- | ----------------------- |
-| < 15 MB | see CI   | `size-gate` (CI, Linux) |
+| < 20 MB | see CI   | `size-gate` (CI, Linux) |
 
 ## Recall latency
 

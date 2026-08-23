@@ -7,6 +7,18 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use http_body_util::Full;
 
+/// Request header that forces the daemon's cycle into deterministic mode
+/// (AILAB-204). Sent as the literal `"1"` and only when `--no-llm` is set —
+/// omitted otherwise, so a daemon built before this ticket sees no new header
+/// at all rather than one it must know to ignore.
+pub const NO_LLM_HEADER: &str = "x-dreamd-no-llm";
+
+/// The only value [`NO_LLM_HEADER`] is honored at. Case-sensitive: anything
+/// else (`"true"`, `"yes"`, `"0"`) is treated as absent, so a client that
+/// guesses the wire format gets the safe default rather than a silent behavior
+/// change.
+pub const NO_LLM_HEADER_VALUE: &str = "1";
+
 /// Outcome of attempting to proxy a dream cycle to a daemon. All four are
 /// "the proxy made a decision"; only `Ran` and `InProgress` mean the daemon
 /// acted. `NotReachable` / `ProjectNotRegistered` tell the caller to fall back
@@ -73,17 +85,27 @@ pub(crate) fn map_dream_status(
 /// project_root` (sent raw — the daemon canonicalizes). A connect that fails
 /// with NotFound/ConnectionRefused → `Ok(NotReachable)` (no live daemon);
 /// other connect/handshake/transport failures → `Err(Transport)`.
+///
+/// `no_llm` travels as the [`NO_LLM_HEADER`] header, not as a reason to skip
+/// the proxy: skipping would run a second cycle in this process while the
+/// daemon's coordinator still owns the JSONL. `--no-commit` remains the only
+/// flag that bypasses the daemon.
 pub async fn proxy_dream_cycle(
     sock_path: &Path,
     project_root: &Path,
+    no_llm: bool,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
     use crate::daemon_client::{send_one, DaemonTransportError};
 
-    let req = hyper::Request::builder()
+    let mut builder = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri("/api/v1/dream")
         .header(hyper::header::HOST, "localhost")
-        .header("x-agent-root", project_root.to_string_lossy().as_ref())
+        .header("x-agent-root", project_root.to_string_lossy().as_ref());
+    if no_llm {
+        builder = builder.header(NO_LLM_HEADER, NO_LLM_HEADER_VALUE);
+    }
+    let req = builder
         .body(Full::new(Bytes::new()))
         .map_err(|e| DreamProxyError::Transport(format!("build request: {e}")))?;
 
@@ -138,17 +160,24 @@ mod tests {
     async fn proxy_dream_cycle_unreachable_socket_is_not_reachable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("nonexistent.sock");
-        let outcome = proxy_dream_cycle(&sock, Path::new("/x"))
+        let outcome = proxy_dream_cycle(&sock, Path::new("/x"), false)
             .await
             .expect("unreachable socket is Ok(NotReachable), not Err");
         assert_eq!(outcome, DreamProxyOutcome::NotReachable);
     }
 
-    /// Load-bearing round-trip: stand up a one-shot UDS server using the same
-    /// `serve_connection` + `TokioIo` idiom the daemon uses (`uds_server.rs`),
-    /// reply 200, and assert the proxied request method/URI/header.
-    #[tokio::test]
-    async fn proxy_dream_cycle_round_trips_over_uds() {
+    /// Captured request shape from the one-shot UDS server below.
+    struct CapturedRequest {
+        method: String,
+        uri: String,
+        agent_root: Option<String>,
+        no_llm: Option<String>,
+    }
+
+    /// Stand up a one-shot UDS server using the same `serve_connection` +
+    /// `TokioIo` idiom the daemon uses (`uds_server.rs`), reply 200, and return
+    /// both the proxy outcome and the request the daemon actually saw.
+    async fn round_trip(no_llm: bool) -> (DreamProxyOutcome, CapturedRequest) {
         use hyper::service::service_fn;
         use hyper_util::rt::{TokioExecutor, TokioIo};
 
@@ -156,8 +185,7 @@ mod tests {
         let sock_path = dir.path().join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        let (req_tx, mut req_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, String, Option<String>)>();
+        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<CapturedRequest>();
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
@@ -165,14 +193,18 @@ mod tests {
             let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let req_tx = req_tx.clone();
                 async move {
-                    let method = req.method().to_string();
-                    let uri = req.uri().to_string();
-                    let agent_root = req
-                        .headers()
-                        .get("x-agent-root")
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string);
-                    let _ = req_tx.send((method, uri, agent_root));
+                    let header = |name: &str| {
+                        req.headers()
+                            .get(name)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string)
+                    };
+                    let _ = req_tx.send(CapturedRequest {
+                        method: req.method().to_string(),
+                        uri: req.uri().to_string(),
+                        agent_root: header("x-agent-root"),
+                        no_llm: header(NO_LLM_HEADER),
+                    });
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .status(200)
@@ -187,14 +219,37 @@ mod tests {
         });
 
         let project_root = Path::new("/some/project/root");
-        let outcome = proxy_dream_cycle(&sock_path, project_root)
+        let outcome = proxy_dream_cycle(&sock_path, project_root, no_llm)
             .await
             .expect("proxy ok");
-        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        let captured = req_rx.recv().await.expect("request captured");
+        (outcome, captured)
+    }
 
-        let (method, uri, agent_root) = req_rx.recv().await.expect("request captured");
-        assert_eq!(method, "POST");
-        assert_eq!(uri, "/api/v1/dream");
-        assert_eq!(agent_root.as_deref(), Some("/some/project/root"));
+    #[tokio::test]
+    async fn proxy_dream_cycle_round_trips_over_uds() {
+        let (outcome, req) = round_trip(false).await;
+        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.uri, "/api/v1/dream");
+        assert_eq!(req.agent_root.as_deref(), Some("/some/project/root"));
+        // AILAB-204: the header is OMITTED by default, not sent as "0" — a
+        // daemon that predates this ticket must see an unchanged request.
+        assert_eq!(
+            req.no_llm, None,
+            "{NO_LLM_HEADER} must be absent when --no-llm is not set"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_dream_cycle_sends_no_llm_header_when_set() {
+        let (outcome, req) = round_trip(true).await;
+        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(req.uri, "/api/v1/dream", "--no-llm must NOT skip the proxy");
+        assert_eq!(
+            req.no_llm.as_deref(),
+            Some(NO_LLM_HEADER_VALUE),
+            "--no-llm must travel as {NO_LLM_HEADER}: {NO_LLM_HEADER_VALUE}"
+        );
     }
 }

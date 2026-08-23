@@ -7,6 +7,11 @@
 //! 2. **In-process** (no daemon, or `--no-commit`): runs the full cycle via
 //!    [`dreamd_core::dream_cycle::run_in_process`].
 //!
+//! `--no-commit` is the ONLY flag that skips the proxy. `--no-llm` (AILAB-204)
+//! travels *through* it as the `x-dreamd-no-llm: 1` header — skipping the daemon
+//! to honor it locally would run a second writer against a JSONL the daemon's
+//! coordinator owns.
+//!
 //! ## WAL protocol
 //!
 //! The in-process path writes [`dream_in_progress.wal`](dreamd_core::wal::DreamWal) before
@@ -68,18 +73,23 @@ impl From<std::io::Error> for DreamCliError {
     }
 }
 
-/// Run the full deterministic dream cycle from the CLI.
+/// Run the full dream cycle from the CLI.
+///
+/// `no_llm` forces the deterministic lesson body on whichever path runs; it does
+/// not change *which* path runs.
 pub fn run(
     project_root: &Path,
     out: &mut impl Write,
     no_commit: bool,
+    no_llm: bool,
 ) -> Result<(), DreamCliError> {
     // WEG-271 fast-follow: if a daemon owns this project, proxy the cycle to it
     // (one writer). --no-commit always runs in-process (determinism / commit
-    // semantics the HTTP API can't express).
+    // semantics the HTTP API can't express). `no_llm` is passed INTO the proxy,
+    // never AND-ed into this condition.
     #[cfg(unix)]
     if !no_commit {
-        if let Some(decided) = try_proxy_to_daemon(project_root, out)? {
+        if let Some(decided) = try_proxy_to_daemon(project_root, out, no_llm)? {
             return Ok(decided); // daemon ran it (409 already surfaced as Err)
         }
         // None → no daemon for this project; fall through to in-process.
@@ -94,9 +104,14 @@ pub fn run(
         dreamd_core::autobiography::check_dirty_at_cycle_start(project_root).unwrap_or_default()
     };
 
-    let result =
-        dream_cycle::run_in_process(project_root, now_sec, no_commit, dirty_at_cycle_start)
-            .map_err(DreamCliError::DreamCycle)?;
+    let result = dream_cycle::run_in_process(
+        project_root,
+        now_sec,
+        no_commit,
+        no_llm,
+        dirty_at_cycle_start,
+    )
+    .map_err(DreamCliError::DreamCycle)?;
 
     let decayed_count = result.decay.decayed_ids.len();
     let kept_count = result.decay.kept_count;
@@ -119,6 +134,7 @@ pub fn run(
 fn try_proxy_to_daemon(
     project_root: &Path,
     out: &mut impl Write,
+    no_llm: bool,
 ) -> Result<Option<()>, DreamCliError> {
     use dreamd_core::client::{proxy_dream_cycle, resolve_daemon_socket, DreamProxyOutcome};
 
@@ -126,7 +142,7 @@ fn try_proxy_to_daemon(
         return Ok(None);
     };
     let outcome = tokio::runtime::Runtime::new()?
-        .block_on(proxy_dream_cycle(&sock, project_root))
+        .block_on(proxy_dream_cycle(&sock, project_root, no_llm))
         .map_err(|e| DreamCliError::DaemonProxy(e.to_string()))?;
     match outcome {
         DreamProxyOutcome::Ran => {
@@ -224,7 +240,7 @@ mod tests {
         fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();
 
         let mut out = Vec::new();
-        run(tmp.path(), &mut out, true).unwrap();
+        run(tmp.path(), &mut out, true, true).unwrap();
         let stdout = String::from_utf8(out).unwrap();
         assert!(
             stdout.contains("dream cycle complete"),
