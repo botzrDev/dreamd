@@ -74,7 +74,14 @@ pub struct ServerConfig {
     /// small bound is enough — a single client RTT writes one message.
     pub coordinator_channel_capacity: usize,
     /// WEG-42 indexer hand-off. When `Some`, every successful coordinator
-    /// append `try_send`s an [`IndexerMsg::Append`] on this channel. The
+    /// append awaits a `send` of an [`IndexerMsg::Append`] on this channel — a
+    /// full channel backpressures the coordinator, it never sheds. While the
+    /// coordinator is parked there it stops draining its own inbox, so the
+    /// `coordinator_channel_capacity` learns already in flight just wait (no
+    /// per-request timeout); only overflow past that inbox reaches
+    /// [`Supervisor::try_send`]'s [`COORDINATOR_SEND_TIMEOUT`] and 503s, and
+    /// only over HTTP — the in-process `dreamd mcp` path sends on the
+    /// coordinator channel without that timeout, so it waits. The
     /// caller (`server::run` entry point) constructs a `TantivyIndexHandle`,
     /// extracts its sender via [`crate::server::TantivyIndexHandle::sender`],
     /// and threads it here.

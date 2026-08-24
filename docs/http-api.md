@@ -208,7 +208,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
   "http://localhost/api/v1/recall?q=axum+unwrap&k=3"
 ```
 
-**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds in v0.1). If the coordinator → indexer channel saturates (`try_send` drops) or the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
+**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds in v0.1). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
 
 ---
 
@@ -242,7 +242,7 @@ Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught 
 | `last_indexed_id` | Watermark from `index_progress.json`, if present |
 | `unindexed_count` | JSONL events after the watermark |
 
-`stale: true` is normal for up to one commit cadence (5 s) after a live append. Persistent staleness indicates channel saturation or a crash gap; restart replay heals it.
+`stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. Staleness that outlives the backlog indicates a crash gap between JSONL `sync_data` and the next commit; that is what restart replay heals.
 
 #### curl example
 

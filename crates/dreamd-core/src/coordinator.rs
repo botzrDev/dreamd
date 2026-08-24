@@ -147,9 +147,10 @@ pub struct MemoryCoordinator {
     agent_root_key: PathBuf,
     idempotency: LruCache<(PathBuf, String), IdempotencyEntry>,
     /// WEG-42: optional hand-off to the per-project Tantivy indexer task.
-    /// `None` means "no indexer wired, append only" (existing tests). On
-    /// `TrySendError::Full` we log `warn!` and drop the update; on
-    /// `TrySendError::Closed` we log `warn!` once and drop the sender.
+    /// `None` means "no indexer wired, append only" (existing tests). The
+    /// hand-off awaits `send`, so a full channel backpressures this actor
+    /// rather than shedding an update; when the channel is closed we log
+    /// `warn!` once and drop the sender.
     #[cfg(unix)]
     indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
 }
@@ -226,7 +227,7 @@ impl MemoryCoordinator {
                     client_dedup_key,
                     response_tx,
                 } => {
-                    let result = self.handle_append(learning, client_dedup_key);
+                    let result = self.handle_append(learning, client_dedup_key).await;
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::RunDreamCycle {
@@ -254,7 +255,7 @@ impl MemoryCoordinator {
         }
     }
 
-    fn handle_append(
+    async fn handle_append(
         &mut self,
         mut learning: AgentLearning,
         client_dedup_key: Option<String>,
@@ -312,12 +313,20 @@ impl MemoryCoordinator {
             );
         }
 
-        // WEG-42 hand-off to the indexer task. Best-effort non-blocking
-        // try_send: `Full` is logged and dropped (next-startup replay
-        // covers the loss); `Closed` is logged once and the sender is
-        // dropped so we stop retrying.
+        // WEG-42 hand-off to the indexer task. The send is AWAITED: a full
+        // channel backpressures this actor rather than shedding the message.
+        // Upstream, in-flight learns queue in the 256-slot coordinator channel
+        // and simply wait — there is no per-request timeout — so a brief park
+        // shows up as latency; only once that inbox is full too does the
+        // `Supervisor`'s separate 100 ms send timeout start returning HTTP 503,
+        // and only on the HTTP ingress (the in-process `dreamd mcp` path sends
+        // on this channel without that timeout, so it waits). Shedding is NOT
+        // replay-healed: startup replay filters `id > last_indexed_id`, a
+        // watermark rather than a contiguous prefix, so a gap followed by any
+        // indexed event is skipped forever. A `Closed` channel is still logged
+        // once and the sender dropped so we stop retrying.
         #[cfg(unix)]
-        self.try_route_to_indexer(&event_id, &learning);
+        self.route_to_indexer(&event_id, &learning).await;
 
         Ok(AppendOutcome {
             id: event_id,
@@ -360,9 +369,28 @@ impl MemoryCoordinator {
         Ok(decay)
     }
 
+    /// Hand one durable append to the indexer task, **awaiting** the send.
+    ///
+    /// The await is the point. A bounded channel that is momentarily full must
+    /// block this actor, not shed the message: startup `replay_two_pass` keeps
+    /// events whose `id > last_indexed_id`, and that watermark is the newest
+    /// committed id, not a contiguous prefix. Shed event N, index N+1, and N is
+    /// skipped forever. Blocking here stops the coordinator reading its own
+    /// inbox, so ingress degrades honestly instead of returning 201 for a record
+    /// recall will never see: the in-flight learns already queued in the 256-slot
+    /// coordinator channel just *wait* (no per-request timeout), and only
+    /// overflow past that inbox meets the `Supervisor`'s separate 100 ms send
+    /// timeout and becomes an HTTP 503. Sustained overload therefore surfaces as
+    /// 503, a brief park as latency — and only on the HTTP ingress: the
+    /// in-process `dreamd mcp` path sends on this channel without that timeout,
+    /// so it waits.
+    ///
+    /// The append is acked once the indexer *accepts* the message; the Tantivy
+    /// commit still lands on the usual 5 s cadence. A closed channel is terminal
+    /// for live routing: warn once, drop the sender, and let the next startup
+    /// replay pick the tail up.
     #[cfg(unix)]
-    fn try_route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
-        use tokio::sync::mpsc::error::TrySendError;
+    async fn route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
         let Some(tx) = self.indexer_tx.as_ref() else {
             return;
         };
@@ -370,19 +398,11 @@ impl MemoryCoordinator {
             event_id: event_id.clone(),
             learning: learning.clone(),
         };
-        match tx.try_send(msg) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                tracing::warn!(
-                    "indexer channel full; dropping IndexerMsg::Append (recoverable via next-startup replay)"
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                tracing::warn!(
-                    "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
-                );
-                self.indexer_tx = None;
-            }
+        if tx.send(msg).await.is_err() {
+            tracing::warn!(
+                "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
+            );
+            self.indexer_tx = None;
         }
     }
 }

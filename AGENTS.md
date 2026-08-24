@@ -322,10 +322,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### indexer-shed-is-not-replay-healed
 
-- **Rule:** An `IndexerMsg::Append` the coordinator `try_send`s and sheds on `Full` is **not** recovered by next-startup replay. `replay_two_pass` keeps only `ev.id.as_str() > last_indexed_id`; a gap followed by any later indexed event is skipped forever.
-- **Why:** AILAB-162 first-pass docs claimed shed appends are "healed by next-startup replay". The same false reassurance is still in `coordinator.rs` (`try_route_to_indexer` warn text). Watermark is the newest indexed id, not a contiguous prefix.
-- **How to apply:** Do not document or design a drain/backpressure path as if replay closes that hole. Closing it is its own ticket (contiguous watermark, or not shedding). The warn text is a separate doc-fix if queued.
-- **Cross-refs:** `ailab-162-drain-not-sigterm`
+- **Rule:** Startup replay does not heal a middle gap. `replay_two_pass` keeps `ev.id.as_str() > last_indexed_id` (newest committed id, not a contiguous prefix). Live appends no longer shed: `handle_append` awaits `tx.send(IndexerMsg::Append)`, so a full 1024-slot indexer channel parks the coordinator instead of dropping. A `Closed` tail past the watermark is still replay-healed; a gap followed by any later indexed event is still skipped forever.
+- **Why:** The pre-fix `try_send` + Full drop logged "recoverable via next-startup replay". False for any shed-then-continue sequence. The ticket closed the live hole by awaiting send; it did not change the watermark.
+- **How to apply:** Do not document channel backpressure as if replay closes a shed gap — there is no shed on Full anymore. Do not "fix" remaining crash holes by rewriting `replay_two_pass` into a contiguous watermark unless that is its own ticket. HTTP 503 is **not** "coordinator parked": in-flight learns wait in the 256-slot inbox (`resp_rx.await` has no timeout); only overflow of that inbox trips `Supervisor::try_send`'s 100 ms timeout, and only on HTTP. In-process `dreamd mcp` sends on a raw coordinator clone with no timeout and waits. `Supervisor::drain`'s deadline-free `Shutdown` can now park behind the indexer and consume `DRAIN_TIMEOUT`, skipping the index flush (lost last commit → rebuild on next open, not JSONL loss). The indexer task never sends back to the coordinator, so coordinator→indexer is acyclic.
+- **Cross-refs:** `ailab-162-drain-not-sigterm`, `replay-two-pass-already-filters`, `spec-deadlock-fixture-names-must-match-the-tree`
+
+### spec-deadlock-fixture-names-must-match-the-tree
+
+- **Rule:** A §4 "fixture must be gone" grep that searches names the spec invented will pass green with the real fixtures intact. Pair the spec names with a live-tree grep of the functions those line numbers actually name.
+- **Why:** indexer-shed.v2 §1.6 named `coordinator_still_succeeds_when_indexer_channel_full` / `channel_full_leaves_recall_stale_until_restart_replay`. The tree had `coordinator_continues_when_indexer_channel_full` and `channel_saturation_stale_recall_until_restart_replay` at the cited lines. §4 grepped only the invented names.
+- **How to apply:** Before locking a negative test-name grep, `rg 'async fn'` the file around the cited lines. Grep both spellings if the spec and tree disagree.
+- **Cross-refs:** `indexer-shed-is-not-replay-healed`
+
+### gated-consumer-is-what-makes-a-full-channel-test-real
+
+- **Rule:** A capacity-1 pre-fill test is vacuous if an ungated forwarder/consumer drains the filler before the coordinator sends. Gate the consumer; assert delivery count or recall, not just "append Ok".
+- **Why:** indexer-shed first green pass: `full_indexer_channel_still_reaches_recall_after_flush` drained the pre-fill, never met a full channel, passed on `try_send`+drop. Mutation-injecting `try_send` + silent Full made the gated rewrite fail (`1 != 3`; recall assertion).
+- **How to apply:** Mutation-inject `try_send`+silent Full and require the test to fail. Current-thread runtime comments are not the proof; the count/recall assertion is.
+- **Cross-refs:** `indexer-shed-is-not-replay-healed`
 
 ### git-diff-name-only-misses-untracked
 

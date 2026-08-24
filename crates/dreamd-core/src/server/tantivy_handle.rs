@@ -29,7 +29,7 @@
 //! supervisor opens a `TantivyIndexHandle`, extracts its
 //! `mpsc::Sender<IndexerMsg>` via [`TantivyIndexHandle::sender`], and threads
 //! that sender into `MemoryCoordinator::open` so each successful append can
-//! `try_send` an [`IndexerMsg::Append`]. The coordinator never holds the
+//! `send` (awaited) an [`IndexerMsg::Append`]. The coordinator never holds the
 //! `IndexWriter`; the writer lives entirely on the indexer task. This keeps
 //! each actor with exactly one mutable resource.
 
@@ -69,9 +69,19 @@ pub const WRITER_HEAP_BYTES: usize = 50_000_000;
 
 /// Default mpsc capacity for the coordinator → indexer hand-off. Sized so a
 /// 5-second commit window plus replay headroom fits without blocking the
-/// coordinator. On `TrySendError::Full`, the coordinator logs `warn!` and
-/// drops the indexer update — the JSONL is the source of truth, so dropping
-/// an index message is recoverable by the next startup replay.
+/// coordinator. The coordinator **awaits** `send` on this channel: once the
+/// buffer fills, the append handler blocks and the actor stops reading its own
+/// inbox, so in-flight learns queue in the 256-slot coordinator channel and
+/// simply wait — nothing times out a queued request, so a brief park surfaces as
+/// latency. Only once that inbox is also full does `Supervisor::try_send`'s
+/// 100 ms `COORDINATOR_SEND_TIMEOUT` start returning HTTP 503, and that is the
+/// HTTP ingress alone: the in-process `dreamd mcp` path sends on the coordinator
+/// channel without that timeout, so it waits rather than 503ing.
+///
+/// Nothing is dropped — a shed `IndexerMsg::Append` would NOT be recovered by
+/// startup replay, which filters `id > last_indexed_id` (a watermark, not a
+/// contiguous prefix), so a gap followed by any indexed event is skipped
+/// forever.
 pub(crate) const DEFAULT_INDEXER_CHANNEL_CAPACITY: usize = 1024;
 
 /// Relative filename for the indexer's commit watermark, joined under the
@@ -92,10 +102,15 @@ pub const SEMANTIC_PASS_FILENAME: &str = "semantic_pass.json";
 /// Compares the JSONL tail against `index_progress.json`. `stale == true` when
 /// the episodic log has committed events the index watermark has not caught up
 /// to yet — including the normal ≤[`DEFAULT_COMMIT_CADENCE`] window after a
-/// live append, channel-saturation drops (`try_send` → `Full`), or a crash
-/// between JSONL `sync_data` and the next Tantivy commit. JSONL durability is
-/// WAL-backed; index freshness is best-effort and heals on the next
-/// `TantivyIndexHandle::open` replay (or when the indexer commits the backlog).
+/// live append, a full indexer channel, or a crash between JSONL `sync_data`
+/// and the next Tantivy commit. A full channel still reads as `stale` — the
+/// event is durable in the JSONL and not yet committed, which is exactly what
+/// this compares. What changed is that it no longer *persists*: because the
+/// coordinator awaits its `send`, the message is queued rather than dropped, so
+/// the staleness clears as the indexer drains the backlog instead of surviving
+/// until a restart. JSONL durability is WAL-backed; index freshness is
+/// best-effort and heals when the indexer commits the backlog (or, after a
+/// crash, on the next `TantivyIndexHandle::open` replay).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IndexFreshness {
     /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
@@ -1670,15 +1685,34 @@ mod tests {
         coord_handle.await.unwrap();
     }
 
+    /// A full indexer channel must BLOCK the coordinator, not shed the message.
+    ///
+    /// Shedding is unrecoverable: `replay_two_pass` keeps `id > last_indexed_id`,
+    /// and that watermark is the newest *committed* id, not a contiguous prefix
+    /// — so a dropped event followed by any indexed event is skipped forever.
+    ///
+    /// The setup makes the backpressure deterministic without a sleep. The
+    /// consumer is gated shut, so the capacity-1 indexer channel stays full. The
+    /// coordinator inbox is *also* capacity 1, but be precise about what that
+    /// buys: the inbox permit is released at the coordinator's `recv`, strictly
+    /// *before* `route_to_indexer` runs, so `coord_tx.send(second)` returning
+    /// proves only that the first message was dequeued. On the current-thread
+    /// runtime `#[tokio::test]` gives us, the coordinator then runs on to its
+    /// first await — the indexer `send`, which has no room — before this task is
+    /// polled again; under `flavor = "multi_thread"` that last step would be a
+    /// race. The count assertion, not the timing, is what makes the test sound:
+    /// opening the gate must let both appends through, for three
+    /// `IndexerMsg::Append`s total (the filler plus both appends). A
+    /// drop-on-`Full` regression loses one or both and fails the count.
     #[tokio::test]
-    async fn coordinator_continues_when_indexer_channel_full() {
+    async fn coordinator_blocks_then_delivers_when_indexer_channel_full() {
         let dir = unique_tmpdir("coord-full");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        // Capacity 1; pre-fill it so the next try_send returns Full.
-        let (idx_tx, _idx_rx) = mpsc::channel::<IndexerMsg>(1);
+        // Capacity 1, pre-filled: the coordinator's next `send` finds it full.
+        let (idx_tx, mut idx_rx) = mpsc::channel::<IndexerMsg>(1);
         idx_tx
             .send(IndexerMsg::Append {
                 event_id: make_event_id('Z'),
@@ -1687,7 +1721,23 @@ mod tests {
             .await
             .unwrap();
 
-        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        // Consumer, held shut by `gate_rx`. Every message it eventually sees is
+        // relayed onto `seen_rx` — the relay is roomier than the traffic, so the
+        // consumer itself never blocks. Holding an undrained receiver here
+        // instead would deadlock the coordinator, which is exactly the point.
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        let (seen_tx, mut seen_rx) = mpsc::channel::<IndexerMsg>(16);
+        let consumer = tokio::spawn(async move {
+            let _ = gate_rx.await;
+            while let Some(msg) = idx_rx.recv().await {
+                if seen_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Capacity 1 so the second `send` below proves the coordinator is parked.
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
         let coord = MemoryCoordinator::open_at(
             &agent_root.episodic_jsonl(),
             agent_root.project_root(),
@@ -1697,22 +1747,52 @@ mod tests {
         .expect("open coord");
         let coord_handle = tokio::spawn(coord.run());
 
-        let (resp_tx, resp_rx) = oneshot::channel();
+        let (r1_tx, r1_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::AppendLearning {
-                learning: sample_learning(make_event_id('0'), "rust.test", "should still succeed"),
+                learning: sample_learning(
+                    make_event_id('0'),
+                    "rust.test",
+                    "first through a full channel",
+                ),
                 client_dedup_key: None,
-                response_tx: resp_tx,
+                response_tx: r1_tx,
             })
             .await
-            .expect("send append");
+            .expect("send first append");
 
-        let minted = resp_rx
+        // Returns once the coordinator has dequeued the first message (the inbox
+        // permit frees at `recv`); on this current-thread runtime it then runs on
+        // into the parked `route_to_indexer` send before we are polled again.
+        let (r2_tx, r2_rx) = oneshot::channel();
+        coord_tx
+            .send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(
+                    make_event_id('1'),
+                    "rust.test",
+                    "second through a full channel",
+                ),
+                client_dedup_key: None,
+                response_tx: r2_tx,
+            })
             .await
-            .expect("recv resp")
-            .expect("append must succeed even when indexer channel is full")
-            .id;
-        assert!(minted.as_str().starts_with("evt_"));
+            .expect("send second append");
+
+        // Release the consumer; the parked send can now make progress.
+        gate_tx.send(()).expect("open consumer gate");
+
+        // 5s bounds turn a backpressure regression that deadlocks into a fast
+        // failure instead of a hung suite.
+        let first = tokio::time::timeout(Duration::from_secs(5), r1_rx)
+            .await
+            .expect("first append must not hang behind a full indexer channel")
+            .expect("recv first resp")
+            .expect("first append ok");
+        let second = tokio::time::timeout(Duration::from_secs(5), r2_rx)
+            .await
+            .expect("second append must not hang behind a full indexer channel")
+            .expect("recv second resp")
+            .expect("second append ok");
 
         let (sh_tx, sh_rx) = oneshot::channel();
         coord_tx
@@ -1721,6 +1801,34 @@ mod tests {
             .unwrap();
         sh_rx.await.unwrap();
         coord_handle.await.unwrap();
+        // Coordinator dropped => its `idx_tx` clone dropped => consumer exits.
+        consumer.await.expect("consumer joined");
+
+        let mut appends = 0usize;
+        while let Some(msg) = seen_rx.recv().await {
+            match msg {
+                IndexerMsg::Append { .. } => appends += 1,
+                _ => panic!("coordinator must emit only IndexerMsg::Append"),
+            }
+        }
+        assert_eq!(
+            appends, 3,
+            "1 pre-filled filler + 2 coordinator appends must all be delivered; \
+             a full channel backpressures the coordinator, it never sheds"
+        );
+
+        // Both appends are durable on disk, not just in the indexer channel.
+        let raw = std::fs::read_to_string(agent_root.episodic_jsonl()).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "both appends must be durable in the JSONL");
+        assert!(
+            raw.contains(first.id.as_str()),
+            "first minted id missing from JSONL"
+        );
+        assert!(
+            raw.contains(second.id.as_str()),
+            "second minted id missing from JSONL"
+        );
     }
 
     #[tokio::test]
@@ -2239,8 +2347,27 @@ mod tests {
         );
     }
 
+    /// An append that met a full indexer channel is still searchable after the
+    /// ordinary flush — no restart, no startup replay.
+    ///
+    /// A capacity-1 channel sits in front of the real [`TantivyIndexHandle`]
+    /// sender, pre-filled so there is no room for the coordinator's `send`. The
+    /// forwarder that relays into the live indexer is held shut by `gate_rx` so
+    /// the channel *stays* full until we say otherwise — an ungated forwarder
+    /// would drain the filler before the coordinator ever sent, and the
+    /// coordinator would never meet a full channel at all. The coordinator inbox
+    /// is capacity 1 for the same reason as
+    /// [`coordinator_blocks_then_delivers_when_indexer_channel_full`]: the
+    /// second `coord_tx.send` cannot return until the coordinator has dequeued
+    /// the append. Only then is the gate opened.
+    ///
+    /// Because the coordinator awaits instead of shedding, the marker token
+    /// reaches Tantivy through the normal path and recall finds it. Under a
+    /// drop-on-`Full` regression the token never reaches the indexer and the
+    /// recall assertion fails. Startup replay is deliberately not exercised —
+    /// it only ever heals the tail after `last_indexed_id`.
     #[tokio::test]
-    async fn channel_saturation_stale_recall_until_restart_replay() {
+    async fn full_indexer_channel_still_reaches_recall_after_flush() {
         let dir = unique_tmpdir("chan-full-recall");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -2250,8 +2377,8 @@ mod tests {
             TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open index");
         let real_tx = handle.sender();
 
-        // Capacity 1, pre-filled — coordinator try_send will drop the next Append.
-        let (idx_tx, _idx_rx) = mpsc::channel::<IndexerMsg>(1);
+        // Capacity 1, pre-filled — the coordinator's `send` blocks for a slot.
+        let (idx_tx, mut idx_rx) = mpsc::channel::<IndexerMsg>(1);
         idx_tx
             .send(IndexerMsg::Append {
                 event_id: make_event_id('Z'),
@@ -2260,7 +2387,23 @@ mod tests {
             .await
             .unwrap();
 
-        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        // Forward everything the coordinator queues into the real indexer, FIFO
+        // — but not before `gate_tx` fires. Ungated, this would empty the
+        // capacity-1 channel immediately and the coordinator would never meet a
+        // full one, leaving the test vacuous.
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        let forwarder = tokio::spawn(async move {
+            let _ = gate_rx.await;
+            while let Some(msg) = idx_rx.recv().await {
+                if real_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Capacity 1 so the `Shutdown` send below cannot return until the
+        // coordinator has dequeued the append.
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
         let coord = MemoryCoordinator::open_at(
             &agent_root.episodic_jsonl(),
             agent_root.project_root(),
@@ -2280,48 +2423,58 @@ mod tests {
             })
             .await
             .expect("send append");
-        resp_rx
-            .await
-            .expect("recv")
-            .expect("append must succeed when indexer channel is full");
 
+        // The inbox permit frees at the coordinator's `recv`, so this returning
+        // proves only that the append was dequeued; on the current-thread test
+        // runtime the coordinator then runs on to its first await — the indexer
+        // `send`, which has no room — before this task is polled again. The
+        // recall assertion below, not this timing, is what makes the test sound:
+        // the point of the gate is that the filler is still occupying the
+        // channel's one slot when the coordinator routes.
         let (sh_tx, sh_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
             .await
             .unwrap();
-        sh_rx.await.unwrap();
-        coord_handle.await.unwrap();
 
-        let stale = assess_index_freshness(&agent_root).expect("assess");
-        assert!(stale.stale, "dropped indexer msg must leave index stale");
+        // Release the forwarder; the parked send can now make progress.
+        gate_tx.send(()).expect("open forwarder gate");
+
+        tokio::time::timeout(Duration::from_secs(5), resp_rx)
+            .await
+            .expect("append must not hang behind a full indexer channel")
+            .expect("recv")
+            .expect("append must succeed when the indexer channel is full");
+
+        tokio::time::timeout(Duration::from_secs(5), sh_rx)
+            .await
+            .expect("shutdown ack must not hang behind a full indexer channel")
+            .unwrap();
+        coord_handle.await.unwrap();
+        // Coordinator dropped => `idx_tx` dropped => the forwarder drains and
+        // exits, so the real indexer has both messages before we flush.
+        forwarder.await.expect("forwarder joined");
+
+        flush(&handle).await.expect("flush");
+        handle.reader().reload().expect("reload after flush");
 
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
-        let misses = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
-            .expect("recall before replay");
-        assert!(
-            misses.is_empty(),
-            "recall must miss unindexed append after channel saturation"
-        );
-
-        drop(real_tx);
-        handle.shutdown().await.expect("shutdown first handle");
-
-        let handle2 =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("reopen replay");
-        handle2.reader().reload().expect("reload after replay");
-        let hits = crate::recall(handle2.reader(), &fields, unique, 5, None, now_sec)
-            .expect("recall after replay");
+        let hits = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
+            .expect("recall after flush");
         assert!(
             !hits.is_empty(),
-            "startup replay must make saturated append searchable"
+            "an append queued behind a full indexer channel must be recallable \
+             after the ordinary flush, with no restart replay"
         );
 
-        let fresh = assess_index_freshness(&agent_root).expect("assess after");
-        assert!(!fresh.stale, "replay must heal freshness: {fresh:?}");
+        let fresh = assess_index_freshness(&agent_root).expect("assess after flush");
+        assert!(
+            !fresh.stale,
+            "backpressured append must leave the index fresh: {fresh:?}"
+        );
 
-        handle2.shutdown().await.expect("shutdown");
+        handle.shutdown().await.expect("shutdown");
     }
 
     /// `is_schema_incompatible` gates a `remove_dir_all` of the index cache, so

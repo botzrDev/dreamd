@@ -207,11 +207,14 @@ where
 /// release the clone, and puts every append it had queued on the indexer
 /// channel ahead of our `Flush` — FIFO then guarantees the commit sees them.
 /// Flushing first would commit a batch that the coordinator was still adding
-/// to. (An append the coordinator's `try_send` already shed under `Full`
-/// backpressure stays shed, and is *not* recovered later: replay filters on
-/// `id > watermark`, so a gap followed by any indexed event is skipped
-/// forever. That hole is pre-existing — `coordinator.rs` sheds it long before
-/// any signal arrives — and closing it is not this ticket.)
+/// to. The coordinator now *awaits* its indexer `send`, so nothing is shed on a
+/// full channel and everything it queued is genuinely ahead of the `Flush`.
+/// That await also couples the two phases: [`Supervisor::drain`] sends
+/// `Shutdown` and waits for the ack with no deadline of its own, so a
+/// coordinator parked on a full indexer channel can spend the entire
+/// [`DRAIN_TIMEOUT`] budget that [`with_drain_timeout`] wraps this call in,
+/// leaving the index flush below unrun — best-effort as ever: a lost commit
+/// costs a rebuild on next open, not data.
 ///
 /// Which index arm runs depends on who still holds the handle.
 /// `tokio::select!` drops the losing `serve_uds` future and with it the

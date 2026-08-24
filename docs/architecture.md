@@ -538,9 +538,12 @@ Two consequences follow, and both are load-bearing:
 
 Only the post-filesystem phases leave the coordinator. Index work is handed to the
 indexer task over its own bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`,
-`tantivy_handle.rs:75`), and the autobiography commit runs after it in `run_post_phases`
-(`dream_cycle.rs:113-130`) — outside the coordinator, best-effort, and unable to block an
-append.
+`tantivy_handle.rs:85`), and the autobiography commit runs after it in `run_post_phases`
+(`dream_cycle.rs:113-130`) — outside the coordinator and best-effort. It is not, however,
+insulated from appends: the indexer is a single task, so an `ApplyRecurrenceSidecar`,
+`IndexSemanticLessons`, or `PruneDecayedEvents` pass occupies it while appends queue, and
+an append that finds the 1024-slot channel full now parks the coordinator on its awaited
+`send` until the indexer takes the message (`coordinator.rs::route_to_indexer`).
 
 ## Observability (WEG-32 / DR-004)
 
