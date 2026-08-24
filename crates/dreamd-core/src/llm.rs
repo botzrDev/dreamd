@@ -13,11 +13,19 @@
 //! rustdoc resolve this block in `lib.rs` scope — the same trap the unresolved
 //! `LlmBackend` link on the line above has been sitting in.)
 //!
+//! Since AILAB-196 it also owns the **pre-call** cost estimate behind
+//! `cost_cap_usd`: [`crate::llm::estimate_prompt_cost`] prices the prompt with a
+//! bundled tokenizer and [`crate::llm::exceeds_cap`] compares that to the
+//! configured cap. Both are pure functions — they decide nothing. The abort
+//! itself belongs to the caller, `dream_cycle::compose_lesson_body`, which is
+//! the only place that knows a model call is otherwise about to happen and is
+//! the only place that can turn "over cap" into a deterministic body. Keeping
+//! the arithmetic here and the decision there is what lets the estimate be unit
+//! tested without a backend, and what keeps the count from being re-run per
+//! retry attempt.
+//!
 //! ## What this module does NOT own
 //!
-//! * Token accounting / the `cost_cap_usd` spend cap — AILAB-196. No tokenizer
-//!   crate is a dependency here; the token counts reported at INFO come from the
-//!   provider's own usage block.
 //! * Personal-layer redaction of prompt inputs — AILAB-199.
 //!
 //! ## Credentials
@@ -293,6 +301,126 @@ pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> Strin
         s.push('\n');
     }
     s
+}
+
+// ── Cost estimate (AILAB-196 / DR-307) ───────────────────────────────────────
+
+/// Completion-token reserve. The prompt caps the lesson at 8 sentences; 512
+/// tokens is the conservative pre-call pad. Errs toward abort, not surprise bills.
+///
+/// A pre-call estimate cannot know the completion length, so the choice is
+/// between under-reserving (the cap passes and the bill arrives anyway) and
+/// over-reserving (a borderline cycle composes deterministically). Only the
+/// second failure mode is recoverable by the operator — raise `cost_cap_usd` —
+/// so the pad is deliberately larger than any lesson this prompt can produce.
+pub const OUTPUT_RESERVE_TOKENS: u32 = 512;
+
+/// USD per 1,000 tokens. Snapshotted 2026-08-24. Refresh the table and
+/// `docs/llm-cost-accuracy.md` in the same commit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelRates {
+    pub input_per_1k: f64,
+    pub output_per_1k: f64,
+}
+
+/// Published price for `model`, or `None` for a model this build has never been
+/// told the price of.
+///
+/// The table is a hand-maintained **snapshot taken 2026-08-24**, not a live
+/// lookup: pricing lives behind a provider dashboard, and a cap that silently
+/// re-prices itself over the network is a cap the operator cannot reason about.
+/// The cost of that choice is that the table goes stale in place, so refreshing
+/// it is a three-part edit that belongs in **one commit**: the match arms here,
+/// the ±drift/pricing prose in `docs/llm-cost-accuracy.md`, and the snapshot
+/// date in both. Split them and the doc starts describing rates the binary no
+/// longer charges against.
+///
+/// Aliases are spelled out rather than normalized because the model string is
+/// operator-typed config, not a parsed enum: `claude-haiku-4.5` is what the
+/// pricing page prints and `claude-haiku-4-5` is what the API accepts, and a
+/// typo'd third spelling should fall through to `None` (over-cap → deterministic)
+/// rather than silently price as something else.
+pub fn rates_for(model: &str) -> Option<ModelRates> {
+    match model {
+        "claude-haiku-4-5" | "claude-haiku-4.5" => Some(ModelRates {
+            input_per_1k: 0.001,  // $1 / 1M input
+            output_per_1k: 0.005, // $5 / 1M output
+        }),
+        "gpt-4o-mini" => Some(ModelRates {
+            input_per_1k: 0.00015,
+            output_per_1k: 0.0006,
+        }),
+        _ => None,
+    }
+}
+
+/// What one composition is predicted to cost, before it is attempted.
+///
+/// `input_tokens` is carried alongside the dollar figure so the abort log can
+/// say *why* a prompt was expensive — a cap breach caused by a 40k-token cluster
+/// is an operator problem with a different fix than one caused by a raised
+/// price.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostEstimate {
+    pub input_tokens: u32,
+    pub estimated_usd: f64,
+}
+
+/// Pre-call USD estimate for `prompt` under `model`.
+///
+/// The caller compares `estimated_usd` to [`crate::config::Config::cost_cap_usd`].
+/// `None` = unknown model (caller aborts to deterministic).
+///
+/// Tokens are counted with `cl100k_base` for **every** model, Anthropic
+/// included. That is knowingly the wrong tokenizer for Claude — Anthropic's
+/// segmentation differs by roughly ±25% on prose of this shape — and it is the
+/// deliberate trade: the alternatives are a network round trip to the provider's
+/// own token-counting endpoint (a remote call to decide whether to make a remote
+/// call, on the exact path that is supposed to be cheap) or a vendored copy of a
+/// tokenizer the provider does not publish. Because the reserve pad in
+/// [`OUTPUT_RESERVE_TOKENS`] is
+/// already generous, the combined error lands on the safe side: the cap errs
+/// toward abort, and the documented worst case is real spend near ~$0.13
+/// against a $0.10 cap (`docs/llm-cost-accuracy.md`).
+///
+/// Building the encoder is fallible, and this module's whole contract is that it
+/// degrades rather than panics — a `dream` cycle must not die because a
+/// tokenizer table failed to load. So an encoder error returns `None`, which the
+/// caller reads exactly like an unknown model: treat as over cap, compose
+/// deterministically. `unwrap()` here would convert a cheap fallback into a
+/// crashed cycle.
+pub fn estimate_prompt_cost(model: &str, prompt: &str) -> Option<CostEstimate> {
+    let rates = rates_for(model)?;
+
+    let bpe = match tiktoken_rs::cl100k_base() {
+        Ok(bpe) => bpe,
+        Err(err) => {
+            tracing::warn!(
+                model = %model,
+                error = %err,
+                "cl100k_base tokenizer unavailable — treating cost estimate as over cap"
+            );
+            return None;
+        }
+    };
+    let input_tokens = bpe.encode_with_special_tokens(prompt).len() as u32;
+
+    let estimated_usd = (f64::from(input_tokens) / 1000.0) * rates.input_per_1k
+        + (f64::from(OUTPUT_RESERVE_TOKENS) / 1000.0) * rates.output_per_1k;
+
+    Some(CostEstimate {
+        input_tokens,
+        estimated_usd,
+    })
+}
+
+/// Whether `estimate` is refused by a `cap_usd` budget.
+///
+/// A non-positive cap is *always* a breach rather than "no limit": `0.0` is what
+/// an operator writes to mean "never call the model", and reading it as unlimited
+/// would invert the one setting whose failure mode costs money.
+pub fn exceeds_cap(estimate: &CostEstimate, cap_usd: f64) -> bool {
+    cap_usd <= 0.0 || estimate.estimated_usd > cap_usd
 }
 
 // ── Citation gate (AILAB-200 / DR-306) ───────────────────────────────────────
@@ -831,6 +959,127 @@ mod tests {
             adapter_for_provider("nope"),
             None,
             "unknown provider degrades to inference rather than failing the cycle"
+        );
+    }
+
+    // ── Cost estimate (AILAB-196) ────────────────────────────────────────────
+
+    /// USD comparisons are float arithmetic; a hundredth of a cent is far below
+    /// any rate in the table, so it separates "wrong" from "last-bit rounding".
+    const USD_EPS: f64 = 1e-9;
+
+    /// The pad every model pays for up front, at haiku's output rate.
+    const HAIKU_PAD_USD: f64 = 512.0 / 1000.0 * 0.005;
+
+    #[test]
+    fn a_known_prompt_counts_a_stable_nonzero_number_of_input_tokens() {
+        let prompt = "Lead with the rule. Cite the events you used.";
+        let first = estimate_prompt_cost("claude-haiku-4-5", prompt).expect("known model");
+        let second = estimate_prompt_cost("claude-haiku-4-5", prompt).expect("known model");
+
+        assert!(
+            first.input_tokens > 0,
+            "a non-empty prompt that counts as zero tokens means the encoder never ran"
+        );
+        assert_eq!(
+            first.input_tokens, second.input_tokens,
+            "the bundled encoding must be deterministic across calls"
+        );
+    }
+
+    #[test]
+    fn haiku_estimate_charges_the_reserved_output_pad_on_top_of_the_input_cost() {
+        let prompt = build_lesson_prompt(
+            "rust::error_handling",
+            &[learning(1, "rust::error_handling", "unwrap panicked")],
+        );
+        let est = estimate_prompt_cost("claude-haiku-4-5", &prompt).expect("known model");
+
+        let input_only = f64::from(est.input_tokens) / 1000.0 * 0.001;
+        assert!(
+            (est.estimated_usd - (input_only + HAIKU_PAD_USD)).abs() < USD_EPS,
+            "estimate {} should be input {input_only} + pad {HAIKU_PAD_USD}",
+            est.estimated_usd
+        );
+        assert!(
+            est.estimated_usd > input_only,
+            "an estimate that ignores OUTPUT_RESERVE_TOKENS would under-price every cycle"
+        );
+    }
+
+    #[test]
+    fn gpt_4o_mini_prices_the_same_prompt_lower_than_haiku() {
+        let prompt = "Lead with the rule. Cite the events you used.";
+        let haiku = estimate_prompt_cost("claude-haiku-4-5", prompt).expect("known model");
+        let mini = estimate_prompt_cost("gpt-4o-mini", prompt).expect("known model");
+
+        assert_eq!(
+            haiku.input_tokens, mini.input_tokens,
+            "cl100k_base is used for every model, so the token count cannot differ"
+        );
+        assert!(
+            mini.estimated_usd < haiku.estimated_usd,
+            "cheaper rates must produce a cheaper estimate: {} vs {}",
+            mini.estimated_usd,
+            haiku.estimated_usd
+        );
+    }
+
+    #[test]
+    fn the_dotted_haiku_alias_prices_identically_to_the_dashed_model_id() {
+        assert_eq!(
+            rates_for("claude-haiku-4.5"),
+            rates_for("claude-haiku-4-5"),
+            "the pricing-page spelling and the API spelling name one model"
+        );
+
+        let prompt = "Lead with the rule.";
+        assert_eq!(
+            estimate_prompt_cost("claude-haiku-4.5", prompt),
+            estimate_prompt_cost("claude-haiku-4-5", prompt)
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_string_yields_no_estimate_at_all() {
+        assert!(rates_for("gpt-5-imaginary").is_none());
+        assert!(
+            estimate_prompt_cost("gpt-5-imaginary", "some prompt").is_none(),
+            "an unpriced model must reach the caller as None, which it reads as over cap"
+        );
+    }
+
+    #[test]
+    fn exceeds_cap_refuses_only_estimates_above_the_budget() {
+        let est = CostEstimate {
+            input_tokens: 1_000,
+            estimated_usd: 0.05,
+        };
+
+        assert!(exceeds_cap(&est, 0.04), "0.05 is over a 0.04 cap");
+        assert!(
+            !exceeds_cap(&est, 0.10),
+            "0.05 is under the default 0.10 cap"
+        );
+        assert!(
+            !exceeds_cap(&est, 0.05),
+            "the cap is a ceiling, not an exclusive bound — exactly at cap still runs"
+        );
+    }
+
+    #[test]
+    fn a_zero_cap_is_over_budget_for_every_estimate() {
+        let free = CostEstimate {
+            input_tokens: 0,
+            estimated_usd: 0.0,
+        };
+        assert!(
+            exceeds_cap(&free, 0.0),
+            "cap_usd = 0.0 means never call the model, not unlimited"
+        );
+        assert!(
+            exceeds_cap(&free, -1.0),
+            "a negative cap cannot authorize spend"
         );
     }
 

@@ -110,6 +110,15 @@ bytes = "1"
 # is CDLA-Permissive-2.0, which needs the per-crate `deny.toml` exception added
 # with this ticket (permissive *data* license on the Mozilla CA bundle; reviewed).
 genai = "0.6"
+# AILAB-196 / DR-307 — pre-call token estimator behind the `cost_cap_usd` gate.
+# `llm::estimate_prompt_cost` counts the composition prompt BEFORE the HTTP call
+# so an over-cap cycle degrades to the deterministic body instead of billing for
+# it. The `cl100k_base` encoding is compiled in via `include_str!`, so counting
+# is pure CPU with no network at run time — deliberately no `async-openai`
+# feature (that one pulls an HTTP client for a remote count we never make) and
+# no `dhat-heap`; `default = []`, so the bare dep is already the minimal set.
+# MIT, already in the global allow list — `deny.toml` needs no exception.
+tiktoken-rs = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

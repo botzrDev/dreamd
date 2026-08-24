@@ -110,7 +110,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-08-24
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -271,8 +271,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 ### linear-todo-can-already-be-on-main
 
 - **Rule:** Before queuing the only Linear Todo, grep the live tree for the feature. A Todo is not proof the work is unshipped.
-- **Why:** 2026-08-15 paired-dev pull: AILAB-205 was the sole dreamd-eng Todo, but `IndexerMsg::IndexSemanticLessons`, `lsn_`, and `tests/semantic_indexing.rs` (cases 01–10) were already on `main` (`787e957`, `5e66918`). Re-queuing would have burned an AFK session on shipped code. Recurred 2026-08-23: AILAB-748 still **In Progress** on Linear while `DRAIN_TIMEOUT` / `with_drain_timeout` around `drain_daemon` are on `main` (`5afb741`).
-- **How to apply:** Search for the ticket id, the new type/msg variant, and the named test file. If present and the spec's test cases exist, close Linear and pick the next Backlog ticket instead of writing a second implement prompt.
+- **Why:** 2026-08-15 paired-dev pull: AILAB-205 was the sole dreamd-eng Todo, but `IndexerMsg::IndexSemanticLessons`, `lsn_`, and `tests/semantic_indexing.rs` (cases 01–10) were already on `main` (`787e957`, `5e66918`). Recurred 2026-08-23: AILAB-748 still **In Progress** on Linear while `DRAIN_TIMEOUT` / `with_drain_timeout` around `drain_daemon` are on `main` (`5afb741`). Recurred 2026-08-24: AILAB-201 / 200 / 191 still **Backlog** and AILAB-748 still **In Progress** after `af256c1` (versioned prompt), `7e3c4b4` (citations), `2b12ae2` (MCP descriptions), `75f5a3f` (`--dry`), `5afb741` (drain timeout).
+- **How to apply:** Search for the ticket id, the new type/msg variant, and the named test file. If present and the spec's test cases exist, close Linear and pick the next Backlog ticket instead of writing a second implement prompt. Status **Backlog** is not proof of unshipped either — check `main` before treating P0 Backlog as the next implement.
 - **Cross-refs:** none
 
 ### changelog-historical-entries-stay-put
@@ -373,8 +373,15 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. Linear AILAB-204 originally said `[dream.llm]`; the issue description was reconciled to flat keys when 204 moved to Done (2026-08-23).
 - **Why:** WEG-14 / DR-112 shipped flat keys and a commented template; a nested table would break `CONFIG_TEMPLATE` parse tests and every existing `config.toml`.
-- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. `cost_cap_usd` stays unread until AILAB-196.
+- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. AILAB-196 reads `cost_cap_usd`; it does not introduce `max_cost_usd` or a nested table.
 - **Cross-refs:** `migrate-from-to-is-record-schema`
+
+### doctor-cluster-health-flag-already-exists
+
+- **Rule:** `dreamd doctor --cluster-health` already diffs `semantic/recurrence_counts.json` against `compute_promoted_clusters`. Tickets that "add cluster-health" must extend that flag's output, not invent a parallel flag.
+- **Why:** Linear AILAB-196 AC (May 2026) asked to show estimated next-cycle cost on `dreamd doctor --cluster-health` as if the flag were new. The flag and sidecar-drift checks shipped earlier; 196 is additive `next_cycle_est_usd=` output. A new flag would split the doctor surface and miss existing tests.
+- **How to apply:** Call a sibling reporter from the existing `if flags.cluster_health` arm. Do not fold cost into `check_cluster_health`'s `bool`. Do not call `select_lesson_or_retire` / `run_cluster_engine` from doctor (`select-lesson-or-retire-unlinks`).
+- **Cross-refs:** `select-lesson-or-retire-unlinks`, `linear-todo-can-already-be-on-main`
 
 ### no-llm-must-not-skip-daemon-proxy
 
@@ -385,10 +392,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### nfr-2-stripped-binary-is-20mb
 
-- **Rule:** CI `size-gate` fails if stripped `target/release/dreamd` is **> 20 MB** (`MAX_BYTES=$((20 * 1024 * 1024))` in `.github/workflows/ci.yml`; soft warn at 16 MB). Do not assume there is headroom for a new HTTP/LLM crate.
-- **Why:** AILAB-204 report-back: main had ~0.81 MB of headroom under the old 15 MB gate; `genai 0.6.5` lands the stripped binary at **16.77 MB**. Founder raised the gate to 20 MB on 2026-08-23 rather than feature-gating genai (which would falsify 204 for the released binary) or cutting Tantivy/git2. AILAB-196 (`tiktoken-rs`) will grow it again.
-- **How to apply:** Measure a stripped copy of `target/release/dreamd` before queueing any crate that pulls reqwest/rustls. Raising the gate again is a founder call. Soft warn is 16 MB; at 16.77 MB the warn fires on purpose.
-- **Cross-refs:** `config-llm-keys-are-flat`
+- **Rule:** CI `size-gate` fails if stripped `target/release/dreamd` is **> 20 MB** (`MAX_BYTES=$((20 * 1024 * 1024))` in `.github/workflows/ci.yml`; soft warn at 16 MB). There is **no headroom** on current `main`. Do not queue a crate that grows the binary until a measurement on this commit is under the gate.
+- **Why:** AILAB-204 report-back cited **16.77 MB** and the founder raised 15→20 MB on 2026-08-23. That 16.77 figure was never the CI number. AILAB-204's own commit (`580cc44`) already fails size-gate at **20.42 MB**; `217f15e` (current main) is **20.47 MB** on ubuntu-latest ([run 32768136453](https://github.com/botzrDev/dreamd/actions/runs/32768136453)) and **20.23 MB** stripped locally. Nightly stays green because that workflow does not run size-gate, which hid the red. Standalone/non-LTO tiktoken probes at ~+3.7 MB; fat LTO + a *reachable* `cl100k_base` is **+1.82 MB** (19.07 MB local / ~19.31 MB projected CI). The 3.7 MB number is the wrong planning input once the profile block ships.
+- **How to apply:** Strip and `stat` `target/release/dreamd` on the commit you are about to grow, or read the latest `size-gate` job log — do not reuse the 16.77 MB CHANGELOG/AGENTS number. Raising the gate again is a founder call. Soft warn is 16 MB and fires on every current main build. AILAB-196 ships `[profile.release] lto = "fat"` + `codegen-units = 1` (measured 17.25 MB without tiktoken, 19.07 MB with a *reachable* tokenizer locally). Shrink or cut, do not silently raise `MAX_BYTES`. A size number from a build that never calls the new code is a false pass (`fat-lto-dead-strips-unreferenced-tokenizer`).
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `config-llm-keys-are-flat`, `fat-lto-dead-strips-unreferenced-tokenizer`
+
+### fat-lto-dead-strips-unreferenced-tokenizer
+
+- **Rule:** Fat LTO will drop `tiktoken-rs` (and `cl100k_base`) from the stripped binary if nothing in a bin crate reaches the estimator. A size measurement taken after adding the dep but before `compose_lesson_body` calls `estimate_prompt_cost` is a false pass.
+- **Why:** AILAB-196 STOP: local fat-LTO + tiktoken was byte-identical to LTO-only (18,086,912) while `strings dreamd | grep -ciE 'cl100k|endoftext|tiktoken'` was 0. A `black_box(estimate_prompt_cost(…))` probe in `main.rs` made the assets link (20,000,192; +1.82 MB). The production reachability path is the compose gate, not a probe left in the CLI.
+- **How to apply:** Report NFR-2 from a build where the production caller exists. Confirm tokenizer markers with `strings`. Do not commit a `black_box` in `crates/dreamd-cli/src/main.rs`.
+- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`
+
+### rustdoc-trips-word-grep-that-meant-call-sites
+
+- **Rule:** An anti-pattern grep for a banned *API* (`count_tokens`, a URL path) will also match rustdoc that explains why that API is unused, unless comment lines are filtered. The `do not|don't|never` negation filter does not catch "we do not call X" if X is on a different sentence-shape.
+- **Why:** AILAB-196 §4 originally grepped `count_tokens|count-tokens|messages/count` in `llm.rs`. Phase 1 rustdoc explaining the rejected remote token-count endpoint tripped it. Same family as `guards-vs-mandates-same-line`.
+- **How to apply:** Grep call syntax / URLs (`\.count_tokens\(`, `messages/count`) and drop `///` / `//!` / `//` lines. Do not ban the English words in docs.
+- **Cross-refs:** `guards-vs-mandates-same-line`
 
 ### v2-beats-linear-ac
 
