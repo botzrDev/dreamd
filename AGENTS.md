@@ -417,3 +417,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-191 Linear AC says “`layer=` filter narrows.” Documenting that would teach agents to pass a param rmcp will reject. Adding the param is a new feature, not “just better descriptions.”
 - **How to apply:** Rewrite descriptions to tell agents to read `source`. Do not add `SearchNodesParams.layer`. Do not unify MCP `query` with HTTP `q`. `index.rs` rustdoc still says every v0.1 doc is `Layer::Episodic` — stale after AILAB-205; do not “fix” it on a copy ticket.
 - **Cross-refs:** `v2-beats-linear-ac`, `layer-semantic-is-not-embeddings`
+
+### rmcp-tool-description-requires-string-literal
+
+- **Rule:** rmcp 1.7 parses `#[tool(description = ...)]` as a darling `Option<String>`, so the attribute takes a string **literal**, not a const. Keep the copy in a const for tests and duplicate the exact bytes into each `#[tool]`; assert `MemoryMcpServer::search_nodes_tool_attr().description` equals the const. `#[allow(dead_code)]` on the const is required because only `#[cfg(test)]` reads it — same shape as the existing `tool_router` allow at `mcp/mod.rs:151`.
+- **Why:** AILAB-191 v2 asked to use consts in all three attributes. That does not compile on rmcp 1.7. Duplicating without a round-trip test would let unix vs `not(unix)` `search_nodes` drift.
+- **How to apply:** Do not fight the macro. Do not `#[cfg(test)]` the const (hides rustdoc / `not(unix)` links). Do not add a layer param to “avoid” the duplication.
+- **Cross-refs:** `linear-search-nodes-layer-filter-does-not-exist`
