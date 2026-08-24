@@ -96,6 +96,7 @@ fn write_lessons(root: &AgentRoot, cluster_key: &str, lessons: Vec<Lesson>) {
             last_updated: at(NOW_SEC),
             prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
             cluster_key: cluster_key.to_string(),
+            citations: Vec::new(),
             lessons,
         },
     )

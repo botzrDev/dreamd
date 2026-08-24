@@ -6,6 +6,7 @@ expression: content
 last_updated: "2025-05-13T12:00:00Z"
 prompt_version: "deterministic-only"
 cluster_key: "rust::tokio::async_patterns"
+citations: "evt_01ARZ3NDEKTSV4RRFFQ69G5FA4"
 ---
 <!-- dreamd:lesson id="evt_01ARZ3NDEKTSV4RRFFQ69G5FA4" cluster="rust::tokio::async_patterns" -->
 tokio::select! branches must handle cancellation; use biased for shutdown priority

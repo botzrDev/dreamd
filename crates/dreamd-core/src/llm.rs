@@ -18,8 +18,6 @@
 //! * Token accounting / the `cost_cap_usd` spend cap — AILAB-196. No tokenizer
 //!   crate is a dependency here; the token counts reported at INFO come from the
 //!   provider's own usage block.
-//! * Citation validation (`evt_` ids the model made up) — AILAB-200. The prompt
-//!   *asks* for verbatim `evt_` ids; nothing here checks that the model complied.
 //! * Personal-layer redaction of prompt inputs — AILAB-199.
 //!
 //! ## Credentials
@@ -34,7 +32,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, EventId};
 use serde::Deserialize;
 
 use crate::config::Config;
@@ -45,14 +43,15 @@ use crate::config::Config;
 /// The date is the **bundle** date of [`LESSON_PROMPT`], not the cycle date: two
 /// stores that composed with the same binary carry the same id, so a lesson's
 /// frontmatter names the prompt that produced it rather than the night it ran.
-/// The two halves move independently — edit `v1.1.txt` in place and only the
-/// date moves; add a `src/prompts/vN.N.txt` and both do. Either way the id
-/// changes in the same commit as the bytes, or frontmatter starts lying about
-/// its own provenance.
+/// The two halves move independently: the id names a prompt *revision*, the file
+/// name names a prompt *file*. AILAB-200 rewrote the last rule of `v1.1.txt` in
+/// place and moved the id to `v1.2` without renaming the file — one file can
+/// back several ids. Either way the id changes in the same commit as the bytes,
+/// or frontmatter starts lying about its own provenance.
 ///
 /// The deterministic arm stamps [`crate::consolidation::DETERMINISTIC_PROMPT_ID`]
 /// instead — no model, no prompt, no version to carry.
-pub const VERSIONED_PROMPT_ID: &str = "dream-cycle/v1.1@2026-08-23";
+pub const VERSIONED_PROMPT_ID: &str = "dream-cycle/v1.2@2026-08-23";
 
 /// INFO line emitted when the cycle falls back for lack of credentials.
 ///
@@ -294,6 +293,68 @@ pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> Strin
         s.push('\n');
     }
     s
+}
+
+// ── Citation gate (AILAB-200 / DR-306) ───────────────────────────────────────
+
+/// Trailer key the prompt asks the model to end with.
+const CITATIONS_PREFIX: &str = "citations:";
+
+/// Split model text into prose + citation ids.
+///
+/// The trailer must be the **last non-empty line** and must read
+/// `citations: evt_aaa evt_bbb` (space-separated, `evt_` + a 26-char Crockford
+/// ULID, validated by [`dreamd_protocol::EventId::parse`]). Missing or malformed
+/// → `None`, which the caller turns into a deterministic body, never a cycle
+/// error.
+///
+/// Only the trailer line is read. Scanning the prose for `evt_` substrings would
+/// let a lesson that *mentions* an id in passing pass the gate this exists to be,
+/// and would pin events the model never claimed to have drawn on.
+pub fn split_citation_trailer(text: &str) -> Option<(String, Vec<String>)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let trailer_idx = lines.iter().rposition(|l| !l.trim().is_empty())?;
+
+    let ids: Vec<String> = lines[trailer_idx]
+        .trim()
+        .strip_prefix(CITATIONS_PREFIX)?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() || !ids.iter().all(|id| EventId::parse(id).is_ok()) {
+        return None;
+    }
+
+    // Everything before the trailer is the lesson. A model that emitted only a
+    // trailer yields empty prose; the caller's empty-body rule (AILAB-204)
+    // catches that downstream.
+    let prose = lines[..trailer_idx].join("\n").trim().to_string();
+
+    // A *second* `citations:` line above the trailer is not prose. Stripping only
+    // the last one would store an unvalidated `citations: evt_…` line as the
+    // lesson body, which §1.5 forbids — and those ids never pass through
+    // `citations_are_valid`, so a hallucinated id would survive as indexed text.
+    // A doubled trailer is malformed input: fall back like any other.
+    if prose
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim().starts_with(CITATIONS_PREFIX))
+    {
+        return None;
+    }
+
+    Some((prose, ids))
+}
+
+/// Every cited id must be a member of the promoted cluster, and there must be at
+/// least one.
+///
+/// `cluster_ids` is `SelectedLesson::events`, not the whole JSONL: a real id from
+/// some other cluster is still a hallucinated *citation* for this lesson, and
+/// pinning it would keep an unrelated event alive through decay.
+pub fn citations_are_valid(cited: &[String], cluster_ids: &[String]) -> bool {
+    !cited.is_empty() && cited.iter().all(|id| cluster_ids.iter().any(|c| c == id))
 }
 
 // ── Retry driver ─────────────────────────────────────────────────────────────
@@ -711,6 +772,8 @@ mod tests {
         // Shape contract from assignments/14-day-blitz.md.
         assert!(prompt.contains("Never invent an id."));
         assert!(prompt.contains("At most 8 sentences."));
+        // AILAB-200: the trailer the citation gate parses is asked for by name.
+        assert!(prompt.contains("citations: evt_aaa evt_bbb"));
     }
 
     /// Pins the bundled prompt body, so an edit to `src/prompts/v1.1.txt` shows
@@ -727,7 +790,7 @@ mod tests {
     #[test]
     fn v1_1_prompt_ends_with_exactly_one_newline() {
         assert!(
-            LESSON_PROMPT.ends_with("- Output only the lesson prose.\n"),
+            LESSON_PROMPT.ends_with("with nothing after that line.\n"),
             "prompt must end with the final rule plus the POSIX newline"
         );
         assert!(
@@ -736,9 +799,12 @@ mod tests {
         );
     }
 
+    /// AILAB-200 rewrote the last rule of `v1.1.txt` in place, so the id moved
+    /// to `v1.2` while the file name stayed. The snapshot above pins the bytes;
+    /// this pins the id that must move with them.
     #[test]
-    fn versioned_prompt_id_is_the_v1_1_bundle_id() {
-        assert_eq!(VERSIONED_PROMPT_ID, "dream-cycle/v1.1@2026-08-23");
+    fn versioned_prompt_id_is_the_v1_2_bundle_id() {
+        assert_eq!(VERSIONED_PROMPT_ID, "dream-cycle/v1.2@2026-08-23");
     }
 
     #[test]
@@ -796,5 +862,134 @@ mod tests {
             source_harness: "test".to_string(),
             content: content.to_string(),
         }
+    }
+
+    // ── Citation gate (AILAB-200) ────────────────────────────────────────────
+
+    /// Real 26-char Crockford ids — `EventId::parse` rejects anything shorter,
+    /// so the short `evt_1` style used elsewhere in the tree cannot be used here.
+    const ID_A: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const ID_B: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+    #[test]
+    fn trailer_splits_prose_from_ids() {
+        let text = format!("Lead with the rule.\nIt held.\n\ncitations: {ID_A} {ID_B}");
+        let (prose, ids) = split_citation_trailer(&text).expect("well-formed trailer");
+
+        assert_eq!(prose, "Lead with the rule.\nIt held.");
+        assert_eq!(ids, vec![ID_A.to_string(), ID_B.to_string()]);
+    }
+
+    #[test]
+    fn trailer_tolerates_trailing_blank_lines_and_padding() {
+        let text = format!("Prose.\n\n   citations:   {ID_A}   \n\n  \n");
+        let (prose, ids) =
+            split_citation_trailer(&text).expect("last non-empty line is the trailer");
+        assert_eq!(prose, "Prose.");
+        assert_eq!(ids, vec![ID_A.to_string()]);
+    }
+
+    #[test]
+    fn missing_trailer_is_none() {
+        assert!(
+            split_citation_trailer("Just prose, no trailer.").is_none(),
+            "a model that never emitted a trailer must not parse as one"
+        );
+    }
+
+    #[test]
+    fn ids_mentioned_only_in_the_prose_do_not_count() {
+        // The gate reads the trailer line and nothing else. Scraping `evt_` out
+        // of the prose would let a lesson that merely *names* an id pass.
+        let text = format!("The fix landed in {ID_A} after the retry.\n\nSee above.");
+        assert!(split_citation_trailer(&text).is_none());
+    }
+
+    #[test]
+    fn trailer_with_no_ids_is_none() {
+        assert!(split_citation_trailer("Prose.\n\ncitations:").is_none());
+        assert!(split_citation_trailer("Prose.\n\ncitations:   ").is_none());
+    }
+
+    #[test]
+    fn trailer_with_a_malformed_id_is_none() {
+        // Right shape, wrong id: `EventId::parse` is the single validator, so a
+        // truncated ULID fails here rather than surviving into the pin pass.
+        assert!(split_citation_trailer("Prose.\n\ncitations: evt_1").is_none());
+        assert!(split_citation_trailer(&format!("Prose.\n\ncitations: {ID_A} nope")).is_none());
+    }
+
+    #[test]
+    fn trailer_must_be_the_last_non_empty_line() {
+        let text = format!("citations: {ID_A}\n\nThe prose came after.");
+        assert!(
+            split_citation_trailer(&text).is_none(),
+            "a trailer buried above the prose is not a trailer"
+        );
+    }
+
+    #[test]
+    fn a_trailer_only_completion_yields_empty_prose() {
+        let text = format!("citations: {ID_A}");
+        let (prose, ids) = split_citation_trailer(&text).expect("parses");
+        assert!(prose.is_empty(), "no prose above the trailer");
+        assert_eq!(ids, vec![ID_A.to_string()]);
+    }
+
+    #[test]
+    fn a_doubled_trailer_is_malformed_not_half_stripped() {
+        // Stripping only the last line would leave `citations: <ID_A>` sitting in
+        // `Lesson.content` — prose that was never validated and never pinned.
+        let text = format!("Prose.\n\ncitations: {ID_A}\ncitations: {ID_B}");
+        assert!(
+            split_citation_trailer(&text).is_none(),
+            "a second trailer above the last one must fall back, not leak into prose"
+        );
+    }
+
+    #[test]
+    fn a_citations_line_inside_the_prose_is_still_rejected() {
+        // Same defect one blank line further up.
+        let text = format!("Prose.\n\ncitations: {ID_A}\n\ncitations: {ID_B}");
+        assert!(split_citation_trailer(&text).is_none());
+    }
+
+    #[test]
+    fn prose_merely_mentioning_the_word_citations_is_fine() {
+        // The guard keys on a trailing `citations:` *line*, not the word.
+        let text =
+            format!("We tightened citations: they must be verbatim.\nDone.\n\ncitations: {ID_A}");
+        let (prose, ids) = split_citation_trailer(&text).expect("not a doubled trailer");
+        assert_eq!(
+            prose,
+            "We tightened citations: they must be verbatim.\nDone."
+        );
+        assert_eq!(ids, vec![ID_A.to_string()]);
+    }
+
+    #[test]
+    fn citations_are_valid_requires_a_non_empty_cluster_subset() {
+        let cluster = vec![ID_A.to_string(), ID_B.to_string()];
+
+        assert!(citations_are_valid(&[ID_A.to_string()], &cluster));
+        assert!(citations_are_valid(&cluster, &cluster));
+
+        assert!(
+            !citations_are_valid(&[], &cluster),
+            "an empty citation list cites nothing"
+        );
+        let hallucinated = "evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ".to_string();
+        assert!(
+            !citations_are_valid(std::slice::from_ref(&hallucinated), &cluster),
+            "an id outside the promoted cluster is a hallucination"
+        );
+        assert!(
+            !citations_are_valid(&[ID_A.to_string(), hallucinated], &cluster),
+            "one bad id fails the whole trailer — partial credit would pin it"
+        );
+        assert!(
+            !citations_are_valid(&[ID_A.to_string()], &[]),
+            "no cluster, nothing valid"
+        );
     }
 }

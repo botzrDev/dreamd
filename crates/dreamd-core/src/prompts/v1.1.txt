@@ -8,4 +8,6 @@ Rules:
   alternative in one clause. If they do not, say nothing about alternatives.
 - Cite only evt_ ids that appear verbatim in the events below. Never invent an id.
 - At most 8 sentences. No headings, no bullet list, no preamble, no sign-off.
-- Output only the lesson prose.
+- Output the lesson prose, then a blank line, then one final trailer line of
+  the form: citations: evt_aaa evt_bbb — space-separated ids copied verbatim
+  from the Events list, at least one, with nothing after that line.

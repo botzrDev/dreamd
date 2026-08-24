@@ -223,6 +223,9 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
 /// **unioned** with any `pinned` flag an external writer already set — the cycle
 /// never unsets a pin it did not itself set (SPEC §67 / WEG-426).
 ///
+/// "Cited" means every [`Lesson::id`] **and** every id in the file-level
+/// `citations` frontmatter (AILAB-200).
+///
 /// Called by WEG-61 (DR-308) after `write_lessons_file`, while the
 /// orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
 /// mutations if `LESSONS.md` or the JSONL is absent.
@@ -230,7 +233,17 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     let lessons_path = agent_root.lessons_md();
     let cited_ids: HashSet<String> = if lessons_path.exists() {
         let lessons_file = lessons::read_lessons_file(&lessons_path)?;
-        lessons_file.lessons.iter().map(|l| l.id.clone()).collect()
+        // Union, not either-or (AILAB-200). `Lesson.id` is the exemplar the
+        // lesson is filed under; `citations` is every cluster member the model
+        // said it drew on. Both must outlive decay or the lesson outlives its
+        // evidence. A pre-AILAB-200 file has no `citations` key, so the union
+        // collapses to today's exemplar-only set.
+        lessons_file
+            .lessons
+            .iter()
+            .map(|l| l.id.clone())
+            .chain(lessons_file.citations.iter().cloned())
+            .collect()
     } else {
         HashSet::new()
     };
@@ -294,6 +307,11 @@ pub enum LessonBodySource {
     Llm {
         content: String,
         prompt_version: String,
+        /// The model's citation trailer, already validated against the promoted
+        /// cluster by [`crate::dream_cycle`] (AILAB-200). Unvalidated citations
+        /// never reach this variant — they arrive as
+        /// [`LessonBodySource::Deterministic`] instead.
+        citations: Vec<String>,
     },
 }
 
@@ -389,14 +407,20 @@ pub fn write_selected_lesson(
     // An LLM body that is empty (or whitespace) is not a body. Falling through
     // to the exemplar text keeps `LESSONS.md` non-empty and keeps the
     // frontmatter honest about which producer actually wrote the prose.
-    let (content, prompt_version) = match body {
+    let (content, prompt_version, citations) = match body {
         LessonBodySource::Llm {
             content,
             prompt_version,
-        } if !content.trim().is_empty() => (content, prompt_version),
+            citations,
+        } if !content.trim().is_empty() => (content, prompt_version, citations),
+        // The deterministic body cites exactly the event it copied. Writing the
+        // exemplar here rather than an empty list is what keeps `--no-llm` pin
+        // behavior identical to the pre-AILAB-200 `Lesson.id`-only pass, and
+        // what makes an LLM fallback byte-identical to a deterministic cycle.
         _ => (
             selected.exemplar_content.clone(),
             DETERMINISTIC_PROMPT_ID.to_string(),
+            vec![selected.exemplar_id.clone()],
         ),
     };
 
@@ -425,6 +449,7 @@ pub fn write_selected_lesson(
         last_updated,
         prompt_version,
         cluster_key: selected.cluster_key.clone(),
+        citations,
         lessons,
     };
     std::fs::create_dir_all(agent_root.semantic_dir())?;
@@ -445,9 +470,10 @@ pub fn write_selected_lesson(
 /// If **no** cluster is promoted, the cycle *retires* instead: any existing
 /// `LESSONS.md` is unlinked (AILAB-699).
 ///
-/// Byte-for-byte identical to the pre-AILAB-204 single-function version — the
-/// dream-cycle snapshot fixtures pin that. The LLM path is the same two steps
-/// with a different [`LessonBodySource`]; see
+/// Byte-for-byte identical to the pre-AILAB-204 single-function version except
+/// for the `citations` frontmatter key AILAB-200 added (always the exemplar id
+/// on this path) — the dream-cycle snapshot fixtures pin that. The LLM path is
+/// the same two steps with a different [`LessonBodySource`]; see
 /// [`crate::dream_cycle::run_filesystem_phases`].
 #[must_use = "dream cycle errors must be handled"]
 pub fn run_deterministic_dream_cycle(
@@ -793,6 +819,7 @@ mod tests {
                 last_updated: fixed_ts(),
                 prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
                 cluster_key: "rust::types".to_string(),
+                citations: vec![],
                 lessons: vec![
                     Lesson {
                         id: test_id(2).as_str().to_string(),
@@ -824,6 +851,68 @@ mod tests {
         assert!(find(1), "id 1: external pin, uncited → union preserves it");
         assert!(find(2), "id 2: cited in LESSONS.md → must be true");
         assert!(find(3), "id 3: cited in LESSONS.md → must be true");
+    }
+
+    /// AILAB-200: the pin pass reads `Lesson.id` **and** the frontmatter
+    /// `citations`. A cluster member the model cited but that is not the
+    /// exemplar must survive decay, or the lesson outlives its evidence.
+    #[test]
+    fn apply_pin_unpin_unions_lesson_ids_with_frontmatter_citations() {
+        let dir = unique_tmpdir("pincitations");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        // 0 is the exemplar (the `Lesson.id`), 1 is a second cluster member the
+        // model cited, 2 is an uncited member. Only 0 and 1 may end up pinned.
+        let events = vec![
+            make_event(0, "rust::types", false),
+            make_event(1, "rust::types", false),
+            make_event(2, "rust::types", false),
+        ];
+        write_jsonl(&root, &events);
+
+        let lessons_path = root.lessons_md();
+        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
+        write_lessons_file(
+            &lessons_path,
+            &LessonsFile {
+                last_updated: fixed_ts(),
+                prompt_version: "dream-cycle/v1.2@2026-08-23".to_string(),
+                cluster_key: "rust::types".to_string(),
+                citations: vec![
+                    test_id(0).as_str().to_string(),
+                    test_id(1).as_str().to_string(),
+                ],
+                lessons: vec![Lesson {
+                    id: test_id(0).as_str().to_string(),
+                    content: "composed prose".to_string(),
+                    pinned: false,
+                }],
+            },
+        )
+        .unwrap();
+
+        apply_pin_unpin(&root).unwrap();
+
+        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
+        let find = |n: u32| {
+            updated
+                .iter()
+                .find(|e| e.id.as_str() == test_id(n).as_str())
+                .unwrap()
+                .pinned
+        };
+        assert!(find(0), "id 0: the exemplar `Lesson.id` → pinned");
+        assert!(
+            find(1),
+            "id 1: cited in frontmatter but not the exemplar → the union must \
+             still pin it; this is the whole point of AILAB-200"
+        );
+        assert!(
+            !find(2),
+            "id 2: an uncited cluster member must NOT be pinned — the union is \
+             over what the lesson claims, not over the cluster"
+        );
     }
 
     #[test]
@@ -1088,6 +1177,7 @@ mod tests {
             last_updated,
             prompt_version: "deterministic-only".to_string(),
             cluster_key: top_cluster.cluster_key.clone(),
+            citations: vec![],
             lessons,
         };
         fs::create_dir_all(root.semantic_dir()).unwrap();
@@ -1135,6 +1225,7 @@ mod tests {
                 last_updated: fixed_ts(),
                 prompt_version: "deterministic-only".to_string(),
                 cluster_key: "rust::types".to_string(),
+                citations: vec![],
                 lessons: vec![Lesson {
                     id: test_id(2).as_str().to_string(),
                     content: "exemplar".to_string(),

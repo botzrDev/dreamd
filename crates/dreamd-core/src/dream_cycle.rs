@@ -193,11 +193,8 @@ async fn compose_lesson_body<B: LlmBackend>(
 
     let prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
     match llm::complete_with_retries(backend, model, &prompt).await {
-        Ok(completion) => LessonBodySource::Llm {
-            // Trim only the envelope whitespace; the prose itself is the model's.
-            content: completion.text.trim().to_string(),
-            prompt_version: llm::VERSIONED_PROMPT_ID.to_string(),
-        },
+        // Trim only the envelope whitespace; the prose itself is the model's.
+        Ok(completion) => compose_from_completion(selected, completion.text.trim()),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -206,6 +203,68 @@ async fn compose_lesson_body<B: LlmBackend>(
             );
             LessonBodySource::Deterministic
         }
+    }
+}
+
+/// Gate one completion on its citation trailer (AILAB-200 / DR-306).
+///
+/// A model that cannot name the cluster events it drew on has not composed a
+/// lesson from them, so an unparseable or hallucinated trailer is treated
+/// exactly like a transport failure: WARN, then the deterministic exemplar copy.
+/// The cycle is still infallible here — this returns a body, never an error.
+fn compose_from_completion(selected: &SelectedLesson, text: &str) -> LessonBodySource {
+    // AILAB-204's empty-body rule runs first, so an empty answer is reported as
+    // an empty answer rather than as a missing trailer.
+    if text.is_empty() {
+        return LessonBodySource::Deterministic;
+    }
+
+    let Some((prose, citations)) = llm::split_citation_trailer(text) else {
+        tracing::warn!(
+            cluster_key = %selected.cluster_key,
+            "llm lesson had no parseable `citations:` trailer; writing the deterministic body"
+        );
+        return LessonBodySource::Deterministic;
+    };
+
+    // A trailer with nothing above it is the 204 empty-body case reached through
+    // a new door, so it degrades before the citation check like any empty answer
+    // — but it is worth a line: silently writing the exemplar copy is otherwise
+    // indistinguishable from the model never having been called.
+    if prose.is_empty() {
+        tracing::warn!(
+            cluster_key = %selected.cluster_key,
+            cited = ?citations,
+            "llm lesson was a citations trailer with no prose; writing the deterministic body"
+        );
+        return LessonBodySource::Deterministic;
+    }
+
+    let cluster_ids: Vec<String> = selected
+        .events
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    if !llm::citations_are_valid(&citations, &cluster_ids) {
+        // Log the offenders, not the whole list: the operator needs to know the
+        // model invented ids, and which.
+        let unknown: Vec<&String> = citations
+            .iter()
+            .filter(|id| !cluster_ids.iter().any(|c| c == *id))
+            .collect();
+        tracing::warn!(
+            cluster_key = %selected.cluster_key,
+            cited = ?citations,
+            unknown = ?unknown,
+            "llm lesson cited ids outside the promoted cluster; writing the deterministic body"
+        );
+        return LessonBodySource::Deterministic;
+    }
+
+    LessonBodySource::Llm {
+        content: prose,
+        prompt_version: llm::VERSIONED_PROMPT_ID.to_string(),
+        citations,
     }
 }
 
@@ -494,14 +553,36 @@ mod tests {
             .expect("fixture promotes a cluster")
     }
 
-    #[tokio::test]
-    async fn llm_success_writes_model_text_but_keeps_the_exemplar_id() {
-        const COMPOSED: &str = "Return `?` from fallible handlers; \
+    /// The model's prose, minus the trailer the AILAB-200 gate strips.
+    const COMPOSED: &str = "Return `?` from fallible handlers; \
             the rejected alternative was `.unwrap()`, which panicked the request task.";
 
+    /// Ids of the promoted cluster, exemplar first, as the gate sees them.
+    fn cluster_ids(root: &AgentRoot) -> Vec<String> {
+        deterministic_exemplar(root)
+            .events
+            .iter()
+            .map(|e| e.id.as_str().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn llm_success_writes_model_text_but_keeps_the_exemplar_id() {
         let (_dir, root) = scaffold_fixture();
-        let expected_id = deterministic_exemplar(&root).exemplar_id;
-        let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
+        let selected = deterministic_exemplar(&root);
+        let expected_id = selected.exemplar_id.clone();
+        // Cite the exemplar plus one other cluster member, so the pin union has
+        // something to prove.
+        let ids = cluster_ids(&root);
+        let other = ids
+            .iter()
+            .find(|id| **id != expected_id)
+            .expect("fixture cluster has more than one event")
+            .clone();
+
+        let fake = crate::llm::fake::FakeLlm::ok(&format!(
+            "{COMPOSED}\n\ncitations: {expected_id} {other}"
+        ));
 
         run_filesystem_phases_with_backend(
             &root,
@@ -514,16 +595,169 @@ mod tests {
         .expect("llm cycle");
 
         let (file, lesson) = read_only_lesson(&root);
-        assert_eq!(lesson.content, COMPOSED, "body must be the model's prose");
+        assert_eq!(
+            lesson.content, COMPOSED,
+            "body must be the model's prose with the citations trailer stripped"
+        );
         assert_eq!(
             file.prompt_version,
             crate::llm::VERSIONED_PROMPT_ID,
             "frontmatter must name the versioned prompt file that composed the body"
         );
         assert_eq!(
+            file.prompt_version, "dream-cycle/v1.2@2026-08-23",
+            "the trailer rule moved the prompt id; frontmatter must say so"
+        );
+        assert_eq!(
+            file.citations,
+            vec![expected_id.clone(), other.clone()],
+            "frontmatter carries the validated trailer, in the model's order"
+        );
+        assert_eq!(
             lesson.id, expected_id,
             "Lesson.id stays the exemplar evt_ id — semantic indexing inherits \
              pain/importance from it, so a minted id would break recall ranking"
+        );
+
+        // AILAB-200 pin union, end to end: the cited non-exemplar member is
+        // pinned even though it is not `Lesson.id`.
+        let events = crate::episodic::read_all(&root.episodic_jsonl()).expect("jsonl reads");
+        let pinned = |id: &str| {
+            events
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .unwrap_or_else(|| panic!("{id} must survive the cycle"))
+                .pinned
+        };
+        assert!(pinned(&expected_id), "exemplar is pinned as before");
+        assert!(
+            pinned(&other),
+            "a cited cluster member must be pinned through the frontmatter union"
+        );
+    }
+
+    #[tokio::test]
+    async fn hallucinated_citation_falls_back_to_the_deterministic_bytes() {
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        // Well-formed id, right shape, not in the promoted cluster.
+        let fake = crate::llm::fake::FakeLlm::ok(&format!(
+            "{COMPOSED}\n\ncitations: evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ"
+        ));
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("a hallucinated citation must NEVER fail the cycle");
+
+        assert_eq!(
+            fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
+            deterministic_bytes,
+            "an invented citation is a transport failure by another name — the \
+             file must be byte-identical to the deterministic cycle, citations \
+             frontmatter included"
+        );
+        assert_eq!(
+            crate::wal::read_last_cycle_status(&root_b).unwrap(),
+            "complete",
+            "the cycle still committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn citation_from_another_cluster_is_still_a_hallucination() {
+        // `rust::axum::error_handling` is a real cluster in the fixture, just not
+        // the promoted one. Pinning it would keep an unrelated event alive.
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        let promoted = cluster_ids(&root_b);
+        let outsider = crate::episodic::read_all(&root_b.episodic_jsonl())
+            .expect("jsonl reads")
+            .into_iter()
+            .map(|e| e.id.as_str().to_string())
+            .find(|id| !promoted.contains(id))
+            .expect("fixture has a second cluster");
+
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {outsider}"));
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("cycle must still commit");
+
+        assert_eq!(
+            fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
+            deterministic_bytes,
+            "a real id from the wrong cluster must not pass the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_citation_trailer_falls_back_to_the_deterministic_bytes() {
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        // Prose only — exactly what the pre-AILAB-200 prompt asked for.
+        let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("a missing trailer must NEVER fail the cycle");
+
+        assert_eq!(
+            fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
+            deterministic_bytes,
+            "no trailer is the same fallback as no completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn ids_named_only_in_the_prose_do_not_satisfy_the_gate() {
+        let (_dir_a, root_a) = scaffold_fixture();
+        run_deterministic(&root_a).await;
+        let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
+
+        let (_dir_b, root_b) = scaffold_fixture();
+        let ids = cluster_ids(&root_b);
+        // Every id is real and in the cluster — but they are in the prose, not
+        // in a trailer. The gate reads the trailer line and nothing else.
+        let fake =
+            crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED} See {} and {}.", ids[0], ids[1]));
+        run_filesystem_phases_with_backend(
+            &root_b,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+        )
+        .await
+        .expect("cycle must still commit");
+
+        assert_eq!(
+            fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
+            deterministic_bytes,
+            "scraping evt_ ids out of the prose would defeat the gate"
         );
     }
 
@@ -589,8 +823,14 @@ mod tests {
         // credential lookup or client construction; prove the deterministic
         // frontmatter lands even so.
         run_deterministic(&root).await;
-        let (file, _) = read_only_lesson(&root);
+        let (file, lesson) = read_only_lesson(&root);
         assert_eq!(file.prompt_version, consolidation::DETERMINISTIC_PROMPT_ID);
+        assert_eq!(
+            file.citations,
+            vec![lesson.id.clone()],
+            "the deterministic body cites exactly the exemplar it copied, so \
+             --no-llm pin behavior is unchanged by AILAB-200"
+        );
     }
 
     #[test]

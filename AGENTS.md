@@ -396,3 +396,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-201: HEAD literal 594 B → file 595 B (`+0x0a`). `build_lesson_prompt` kept `"\n\nCluster: "`, so `prose\n\nCluster:` became `prose\n\n\nCluster:`. Spec allowed the newline; a dedicated `ends_with("...\n") && !ends_with("\n\n")` test pinned the seam.
 - **How to apply:** When extracting prompt/config bytes into a file, assert the assembler seam, not only an insta snapshot. Do not `.trim_end()` in `build_lesson_prompt` to hide it.
 - **Cross-refs:** `linear-201-ac-is-pre-llm-module`
+
+### required-struct-field-forces-out-of-allowlist-literal-sites
+
+- **Rule:** Adding a required field to a public struct forces a literal at every existing struct-literal construction site. An allow-list that names only the product files will miss those compile-fix sites; `git diff --name-only` plus `git ls-files --others --exclude-standard` is the gate, not an empty allow-list.
+- **Why:** AILAB-200 added `LessonsFile.citations: Vec<String>`. Product work stayed in the allow-list, but `server/tantivy_handle.rs` and `tests/semantic_indexing.rs` each gained a one-line `citations: Vec::new()` so test helpers still compiled. That is not scope creep; omitting the field does not compile.
+- **How to apply:** When a v2 adds a required field, expect helper/test literals outside the product allow-list. Prefer `Default` only if the crate already uses it for that type. Do not fail 200-style tickets for those one-line fills; do fail new product logic in those files.
+- **Cross-refs:** `git-diff-name-only-misses-untracked`
+
+### cargo-test-lib-filter-is-substring
+
+- **Rule:** `cargo test -p dreamd-core --lib llm` is a **substring** filter on test names, not “the `llm` module.” It also runs `dream_cycle` / HTTP tests whose names contain `llm`.
+- **Why:** AILAB-200 report-back: `--lib llm` printed 35 passed (311 filtered) because `llm_success_writes_model_text…` and friends matched. That extra coverage is real; it is not proof the command was scoped to `llm.rs` alone.
+- **How to apply:** For a module-only gate use `cargo test -p dreamd-core --lib -- llm::`. Read the “filtered” count. Do not treat a 35-pass `--lib llm` paste as “35 tests in llm.rs.”
+- **Cross-refs:** `cargo-run-dreamd-needs-bin`
+
+### linear-search-nodes-layer-filter-does-not-exist
+
+- **Rule:** MCP `search_nodes` takes `query` + `k` only (`SearchNodesParams`). HTTP `GET /api/v1/recall` takes `q` + `k`. Both call `recall(..., None)`. Hits already carry `source` (`"episodic"` | `"semantic"` via `Layer::as_str`). There is no `layer` / `layer=` argument on either surface.
+- **Why:** AILAB-191 Linear AC says “`layer=` filter narrows.” Documenting that would teach agents to pass a param rmcp will reject. Adding the param is a new feature, not “just better descriptions.”
+- **How to apply:** Rewrite descriptions to tell agents to read `source`. Do not add `SearchNodesParams.layer`. Do not unify MCP `query` with HTTP `q`. `index.rs` rustdoc still says every v0.1 doc is `Layer::Episodic` — stale after AILAB-205; do not “fix” it on a copy ticket.
+- **Cross-refs:** `v2-beats-linear-ac`, `layer-semantic-is-not-embeddings`

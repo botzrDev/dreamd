@@ -2403,6 +2403,7 @@ mod tests {
                     .with_timezone(&Utc),
                 prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
                 cluster_key: cluster_key.to_string(),
+                citations: Vec::new(),
                 lessons,
             },
         )
