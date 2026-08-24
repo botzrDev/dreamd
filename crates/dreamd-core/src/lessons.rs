@@ -50,14 +50,19 @@ const OPEN_MIDDLE: &str = "\" cluster=\"";
 const OPEN_SUFFIX: &str = "\" -->";
 const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 
-/// Serialize `file` to the structured `LESSONS.md` format and write it
-/// atomically to `path` (via [`crate::io::write_atomic`]).
+/// Serialize `file` to the structured `LESSONS.md` format and return the exact
+/// bytes [`write_lessons_file`] would persist.
 ///
 /// Output: YAML-style frontmatter (`last_updated`, `prompt_version`,
 /// `cluster_key`, `citations`) followed by HTML-comment-delimited lesson
-/// blocks.
-/// Round-trips cleanly through [`read_lessons_file`].
-pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
+/// blocks. Round-trips cleanly through [`read_lessons_file`].
+///
+/// Split out from the writer (AILAB-341) so `dreamd dream --dry` can print the
+/// file a cycle *would* write without touching disk. The preview is the same
+/// function call the write path makes, so the two cannot drift into printing
+/// one shape and persisting another.
+#[must_use]
+pub fn render_lessons_file(file: &LessonsFile) -> String {
     let mut s = String::new();
     s.push_str("---\n");
     s.push_str(&format!(
@@ -84,7 +89,16 @@ pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
         s.push_str(CLOSE_MARKER);
         s.push('\n');
     }
-    write_atomic(path, s.as_bytes())
+    s
+}
+
+/// Serialize `file` and write it atomically to `path` (via
+/// [`crate::io::write_atomic`]).
+///
+/// The bytes are exactly [`render_lessons_file`]'s output — the dry-run preview
+/// and this writer share one serializer by construction.
+pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
+    write_atomic(path, render_lessons_file(file).as_bytes())
 }
 
 struct ParsedFrontmatter {
@@ -396,6 +410,36 @@ mod tests {
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains("citations: \"\"\n"), "writer emits the key");
         assert_eq!(read_lessons_file(&path).expect("read ok"), f);
+    }
+
+    /// AILAB-341: the dry-run preview prints `render_lessons_file`; a real cycle
+    /// persists `write_lessons_file`. If those ever produced different bytes the
+    /// preview would be a lie, so pin the identity rather than trusting that one
+    /// still delegates to the other.
+    #[test]
+    fn write_lessons_file_persists_exactly_render_lessons_file_bytes() {
+        let dir = unique_tmpdir("render-eq-write");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("LESSONS.md");
+
+        let f = LessonsFile {
+            last_updated: fixed_timestamp(),
+            prompt_version: "dream-cycle/v1.2@2026-08-23".to_string(),
+            cluster_key: "rust::error_handling".to_string(),
+            citations: vec!["evt_9a8b7c6d".to_string(), "evt_1122aabb".to_string()],
+            lessons: vec![Lesson {
+                id: "evt_9a8b7c6d".to_string(),
+                content: "Prefer `?` over `.unwrap()` outside tests.\n\nSecond para.".to_string(),
+                pinned: false,
+            }],
+        };
+
+        write_lessons_file(&path, &f).expect("write ok");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            render_lessons_file(&f),
+            "the dry preview and the persisted file must be byte-identical"
+        );
     }
 
     #[test]

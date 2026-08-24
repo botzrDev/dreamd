@@ -28,7 +28,7 @@ fn no_subcommand_exits_two() {
 }
 
 #[test]
-fn dream_dry_exits_two() {
+fn dream_dry_exits_zero_and_writes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".agent")).unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -40,11 +40,31 @@ fn dream_dry_exits_two() {
         .output()
         .expect("run dreamd dream --dry");
 
-    assert_eq!(out.status.code(), Some(2));
+    // AILAB-341: `--dry` is implemented. An empty `.agent/` promotes nothing, so
+    // the preview reports the retire a real cycle would perform — and performs
+    // none of it.
+    assert_eq!(out.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("dry run"), "got: {stderr}");
+    assert!(stderr.contains("not written"), "got: {stderr}");
     assert!(
-        stderr.contains("--dry is not yet implemented"),
-        "got: {stderr}"
+        !stderr.to_lowercase().contains("not yet implemented"),
+        "the stub message must be gone; got: {stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "a retire preview prints nothing to stdout; got: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !tmp.path().join(".agent/semantic/LESSONS.md").exists(),
+        "--dry must not create LESSONS.md"
+    );
+    assert!(
+        !tmp.path()
+            .join(".agent/.dreamd/dream_in_progress.wal")
+            .exists(),
+        "--dry must not open a WAL"
     );
 }
 

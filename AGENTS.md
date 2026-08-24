@@ -424,3 +424,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-191 v2 asked to use consts in all three attributes. That does not compile on rmcp 1.7. Duplicating without a round-trip test would let unix vs `not(unix)` `search_nodes` drift.
 - **How to apply:** Do not fight the macro. Do not `#[cfg(test)]` the const (hides rustdoc / `not(unix)` links). Do not add a layer param to “avoid” the duplication.
 - **Cross-refs:** `linear-search-nodes-layer-filter-does-not-exist`
+
+### dry-skips-proxy-unlike-no-llm
+
+- **Rule:** `dreamd dream --dry` must skip the daemon proxy. `--no-llm` must not. `--no-commit` is the only write-path flag that skips the proxy today.
+- **Why:** `POST /api/v1/dream` runs the real cycle (WAL, LESSONS.md, JSONL pins, sidecar, index). A dry preview that proxies would write. `--no-llm` skipping the proxy while `dreamd watch` owns the JSONL races the coordinator (WEG-271).
+- **How to apply:** Dry is a separate CLI arm that calls a read-only preview and never `try_proxy_to_daemon`. The write path still sends `x-dreamd-no-llm: 1` through the proxy. `--dry --no-commit` is just `--dry` (nothing to commit). `--dry --auto` stays invalid.
+- **Cross-refs:** `no-llm-must-not-skip-daemon-proxy`, `coordinator-not-mutex-file`
+
+### select-lesson-or-retire-unlinks
+
+- **Rule:** `select_lesson_or_retire` is not a read. On empty promotion it `remove_file`s `LESSONS.md` (AILAB-699). `run_cluster_engine` always writes `recurrence_counts.json`.
+- **Why:** A preview that reused the write-path select/cluster functions would mutate the store — the opposite of `--dry`.
+- **How to apply:** Dry uses `compute_promoted_clusters` (already pub, no disk) plus a new `preview_select_lesson` that does not unlink and does not call `run_cluster_engine`. Do not call `wal::begin_cycle`, `write_selected_lesson`, decay, index, or autobiography on the dry path.
+- **Cross-refs:** `dry-skips-proxy-unlike-no-llm`
+
+### fixture-now-sec-is-not-the-corpus-clock
+
+- **Rule:** A “advance past the recurrence window” test must add the window to the fixture’s newest event timestamp, not to the test’s `NOW_SEC` constant.
+- **Why:** AILAB-341: `tests/fixtures/dream-cycle-snapshot/` is dated 2026-05, a year ahead of `NOW_SEC = 1_747_137_600` (2025-05-13). `NOW_SEC + 30d` still sits inside the window, so a naive retire-preview test keeps promoting.
+- **How to apply:** `newest_event_ts + WINDOW_30_DAYS_SEC + 1`. See `preview_without_promotion_reports_none_and_leaves_lessons_md` in `dream_cycle.rs`.
+- **Cross-refs:** `select-lesson-or-retire-unlinks`

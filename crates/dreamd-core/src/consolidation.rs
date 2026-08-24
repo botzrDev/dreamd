@@ -394,16 +394,61 @@ pub fn select_lesson_or_retire(
     }))
 }
 
-/// Write `LESSONS.md` for `selected` with the chosen body, then apply pins.
+/// Cluster + pick exemplar with no sidecar write and no `LESSONS.md` unlink.
 ///
-/// Records the `ReplaceSemanticMemory` intent into the orchestrator-owned WAL
-/// envelope before touching the file, exactly as the single-path version did.
-pub fn write_selected_lesson(
+/// The read-only twin of [`select_lesson_or_retire`], for `dreamd dream --dry`
+/// (AILAB-341). Same promotion rules — it calls the same
+/// [`compute_promoted_clusters`] and the same [`pick_exemplar`] — but it reaches
+/// disk exactly once, to read the episodic JSONL.
+///
+/// `Ok(None)` means **nothing would be promoted**. Unlike the write path this
+/// leaves any existing `LESSONS.md` untouched: a preview that deleted the file
+/// it is previewing the deletion of would be a write, and `--dry` writes
+/// nothing. The caller reports "would retire" instead.
+///
+/// `now_sec` is caller-provided for determinism — do not call `Utc::now()`.
+pub fn preview_select_lesson(
     agent_root: &AgentRoot,
+    now_sec: i64,
+) -> Result<Option<SelectedLesson>, DreamCycleError> {
+    let events =
+        episodic::read_all(&agent_root.episodic_jsonl()).map_err(ConsolidationError::from)?;
+    let promoted = compute_promoted_clusters(&events, now_sec);
+    if promoted.is_empty() {
+        return Ok(None);
+    }
+
+    let top_cluster = promoted
+        .iter()
+        .max_by(|a, b| {
+            a.salience_sum
+                .partial_cmp(&b.salience_sum)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap(); // safe: promoted.is_empty() guarded above
+
+    let exemplar = pick_exemplar(&top_cluster.events, now_sec);
+
+    Ok(Some(SelectedLesson {
+        cluster_key: top_cluster.cluster_key.clone(),
+        exemplar_id: exemplar.id.as_str().to_string(),
+        exemplar_content: exemplar.content.clone(),
+        events: top_cluster.events.clone(),
+    }))
+}
+
+/// Build the [`LessonsFile`] `selected` + `body` resolve to.
+///
+/// The single owner of the frontmatter shape and of the empty-LLM-body
+/// degradation rule. [`write_selected_lesson`] serializes what this returns and
+/// `dreamd dream --dry` renders it; sharing the builder is what makes the
+/// preview byte-identical to the file a real cycle would persist (AILAB-341).
+#[must_use]
+pub fn lessons_file_from_selected(
     now_sec: i64,
     selected: &SelectedLesson,
     body: LessonBodySource,
-) -> Result<(), DreamCycleError> {
+) -> LessonsFile {
     // An LLM body that is empty (or whitespace) is not a body. Falling through
     // to the exemplar text keeps `LESSONS.md` non-empty and keeps the
     // frontmatter honest about which producer actually wrote the prose.
@@ -432,6 +477,27 @@ pub fn write_selected_lesson(
         pinned: false,
     }];
 
+    LessonsFile {
+        last_updated: DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap_or_default(),
+        prompt_version,
+        cluster_key: selected.cluster_key.clone(),
+        citations,
+        lessons,
+    }
+}
+
+/// Write `LESSONS.md` for `selected` with the chosen body, then apply pins.
+///
+/// Records the `ReplaceSemanticMemory` intent into the orchestrator-owned WAL
+/// envelope before touching the file, exactly as the single-path version did.
+pub fn write_selected_lesson(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    selected: &SelectedLesson,
+    body: LessonBodySource,
+) -> Result<(), DreamCycleError> {
+    let lessons_file = lessons_file_from_selected(now_sec, selected, body);
+
     let lessons_path = agent_root.lessons_md();
     let temp_path = lessons_path
         .with_extension("tmp")
@@ -444,14 +510,6 @@ pub fn write_selected_lesson(
         },
     )?;
 
-    let last_updated = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap_or_default();
-    let lessons_file = LessonsFile {
-        last_updated,
-        prompt_version,
-        cluster_key: selected.cluster_key.clone(),
-        citations,
-        lessons,
-    };
     std::fs::create_dir_all(agent_root.semantic_dir())?;
     lessons::write_lessons_file(&lessons_path, &lessons_file)?;
 
@@ -1010,6 +1068,94 @@ mod tests {
         write_jsonl(&root, &[]);
         run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
         assert!(!root.lessons_md().exists());
+    }
+
+    // --- AILAB-341: the read-only preview twin ---
+
+    /// The write path unlinks a stale `LESSONS.md` when nothing promotes
+    /// (AILAB-699). `preview_select_lesson` must reach the same *decision* —
+    /// `None` — while leaving the file exactly where it was, because `--dry`
+    /// writes nothing and an unlink is a write.
+    #[test]
+    fn preview_select_lesson_reports_none_without_unlinking_lessons_md() {
+        let dir = unique_tmpdir("preview-no-unlink");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        // Events far enough in the past that neither window promotes them.
+        let stale = NOW_SEC - WINDOW_30_DAYS_SEC - 1;
+        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
+            .map(|i| make_event_at(i as u32, "rust::types", stale))
+            .collect();
+        write_jsonl(&root, &events);
+
+        // A LESSONS.md an earlier promoting cycle left behind.
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        let existing = LessonsFile {
+            last_updated: fixed_ts(),
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: "rust::types".to_string(),
+            citations: vec![],
+            lessons: vec![Lesson {
+                id: "evt_00000000000000000000000000".to_string(),
+                content: "stale lesson".to_string(),
+                pinned: false,
+            }],
+        };
+        write_lessons_file(&root.lessons_md(), &existing).unwrap();
+        let before = fs::read(root.lessons_md()).unwrap();
+
+        assert!(
+            preview_select_lesson(&root, NOW_SEC).unwrap().is_none(),
+            "no cluster promotes, so the preview reports `would retire`"
+        );
+        assert_eq!(
+            fs::read(root.lessons_md()).unwrap(),
+            before,
+            "the preview must leave the stale LESSONS.md byte-identical"
+        );
+        assert!(
+            !root.semantic_dir().join("recurrence_counts.json").exists(),
+            "the preview must not write the recurrence sidecar"
+        );
+        assert!(!root.wal_path().exists(), "the preview must not open a WAL");
+    }
+
+    /// A promoting store: the preview selects the same cluster and exemplar the
+    /// write path would, and still touches nothing.
+    #[test]
+    fn preview_select_lesson_matches_the_write_path_selection() {
+        let dir = unique_tmpdir("preview-selects");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
+            .map(|i| make_event_at(i as u32, "rust::types", NOW_SEC))
+            .collect();
+        write_jsonl(&root, &events);
+        let jsonl_before = fs::read(root.episodic_jsonl()).unwrap();
+
+        let previewed = preview_select_lesson(&root, NOW_SEC)
+            .unwrap()
+            .expect("a cluster promotes");
+
+        assert!(
+            !root.semantic_dir().join("recurrence_counts.json").exists(),
+            "the preview must not write the recurrence sidecar"
+        );
+        assert_eq!(
+            fs::read(root.episodic_jsonl()).unwrap(),
+            jsonl_before,
+            "the preview must not rewrite the episodic log"
+        );
+
+        // Now let the write path decide, and compare.
+        let written = select_lesson_or_retire(&root, NOW_SEC)
+            .unwrap()
+            .expect("a cluster promotes");
+        assert_eq!(previewed.cluster_key, written.cluster_key);
+        assert_eq!(previewed.exemplar_id, written.exemplar_id);
+        assert_eq!(previewed.exemplar_content, written.exemplar_content);
     }
 
     // --- AILAB-699: a cycle that promotes nothing retires LESSONS.md ---

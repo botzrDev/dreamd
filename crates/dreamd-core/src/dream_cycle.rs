@@ -351,6 +351,92 @@ pub fn run_in_process(
     })
 }
 
+/// What `dreamd dream --dry` would have persisted, built without *writing*
+/// anything (AILAB-341). Reads: the episodic JSONL always, plus `config.toml`
+/// and the credential files when the LLM arm is live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DryPreview {
+    /// `None` = would retire LESSONS.md (AILAB-699). File is not touched.
+    pub lessons_markdown: Option<String>,
+}
+
+/// Preview one dream cycle's consolidation phase and return the `LESSONS.md`
+/// bytes it would write — writing nothing.
+///
+/// Read-only twin of [`run_in_process`], and the whole of `dreamd dream --dry`.
+/// It reads the episodic JSONL, clusters in memory, composes a body, and renders
+/// through the same `lessons::render_lessons_file` the writer serializes with —
+/// so for any given body the preview is byte-identical to the file a real cycle
+/// would persist. Under `no_llm` (and on any LLM fallback) that makes the whole
+/// preview reproducible; with a live model the prose is the model's, so a later
+/// real cycle composes its own and the bytes will differ.
+///
+/// Deliberately absent: the WAL envelope, the recurrence sidecar, the retire
+/// unlink, the JSONL pin rewrite, decay, Tantivy, and the autobiography commit.
+/// Every one of those is a write, and `--dry` has none. `--no-commit` is
+/// therefore meaningless here and is ignored by the caller.
+///
+/// The model **is** allowed to run when `no_llm` is false and credentials
+/// resolve — comparing composed prose against the raw log is the point of the
+/// flag. Composition stays infallible: any LLM failure degrades to the
+/// deterministic exemplar copy, exactly as on the write path.
+///
+/// Uses the same current-thread runtime shape as [`run_in_process`] so the body
+/// composition can `await`; building a second runtime inside an existing one
+/// would panic at the nested `block_on`.
+pub fn preview_in_process(
+    project_root: &Path,
+    now_sec: i64,
+    no_llm: bool,
+) -> Result<DryPreview, DreamCycleError> {
+    let agent_root = AgentRoot::new(project_root);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for dream preview");
+
+    runtime.block_on(preview_phases(&agent_root, now_sec, no_llm))
+}
+
+/// Async half of [`preview_in_process`]: select, compose, render.
+async fn preview_phases(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    no_llm: bool,
+) -> Result<DryPreview, DreamCycleError> {
+    let Some(selected) = consolidation::preview_select_lesson(agent_root, now_sec)? else {
+        // Nothing promotes. The write path would unlink a stale LESSONS.md here;
+        // a preview reports the intent and leaves the file alone.
+        return Ok(DryPreview {
+            lessons_markdown: None,
+        });
+    };
+
+    let body = if no_llm {
+        // Turbofish only names the type the `None` needs; no client is built.
+        compose_lesson_body::<llm::GenaiBackend>(&selected, None).await
+    } else {
+        // A broken config.toml must not fail a preview that would otherwise
+        // render deterministically — degrade to defaults and say so.
+        let config = crate::config::load_config(agent_root.project_root()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "config load failed; using defaults for the preview LLM phase");
+            crate::config::Config::default()
+        });
+        match llm::resolve_backend(&config) {
+            Some(backend) => {
+                compose_lesson_body(&selected, Some((&backend, config.model.as_str()))).await
+            }
+            None => compose_lesson_body::<llm::GenaiBackend>(&selected, None).await,
+        }
+    };
+
+    let lessons_file = consolidation::lessons_file_from_selected(now_sec, &selected, body);
+    Ok(DryPreview {
+        lessons_markdown: Some(crate::lessons::render_lessons_file(&lessons_file)),
+    })
+}
+
 #[cfg(unix)]
 async fn run_index_phases(
     agent_root: &AgentRoot,
@@ -535,6 +621,97 @@ mod tests {
             "complete",
             "exactly one transition to complete, at the end"
         );
+    }
+
+    // ── AILAB-341: `dreamd dream --dry` preview ──────────────────────────────
+
+    /// The preview's whole claim is "this is what the cycle would write". Pin it
+    /// against the real thing: preview first (asserting the store is untouched),
+    /// then run a deterministic cycle over the same fixture at the same
+    /// `now_sec` and compare the bytes.
+    #[test]
+    fn preview_is_byte_identical_to_the_no_llm_cycle_it_previews() {
+        let (_dir, root) = scaffold_fixture();
+        let project_root = root.project_root().to_path_buf();
+        let sidecar = root.semantic_dir().join("recurrence_counts.json");
+        let jsonl_before = fs::read(root.episodic_jsonl()).unwrap();
+
+        let preview = preview_in_process(&project_root, NOW_SEC, true).expect("preview");
+        let markdown = preview
+            .lessons_markdown
+            .expect("the fixture promotes a cluster");
+
+        assert!(
+            !root.lessons_md().exists(),
+            "a dry run must not create LESSONS.md"
+        );
+        assert!(!sidecar.exists(), "a dry run must not write the sidecar");
+        assert!(!root.wal_path().exists(), "a dry run must not open a WAL");
+        assert_eq!(
+            fs::read(root.episodic_jsonl()).unwrap(),
+            jsonl_before,
+            "a dry run must not rewrite the episodic log"
+        );
+
+        run_in_process(&project_root, NOW_SEC, true, true, Vec::new()).expect("real cycle");
+
+        assert_eq!(
+            markdown,
+            fs::read_to_string(root.lessons_md()).unwrap(),
+            "the preview must be byte-identical to the LESSONS.md the cycle wrote"
+        );
+    }
+
+    /// Nothing promotes: the preview reports "would retire" (`None`) and leaves
+    /// the stale `LESSONS.md` on disk. The write path unlinks it (AILAB-699) —
+    /// that difference is the point of the preview.
+    #[test]
+    fn preview_without_promotion_reports_none_and_leaves_lessons_md() {
+        let (_dir, root) = scaffold_fixture();
+        let project_root = root.project_root().to_path_buf();
+
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        let existing = crate::lessons::LessonsFile {
+            last_updated: chrono::DateTime::from_timestamp(NOW_SEC, 0).unwrap(),
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: "rust::types".to_string(),
+            citations: vec![],
+            lessons: vec![crate::lessons::Lesson {
+                id: "evt_00000000000000000000000000".to_string(),
+                content: "stale lesson".to_string(),
+                pinned: false,
+            }],
+        };
+        crate::lessons::write_lessons_file(&root.lessons_md(), &existing).unwrap();
+        let before = fs::read(root.lessons_md()).unwrap();
+
+        // Past both recurrence windows, so no fixture cluster still promotes.
+        // Derived from the fixture's own newest event, not from `NOW_SEC`: the
+        // snapshot corpus is timestamped a year *ahead* of `NOW_SEC`, so a
+        // `NOW_SEC + 30d` offset would still sit inside the window.
+        let newest = crate::episodic::read_all(&root.episodic_jsonl())
+            .unwrap()
+            .iter()
+            .map(|e| e.timestamp.timestamp())
+            .max()
+            .expect("fixture is non-empty");
+        let later = newest + consolidation::WINDOW_30_DAYS_SEC + 1;
+        let preview = preview_in_process(&project_root, later, true).expect("preview");
+
+        assert!(
+            preview.lessons_markdown.is_none(),
+            "no promotion previews as a retire, not as an empty file"
+        );
+        assert_eq!(
+            fs::read(root.lessons_md()).unwrap(),
+            before,
+            "the preview must leave the stale LESSONS.md byte-identical"
+        );
+        assert!(
+            !root.semantic_dir().join("recurrence_counts.json").exists(),
+            "the preview must not write the sidecar"
+        );
+        assert!(!root.wal_path().exists(), "the preview must not open a WAL");
     }
 
     // ── AILAB-204: LLM body composition ──────────────────────────────────────

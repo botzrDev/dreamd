@@ -258,10 +258,11 @@ autobiography.**
 **Triggers: there are exactly two, and both are manual.** The CLI `dreamd
 dream` (`cli.rs:78-79`) and `POST /api/v1/dream` (`router.rs:23`). **There is
 no scheduler in v0.1** — nothing runs unless a user or an agent asks for it, so
-do not read "nightly cycle" into any part of this design. `--auto`
-(`cli.rs:42-45`) and `--dry` (`cli.rs:38-41`) are hidden flags that reject with
-"Not yet supported at v0.1; ships v0.1.1". `--no-commit` (`cli.rs:46-49`) skips
-only the git step.
+do not read "nightly cycle" into any part of this design. `--auto` is a hidden
+flag that still rejects with "Not yet supported at v0.1; ships v0.1.1". `--dry`
+previews: it prints the `LESSONS.md` the cycle would write and writes nothing,
+skipping the daemon proxy because a `POST /api/v1/dream` is itself a write
+(AILAB-341). `--no-commit` skips only the git step.
 
 ### Clustering: a prefix tree over `skill_action`
 

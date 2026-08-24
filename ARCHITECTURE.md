@@ -220,7 +220,8 @@ Modules and CLI surfaces that have **no production call sites** (or misleading d
 | `ServerConfig` (`server/lifecycle.rs`) | Struct + `impl` for future daemon boot configuration | **Never constructed** in production | **Keep** — wiring type for a future `server::run` refactor; do not delete pre-launch | Second binary consumer or `server::run` extraction (see `docs/architecture.md` crate-split tripwires) |
 | `SocketGuard` / `bind_writer_socket` (`server/uds.rs`) | RAII UDS bind with Drop-unlink and orphan recovery | **Tested**; production uses `bind_api_socket` + manual unlink in `watch.rs` | **Keep** — v0.1.1 should switch production bind to RAII (closes orphan-socket gap after `SIGKILL`); note the production gap | Service install / orphan-socket hardening ticket |
 | `layer` filter in `collector::recall` | `layer: Option<Layer>` param on BM25 recall | **All production callers pass `None`** (HTTP `/recall`, MCP `search_nodes`) | **Keep** — test-only surface for future layer-filtered recall; not v0.1 scope | LESSONS.md / semantic layer indexing (WEG-136, v0.1.1) |
-| `--dry` / `--auto` on `dreamd dream` | Clap flags on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for v0.1.1 dry-run and auto modes; documented here, not only in `cli.rs` | v0.1.1 dream-cycle UX (CHANGELOG) |
+| `--dry` on `dreamd dream` | Clap flag on the dream subcommand | **Implemented** (AILAB-341) — previews the would-be `LESSONS.md` on stdout, writes nothing, skips the daemon proxy | **Shipped** — no longer a reserved surface | n/a |
+| `--auto` on `dreamd dream` | Hidden clap flag on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for v0.1.1 auto mode; documented here, not only in `cli.rs` | v0.1.1 dream-cycle UX (CHANGELOG) |
 
 ### 9. SkillAction validation seam
 

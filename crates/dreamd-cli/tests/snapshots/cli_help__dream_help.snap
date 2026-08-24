@@ -8,7 +8,7 @@ Usage: dream [OPTIONS]
 
 Options:
       --dry
-          Dry run: print what would change without writing. Not yet implemented; ships v0.1.1
+          Dry run: print the LESSONS.md this cycle would write, without writing anything. Skips the daemon proxy; --no-commit is ignored
 
       --no-commit
           Skip the autobiography commit. The cycle still runs and writes to disk; only the git2 commit step is skipped. Useful in CI

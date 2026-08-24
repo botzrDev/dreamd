@@ -35,8 +35,8 @@ pub struct Cli {
 /// Arguments for the `dreamd dream` subcommand.
 #[derive(Args, Debug)]
 pub struct DreamArgs {
-    /// Dry run: print what would change without writing.
-    /// Not yet implemented; ships v0.1.1.
+    /// Dry run: print the LESSONS.md this cycle would write, without writing
+    /// anything. Skips the daemon proxy; --no-commit is ignored.
     #[arg(long)]
     pub dry: bool,
     /// Schedule automatic dream cycles.
@@ -529,10 +529,6 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if args.dry {
-        eprintln!("dreamd: --dry is not yet implemented (ships v0.1.1).");
-        return ExitCode::from(2);
-    }
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
@@ -552,6 +548,37 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         Ok(r) => r,
         Err(code) => return code,
     };
+    // AILAB-341: `--dry` writes nothing, so it forks off here — after config and
+    // store resolution (a preview still needs to know which store it is
+    // previewing), before the write path. It deliberately does NOT proxy to the
+    // daemon: `POST /api/v1/dream` performs the mutation the flag exists to
+    // avoid. `--no-commit` is a no-op alongside it, not an error.
+    if args.dry {
+        // lock-ok (AILAB-583 / AILAB-204): stdout stays UNLOCKED — the preview
+        // may sit on the model call for up to 90s.
+        // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
+        let outcome = commands::dream::run_dry(
+            agent_root.project_root(),
+            &mut std::io::stdout(),
+            args.no_llm,
+        );
+        return match outcome {
+            // Banner on stderr so stdout is exactly the would-be file bytes.
+            Ok(commands::dream::DryOutcome::WouldWrite) => {
+                eprintln!("dreamd: dry run; would write .agent/semantic/LESSONS.md (not written)");
+                ExitCode::SUCCESS
+            }
+            Ok(commands::dream::DryOutcome::WouldRetire) => {
+                eprintln!("dreamd: dry run; would retire LESSONS.md (not written)");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("dreamd: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     // lock-ok (AILAB-583 / AILAB-204): `&mut std::io::stdout()` stays UNLOCKED.
     // The cycle opens a Tantivy index and — since AILAB-204 — may sit on a
     // network call for up to 90s; holding a std stream lock across either is the
