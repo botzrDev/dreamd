@@ -10,34 +10,36 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 ### Install
 
-Pick one path:
+Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
 ```bash
 # npm (no Rust required)
 npx -y dreamd-mcp --version
 
-# cargo (from a clone)
+# cargo (from a clone) — installs the `dreamd` binary
 cargo install --path crates/dreamd-cli
 dreamd version
 ```
 
-### Init a project store
+### Set up a project
 
 ```bash
 cd ~/your-project    # must contain .git/, Cargo.toml, package.json, or pyproject.toml
-dreamd init
+npx -y dreamd-mcp setup
 ```
 
-**What just happened:** dreamd scaffolded `<project>/.agent/` (episodic, semantic, personal, working), wrote a commented config template to `.agent/.dreamd/config.toml`, registered the project in `~/.agent/registry.toml`, and appended `/.agent/.dreamd/` to `.gitignore`.
+**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor.
+
+`setup` prompts when it has a TTY; pass `--yes` (with `--harness claude|cursor|both|none`) in scripts. `npx -y dreamd-mcp init` is the lower-level scaffold primitive — it creates the store and writes no harness config, which is also what `npx -y dreamd-mcp setup --no-write-mcp` gives you.
 
 Verify:
 
 ```bash
 ls -la .agent/
-dreamd doctor
+npx -y dreamd-mcp doctor
 ```
 
-`doctor` prints dream-cycle mode, last cycle status, and index health.
+`doctor` prints dream-cycle mode and index health. Last cycle status is `dreamd status` (requires a cargo-installed `dreamd` binary; the npm shim does not forward `status`).
 
 ---
 
@@ -45,7 +47,7 @@ dreamd doctor
 
 Append a learning via the HTTP API (or let your agent call `append_node` over MCP — same shape).
 
-With the daemon running (section 5), or in-process via `dreamd mcp`:
+With the daemon running (section 5), or in-process via `npx -y dreamd-mcp`:
 
 ```bash
 PROJECT=$(pwd)
@@ -55,9 +57,6 @@ curl --unix-socket ~/.agent/dreamd.sock \
   -H "X-Agent-Root: $PROJECT" \
   -H "Content-Type: application/json" \
   -d '{
-    "schema_version": "1.0.0",
-    "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "timestamp": "2026-06-23T12:00:00Z",
     "pain": 7.0,
     "importance": 8.0,
     "skill_action": "rust::error_handling::axum_rejection",
@@ -66,6 +65,8 @@ curl --unix-socket ~/.agent/dreamd.sock \
   }' \
   http://localhost/api/v1/learn
 ```
+
+> **Socket path:** the default is `~/.agent/dreamd.sock`. Clients can override it with [`DREAMD_SOCK`](./docs/configuration.md#dreamd_sock); `dreamd watch` always binds `$HOME/.agent/dreamd.sock`.
 
 **What just happened:** The coordinator minted a real `evt_…` ID, redacted secrets (if enabled), appended one JSONL line to `.agent/episodic/AGENT_LEARNINGS.jsonl`, and queued a Tantivy index update.
 
@@ -105,14 +106,14 @@ Each result includes `score`, `bm25`, `salience`, and `metadata` (timestamp, pai
 Seed a few related learnings (or use the MCP `append_node` tool three times with the same `skill_action` prefix). Then consolidate:
 
 ```bash
-dreamd dream
+npx -y dreamd-mcp dream
 ```
 
 **What just happened:**
 
 1. WAL written (`dream_in_progress.wal`) before any destructive step
 2. Episodic events clustered by `skill_action`
-3. Clusters with ≥3 recurrences in the window promote to `.agent/semantic/LESSONS.md`
+3. Clusters with ≥3 events in a 7- or 30-day window are promotion candidates; the cycle writes **one** lesson to `.agent/semantic/LESSONS.md` — the highest-salience exemplar from the top cluster (salience, then pain, then importance, then EventId)
 4. Promoted exemplar events get `pinned: true` in JSONL
 5. Decay pruner archives stale unpinned events to `.agent/.dreamd/snapshots/`
 6. `recurrence_counts.json` updated; WAL committed
@@ -125,7 +126,7 @@ cat .agent/semantic/recurrence_counts.json | jq .
 grep '"pinned": true' .agent/episodic/AGENT_LEARNINGS.jsonl
 ```
 
-Re-run is idempotent on identical input (byte-identical `LESSONS.md`).
+Re-run is idempotent on identical input **and the same `now_sec`**. The CLI uses wall clock unless `SOURCE_DATE_EPOCH` is set, so two bare runs seconds apart are not byte-identical (`last_updated` changes).
 
 ---
 
@@ -135,7 +136,7 @@ Terminal 1 — start the shared writer:
 
 ```bash
 cd ~/your-project
-dreamd watch
+npx -y dreamd-mcp watch
 ```
 
 **What just happened:** The daemon bound `~/.agent/dreamd.sock` (`0600`), booted the coordinator + pinned Tantivy handle for this project, and blocks until SIGINT/SIGTERM.
@@ -155,7 +156,7 @@ Terminal 3 — MCP bridges to the daemon automatically:
 npx -y dreamd-mcp
 ```
 
-Stderr should show `Phase 2 (Remote backend)` when the daemon is reachable.
+Stderr should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is reachable. If no daemon is running, MCP falls back to in-process with no default-stderr line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`).
 
 ---
 
@@ -168,8 +169,9 @@ Point two agents at the same project:
 | Claude Code | [adapters/claude-code/README.md](./adapters/claude-code/README.md) |
 | Cursor | [adapters/cursor/README.md](./adapters/cursor/README.md) |
 | Cline | [adapters/cline/README.md](./adapters/cline/README.md) |
+| Aider | [adapters/aider/README.md](./adapters/aider/README.md) |
 
-With `dreamd watch` running, both harnesses share one coordinator. A learning appended in Cursor is recallable in Claude Code after the commit cadence.
+With `npx -y dreamd-mcp watch` running, both harnesses share one coordinator. A learning appended in Cursor is recallable in Claude Code after the commit cadence.
 
 Try it:
 
@@ -187,7 +189,7 @@ Simulate a mid-cycle kill:
 
 ```bash
 # Start a cycle, then SIGKILL the daemon mid-write (or use the fixture)
-kill -9 $(pgrep -f 'dreamd watch')
+kill -9 $(pgrep -f 'dreamd watch')   # cargo-installed daemon; npm: pgrep -f 'dreamd-mcp watch'
 ```
 
 Or study the static fixture: [examples/crash-recovery/](./examples/crash-recovery/).
@@ -195,7 +197,7 @@ Or study the static fixture: [examples/crash-recovery/](./examples/crash-recover
 Restart:
 
 ```bash
-dreamd watch
+npx -y dreamd-mcp watch
 ```
 
 **What just happened:** On startup, if `dream_in_progress.wal` exists, recovery runs before serving traffic — temp files from incomplete intents are cleaned up, WAL deleted, `state.json` marked `failed`. The store is never left half-promoted.
@@ -203,7 +205,7 @@ dreamd watch
 Verify:
 
 ```bash
-dreamd doctor
+npx -y dreamd-mcp doctor
 ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 ```
 

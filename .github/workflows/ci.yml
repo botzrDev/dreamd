@@ -145,7 +145,7 @@ jobs:
         working-directory: packages/dreamd-mcp
         run: node --test
 
-  # ── Binary size gate (NFR-2: stripped release < 15 MB) ───────────────────────
+  # ── Binary size gate (NFR-2: stripped release < 20 MB) ───────────────────────
   size-gate:
     name: Binary size gate
     needs: lint
@@ -178,18 +178,18 @@ jobs:
           SIZE_BYTES=$(stat -c%s "$BINARY")
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
           echo "Stripped binary size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
-          WARN_BYTES=$((12 * 1024 * 1024))
+          WARN_BYTES=$((16 * 1024 * 1024))
           if [ "$SIZE_BYTES" -gt "$WARN_BYTES" ]; then
-            echo "::warning::Binary size ${SIZE_MB} MB has crossed the 12 MB soft warning threshold (hard limit: 15 MB, NFR-2)"
+            echo "::warning::Binary size ${SIZE_MB} MB has crossed the 16 MB soft warning threshold (hard limit: 20 MB, NFR-2)"
           fi
-          # NFR-2: must be < 15 MB
-          MAX_BYTES=$((15 * 1024 * 1024))
+          # NFR-2: must be < 20 MB (raised 2026-08-23 for AILAB-204 genai)
+          MAX_BYTES=$((20 * 1024 * 1024))
           if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
-            echo "::error::Binary size ${SIZE_MB} MB exceeds the 15 MB limit (NFR-2)"
+            echo "::error::Binary size ${SIZE_MB} MB exceeds the 20 MB limit (NFR-2)"
             exit 1
           fi
           echo "### Binary size gate" >> "$GITHUB_STEP_SUMMARY"
-          echo "Stripped size: **${SIZE_MB} MB** (limit: 15 MB)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stripped size: **${SIZE_MB} MB** (limit: 20 MB)" >> "$GITHUB_STEP_SUMMARY"
 
   # ── Idle RSS gate (NFR-1: daemon < 30 MB at idle) ─────────────────────────────
   idle-rss-gate:
@@ -490,6 +490,46 @@ jobs:
         # failures); the suite prints "=== RESULT: N passed, N failed ===".
         # WEG-512: watch must start with cwd=$PROJ (see alpha-suite.sh).
         run: timeout 180 bash scripts/alpha/alpha-suite.sh
+
+  # ── Install-funnel suite (AILAB-555) ─────────────────────────────────────────
+  # End-to-end gate on the install front door: `setup` on a cold project, the
+  # floating npx pin it writes, `doctor` on the scaffold, an idempotent re-run,
+  # the `update --dry-run` restart contract, and every row of the ratified
+  # AILAB-548 §3 conflict taxonomy. Unit tests cover the classifier; this covers
+  # the real binary against a real filesystem, which is where a wiring or
+  # exit-code regression actually reaches the user. Gating: unlike `alpha`, it
+  # starts no daemon and does no polling, so there is no flake budget to earn.
+  install-funnel:
+    name: Install funnel suite
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build dreamd CLI (debug binary)
+        run: cargo build -p dreamd
+
+      - name: Run install-funnel suite (setup / doctor / update / conflicts)
+        # No daemon and no network — the suite is seconds of work; 180s mirrors
+        # the alpha job and only exists to bound a hang. Exit code is
+        # authoritative (0 iff zero failures); the suite prints
+        # "=== RESULT: N passed, N failed ===".
+        run: timeout 180 bash scripts/alpha/install-funnel-suite.sh
 
   # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
   notify-failure:

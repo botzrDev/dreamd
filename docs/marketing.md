@@ -17,7 +17,7 @@ AGENTS.md is what you wrote down. dreamd is what your agent learned, across ever
 ## The moment it earns its name
 
 ```text
-~/project $ npx -y dreamd-mcp init
+~/project $ npx -y dreamd-mcp setup
 
 # In Claude Code, Tuesday afternoon:
 you   ▸ axum keeps blowing up when I unwrap in route handlers
@@ -30,7 +30,7 @@ cursor▸ You're unwrapping in a route handler. dreamd has a
         custom Error types. Try `?` and a typed error.
 ```
 
-> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+> First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
 
 No re-explaining. No re-pasting. No "as I mentioned before."
 

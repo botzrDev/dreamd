@@ -186,9 +186,10 @@ covers the **derived index cache**, which self-heals as described above.
 **durable** store: every persisted episodic record carries
 `schema_version: "1.0.0"` and daemon `state.json` carries
 `schema_version: "1.0"`, on independent version streams, and a `dreamd migrate`
-path must exist before either version changes. `dreamd migrate` is
-unimplemented (DR-108 / v0.1.1). It is the durable store's problem, not the
-index's — do not cite it as a prerequisite for an index schema bump.
+path must exist before either version changes. `dreamd migrate --from 1.0.0 --to 1.0.0`
+is the shipped no-op stub (episodic `RECORD_SCHEMA_VERSION` only). It is the
+durable store's problem, not the index's — do not cite it as a prerequisite for
+an index schema bump.
 
 ### Query-time salience
 
@@ -257,10 +258,11 @@ autobiography.**
 **Triggers: there are exactly two, and both are manual.** The CLI `dreamd
 dream` (`cli.rs:78-79`) and `POST /api/v1/dream` (`router.rs:23`). **There is
 no scheduler in v0.1** — nothing runs unless a user or an agent asks for it, so
-do not read "nightly cycle" into any part of this design. `--auto`
-(`cli.rs:42-45`) and `--dry` (`cli.rs:38-41`) are hidden flags that reject with
-"Not yet supported at v0.1; ships v0.1.1". `--no-commit` (`cli.rs:46-49`) skips
-only the git step.
+do not read "nightly cycle" into any part of this design. `--auto` is a hidden
+flag that still rejects with "Not yet supported at v0.1; ships v0.1.1". `--dry`
+previews: it prints the `LESSONS.md` the cycle would write and writes nothing,
+skipping the daemon proxy because a `POST /api/v1/dream` is itself a write
+(AILAB-341). `--no-commit` skips only the git step.
 
 ### Clustering: a prefix tree over `skill_action`
 
@@ -295,6 +297,30 @@ exemplar (`:270-285`). `pick_exemplar` ranks salience → pain → importance �
 reverse `EventId` (`:316-318`). A cycle is therefore a narrow instrument: at
 most one lesson per run, not a batch summarisation pass.
 
+A cycle that promotes **no** cluster **unlinks** `semantic/LESSONS.md` if it is
+present (`run_deterministic_dream_cycle`, `consolidation.rs`) rather than
+writing an empty file — the never-dreamed state and the retired state are both
+"the file is absent". Retirement is therefore structural, not scheduled: a
+cluster that stops recurring simply fails the window test on the next cycle,
+drops out of the file, and the post-cycle semantic pass turns that absence into
+`delete_term(layer="semantic")` and a commit (`index_semantic_lessons`,
+`server/tantivy_handle.rs`), so recall stops serving the stale lesson without a
+daemon restart. There is no expiry timer, no age filter, and no read-time
+staleness check — one cycle run past the trailing window is the whole
+mechanism. A malformed `LESSONS.md` is the deliberate exception: it leaves the
+index untouched, because a corrupt file must never wipe the semantic layer. The
+cited exemplars **stay pinned** — retirement removes the derived document, not
+the source events.
+
+Every pass that resolves lessons records the ones it could **not** index — a
+lesson whose exemplar is no longer in the episodic log is skipped rather than
+indexed at score 0.0 — to `<project>/.agent/.dreamd/semantic_pass.json`
+(`SemanticPassRecord`, `server/tantivy_handle.rs`). `dreamd doctor` reads that
+sidecar and names the skipped lessons, so a silently un-recallable lesson is
+visible without the daemon running and without doctor re-parsing `LESSONS.md`
+(AILAB-700). The malformed case writes nothing: the index was untouched, so the
+previous record still describes it.
+
 Pins are **unioned, never unset**. `apply_pin_unpin` computes
 `event.pinned = event.pinned || cited_ids.contains(...)` (`:221`), so a cycle
 can pin an event it cites but can never clear a pin it did not set
@@ -311,10 +337,17 @@ your head:
   the half-life of that curve is ~9.7 days, and calling it one is a factual
   error. It is evaluated at query time and never moves a record on disk.
 - The **decay pruner** (`decay.rs`) is what actually archives records off the
-  hot path. It fires only when `DECAY_AGE_THRESHOLD_SEC = 90 days`
-  (`decay.rs:20`) **and** `DECAY_SALIENCE_THRESHOLD = 2.0` (`decay.rs:26`)
-  both hold — old-and-uninteresting, not merely old. Pinned records are
-  **never** archived (`decay.rs:33-35`).
+  hot path. Its effective gate is **`!pinned && age > 90d`**
+  (`DECAY_AGE_THRESHOLD_SEC`, `decay.rs:20`) — age alone, not age plus
+  interest. Pinned records are **never** archived (`decay.rs:33-35`).
+- `DECAY_SALIENCE_THRESHOLD = 2.0` (`decay.rs:26`) is evaluated
+  (`decay.rs:40-47`) but **cannot currently discriminate**. The pruner scores
+  through `RecurrenceContext::decay()`, hardcoded to recurrence `0`
+  (`salience.rs:54-57`, `:64`), so past 90 days the recency term alone caps
+  salience at `exp(-90/14) ≈ 0.0016` — below `2.0` even at maximum pain and
+  importance. Read the constant as a **defensive floor**, not a live filter:
+  it is retained so a future change to decay-phase recurrence cannot silently
+  start archiving high-salience records.
 
 ### Autobiography
 
@@ -472,7 +505,7 @@ All API handlers must call `Supervisor::try_send` rather than cloning the raw `t
 `CoordinatorSendError::Full`, which the Axum layer maps to HTTP 503 +
 `Retry-After: 1` and emits a structured tracing event
 (`dreamd_event="shed_load" route=... queue_depth=...`). On `CoordinatorSendError::Closed`
-the daemon is shutting down; the response is 503 with no retry header.
+the daemon is shutting down; the response is 500 `"coordinator unavailable"` with no retry header.
 
 **Why a method, not `sender()`:** `sender()` exists for the UDS connection pattern where
 each task owns a raw clone and manages its own lifetime. HTTP handlers hold
@@ -505,9 +538,12 @@ Two consequences follow, and both are load-bearing:
 
 Only the post-filesystem phases leave the coordinator. Index work is handed to the
 indexer task over its own bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`,
-`tantivy_handle.rs:75`), and the autobiography commit runs after it in `run_post_phases`
-(`dream_cycle.rs:113-130`) — outside the coordinator, best-effort, and unable to block an
-append.
+`tantivy_handle.rs:85`), and the autobiography commit runs after it in `run_post_phases`
+(`dream_cycle.rs:113-130`) — outside the coordinator and best-effort. It is not, however,
+insulated from appends: the indexer is a single task, so an `ApplyRecurrenceSidecar`,
+`IndexSemanticLessons`, or `PruneDecayedEvents` pass occupies it while appends queue, and
+an append that finds the 1024-slot channel full now parks the coordinator on its awaited
+`send` until the indexer takes the message (`coordinator.rs::route_to_indexer`).
 
 ## Observability (WEG-32 / DR-004)
 
@@ -524,12 +560,20 @@ Two layers:
   TTY-conditional: pretty human-readable text when stderr is a terminal, JSON
   when it is not (CI, service-managed daemon). Detection uses
   `std::io::IsTerminal` — no `atty` crate.
-- **File → `~/.agent/dreamd.log`, JSON always.** Written through a non-blocking
-  appender (`tracing-appender`). The returned `WorkerGuard` is bound as
-  `_log_guard` in `run()` and held until the process exits; dropping it early
-  discards buffered file logs. The file is **truncated at startup** for v0.1 —
-  log rotation is deferred to v0.1.1. The path is resolved via
-  `DaemonHome::log_file()`, never hardcoded.
+- **File → `~/.agent/dreamd.log`, JSON always — daemon only.** Only `dreamd
+  watch`, the long-running daemon, installs this layer; every other invocation
+  (`init`, `status`, `doctor`, `dream`, `reset`, `mcp`, bare `--version`, …)
+  passes `None` and is console-only on stderr. The gate is
+  `cli::wants_daemon_log` (AILAB-184). The reason is the next sentence: the
+  daemon's file is **truncated at startup** for v0.1 — log rotation is deferred
+  to v0.1.1 — so a short-lived one-shot that opened the same path would erase a
+  running daemon's accumulated log while writing nothing of its own into it.
+  `mcp` is long-running but excluded too: IDEs spawn several concurrently, and
+  they would truncate each other. Written through a non-blocking appender
+  (`tracing-appender`); the returned `WorkerGuard` is bound as `_log_guard` in
+  `run()` and held until the process exits, since dropping it early discards
+  buffered file logs. The path is resolved via `DaemonHome::log_file()`, never
+  hardcoded.
 
 Level comes from the `DREAMD_LOG` env var (`error|warn|info|debug|trace`,
 standard `EnvFilter` syntax), defaulting to `info`. `DREAMD_LOG` is owned here

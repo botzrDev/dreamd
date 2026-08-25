@@ -11,7 +11,8 @@
 
 use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use dreamd_protocol::{AgentLearning, EventId, RECORD_SCHEMA_VERSION};
@@ -46,15 +47,68 @@ fn seed_store(root: &Path) {
     .unwrap();
 }
 
+/// Wall-clock budget for one `dreamd doctor` child. A healthy repair on this
+/// one-record fixture finishes in well under a second; 30s is pure headroom for
+/// a cold CI runner. Exceeding it means the child wedged (AILAB-575: the repair
+/// path once deadlocked forever against the process-wide stderr lock), and the
+/// test must FAIL loudly rather than inherit CI's 6h job ceiling.
+const DOCTOR_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Poll interval while waiting on the child. Short enough that a passing run
+/// pays no visible cost, long enough not to spin a core.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Spawn `dreamd doctor` and wait for it with a hard deadline.
+///
+/// Deliberately hand-rolled: the workspace carries no wait-with-timeout crate,
+/// and `Command::output()` cannot be interrupted — a wedged child hangs the
+/// suite indefinitely. On timeout the child is SIGKILLed (so no orphaned
+/// `dreamd doctor --repair` survives the run) and the test panics.
 fn run_doctor(project: &Path, home: &Path, sock: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(dreamd_bin())
+    let mut child = Command::new(dreamd_bin())
         .arg("doctor")
         .args(args)
         .current_dir(project)
         .env("HOME", home)
         .env("DREAMD_SOCK", sock)
-        .output()
-        .expect("run dreamd doctor")
+        // Pin the log level instead of inheriting it. `info` is what makes
+        // Tantivy's `segment_updater` thread emit through the console layer,
+        // which is precisely the AILAB-575 deadlock trigger — a developer
+        // running with `DREAMD_LOG=off` would otherwise silently disarm this
+        // regression guard. It also bounds child output so the un-drained
+        // pipes below cannot fill and cause a false timeout.
+        .env("DREAMD_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn dreamd doctor");
+
+    let deadline = Instant::now() + DOCTOR_TIMEOUT;
+    loop {
+        match child.try_wait().expect("try_wait on dreamd doctor") {
+            Some(_) => break,
+            None if Instant::now() >= deadline => {
+                // Kill first: that closes the child's pipe ends, so the
+                // `wait_with_output` below cannot itself block.
+                let _ = child.kill();
+                let out = child.wait_with_output().expect("reap timed-out doctor");
+                panic!(
+                    "`dreamd doctor {}` did not exit within {}s — killed. \
+                     The repair path must never block forever (AILAB-575).\n\
+                     partial stdout={}\npartial stderr={}",
+                    args.join(" "),
+                    DOCTOR_TIMEOUT.as_secs(),
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                );
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
+        }
+    }
+    child
+        .wait_with_output()
+        .expect("collect dreamd doctor output")
 }
 
 #[test]

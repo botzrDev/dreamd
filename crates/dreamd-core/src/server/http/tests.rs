@@ -614,6 +614,136 @@ async fn learn_server_stamps_schema_version() {
     );
 }
 
+/// AILAB-175: the wire body carries no `id` / `schema_version` / `timestamp`,
+/// so a body omitting all three is valid and the daemon mints the id. Before
+/// the `AppendLearningRequest` DTO these were required fields and their absence
+/// 400'd at the axum extractor, before the handler body ever ran.
+#[tokio::test]
+async fn learn_without_id_returns_201_and_mints_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state);
+
+    let body = serde_json::json!({
+        "pain": 5.0,
+        "importance": 5.0,
+        "skill_action": "rust::test",
+        "source_harness": "test-harness",
+        "content": "no id, no schema_version, no timestamp"
+    });
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/learn")
+            .header("x-agent-root", root_str)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let json = body_json(resp).await;
+    let id = json["id"].as_str().unwrap();
+    assert!(id.starts_with("evt_"), "daemon-minted id, got {id:?}");
+    EventId::parse(id).expect("minted id must parse as an EventId");
+}
+
+/// AILAB-175 AC: a client-sent `id` is **ignored, not rejected**. This exact
+/// body 400'd at the extractor before the DTO (`EventId::parse` requires the
+/// `evt_` prefix + 26 Crockford chars), which is the reported bug. Serde's
+/// default ignore-unknown behavior on the DTO is what makes this pass — see
+/// the type's doc-comment for why it must stay that way.
+#[tokio::test]
+async fn learn_ignores_bogus_client_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state);
+
+    let body = serde_json::json!({
+        "id": "not-a-ulid",
+        "pain": 5.0,
+        "importance": 5.0,
+        "skill_action": "rust::test",
+        "source_harness": "test-harness",
+        "content": "bogus client id"
+    });
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/learn")
+            .header("x-agent-root", root_str)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a malformed client id must be ignored, not rejected"
+    );
+
+    let json = body_json(resp).await;
+    let id = json["id"].as_str().unwrap();
+    assert_ne!(id, "not-a-ulid", "client id must not be echoed");
+    EventId::parse(id).expect("minted id must parse as an EventId");
+}
+
+/// AILAB-175 §1.9 regression guard: `build_agent_learning` hardcodes
+/// `pinned: false` (MCP has no such param), so routing HTTP through it would
+/// silently drop a client's `"pinned": true`. The handler re-applies it; this
+/// test fails if that line is ever removed.
+#[tokio::test]
+async fn learn_client_pinned_true_is_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_real_state(dir.path(), registry_path);
+    let agent_root = AgentRoot::new(dir.path());
+    let router = build_router(state);
+
+    let body = serde_json::json!({
+        "pain": 5.0,
+        "importance": 5.0,
+        "pinned": true,
+        "skill_action": "rust::test",
+        "source_harness": "test-harness",
+        "content": "pin me"
+    });
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/learn")
+            .header("x-agent-root", root_str)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
+    let record: AgentLearning = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert!(
+        record.pinned,
+        "client-supplied pinned=true must survive the build_agent_learning mapping"
+    );
+}
+
 /// The coordinator server-stamps `timestamp`: a client-supplied value is
 /// overwritten at durable write and echoed in the learn response.
 #[tokio::test]

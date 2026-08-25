@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""State-Drift benchmark — Week-0 bake-off gate (ANTH-20).
+"""WasTrue benchmark — Week-0 bake-off gate (ANTH-20).
 
 Neutral referee: every memory system is one row. Programmatic oracle with an
 explicit AMBIGUOUS bucket. Determinism is checked, not assumed.
 
 Reproduce:
-  python3 scripts/benchmark/state_drift_bench.py --demo
-  python3 scripts/benchmark/state_drift_bench.py --verify-determinism
-  python3 scripts/benchmark/state_drift_bench.py --bakeoff
+  python3 scripts/benchmark/wastrue_bench.py --demo
+  python3 scripts/benchmark/wastrue_bench.py --verify-determinism
+  python3 scripts/benchmark/wastrue_bench.py --bakeoff
 """
 from __future__ import annotations
 
@@ -465,7 +465,7 @@ class DreamdAdapter(MemoryAdapter):
                     "pain": 7.0,
                     "importance": 8.0,
                     "skill_action": f"bench::{scenario.id}::turn{i}",
-                    "source_harness": "state_drift_bench",
+                    "source_harness": "wastrue_bench",
                     "content": turn.content,
                 }
             ).encode()
@@ -543,7 +543,7 @@ class Mem0Adapter(MemoryAdapter):
                         {"role": "user", "content": turn.content},
                         {
                             "role": "assistant",
-                            "content": "Recorded for benchmark state-drift probe.",
+                            "content": "Recorded for benchmark wastrue probe.",
                         },
                     ],
                     "user_id": self._user_id,
@@ -597,7 +597,7 @@ class ZepAdapter(MemoryAdapter):
             headers={
                 "Authorization": f"Api-Key {self.api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "dreamd-state-drift-bench/0.1 (ANTH-20)",
+                "User-Agent": "dreamd-wastrue-bench/0.1 (ANTH-20)",
                 "Accept": "application/json",
             },
             method=method,
@@ -774,7 +774,7 @@ def load_env_file(path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="State-Drift benchmark bake-off gate")
+    parser = argparse.ArgumentParser(description="WasTrue benchmark bake-off gate")
     parser.add_argument("--env-file", type=Path, help="Source export KEY=VAL lines before run")
     parser.add_argument("--demo", action="store_true", help="Reference/floor systems only")
     parser.add_argument("--verify-determinism", action="store_true", help="Determinism replay check")

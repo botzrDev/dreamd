@@ -66,6 +66,25 @@ pub enum McpRunError {
 
 // Tool parameter structs
 
+/// AILAB-191 / DR-505 v2 -- three-element progressive disclosure (one-line
+/// summary, v1 trigger phrases, event-vs-lesson distinction).
+///
+/// rmcp 1.7 parses `#[tool(description = ...)]` as a darling `Option<String>`
+/// (`rmcp-macros-1.7.0/src/tool.rs:85`), so the attribute demands a string
+/// *literal* and cannot reference this const. The literal bytes are therefore
+/// duplicated in the two `search_nodes` `#[tool]` attributes (unix and
+/// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
+/// generated `Tool.description` equals this const so the copies cannot drift.
+#[allow(dead_code)] // referenced by the drift test; the attributes need literals
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument.";
+
+/// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
+/// the real write target: `append_node` appends an episodic event to
+/// `AGENT_LEARNINGS.jsonl`; `.agent/semantic/LESSONS.md` is written by the
+/// dream cycle, never by this tool.
+#[allow(dead_code)] // referenced by the drift test; the attributes need literals
+const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. One precise event beats several vague ones.";
+
 /// Parameters for the `search_nodes` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchNodesParams {
@@ -229,12 +248,15 @@ impl MemoryMcpServer {
         self.index_map.lock().expect("index map lock").len()
     }
 
-    /// Search episodic memory using BM25 × salience scoring.
+    /// Search memory using BM25 × salience scoring, blending raw episodic
+    /// events and consolidated semantic lessons in one ranking.
     ///
-    /// Returns a ranked list of matching learning entries.
+    /// Returns a ranked list of matching entries. Each hit carries a `source`
+    /// field (`"episodic"` | `"semantic"`, [`crate::index::Layer::as_str`]);
+    /// there is no layer/source request parameter.
     #[cfg(unix)]
     #[tool(
-        description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided."
+        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument."
     )]
     async fn search_nodes(
         &self,
@@ -298,10 +320,14 @@ impl MemoryMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Search episodic memory using BM25 × salience scoring (non-Unix stub).
+    /// Search memory using BM25 × salience scoring, blending raw episodic
+    /// events and consolidated semantic lessons (non-Unix stub).
+    ///
+    /// The description literal below must stay byte-identical to the unix copy
+    /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search episodic memory for past learnings -- use when: recall, did we discuss, what did we decide, previously decided."
+        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument."
     )]
     async fn search_nodes(
         &self,
@@ -315,9 +341,11 @@ impl MemoryMcpServer {
 
     /// Append a new learning node to episodic memory.
     ///
-    /// The entry is durably fsynced before this call returns (DR-103).
+    /// The entry is durably fsynced before this call returns (DR-103). Writes
+    /// `AGENT_LEARNINGS.jsonl` only -- `.agent/semantic/LESSONS.md` is the
+    /// dream cycle's output, not this tool's.
     #[tool(
-        description = "Append a new learning to episodic memory -- use when: note that, remember, log this, save this lesson."
+        description = "Append a raw episodic event -- use when: note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. One precise event beats several vague ones."
     )]
     async fn append_node(
         &self,
@@ -393,12 +421,13 @@ impl ServerHandler for MemoryMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dreamd-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                r#"dreamd memory server -- search and append episodic agent learnings.
+                r#"dreamd memory server -- search and append agent memory (events + lessons).
 
 WHEN TO CALL search_nodes
 - Session start on any domain you have worked in before (language, framework, project area)
 - Before reasoning from scratch on a topic; you may already have a relevant note
 - Use 2-4 keywords matching the current task
+- Hits may be raw events (source=episodic) or consolidated lessons (source=semantic); there is no layer filter
 
 WHEN TO CALL append_node
 - End of session: capture discoveries, constraints, and non-obvious patterns
@@ -722,6 +751,94 @@ mod tests {
             info.server_info.version,
             env!("CARGO_PKG_VERSION"),
             "MCP initialize serverInfo.version must track dreamd-cli build version"
+        );
+    }
+
+    /// AILAB-191: the `search_nodes` copy must keep the v1 (AILAB-357) trigger
+    /// phrases *and* teach agents that hits are blended, distinguished by the
+    /// existing `source` JSON field rather than by a request argument.
+    #[test]
+    fn search_nodes_description_names_both_sources() {
+        for needle in [
+            "source=episodic",
+            "source=semantic",
+            "no layer",
+            // v1 trigger phrases (AILAB-357) -- must survive the rewrite.
+            "recall",
+            "did we discuss",
+            "what did we decide",
+            "previously decided",
+        ] {
+            assert!(
+                SEARCH_NODES_DESCRIPTION.contains(needle),
+                "SEARCH_NODES_DESCRIPTION must contain {needle:?}: {SEARCH_NODES_DESCRIPTION}"
+            );
+        }
+    }
+
+    /// AILAB-191: `append_node` writes an episodic event to
+    /// `AGENT_LEARNINGS.jsonl` (`layout.rs` `learnings_path`). It never writes
+    /// `.agent/semantic/LESSONS.md` -- that is the dream cycle's output -- so
+    /// the copy must not name LESSONS.md as the destination.
+    #[test]
+    fn append_node_description_writes_events_not_lessons() {
+        assert!(
+            APPEND_NODE_DESCRIPTION.contains("AGENT_LEARNINGS.jsonl"),
+            "APPEND_NODE_DESCRIPTION must name the real write target: {APPEND_NODE_DESCRIPTION}"
+        );
+        assert!(
+            APPEND_NODE_DESCRIPTION.contains("not LESSONS.md"),
+            "APPEND_NODE_DESCRIPTION must disclaim LESSONS.md: {APPEND_NODE_DESCRIPTION}"
+        );
+        for forbidden in ["Writes LESSONS.md", "to LESSONS.md", "into LESSONS.md"] {
+            assert!(
+                !APPEND_NODE_DESCRIPTION.contains(forbidden),
+                "APPEND_NODE_DESCRIPTION must not present LESSONS.md as the destination \
+                 ({forbidden:?}): {APPEND_NODE_DESCRIPTION}"
+            );
+        }
+    }
+
+    /// AILAB-191: rmcp 1.7 forces string literals in `#[tool(description)]`
+    /// (`rmcp-macros-1.7.0/src/tool.rs:85` -- darling `Option<String>`), so the
+    /// literal bytes are duplicated. This binds the shipped `Tool.description`
+    /// back to the const on whichever `cfg` compiled, so unix and `not(unix)`
+    /// cannot drift from each other or from the const.
+    #[test]
+    fn tool_attr_descriptions_match_description_consts() {
+        assert_eq!(
+            MemoryMcpServer::search_nodes_tool_attr()
+                .description
+                .as_deref(),
+            Some(SEARCH_NODES_DESCRIPTION),
+            "search_nodes #[tool(description)] literal drifted from SEARCH_NODES_DESCRIPTION"
+        );
+        assert_eq!(
+            MemoryMcpServer::append_node_tool_attr()
+                .description
+                .as_deref(),
+            Some(APPEND_NODE_DESCRIPTION),
+            "append_node #[tool(description)] literal drifted from APPEND_NODE_DESCRIPTION"
+        );
+    }
+
+    /// AILAB-191: server instructions must not contradict the tool copy -- the
+    /// WHEN TO CALL search_nodes block names the `source` field too.
+    #[test]
+    fn get_info_instructions_mention_source_field() {
+        use rmcp::ServerHandler;
+
+        let instructions = MemoryMcpServer::new()
+            .get_info()
+            .instructions
+            .expect("server instructions present");
+        assert!(
+            instructions.contains("source=episodic"),
+            "instructions must name source=episodic: {instructions}"
+        );
+        assert!(
+            instructions.contains("source=semantic"),
+            "instructions must name source=semantic: {instructions}"
         );
     }
 

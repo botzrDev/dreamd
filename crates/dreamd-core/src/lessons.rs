@@ -34,6 +34,14 @@ pub struct LessonsFile {
     pub prompt_version: String,
     /// File-level `skill_action` cluster key; all lessons in the file share it.
     pub cluster_key: String,
+    /// Episodic `evt_` ids this file's lessons were composed from (AILAB-200).
+    ///
+    /// File-level, like `cluster_key`: one cluster per file, so a per-lesson
+    /// list could disagree with itself. The LLM arm carries the model's
+    /// validated trailer; the deterministic arm carries the exemplar alone.
+    /// `apply_pin_unpin` pins the union of these and every [`Lesson::id`], so an
+    /// id here survives decay. Empty when read from a pre-AILAB-200 file.
+    pub citations: Vec<String>,
     pub lessons: Vec<Lesson>,
 }
 
@@ -42,13 +50,19 @@ const OPEN_MIDDLE: &str = "\" cluster=\"";
 const OPEN_SUFFIX: &str = "\" -->";
 const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 
-/// Serialize `file` to the structured `LESSONS.md` format and write it
-/// atomically to `path` (via [`crate::io::write_atomic`]).
+/// Serialize `file` to the structured `LESSONS.md` format and return the exact
+/// bytes [`write_lessons_file`] would persist.
 ///
 /// Output: YAML-style frontmatter (`last_updated`, `prompt_version`,
-/// `cluster_key`) followed by HTML-comment-delimited lesson blocks.
-/// Round-trips cleanly through [`read_lessons_file`].
-pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
+/// `cluster_key`, `citations`) followed by HTML-comment-delimited lesson
+/// blocks. Round-trips cleanly through [`read_lessons_file`].
+///
+/// Split out from the writer (AILAB-341) so `dreamd dream --dry` can print the
+/// file a cycle *would* write without touching disk. The preview is the same
+/// function call the write path makes, so the two cannot drift into printing
+/// one shape and persisting another.
+#[must_use]
+pub fn render_lessons_file(file: &LessonsFile) -> String {
     let mut s = String::new();
     s.push_str("---\n");
     s.push_str(&format!(
@@ -58,6 +72,10 @@ pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     ));
     s.push_str(&format!("prompt_version: \"{}\"\n", file.prompt_version));
     s.push_str(&format!("cluster_key: \"{}\"\n", file.cluster_key));
+    // Space-separated inside one quoted scalar, not a YAML/JSON sequence: the
+    // reader here is `parse_frontmatter_line`, which understands exactly one
+    // shape — `key: "value"` — and every other key already uses it.
+    s.push_str(&format!("citations: \"{}\"\n", file.citations.join(" ")));
     s.push_str("---\n");
     for lesson in &file.lessons {
         s.push_str(OPEN_PREFIX);
@@ -71,13 +89,23 @@ pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
         s.push_str(CLOSE_MARKER);
         s.push('\n');
     }
-    write_atomic(path, s.as_bytes())
+    s
+}
+
+/// Serialize `file` and write it atomically to `path` (via
+/// [`crate::io::write_atomic`]).
+///
+/// The bytes are exactly [`render_lessons_file`]'s output — the dry-run preview
+/// and this writer share one serializer by construction.
+pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
+    write_atomic(path, render_lessons_file(file).as_bytes())
 }
 
 struct ParsedFrontmatter {
     last_updated: DateTime<Utc>,
     prompt_version: String,
     cluster_key: String,
+    citations: Vec<String>,
 }
 
 /// Parse YAML-style frontmatter from `lines`, starting at index 0.
@@ -95,6 +123,7 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
     let mut last_updated: Option<String> = None;
     let mut prompt_version: Option<String> = None;
     let mut cluster_key: Option<String> = None;
+    let mut citations: Option<String> = None;
 
     while idx < lines.len() && lines[idx] != "---" {
         let line = lines[idx];
@@ -107,6 +136,7 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
             "last_updated" => last_updated = Some(value),
             "prompt_version" => prompt_version = Some(value),
             "cluster_key" => cluster_key = Some(value),
+            "citations" => citations = Some(value),
             other => {
                 return Err(invalid(&format!("unknown frontmatter key: {other}")));
             }
@@ -120,6 +150,14 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
     let last_updated_raw = last_updated.ok_or_else(|| invalid("missing last_updated"))?;
     let prompt_version = prompt_version.ok_or_else(|| invalid("missing prompt_version"))?;
     let cluster_key = cluster_key.ok_or_else(|| invalid("missing cluster_key"))?;
+    // Absent on every file written before AILAB-200. Missing is empty, not an
+    // error — an old `LESSONS.md` must keep parsing, and an empty union just
+    // means `apply_pin_unpin` falls back to today's `Lesson.id`-only behavior.
+    let citations: Vec<String> = citations
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
 
     let last_updated = DateTime::parse_from_rfc3339(&last_updated_raw)
         .map_err(|e| invalid(&format!("invalid last_updated: {e}")))?
@@ -130,6 +168,7 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
             last_updated,
             prompt_version,
             cluster_key,
+            citations,
         },
         idx,
     ))
@@ -174,6 +213,10 @@ fn parse_lesson_block(
 
 /// Parse a `LESSONS.md` file written by [`write_lessons_file`].
 ///
+/// A missing `citations` key yields an empty vec — files written before
+/// AILAB-200 have none and must still parse. Any *other* unknown key is still
+/// an error.
+///
 /// Returns [`io::ErrorKind::InvalidData`] if the frontmatter is missing or
 /// malformed, a lesson's `cluster` attribute does not match the file-level
 /// `cluster_key`, or a close marker is absent.
@@ -199,6 +242,7 @@ pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
         last_updated: frontmatter.last_updated,
         prompt_version: frontmatter.prompt_version,
         cluster_key: frontmatter.cluster_key,
+        citations: frontmatter.citations,
         lessons,
     })
 }
@@ -256,6 +300,7 @@ mod tests {
             last_updated: fixed_timestamp(),
             prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
             cluster_key: "rust::error_handling".to_string(),
+            citations: vec!["evt_9a8b7c6d".to_string(), "evt_1122aabb".to_string()],
             lessons: vec![
                 Lesson {
                     id: "evt_9a8b7c6d".to_string(),
@@ -285,6 +330,7 @@ mod tests {
             last_updated: fixed_timestamp(),
             prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
             cluster_key: "rust::error_handling".to_string(),
+            citations: vec![],
             lessons: vec![],
         };
 
@@ -303,6 +349,7 @@ mod tests {
             last_updated: fixed_timestamp(),
             prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
             cluster_key: "rust::testing".to_string(),
+            citations: vec!["evt_multiline".to_string()],
             lessons: vec![Lesson {
                 id: "evt_multiline".to_string(),
                 content: "First paragraph.\n\nSecond paragraph with code:\n\n    let x = 1;"
@@ -314,6 +361,103 @@ mod tests {
         write_lessons_file(&path, &f).expect("write ok");
         let g = read_lessons_file(&path).expect("read ok");
         assert_eq!(f, g);
+    }
+
+    /// AILAB-200: a file written before the `citations` key existed must still
+    /// parse. The key is optional on read; every *other* unknown key is an error.
+    #[test]
+    fn file_without_citations_key_parses_with_empty_citations() {
+        let dir = unique_tmpdir("nocitations");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("LESSONS.md");
+        // Byte-for-byte a pre-AILAB-200 LESSONS.md.
+        let body = "---\n\
+                    last_updated: \"2026-05-13T00:00:00Z\"\n\
+                    prompt_version: \"dream-cycle/v1.1@2026-05-13\"\n\
+                    cluster_key: \"rust::a\"\n\
+                    ---\n\
+                    <!-- dreamd:lesson id=\"evt_1\" cluster=\"rust::a\" -->\n\
+                    body\n\
+                    <!-- /dreamd:lesson -->\n";
+        fs::write(&path, body).unwrap();
+
+        let f = read_lessons_file(&path).expect("old file must still parse");
+        assert!(
+            f.citations.is_empty(),
+            "missing key is an empty vec, not an error"
+        );
+        assert_eq!(f.lessons.len(), 1);
+    }
+
+    /// An empty `citations` value round-trips to an empty vec rather than to a
+    /// one-element vec holding the empty string — `split_whitespace` on `""`
+    /// yields nothing, which is the property this pins.
+    #[test]
+    fn empty_citations_value_reads_back_as_empty_vec() {
+        let dir = unique_tmpdir("emptycitations");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("LESSONS.md");
+
+        let f = LessonsFile {
+            last_updated: fixed_timestamp(),
+            prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
+            cluster_key: "rust::a".to_string(),
+            citations: vec![],
+            lessons: vec![],
+        };
+        write_lessons_file(&path, &f).expect("write ok");
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("citations: \"\"\n"), "writer emits the key");
+        assert_eq!(read_lessons_file(&path).expect("read ok"), f);
+    }
+
+    /// AILAB-341: the dry-run preview prints `render_lessons_file`; a real cycle
+    /// persists `write_lessons_file`. If those ever produced different bytes the
+    /// preview would be a lie, so pin the identity rather than trusting that one
+    /// still delegates to the other.
+    #[test]
+    fn write_lessons_file_persists_exactly_render_lessons_file_bytes() {
+        let dir = unique_tmpdir("render-eq-write");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("LESSONS.md");
+
+        let f = LessonsFile {
+            last_updated: fixed_timestamp(),
+            prompt_version: "dream-cycle/v1.2@2026-08-23".to_string(),
+            cluster_key: "rust::error_handling".to_string(),
+            citations: vec!["evt_9a8b7c6d".to_string(), "evt_1122aabb".to_string()],
+            lessons: vec![Lesson {
+                id: "evt_9a8b7c6d".to_string(),
+                content: "Prefer `?` over `.unwrap()` outside tests.\n\nSecond para.".to_string(),
+                pinned: false,
+            }],
+        };
+
+        write_lessons_file(&path, &f).expect("write ok");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            render_lessons_file(&f),
+            "the dry preview and the persisted file must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn unknown_frontmatter_key_is_still_an_error() {
+        let dir = unique_tmpdir("unknownkey");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("LESSONS.md");
+        let body = "---\n\
+                    last_updated: \"2026-05-13T00:00:00Z\"\n\
+                    prompt_version: \"dream-cycle/v1.1@2026-05-13\"\n\
+                    cluster_key: \"rust::a\"\n\
+                    citations: \"evt_1\"\n\
+                    embeddings: \"nope\"\n\
+                    ---\n";
+        fs::write(&path, body).unwrap();
+
+        let err = read_lessons_file(&path).expect_err("should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

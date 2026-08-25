@@ -78,11 +78,7 @@ impl<R: ProjectMapResource> ProjectResourceMap<R> {
         self.evict_idle();
 
         if let Some(idx) = self.position(project_root) {
-            let entry = self.entries.remove(idx);
-            self.entries.push(entry);
-            let last = self.entries.len() - 1;
-            self.entries[last].1.touch();
-            return Ok(&mut self.entries[last].1);
+            return Ok(self.promote(idx));
         }
 
         while self.entries.len() >= self.config.capacity {
@@ -94,6 +90,67 @@ impl<R: ProjectMapResource> ProjectResourceMap<R> {
         self.entries.push((project_root.to_path_buf(), resource));
         let last = self.entries.len() - 1;
         Ok(&mut self.entries[last].1)
+    }
+
+    /// Look up the resource for `project_root`, opening nothing.
+    ///
+    /// The hit path is [`Self::get_or_insert`]'s, to the same bookkeeping: idle
+    /// entries are evicted first, then a hit is moved MRU-to-back and
+    /// [`ProjectMapResource::touch`]ed. A miss returns `None` and leaves the map
+    /// untouched — the caller is expected to open the resource with the map's
+    /// own lock **released** and publish it via [`Self::insert_or_adopt`]
+    /// (AILAB-186). Splitting the two halves is the whole point:
+    /// `get_or_insert` cannot express that, because it hands back a borrow of
+    /// the map and so must run `open` while that borrow is live.
+    pub fn get_mut(&mut self, project_root: &Path) -> Option<&mut R> {
+        self.evict_idle();
+        let idx = self.position(project_root)?;
+        Some(self.promote(idx))
+    }
+
+    /// Publish an already-opened `resource` for `project_root`, or adopt the
+    /// incumbent if another caller published one first. Returns the winner.
+    ///
+    /// **The incumbent always wins.** Once a resource is in the map it may
+    /// already have handed pieces of itself to live requests — that is exactly
+    /// what `AppState::with_index_handle`'s `f` does, and `supervisor_map`
+    /// caches coordinators wired to the index handle's indexer channel.
+    /// Replacing it would strand every one of those. `resource` has been
+    /// observed by nobody, so it is the safe one to discard — and it is
+    /// [`released`](ProjectMapResource::release), never dropped on the floor:
+    /// for index handles that means two live Tantivy `IndexWriter`s on one
+    /// directory otherwise, which is the corruption the writer lock exists to
+    /// prevent.
+    ///
+    /// A miss is the ordinary path and evicts to capacity exactly as
+    /// [`Self::get_or_insert`] does.
+    pub fn insert_or_adopt(&mut self, project_root: &Path, resource: R) -> &mut R {
+        self.evict_idle();
+
+        if let Some(idx) = self.position(project_root) {
+            let _ = resource.release();
+            return self.promote(idx);
+        }
+
+        while self.entries.len() >= self.config.capacity {
+            let (_, evicted) = self.entries.remove(0);
+            let _ = evicted.release();
+        }
+
+        self.entries.push((project_root.to_path_buf(), resource));
+        let last = self.entries.len() - 1;
+        &mut self.entries[last].1
+    }
+
+    /// Move entry `idx` MRU-to-back, [`touch`](ProjectMapResource::touch) it,
+    /// and hand out the borrow. One definition of "cache-hit bookkeeping", so
+    /// [`Self::get_mut`] cannot drift from [`Self::get_or_insert`].
+    fn promote(&mut self, idx: usize) -> &mut R {
+        let entry = self.entries.remove(idx);
+        self.entries.push(entry);
+        let last = self.entries.len() - 1;
+        self.entries[last].1.touch();
+        &mut self.entries[last].1
     }
 
     /// Walk all entries and release any whose `last_used()` is older than

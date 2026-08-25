@@ -19,12 +19,55 @@ use crate::server::project_resource_map::{
     ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig,
 };
 
-/// Error surfaced when an index handle fails to close cleanly. Concrete
-/// implementations decide what's "fatal" vs "logged" — the skeleton holds
-/// only the string form.
+/// Error surfaced when an index handle fails to open, commit, or close
+/// cleanly. Variants separate the failures a caller can sensibly retry
+/// (see [`IndexError::is_retryable`]) from terminal ones, and give the
+/// schema-incompatibility wipe gate in [`crate::server::tantivy_handle`] a
+/// typed source to match on instead of the whole rendered string.
 #[derive(Debug, thiserror::Error)]
-#[error("index error: {0}")]
-pub struct IndexError(pub String);
+pub enum IndexError {
+    /// The indexer task's mpsc receiver is gone — the send never landed.
+    #[error("index error: indexer channel closed")]
+    ChannelClosed,
+    /// The indexer task accepted the message then dropped the oneshot
+    /// sender without replying.
+    #[error("index error: indexer task dropped response sender")]
+    TaskDropped,
+    /// A `std::sync::Mutex` guarding a per-project map was poisoned.
+    #[error("index error: index map lock poisoned")]
+    LockPoisoned,
+    /// Write-ahead-log recovery failed while resolving a project.
+    #[error("index error: wal recovery: {0}")]
+    Wal(String),
+    /// A per-project coordinator supervisor failed to start.
+    #[error("index error: supervisor start failed: {0}")]
+    Supervisor(String),
+    /// Filesystem failure.
+    #[error("index error: io: {0}")]
+    Io(String),
+    /// A `tantivy` operation failed. The payload is tantivy's own rendering;
+    /// `is_schema_incompatible` matches `"schema error:"` inside it.
+    #[error("index error: tantivy: {0}")]
+    Tantivy(String),
+    /// Opening the tantivy `MmapDirectory` failed. Distinct from
+    /// [`IndexError::Tantivy`] because its payload embeds the directory
+    /// *path*, which must never be searched for schema keywords.
+    #[error("index error: tantivy directory: {0}")]
+    TantivyDirectory(String),
+    /// Everything else — sidecar/progress/manifest parse and write failures,
+    /// task joins, runtime construction.
+    #[error("index error: {0}")]
+    Other(String),
+}
+
+impl IndexError {
+    /// Is this failure worth retrying? Only the two channel-shaped failures
+    /// are: everything else is a terminal disk, schema, or parse fault that
+    /// a retry would reproduce.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::ChannelClosed | Self::TaskDropped)
+    }
+}
 
 /// Per-project search-index handle managed by [`ProjectIndexMap`].
 ///
@@ -98,6 +141,33 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
         F: FnOnce(&Path) -> Result<H, IndexError>,
     {
         self.inner.get_or_insert(project_root, open)
+    }
+
+    /// Look up the live handle for `project_root` without opening one.
+    ///
+    /// A hit is marked most-recently-used, exactly as [`Self::get_or_open`]
+    /// does. A miss returns `None` — and the caller must then open the handle
+    /// with the surrounding `index_map` mutex **released** and publish it via
+    /// [`Self::insert_or_adopt`] (AILAB-186). `TantivyIndexHandle::open` replays
+    /// the whole JSONL, commits, and allocates a 50 MB `IndexWriter`; running
+    /// that under the map lock stalled every other project's requests.
+    ///
+    /// [`TantivyIndexHandle::open`]: crate::server::TantivyIndexHandle::open
+    pub fn get_handle(&mut self, project_root: &Path) -> Option<&mut H> {
+        self.inner.get_mut(project_root)
+    }
+
+    /// Publish an already-opened `handle` for `project_root`, or adopt the
+    /// incumbent if another thread opened the same root first. Returns whichever
+    /// handle is now in the map.
+    ///
+    /// The incumbent wins and the loser is **closed**, not leaked and not
+    /// silently dropped: two live handles on one index directory means two
+    /// Tantivy `IndexWriter`s. See
+    /// [`ProjectResourceMap::insert_or_adopt`] for why the incumbent is the one
+    /// that has to survive.
+    pub fn insert_or_adopt(&mut self, project_root: &Path, handle: H) -> &mut H {
+        self.inner.insert_or_adopt(project_root, handle)
     }
 
     /// Walk all entries and close any whose `last_used()` is older than
@@ -297,6 +367,182 @@ mod tests {
         assert_eq!(log.closes(), 3);
     }
 
+    /// AILAB-186's decisive test: the open must be able to observe that the map
+    /// mutex is free while it runs.
+    ///
+    /// The negative control in the second half is what makes the first half mean
+    /// anything — it drives the *old* `get_or_open` shape through the identical
+    /// probe and shows it sees the mutex held. (`try_lock`, not `lock`: a std
+    /// `Mutex` is not reentrant, so `lock` here would deadlock rather than
+    /// report.)
+    #[test]
+    fn open_runs_without_map_lock_held() {
+        let log = TestEventLog::new();
+        let map: Arc<Mutex<ProjectIndexMap<TestIndexHandle>>> =
+            Arc::new(Mutex::new(ProjectIndexMap::with_defaults()));
+
+        // --- new shape: lookup, release, open, re-lock, publish.
+        let root = Path::new("/p/a");
+        {
+            let mut guard = map.lock().expect("map mutex");
+            assert!(guard.get_handle(root).is_none(), "cold map must miss");
+        }
+        // This closure stands in for `TantivyIndexHandle::open` at exactly the
+        // point `with_index_handle` calls it.
+        let open_probe = |p: &Path| {
+            let map_free = map.try_lock().is_ok();
+            (TestIndexHandle::open(p, log.clone()), map_free)
+        };
+        let (handle, free_during_open) = open_probe(root);
+        {
+            let mut guard = map.lock().expect("map mutex");
+            guard.insert_or_adopt(root, handle);
+        }
+
+        assert!(
+            free_during_open,
+            "the map mutex must be free while the handle is being opened"
+        );
+
+        // --- negative control: the same probe under today's `get_or_open`.
+        let mut held_under_get_or_open = None;
+        {
+            let mut guard = map.lock().expect("map mutex");
+            let _ = guard.get_or_open(Path::new("/p/b"), |p| {
+                held_under_get_or_open = Some(map.try_lock().is_ok());
+                Ok(TestIndexHandle::open(p, log.clone()))
+            });
+        }
+        assert_eq!(
+            held_under_get_or_open,
+            Some(false),
+            "control: `get_or_open` runs its opener inside the guard — if this \
+             ever reports the map free, the assertion above proves nothing"
+        );
+
+        assert_eq!(map.lock().expect("map mutex").len(), 2);
+        assert_eq!(log.opens(), 2);
+        assert_eq!(log.closes(), 0);
+    }
+
+    /// Two threads first-touch the same root. Both open (that is the race the
+    /// released lock permits); exactly one handle may live in the map, and the
+    /// loser must be **closed**, not leaked — two live handles on one index dir
+    /// means two Tantivy `IndexWriter`s.
+    #[test]
+    fn concurrent_first_touch_keeps_one_handle() {
+        let log = TestEventLog::new();
+        let map: Arc<Mutex<ProjectIndexMap<TestIndexHandle>>> =
+            Arc::new(Mutex::new(ProjectIndexMap::with_defaults()));
+        let root = PathBuf::from("/p/a");
+        // Both threads complete their lookup before either publishes, so both
+        // are guaranteed to miss. No thread short-circuits before the barrier,
+        // so it cannot deadlock.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let map = map.clone();
+                let log = log.clone();
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let hit = {
+                        let mut guard = map.lock().expect("map mutex");
+                        guard.get_handle(&root).is_some()
+                    };
+                    barrier.wait();
+                    let handle = TestIndexHandle::open(&root, log);
+                    let mut guard = map.lock().expect("map mutex");
+                    guard.insert_or_adopt(&root, handle);
+                    hit
+                })
+            })
+            .collect();
+
+        for t in threads {
+            assert!(!t.join().expect("thread panicked"), "both must miss");
+        }
+
+        assert_eq!(log.opens(), 2, "the barrier forces the both-open race");
+        assert_eq!(log.closes(), 1, "the losing handle must be closed");
+        assert_eq!(
+            map.lock().expect("map mutex").len(),
+            1,
+            "exactly one handle survives in the map"
+        );
+        assert_eq!(
+            log.events().last(),
+            Some(&TestEvent::Close(root)),
+            "and the close is of that root, not of some evicted neighbour"
+        );
+    }
+
+    /// AC #1: a slow open of project A must not block project B. Thread A parks
+    /// mid-"open" on a channel with no lock held; B has to get all the way
+    /// through its own lookup-open-publish before A is released.
+    #[test]
+    fn second_project_not_blocked_by_slow_open() {
+        let log = TestEventLog::new();
+        let map: Arc<Mutex<ProjectIndexMap<TestIndexHandle>>> =
+            Arc::new(Mutex::new(ProjectIndexMap::with_defaults()));
+        let (release_a_tx, release_a_rx) = std::sync::mpsc::channel::<()>();
+        let (a_is_opening_tx, a_is_opening_rx) = std::sync::mpsc::channel::<()>();
+
+        let a = {
+            let map = map.clone();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let root = Path::new("/p/a");
+                {
+                    let mut guard = map.lock().expect("map mutex");
+                    assert!(guard.get_handle(root).is_none());
+                }
+                a_is_opening_tx.send(()).expect("test receiver alive");
+                // The slow open. Lock released above, not re-taken until after.
+                release_a_rx.recv().expect("test sender alive");
+                let handle = TestIndexHandle::open(root, log);
+                let mut guard = map.lock().expect("map mutex");
+                guard.insert_or_adopt(root, handle);
+            })
+        };
+
+        a_is_opening_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("thread A never reached its open");
+
+        // A is parked inside its open right now. B must not be able to tell.
+        let (b_done_tx, b_done_rx) = std::sync::mpsc::channel::<()>();
+        let b = {
+            let map = map.clone();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let root = Path::new("/p/b");
+                {
+                    let mut guard = map.lock().expect("map mutex");
+                    assert!(guard.get_handle(root).is_none());
+                }
+                let handle = TestIndexHandle::open(root, log);
+                let mut guard = map.lock().expect("map mutex");
+                guard.insert_or_adopt(root, handle);
+                let _ = b_done_tx.send(());
+            })
+        };
+        // Timed, not a bare `join`: under the old shape B blocks on the map
+        // mutex for as long as A is parked, and this must fail rather than hang.
+        b_done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("project B blocked behind project A's open");
+        b.join().expect("thread B panicked");
+
+        release_a_tx.send(()).expect("thread A alive");
+        a.join().expect("thread A panicked");
+
+        assert_eq!(map.lock().expect("map mutex").len(), 2);
+        assert_eq!(log.opens(), 2);
+        assert_eq!(log.closes(), 0, "distinct roots never race");
+    }
+
     #[test]
     fn drop_closes_open_handles() {
         let log = TestEventLog::new();
@@ -307,5 +553,31 @@ mod tests {
             let _ = map.get_or_open(Path::new("/p/b"), &open).unwrap();
         }
         assert_eq!(log.closes(), 2, "Drop must close every open handle");
+    }
+
+    /// `is_retryable` is the whole point of splitting the enum: only the two
+    /// channel-shaped failures are worth a second attempt. A disk, tantivy, or
+    /// parse fault would reproduce, so retrying it is a hot loop, not a heal.
+    #[test]
+    fn is_retryable_covers_channel_failures_only() {
+        assert!(
+            IndexError::ChannelClosed.is_retryable(),
+            "a closed indexer channel is retryable"
+        );
+        assert!(
+            IndexError::TaskDropped.is_retryable(),
+            "a dropped response sender is retryable"
+        );
+
+        for terminal in [
+            IndexError::Tantivy("Schema error: 'x' not found".to_string()),
+            IndexError::Io("permission denied".to_string()),
+            IndexError::Other("parse index_progress.json: eof".to_string()),
+        ] {
+            assert!(
+                !terminal.is_retryable(),
+                "terminal failure must not be retryable: {terminal:?}"
+            );
+        }
     }
 }

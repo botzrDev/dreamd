@@ -7,15 +7,17 @@ Node shim for the [dreamd](https://github.com/botzrDev/dreamd) MCP server. Downl
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
 ```sh
-# 1. Scaffold .agent/ into your project
-npx -y dreamd-mcp init
+# 1. Scaffold .agent/ and wire your harness's MCP config
+npx -y dreamd-mcp setup
 
 # 2. Start a shared daemon (recommended when multiple agents write)
 npx -y dreamd-mcp watch
 
-# 3. Point Claude Code, Cursor, or any MCP-aware harness at the MCP server
+# 3. Reload the harness — it now spawns the MCP server itself
 npx -y dreamd-mcp
 ```
+
+`setup` prompts when it has a TTY; in scripts pass `--yes` with `--harness claude|cursor|both|none`. It writes each MCP config as 2-space pretty-printed JSON with a trailing newline and does **not** preserve your original formatting, so an existing `.mcp.json` / `.cursor/mcp.json` can come back reformatted — other MCP servers in the file are kept. `npx -y dreamd-mcp init` remains the scaffold-only primitive (store, no harness config), same as `setup --no-write-mcp`.
 
 > **Leave `npx dreamd-mcp` floating — don't pin.** On a fresh spawn, npx
 > re-resolves the `latest` dist-tag from the registry, so a floating config always
@@ -74,13 +76,16 @@ export DREAMD_BIN_ALLOW_UNVERIFIED=1
 npx -y dreamd-mcp
 ```
 
-> First run prompts once — press `y`, or use `npx -y dreamd-mcp`.
+> First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
 
 ## Uninstall / reset
 
 `dreamd-mcp` is never installed globally — it runs straight from the npx cache and
 downloads the native binary into a per-version cache. `npm uninstall -g dreamd-mcp`
 is therefore a no-op. There is no `dreamd reset --all` — use `dreamd uninstall`.
+
+> **Order:** run uninstall (or the manual cleanup steps) → remove the `dreamd`
+> block from your MCP client config → reload the client.
 
 ### Uninstall
 
@@ -102,8 +107,8 @@ Safe to run twice — a second run succeeds with nothing left to do.
 
 Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, and every
 project's `.agent/` memory store. To wipe a project's store entirely, see
-[Full fresh store](../../docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
-in the troubleshooting guide — delete `.agent/` and re-run `dreamd init`. That is
+[Full fresh store](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
+in the troubleshooting guide — delete `.agent/` and re-run `npx -y dreamd-mcp init`. That is
 destructive; back up first if the store has value.
 
 **Then remove the client config entry.** Delete the `dreamd` MCP server block from
@@ -119,13 +124,24 @@ npx -y dreamd-mcp update        # or: dreamd update
 ```
 
 Prints the current version, stops local servers, removes the socket, and clears
-`~/.cache/dreamd-mcp`, then instructs you to re-run `npx -y dreamd-mcp` — the
-floating npx spawn re-resolves `latest` and fetches the new binary.
+`~/.cache/dreamd-mcp`, then prints the **restart contract**:
+
+1. **Stop** local `dreamd mcp` / `dreamd watch` if running — `update` does this
+   for you on every non-dry run, and reports whether anything matched.
+2. **Reload your MCP harness** (Claude Code, Cursor, …) so it drops the old
+   binary. Until the harness reloads, it keeps the running process alive and you
+   stay on the old version.
+3. **Re-run `npx -y dreamd-mcp`** — the floating npx spawn re-resolves `latest`
+   and fetches the new binary. Keep the pin floating; a hard version pin never
+   picks up new releases.
+
+`update` never relaunches anything for you — no OS service, no auto-respawn.
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | Print the current version and planned actions; change nothing |
-| `--quiet` / `-q` | Suppress non-essential output |
+| `--dry-run` | Print the current version and the restart contract as a plan; change nothing |
+| `--restart` | Explicitly stop local `dreamd mcp` / `dreamd watch` and say so. Same stop that already runs by default — the flag makes the step loud, and is a no-op if nothing is running |
+| `--quiet` / `-q` | Suppress non-essential output. Version lines and a one-line reload + re-run reminder still print |
 
 `update` does not touch `~/.npm/_npx`. If you built from source with
 `cargo install --path crates/dreamd-cli`, clearing the cache does not replace that
@@ -138,11 +154,28 @@ the command above: perform the dreamd cleanup first, then remove the MCP client
 configuration entry and reload the client. If the client respawns dreamd while
 you work through these steps, finish removing the configuration entry before
 reloading it.
+**Use `npx -y dreamd-mcp uninstall` instead of the recipe below** — it does all
+four steps in one command. (`dreamd update` covers steps 1 and 3 only: it never
+unregisters the project and never touches `~/.npm/_npx`.)
+
+Both commands' stop step is scoped: they signal only the `dreamd mcp` /
+`dreamd watch` processes attributable to *this* `$HOME` and *this*
+`~/.cache/dreamd-mcp`. Anything serving another home, another sandbox, or
+another user on the box is left running and named on stderr. A hand-run `pkill`
+has no such scope.
+
+If you still want the steps by hand, run the cleanup below (stop processes,
+remove the socket, unregister the project, clear caches), **then** remove the
+`dreamd` block from your MCP client config and reload the client — the same
+order as [Uninstall](#uninstall):
 
 ```sh
-# 1. Stop processes + remove the socket
-pkill -f 'dreamd mcp' || true
-pkill -f 'dreamd watch' || true
+# 1. Stop your dreamd servers + remove the socket.
+#    `-u "$(id -u)"` keeps the signal inside your own account. Never run a bare
+#    `pkill -f` for these patterns: it is machine-global and SIGTERMs every
+#    matching process on the box, including other users' servers.
+pkill -u "$(id -u)" -f 'dreamd mcp'   || true
+pkill -u "$(id -u)" -f 'dreamd watch' || true
 rm -f ~/.agent/dreamd.sock
 
 # 2. Unregister the project from the registry (run from the project root)
@@ -171,6 +204,12 @@ reload the client. Until that entry is gone, a later client session can respawn
 > **Warning:** `rm -rf ~/.npm/_npx` deletes **every** npx-cached package on your
 > machine, not just dreamd. Use the scoped loop — or `dreamd uninstall`, which
 > scopes by default — unless you intend a full npx reset.
+
+> **Warning:** step 1 is still coarser than `dreamd uninstall`. `pkill -u` stops
+> at the user boundary, not the home boundary, so if you run dreamd under more
+> than one `$HOME` on the same account — a sandbox, a devcontainer, a test rig —
+> it stops those servers too. `dreamd uninstall` / `dreamd update` signal only
+> what belongs to the `$HOME` you run them under.
 
 ## License
 

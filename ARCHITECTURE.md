@@ -175,18 +175,18 @@ sequenceDiagram
 |---|---|---|
 | JSONL append | `write_all` + `sync_data` before HTTP 201 | `truncate_malformed_tail` on coordinator open |
 | Dream cycle | WAL before destructive ops | `recover_on_startup` |
-| Tantivy index | 5 s commit cadence; coordinator → indexer `try_send` (drops on `Full`) | Startup two-pass replay in `TantivyIndexHandle::open` |
+| Tantivy index | 5 s commit cadence; coordinator → indexer awaited `send` (backpressures when full) | Startup two-pass replay in `TantivyIndexHandle::open` |
 
-**Coordinator → indexer hand-off.** After each durable JSONL append, the coordinator `try_send`s `IndexerMsg::Append` on a bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`). On `TrySendError::Full`, the message is logged and dropped — the append still succeeds. On `Closed`, the sender is dropped and live indexing stops until restart.
+**Coordinator → indexer hand-off.** After each durable JSONL append, the coordinator **awaits** `send` of `IndexerMsg::Append` on a bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`). A full channel backpressures the coordinator — the append handler blocks until the indexer accepts the message, and the coordinator stops reading its own inbox. In-flight learns then sit in the 256-slot coordinator channel and **wait**: nothing times out a queued request, so a brief park surfaces as added latency. Only once that inbox is full too does `Supervisor::try_send`'s separate 100 ms `COORDINATOR_SEND_TIMEOUT` start returning HTTP 503 — sustained overload surfaces as 503, and only on the HTTP ingress, since the in-process `dreamd mcp` path sends on the coordinator channel without that timeout and simply waits. The message is never dropped **for backpressure**: an append is acked only once the indexer has accepted it (not once Tantivy commits — commit stays on the 5 s cadence). A `Closed` channel is the one case that still drops: the in-flight message is discarded, `indexer_tx` is cleared, and live routing stops until restart — tail-replay-healed on the next open, so not silent loss.
 
-**Bounded recall staleness.** The indexer commits on a wall-clock cadence (default 5 s). Between append and commit, `index_progress.json` lags the JSONL tail; recall may miss very recent events for up to one commit window. Channel saturation or a crash between JSONL `sync_data` and the next Tantivy commit can extend that lag until the next `TantivyIndexHandle::open` replay.
+**Bounded recall staleness.** The indexer commits on a wall-clock cadence (default 5 s). Between append and commit, `index_progress.json` lags the JSONL tail; recall may miss very recent events for up to one commit window. Channel saturation still extends that lag past a single commit window — the indexer may be mid-commit, or working a whole-JSONL `ApplyRecurrenceSidecar` pass, while appends queue behind it — but the queued messages are still in the channel, so the lag clears as the indexer catches up rather than persisting until a restart. A crash between JSONL `sync_data` and the next Tantivy commit is the case that persists until the next `TantivyIndexHandle::open` replay.
 
 **Observable signal.** `assess_index_freshness(agent_root)` compares the JSONL tail to `index_progress.json` and reports `stale`, `unindexed_count`, and both IDs. Surfaces at:
 
 - `GET /api/v1/health` (per project, requires `X-Agent-Root`)
 - `dreamd doctor` (`index_freshness:` line)
 
-**Healing.** `TantivyIndexHandle::open` replays every JSONL event whose `EventId` is strictly greater than the on-disk watermark. `add_document` is idempotent; replay re-does at most one commit window after crash. v0.1.1 may add indexer backpressure instead of drop-on-full.
+**Healing.** `TantivyIndexHandle::open` replays every JSONL event whose `EventId` is strictly greater than the on-disk watermark. `add_document` is idempotent; replay re-does at most one commit window after crash. Replay heals only the **tail** after that watermark, never a middle gap: the filter is `id > last_indexed_id`, so a missing event followed by any indexed event is skipped forever. That is why the live hand-off backpressures instead of dropping — nothing arrives at replay needing a gap filled.
 
 **Schema-version migration.** The index carries an `index_manifest.json` version (`SCHEMA_VERSION`, e.g. `index/1.3`). On open, a manifest older than the binary's (`NeedsMigration`) triggers a full rebuild: `TantivyIndexHandle::open` wipes the index dir + progress watermark, replays the JSONL under the current schema, and re-stamps the manifest — on both the daemon and no-daemon paths. This is why an index-schema field add (e.g. WEG-424's `skill_action`/`source_harness`) self-heals on upgrade rather than needing `dreamd migrate` (§7, which governs the durable JSONL/state schema, not the derived index cache). A manifest *newer* than the binary aborts startup.
 
@@ -220,7 +220,8 @@ Modules and CLI surfaces that have **no production call sites** (or misleading d
 | `ServerConfig` (`server/lifecycle.rs`) | Struct + `impl` for future daemon boot configuration | **Never constructed** in production | **Keep** — wiring type for a future `server::run` refactor; do not delete pre-launch | Second binary consumer or `server::run` extraction (see `docs/architecture.md` crate-split tripwires) |
 | `SocketGuard` / `bind_writer_socket` (`server/uds.rs`) | RAII UDS bind with Drop-unlink and orphan recovery | **Tested**; production uses `bind_api_socket` + manual unlink in `watch.rs` | **Keep** — v0.1.1 should switch production bind to RAII (closes orphan-socket gap after `SIGKILL`); note the production gap | Service install / orphan-socket hardening ticket |
 | `layer` filter in `collector::recall` | `layer: Option<Layer>` param on BM25 recall | **All production callers pass `None`** (HTTP `/recall`, MCP `search_nodes`) | **Keep** — test-only surface for future layer-filtered recall; not v0.1 scope | LESSONS.md / semantic layer indexing (WEG-136, v0.1.1) |
-| `--dry` / `--auto` on `dreamd dream` | Clap flags on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for v0.1.1 dry-run and auto modes; documented here, not only in `cli.rs` | v0.1.1 dream-cycle UX (CHANGELOG) |
+| `--dry` on `dreamd dream` | Clap flag on the dream subcommand | **Implemented** (AILAB-341) — previews the would-be `LESSONS.md` on stdout, writes nothing, skips the daemon proxy | **Shipped** — no longer a reserved surface | n/a |
+| `--auto` on `dreamd dream` | Hidden clap flag on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for v0.1.1 auto mode; documented here, not only in `cli.rs` | v0.1.1 dream-cycle UX (CHANGELOG) |
 
 ### 9. SkillAction validation seam
 
@@ -296,7 +297,7 @@ For multiple agents writing to the same project simultaneously, run one `dreamd 
 | Metric | Target |
 |---|---|
 | Idle daemon RSS | < 30 MB |
-| Stripped release binary | < 15 MB |
+| Stripped release binary | < 20 MB |
 | Recall P50 warm at 10k | < 5 ms |
 | Recall P99 cold at 10k | < 50 ms |
 

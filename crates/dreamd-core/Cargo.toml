@@ -32,7 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 ulid = "1"
-lru = "0.16"
+lru = "0.18.2"
 # WEG-49 (DR-210) startup manifest gate emits structured warn! lines for
 # Absent / NeedsMigration outcomes. Per-crate only — no workspace promotion
 # until a second consumer appears (WEG-41-A drift catalog entry).
@@ -84,7 +84,7 @@ schemars = "1"
 regex = "1"
 # WEG-63 / DR-311 — autobiography commit on dream-cycle completion.
 # git2 wraps libgit2 (C); adds ~1-2MB to the stripped binary. WEG-54
-# (DR-809 binary size CI gate, 15MB) is the upper bound; current binary
+# (DR-809 binary size CI gate, 20MB after AILAB-204) is the upper bound; current binary
 # is 839KB stripped, so the addition is comfortably under.
 git2 = "0.21"
 # WEG-72 / DR-407 — SO_PEERCRED middleware. `serve_uds` drives hyper-util's
@@ -100,6 +100,25 @@ hyper-util = { version = "0.1", features = ["server", "http1", "http2"] }
 hyper = { version = "1", features = ["client", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
+# AILAB-204 / DR-304 — LLM client for the dream cycle's lesson composition.
+# `MIT OR Apache-2.0`; the production backend lives in `llm::GenaiBackend` and is
+# the ONLY module that touches this crate. Pinned to "0.6" (resolved 0.6.5) —
+# 0.7 is still pre-release. The 30s per-attempt timeout is genai's own
+# `WebConfig::with_timeout`, so no extra HTTP/timeout crate is needed.
+#
+# Transitive note: genai -> reqwest -> rustls-platform-verifier -> webpki-root-certs
+# is CDLA-Permissive-2.0, which needs the per-crate `deny.toml` exception added
+# with this ticket (permissive *data* license on the Mozilla CA bundle; reviewed).
+genai = "0.6"
+# AILAB-196 / DR-307 — pre-call token estimator behind the `cost_cap_usd` gate.
+# `llm::estimate_prompt_cost` counts the composition prompt BEFORE the HTTP call
+# so an over-cap cycle degrades to the deterministic body instead of billing for
+# it. The `cl100k_base` encoding is compiled in via `include_str!`, so counting
+# is pure CPU with no network at run time — deliberately no `async-openai`
+# feature (that one pulls an HTTP client for a remote count we never make) and
+# no `dhat-heap`; `default = []`, so the bare dep is already the minimal set.
+# MIT, already in the global allow list — `deny.toml` needs no exception.
+tiktoken-rs = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

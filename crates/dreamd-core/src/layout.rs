@@ -227,6 +227,17 @@ impl DaemonHome {
         self.home.join("registry.toml")
     }
 
+    /// `~/.agent/registry.toml.lock` — flock target that serializes the
+    /// registry read-modify-write shared by `dreamd init` and
+    /// `dreamd ... uninstall` (AILAB-161). Held via
+    /// [`io::lock_exclusive`](crate::io::lock_exclusive); never unlinked,
+    /// because `flock` is advisory and keyed on the open file description, so
+    /// removing the path would let a writer holding the old inode run
+    /// concurrently with one that re-created it.
+    pub fn registry_lock(&self) -> PathBuf {
+        self.home.join("registry.toml.lock")
+    }
+
     /// `~/.agent/auth.json` — bearer token for the Windows TCP fallback.
     pub fn auth_json(&self) -> PathBuf {
         self.home.join("auth.json")

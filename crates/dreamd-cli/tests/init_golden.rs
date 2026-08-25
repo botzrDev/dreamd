@@ -30,9 +30,12 @@ fn dreamd_bin() -> &'static str {
 fn first_run_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
-    // WEG-32: daemon HOME, separate from the project dir. init_tracing creates
-    // ~/.agent/dreamd.log at startup; sharing tmp would pre-create the project
-    // .agent/ and make init report "already initialized".
+    // Daemon HOME, separate from the project dir. `init` registers the project
+    // by writing ~/.agent/registry.toml (commands::init::register_project), so
+    // sharing tmp would pre-create the project .agent/ and make init report
+    // "already initialized". (Pre-AILAB-184 init_tracing also created
+    // ~/.agent/dreamd.log here; it no longer does — one-shots are console-only
+    // — but the registry write keeps this separation load-bearing.)
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
@@ -94,7 +97,7 @@ fn first_run_matches_golden() {
 fn rerun_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
-    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    // Daemon HOME, separate from the project dir (see first_run_matches_golden).
     let home = tempfile::tempdir().unwrap();
 
     let first = Command::new(dreamd_bin())
@@ -135,7 +138,7 @@ fn rerun_matches_golden() {
 fn quiet_first_run_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
-    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    // Daemon HOME, separate from the project dir (see first_run_matches_golden).
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
@@ -171,7 +174,7 @@ fn quiet_first_run_matches_golden() {
 fn quiet_rerun_matches_golden() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
-    // WEG-32: daemon HOME, separate from the project dir (see first_run_matches_golden).
+    // Daemon HOME, separate from the project dir (see first_run_matches_golden).
     let home = tempfile::tempdir().unwrap();
 
     let first = Command::new(dreamd_bin())
@@ -204,8 +207,12 @@ fn quiet_rerun_matches_golden() {
 fn no_project_root_fails_and_skips_scaffold() {
     let tmp = tempfile::tempdir().unwrap();
     // intentionally no .git / Cargo.toml / package.json / pyproject.toml
-    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
-    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    // Daemon HOME, separate from the project dir, so anything this invocation
+    // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
+    // Since AILAB-184 nothing on this path actually does — init bails at
+    // NoProjectRoot before the registry write, and one-shots no longer open
+    // ~/.agent/dreamd.log — so the split is now defensive, matching the rest of
+    // the suite rather than propping up this assertion on its own.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())

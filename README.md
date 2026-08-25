@@ -3,29 +3,29 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/v0.1-targeting%20Aug%209-orange.svg)](#status)
+[![Status](https://img.shields.io/badge/v0.1.0-released-brightgreen.svg)](#status)
 
 **The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
-Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MCP-aware harnesses share it. What one agent learns, the next already knows. You can `cat`, `grep`, `git diff`, and hand-edit every byte.
+Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MCP-aware harnesses share it. What one agent learns, the next already knows. You can `cat`, `grep`, and `git diff` every byte. Durable appends go through MCP / the daemon so the writer stays single-writer.
 
 This is not "another memory product." It is a storage-model wedge: the filesystem is the source of truth, and the MCP tools (`search_nodes` / `append_node`) are a thin interface over those files.
 
 **Open core:** Apache-2.0 core today, self-hosted only. Premium features may ship later. Do not read this as free-forever for everything.
 
 ```bash
-npx -y dreamd-mcp init    # scaffold .agent/
-npx -y dreamd-mcp         # MCP server (stdio)
+npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
+npx -y dreamd-mcp         # MCP server (stdio) — what the harness spawns
 ```
 
-> First run prompts once. Press `y`, or keep using `npx -y dreamd-mcp`.
+> First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
 
 ---
 
 ## The moment it earns its name
 
 ```text
-~/project $ npx -y dreamd-mcp init
+~/project $ npx -y dreamd-mcp setup
 
 # Claude Code, Tuesday:
 you   > axum keeps blowing up when I unwrap in route handlers
@@ -47,11 +47,13 @@ No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
 ### npm (recommended)
 
 ```bash
-npx -y dreamd-mcp init
-npx -y dreamd-mcp
+npx -y dreamd-mcp setup   # scaffold .agent/ + write the harness MCP config
+npx -y dreamd-mcp         # MCP server (stdio) — your harness spawns this
 ```
 
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
+
+`setup` prompts when it has a TTY. In scripts and non-interactive shells, pass `--yes --harness claude|cursor|both` (`--harness none` or `--no-write-mcp` scaffolds without touching any MCP config).
 
 ### Cargo / from source
 
@@ -71,21 +73,22 @@ If `~/your-project` is a brand-new folder, run `git init` first (or make sure it
 
 ```bash
 cd ~/your-project
-npx -y dreamd-mcp init
+npx -y dreamd-mcp setup
 
-# Terminal 1: shared daemon (recommended when several agents write)
-dreamd watch
-
-# Terminal 2: MCP server for your harness
-npx -y dreamd-mcp
+# Optional: shared daemon (recommended when several agents write)
+npx -y dreamd-mcp watch
 ```
+
+Reload your harness. `setup` already wired the dreamd MCP server, so the harness spawns `npx -y dreamd-mcp` itself — no config to copy by hand.
 
 Ask the agent to search memory for something you just learned. It calls `search_nodes` and recalls prior context.
 
 ```bash
 cat .agent/episodic/AGENT_LEARNINGS.jsonl
-dreamd doctor
+npx -y dreamd-mcp doctor
 ```
+
+The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` if you want the `dreamd` binary.
 
 Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md)
 
@@ -100,7 +103,7 @@ Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
-`dreamd init` is idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `dreamd uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `dreamd init --uninstall-project` unregisters the current project and touches nothing else.
+`npx -y dreamd-mcp setup` (or `dreamd setup` after a cargo install) scaffolds the store by calling `init`, then writes the harness MCP config. `init` is the scaffold primitive and still works on its own when you want the store without touching any MCP config. Both are idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `npx -y dreamd-mcp init --uninstall-project` unregisters the current project and touches nothing else.
 
 ---
 
@@ -136,9 +139,9 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 | When | What |
 |---|---|
-| **v0.1** (~2026-08-09) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
+| **v0.1.0** (2026-08-05) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
 | **v0.1.1** | Windows lifecycle, semantic / embedding recall, LLM-assisted dream cycle (not claimed in v0.1) |
-| **Oct 2026** | State-Drift benchmark publish (dreamd is one row; conflict of interest disclosed) |
+| **Oct 2026** | WasTrue benchmark publish (dreamd is one row; conflict of interest disclosed) |
 
 v0.1.1 features are intentionally not implemented or documented as shipped in v0.1 code.
 
@@ -166,19 +169,19 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v0.1 targeting 2026-08-09.** Daemon commands available today: `init`, `dream`, `doctor`, `mcp`, `watch`, `reset workspace`, `version`. npm package: `dreamd-mcp` (floating: `npx -y dreamd-mcp`). Linux and macOS.
+**v0.1.0 is out.** npm package `dreamd-mcp` has held the `latest` dist-tag since 2026-08-06. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). Linux and macOS.
 
 | Layer | Status |
 |---|---|
 | `SPEC.md` v0.1 | Shipped |
-| Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | In progress |
+| Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | Shipped |
 | MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped on npm |
-| CI / cross-platform matrix | Lint, test, build, binary-size gate, DCO |
+| CI / cross-platform matrix | Lint, test, build, binary-size gate, DCO (Windows jobs are informational) |
 | Conformance | Reference-impl alpha suites (`scripts/alpha/`); no formal certification in v0.1 |
 
 ---
 
-## State-Drift benchmark (Oct 2026)
+## WasTrue benchmark (Oct 2026)
 
 A separate, reproducible eval measuring whether memory systems correctly update superseded facts. dreamd is one row in the table, published regardless of placement. Conflict of interest is disclosed; configs use each maintainer's documented defaults; raw outputs are committed for audit. Methodology: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
 

@@ -29,7 +29,7 @@
 //! supervisor opens a `TantivyIndexHandle`, extracts its
 //! `mpsc::Sender<IndexerMsg>` via [`TantivyIndexHandle::sender`], and threads
 //! that sender into `MemoryCoordinator::open` so each successful append can
-//! `try_send` an [`IndexerMsg::Append`]. The coordinator never holds the
+//! `send` (awaited) an [`IndexerMsg::Append`]. The coordinator never holds the
 //! `IndexWriter`; the writer lives entirely on the indexer task. This keeps
 //! each actor with exactly one mutable resource.
 
@@ -69,9 +69,19 @@ pub const WRITER_HEAP_BYTES: usize = 50_000_000;
 
 /// Default mpsc capacity for the coordinator → indexer hand-off. Sized so a
 /// 5-second commit window plus replay headroom fits without blocking the
-/// coordinator. On `TrySendError::Full`, the coordinator logs `warn!` and
-/// drops the indexer update — the JSONL is the source of truth, so dropping
-/// an index message is recoverable by the next startup replay.
+/// coordinator. The coordinator **awaits** `send` on this channel: once the
+/// buffer fills, the append handler blocks and the actor stops reading its own
+/// inbox, so in-flight learns queue in the 256-slot coordinator channel and
+/// simply wait — nothing times out a queued request, so a brief park surfaces as
+/// latency. Only once that inbox is also full does `Supervisor::try_send`'s
+/// 100 ms `COORDINATOR_SEND_TIMEOUT` start returning HTTP 503, and that is the
+/// HTTP ingress alone: the in-process `dreamd mcp` path sends on the coordinator
+/// channel without that timeout, so it waits rather than 503ing.
+///
+/// Nothing is dropped — a shed `IndexerMsg::Append` would NOT be recovered by
+/// startup replay, which filters `id > last_indexed_id` (a watermark, not a
+/// contiguous prefix), so a gap followed by any indexed event is skipped
+/// forever.
 pub(crate) const DEFAULT_INDEXER_CHANNEL_CAPACITY: usize = 1024;
 
 /// Relative filename for the indexer's commit watermark, joined under the
@@ -82,15 +92,25 @@ pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 /// Relative directory holding the per-project Tantivy index segments.
 pub const INDEX_DIR_NAME: &str = "index";
 
+/// Relative filename for the semantic pass's report of lessons it could not
+/// index, joined under the project's `.dreamd/` directory. Written by
+/// [`index_semantic_lessons`], read by `dreamd doctor` (AILAB-700).
+pub const SEMANTIC_PASS_FILENAME: &str = "semantic_pass.json";
+
 /// v0.1 index-vs-JSONL contract surface (WEG-42 / DR-202).
 ///
 /// Compares the JSONL tail against `index_progress.json`. `stale == true` when
 /// the episodic log has committed events the index watermark has not caught up
 /// to yet — including the normal ≤[`DEFAULT_COMMIT_CADENCE`] window after a
-/// live append, channel-saturation drops (`try_send` → `Full`), or a crash
-/// between JSONL `sync_data` and the next Tantivy commit. JSONL durability is
-/// WAL-backed; index freshness is best-effort and heals on the next
-/// `TantivyIndexHandle::open` replay (or when the indexer commits the backlog).
+/// live append, a full indexer channel, or a crash between JSONL `sync_data`
+/// and the next Tantivy commit. A full channel still reads as `stale` — the
+/// event is durable in the JSONL and not yet committed, which is exactly what
+/// this compares. What changed is that it no longer *persists*: because the
+/// coordinator awaits its `send`, the message is queued rather than dropped, so
+/// the staleness clears as the indexer drains the backlog instead of surviving
+/// until a restart. JSONL durability is WAL-backed; index freshness is
+/// best-effort and heals when the indexer commits the backlog (or, after a
+/// crash, on the next `TantivyIndexHandle::open` replay).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IndexFreshness {
     /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
@@ -131,6 +151,47 @@ pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, 
         last_indexed_id: progress.last_indexed_id,
         unindexed_count,
     })
+}
+
+/// What the last semantic (LESSONS.md) pass could not index (AILAB-700).
+///
+/// Lives at `<agent_root>/.agent/.dreamd/semantic_pass.json`. It exists so
+/// `dreamd doctor` can report un-indexable lessons without opening the index
+/// and without re-resolving LESSONS.md against the episodic log — a second
+/// parser for the same rule is exactly the drift this avoids.
+///
+/// Deliberately carries **no timestamp**: `dream` reads wall-clock, which would
+/// make the file non-deterministic for no operator benefit. Doctor reports the
+/// current state of the store, not when that state was measured.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticPassRecord {
+    /// `lesson.id`s dropped because the exemplar was not in the episodic log.
+    pub skipped_lesson_ids: Vec<String>,
+    /// The clustering key of the LESSONS.md those lessons came from.
+    pub cluster_key: String,
+    /// Lessons successfully added as `layer=semantic` documents.
+    pub indexed: usize,
+}
+
+/// Read the semantic pass report for `agent_root` without opening Tantivy.
+///
+/// `Ok(None)` when the file is absent — a store that has never dreamed has no
+/// report, which is a fact and not a fault. Same shape as
+/// [`assess_index_freshness`]: `dreamd doctor` is most valuable when the daemon
+/// is down, so this path opens no index and takes no lock.
+pub fn read_semantic_pass_record(
+    agent_root: &AgentRoot,
+) -> Result<Option<SemanticPassRecord>, IndexError> {
+    let path = agent_root.dreamd_dir().join(SEMANTIC_PASS_FILENAME);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| IndexError::Other(format!("parse {SEMANTIC_PASS_FILENAME}: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(IndexError::Other(format!(
+            "read {SEMANTIC_PASS_FILENAME}: {e}"
+        ))),
+    }
 }
 
 /// Crash-recovery watermark recording the daemon-assigned `EventId` of the
@@ -179,6 +240,15 @@ pub enum IndexerMsg {
     /// Does not touch the JSONL — JSONL rewrite is handled by `run_decay_pruner`.
     PruneDecayedEvents {
         event_ids: Vec<EventId>,
+        response: oneshot::Sender<Result<(), IndexError>>,
+    },
+    /// Dream-cycle hook (DR-211 / AILAB-205): re-read `semantic/LESSONS.md`,
+    /// replace every `layer=semantic` document with the file's current lesson
+    /// set, then commit. Lets a running daemon pick up the lessons consolidation
+    /// just wrote without waiting for a restart. Never touches episodic
+    /// documents or the episodic watermark. Resolves after the commit completes.
+    IndexSemanticLessons {
+        agent_root: AgentRoot,
         response: oneshot::Sender<Result<(), IndexError>>,
     },
 }
@@ -237,7 +307,7 @@ impl TantivyIndexHandle {
                 std::fs::create_dir_all(&index_dir).map_err(io_to_index)?;
             }
             Err(ManifestVersionError::TooNew { manifest, binary }) => {
-                return Err(IndexError(format!(
+                return Err(IndexError::Other(format!(
                     "index schema {manifest:?} is newer than binary {binary:?}; \
                      upgrade dreamd, or wipe the index dir to rebuild under this binary"
                 )));
@@ -264,14 +334,32 @@ impl TantivyIndexHandle {
             add_document(&mut writer, &fields, event, count)?;
             latest_committed = Some(event.id.as_str().to_owned());
         }
-        if !to_index.is_empty() {
+        // DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same rebuild,
+        // after the episodic replay and before the single commit below. One
+        // insertion point covers three recovery paths — cold start, the
+        // schema-migration rebuild above, and `dreamd doctor --repair` (which
+        // reopens through this same function, so `doctor.rs` needs no change).
+        let semantic = index_semantic_lessons(&mut writer, &fields, agent_root)?;
+
+        // The semantic pass has its own reason to commit: after a crash between
+        // the LESSONS.md write and the Tantivy commit, the episodic watermark is
+        // already current, so `to_index` is empty and the old
+        // `!to_index.is_empty()` gate would have skipped the commit and dropped
+        // the replayed lessons on the floor.
+        let needs_commit = !to_index.is_empty() || semantic.touched;
+        if needs_commit {
             writer.commit().map_err(tantivy_to_index)?;
-            write_progress(
-                &progress_path,
-                &IndexProgress {
-                    last_indexed_id: latest_committed.clone(),
-                },
-            )?;
+            // Watermark tracks the episodic log only. The semantic pass is a
+            // wholesale delete-then-add and is idempotent by construction, so it
+            // deliberately has no watermark of its own (AILAB-205 §3 step 3).
+            if !to_index.is_empty() {
+                write_progress(
+                    &progress_path,
+                    &IndexProgress {
+                        last_indexed_id: latest_committed.clone(),
+                    },
+                )?;
+            }
             // The reader was created before this replay commit and uses the
             // default `ReloadPolicy::OnCommitWithDelay`, so the first query
             // after open would otherwise see a stale (pre-replay) view until
@@ -343,9 +431,8 @@ impl TantivyIndexHandle {
                 response: tx,
             })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
@@ -360,9 +447,52 @@ impl TantivyIndexHandle {
                 response: tx,
             })
             .await
-            .map_err(|_| IndexError("indexer channel closed".to_string()))?;
-        rx.await
-            .map_err(|_| IndexError("indexer task dropped response sender".to_string()))?
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
+    }
+
+    /// Re-index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
+    /// documents (DR-211 / AILAB-205). Called by the dream cycle after
+    /// consolidation rewrites the file so a live daemon serves the new lessons
+    /// without a restart.
+    ///
+    /// Idempotent: the pass deletes every semantic document and re-adds the
+    /// file's current lesson set, so running it twice is indistinguishable from
+    /// running it once. A missing LESSONS.md is a silent no-op.
+    pub async fn index_semantic_lessons(&self, agent_root: AgentRoot) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.indexer
+            .sender()
+            .send(IndexerMsg::IndexSemanticLessons {
+                agent_root,
+                response: tx,
+            })
+            .await
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
+    }
+
+    /// Force a Tantivy commit + progress-file update and wait for it.
+    ///
+    /// Promoted from the test-only helper for AILAB-162: `run_watch`'s
+    /// shutdown drain prefers [`Self::shutdown`], but that consumes `self` and
+    /// the primary handle is an `Arc` shared with `AppState`. When
+    /// `Arc::try_unwrap` cannot recover sole ownership, this is the drain — it
+    /// rides the existing [`IndexerMsg::Flush`] path, so there is exactly one
+    /// commit implementation (`commit_and_persist`) and no second, shutdown-only
+    /// code path that could drift from it.
+    ///
+    /// Unlike `shutdown` it leaves the indexer task running. That is the point:
+    /// a shared handle has other owners, and the process is about to exit
+    /// anyway — what must not be lost is the batch already accumulated in the
+    /// writer, which this commits.
+    pub(crate) async fn flush(&self) -> Result<(), IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender()
+            .send(IndexerMsg::Flush { ack: tx })
+            .await
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Async drain path. Drops the indexer sender, awaits task completion
@@ -373,7 +503,7 @@ impl TantivyIndexHandle {
         let IndexerHandle { tx, join } = self.indexer;
         drop(tx);
         join.await
-            .map_err(|e| IndexError(format!("indexer task join: {e}")))?;
+            .map_err(|e| IndexError::Other(format!("indexer task join: {e}")))?;
         Ok(())
     }
 }
@@ -405,7 +535,7 @@ impl IndexHandle for TantivyIndexHandle {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|e| IndexError(format!("build runtime for close: {e}")))?;
+                    .map_err(|e| IndexError::Other(format!("build runtime for close: {e}")))?;
                 rt.block_on(async move {
                     let _ = join.await;
                 });
@@ -468,6 +598,19 @@ async fn run_indexer(
                             &fields,
                             &agent_root,
                         );
+                        let _ = response.send(result);
+                    }
+                    Some(IndexerMsg::IndexSemanticLessons { agent_root, response }) => {
+                        let result = (|| -> Result<(), IndexError> {
+                            let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root)?;
+                            // No delete/add was issued (unreadable or malformed
+                            // LESSONS.md) — nothing to commit. A *missing* file
+                            // does issue a delete: it retires the layer.
+                            if outcome.touched {
+                                writer.commit().map_err(tantivy_to_index)?;
+                            }
+                            Ok(())
+                        })();
                         let _ = response.send(result);
                     }
                     Some(IndexerMsg::PruneDecayedEvents { event_ids, response }) => {
@@ -552,9 +695,9 @@ fn apply_recurrence_sidecar_inner(
     // 1. Read and parse the sidecar.
     let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
     let sidecar_json = std::fs::read_to_string(&sidecar_path)
-        .map_err(|e| IndexError(format!("read recurrence_counts.json: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("read recurrence_counts.json: {e}")))?;
     let sidecar: RecurrenceSidecar = serde_json::from_str(&sidecar_json)
-        .map_err(|e| IndexError(format!("parse recurrence_counts.json: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("parse recurrence_counts.json: {e}")))?;
 
     // 2. Walk the JSONL (shared episodic scan, WEG-378) and bucket by skill_action.
     let jsonl_path = agent_root.episodic_jsonl();
@@ -596,6 +739,245 @@ fn apply_recurrence_sidecar_inner(
     Ok(())
 }
 
+/// What one semantic (LESSONS.md) indexing pass did.
+///
+/// `touched` records whether the pass issued any delete/add operation, so the
+/// caller knows a commit is required. It is `true` from the wholesale delete
+/// onward — even when every lesson was skipped, because the delete alone
+/// changes the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SemanticPassOutcome {
+    /// Lessons added as `layer=semantic` documents.
+    pub(crate) indexed: usize,
+    /// Lessons dropped because their exemplar event was not in the episodic log.
+    pub(crate) skipped: usize,
+    /// `true` once the pass has mutated the writer (delete and/or add).
+    pub(crate) touched: bool,
+}
+
+/// Identity token for a lesson document: the exemplar's id in a distinct
+/// namespace (DR-211 / AILAB-205).
+///
+/// Load-bearing, not cosmetic. Both existing delete sites key on the raw
+/// `event_id` term — the decay pruner and the recurrence sidecar — so a lesson
+/// carrying its exemplar's id verbatim would be deleted alongside the event,
+/// and the sidecar would re-add only the episodic document. A separate
+/// namespace keeps both paths correct without touching either. It also keeps
+/// lessons out of decay entirely: the pruner's candidate ids come from the
+/// JSONL, which holds no `lsn_` records.
+fn semantic_event_id(lesson_id: &str) -> String {
+    format!("lsn_{lesson_id}")
+}
+
+/// Count the episodic events belonging to `cluster_key`, using the same prefix
+/// semantics `consolidation` promotes with.
+///
+/// `compute_promoted_clusters` promotes at the *deepest* prefix that met the
+/// threshold, so member events routinely carry longer leaf keys — three events
+/// under `rust::eh::unwrap` and two under `rust::eh::expect` can promote as
+/// `rust::eh`. An exact-match count would report 0 members for exactly those
+/// clusters, and `recurrence` feeds the salience product.
+fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
+    let child_prefix = format!("{cluster_key}::");
+    events
+        .iter()
+        .filter(|ev| ev.skill_action == cluster_key || ev.skill_action.starts_with(&child_prefix))
+        .count() as u64
+}
+
+/// Index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
+/// documents (DR-211 / AILAB-205).
+///
+/// Wholesale replace: delete every semantic document, then add the file's
+/// current lesson set. LESSONS.md is rewritten in full each dream cycle, so the
+/// index mirrors that — a lesson dropped between cycles disappears, and a
+/// cluster that stops recurring retires structurally with no expiry logic.
+///
+/// Does **not** commit. The caller owns the commit so this pass can share the
+/// episodic replay's single commit inside [`TantivyIndexHandle::open`].
+///
+/// Exemplar lookup is the live episodic log only; a miss skips the lesson with
+/// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `apply_pin_unpin`
+/// pins every cited exemplar and `should_decay` short-circuits on `pinned`, so
+/// a cited exemplar does not age out). A lesson is never indexed with defaulted
+/// pain/importance: that document would score exactly 0.0 and could never rank.
+///
+/// Tolerate-and-report, in the posture `episodic::read_all` uses — but the two
+/// failure modes are deliberately **not** symmetric (AILAB-699):
+///
+/// * **Missing** LESSONS.md is a *fact*, not a failure: either the store has
+///   never dreamed, or a no-promotion cycle retired the file. Both mean zero
+///   lessons, so the pass deletes the semantic layer and reports `touched`,
+///   silently and with no log line.
+/// * **Unreadable or malformed** LESSONS.md is a failure of unknown extent: the
+///   lessons may still be there behind a torn write. It logs at `warn!` and
+///   returns untouched, so a corrupt file can never wipe the layer. The parse
+///   deliberately happens **before** the delete for the same reason.
+///
+/// Every path that resolves lessons also writes a [`SemanticPassRecord`] to
+/// `.dreamd/semantic_pass.json` so `dreamd doctor` can name the skipped lessons
+/// (AILAB-700). The write lives here, not at the call sites, because both
+/// consumers — the [`TantivyIndexHandle::open`] rebuild and the indexer task's
+/// `IndexSemanticLessons` handler — go through this one function. The malformed
+/// path deliberately writes nothing: it did not touch the index, so the prior
+/// record still describes it.
+fn index_semantic_lessons(
+    writer: &mut IndexWriter<TantivyDocument>,
+    fields: &SchemaFields,
+    agent_root: &AgentRoot,
+) -> Result<SemanticPassOutcome, IndexError> {
+    let lessons_path = agent_root.lessons_md();
+    let lessons_file = match crate::lessons::read_lessons_file(&lessons_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // An absent LESSONS.md means "zero lessons", not "skip the pass"
+            // (AILAB-699). A no-promotion dream cycle *unlinks* the file — that
+            // unlink is the whole retirement mechanism, and without this delete
+            // the retired lesson keeps answering recall out of the live index
+            // until the daemon restarts. Same STRING exact-match term as the
+            // wholesale replace below, so it hits every semantic document and
+            // zero episodic ones.
+            //
+            // `touched: true` is what makes the caller commit. On a store that
+            // has never dreamed this costs one delete of an empty layer plus a
+            // commit; that is the accepted price of not needing a "did a cycle
+            // just remove this file?" signal threaded down here.
+            let term = tantivy::Term::from_field_text(fields.layer, Layer::Semantic.as_str());
+            writer.delete_term(term);
+            // A retired file has no un-indexable lessons, so clear any prior
+            // report (AILAB-700) — otherwise doctor keeps naming lessons that
+            // no longer exist.
+            write_semantic_pass_record(agent_root, &SemanticPassRecord::default());
+            return Ok(SemanticPassOutcome {
+                indexed: 0,
+                skipped: 0,
+                touched: true,
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %lessons_path.display(),
+                error = %e,
+                "LESSONS.md unreadable; leaving the index untouched"
+            );
+            // Deliberately no report write: the index was not touched, so the
+            // prior record is still the truth about what is in it.
+            return Ok(SemanticPassOutcome::default());
+        }
+    };
+
+    // Only read the episodic log once we know there is a LESSONS.md to index,
+    // so a project that has never dreamed pays no extra I/O here.
+    let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
+    let exemplars: HashMap<&str, &AgentLearning> =
+        events.iter().map(|ev| (ev.id.as_str(), ev)).collect();
+    let member_count = cluster_member_count(&events, &lessons_file.cluster_key);
+
+    // `layer` is STRING (raw-tokenized), so this exact-match term hits every
+    // semantic document and zero episodic ones. Deleting by the file's
+    // clustering key instead would take every episodic event in it as well.
+    let term = tantivy::Term::from_field_text(fields.layer, Layer::Semantic.as_str());
+    writer.delete_term(term);
+
+    let mut outcome = SemanticPassOutcome {
+        indexed: 0,
+        skipped: 0,
+        touched: true,
+    };
+    // Kept local rather than on `SemanticPassOutcome`: that type is `Copy` and
+    // built with struct-literal syntax at every return, and a `Vec` field would
+    // break both (AILAB-700).
+    let mut skipped_lesson_ids: Vec<String> = Vec::new();
+    for lesson in &lessons_file.lessons {
+        let Some(exemplar) = exemplars.get(lesson.id.as_str()) else {
+            tracing::warn!(
+                lesson_id = %lesson.id,
+                cluster_key = %lessons_file.cluster_key,
+                path = %lessons_path.display(),
+                "lesson exemplar is not in the episodic log; skipping the lesson \
+                 (indexing it without the exemplar's pain/importance would produce \
+                 a document that scores 0.0 and can never rank)"
+            );
+            outcome.skipped += 1;
+            skipped_lesson_ids.push(lesson.id.clone());
+            continue;
+        };
+        add_semantic_document(
+            writer,
+            fields,
+            &lessons_file,
+            lesson,
+            exemplar,
+            member_count,
+        )?;
+        outcome.indexed += 1;
+    }
+
+    // Written on every full pass, including the zero-skip one: without that,
+    // a store whose exemplars were restored would keep reporting yesterday's
+    // skips forever (AILAB-700).
+    write_semantic_pass_record(
+        agent_root,
+        &SemanticPassRecord {
+            skipped_lesson_ids,
+            cluster_key: lessons_file.cluster_key.clone(),
+            indexed: outcome.indexed,
+        },
+    );
+
+    Ok(outcome)
+}
+
+/// Map one [`crate::lessons::Lesson`] onto a `layer=semantic` Tantivy document.
+///
+/// `pain` and `importance` are inherited from the exemplar event because a
+/// lesson has none of its own: `collector::recall` reads both fast fields with
+/// `unwrap_or(0.0)` and the salience product multiplies by each, so a lesson
+/// indexed without them would score exactly 0.0 and never surface.
+///
+/// `timestamp_sec` is the file's `last_updated` — the consolidation time — and
+/// deliberately **not** the exemplar's timestamp. Salience decays as
+/// `exp(-age_days/14)`, which asks "how stale is this claim?"; for an event that
+/// is when it fired, but for a lesson it is when consolidation last re-affirmed
+/// it. A lesson distilled today from a 90-day-old exemplar would otherwise score
+/// `exp(-6.43) ~= 0.0016` and rank two orders of magnitude below any fresh
+/// event — indexed, matching, and permanently buried.
+///
+/// `source_harness` is the literal `"dreamd"` rather than the exemplar's
+/// harness — a promoted cluster spans harnesses, so attributing the synthesized
+/// lesson to one contributor would misreport provenance. The exemplar (and its
+/// harness) stay one hop away through `event_id`.
+fn add_semantic_document(
+    writer: &mut IndexWriter<TantivyDocument>,
+    fields: &SchemaFields,
+    lessons_file: &crate::lessons::LessonsFile,
+    lesson: &crate::lessons::Lesson,
+    exemplar: &AgentLearning,
+    member_count: u64,
+) -> Result<(), IndexError> {
+    // Consolidation time, not the exemplar's timestamp — see the fn docs.
+    let last_updated_sec = lessons_file.last_updated.timestamp() as u64;
+    let doc = doc!(
+        fields.content => lesson.content.clone(),
+        fields.timestamp_sec => last_updated_sec,
+        fields.pain => exemplar.pain as f64,
+        fields.importance => exemplar.importance as f64,
+        fields.recurrence => member_count,
+        fields.layer => Layer::Semantic.as_str().to_string(),
+        fields.last_updated_sec => last_updated_sec,
+        fields.cited_event_count => member_count,
+        fields.event_id => semantic_event_id(&lesson.id),
+        fields.skill_action => lessons_file.cluster_key.clone(),
+        fields.source_harness => SEMANTIC_SOURCE_HARNESS.to_string(),
+    );
+    writer.add_document(doc).map_err(tantivy_to_index)?;
+    Ok(())
+}
+
+/// `source_harness` stamped on every lesson document. The dream cycle authored
+/// it, not any one harness.
+const SEMANTIC_SOURCE_HARNESS: &str = "dreamd";
+
 /// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
 /// `layer` is always [`Layer::Episodic`] in v0.1; semantic indexing is WEG-136.
 /// `event_id` is stored as `STRING | STORED` for targeted delete-and-re-add
@@ -629,7 +1011,7 @@ fn add_document(
 // Replay (two-pass)
 
 fn read_jsonl_events(jsonl_path: &Path) -> Result<Vec<AgentLearning>, IndexError> {
-    crate::episodic::read_all(jsonl_path).map_err(|e| IndexError(format!("read jsonl: {e}")))
+    crate::episodic::read_all(jsonl_path).map_err(|e| IndexError::Other(format!("read jsonl: {e}")))
 }
 
 fn replay_two_pass(
@@ -665,18 +1047,48 @@ fn replay_two_pass(
 fn read_progress(path: &Path) -> Result<IndexProgress, IndexError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|e| IndexError(format!("parse {INDEX_PROGRESS_FILENAME}: {e}"))),
+            .map_err(|e| IndexError::Other(format!("parse {INDEX_PROGRESS_FILENAME}: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(IndexProgress::default()),
-        Err(e) => Err(IndexError(format!("read {INDEX_PROGRESS_FILENAME}: {e}"))),
+        Err(e) => Err(IndexError::Other(format!(
+            "read {INDEX_PROGRESS_FILENAME}: {e}"
+        ))),
     }
 }
 
 fn write_progress(path: &Path, progress: &IndexProgress) -> Result<(), IndexError> {
     let bytes = serde_json::to_vec(progress)
-        .map_err(|e| IndexError(format!("serialize {INDEX_PROGRESS_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("serialize {INDEX_PROGRESS_FILENAME}: {e}")))?;
     write_atomic(path, &bytes)
-        .map_err(|e| IndexError(format!("write {INDEX_PROGRESS_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("write {INDEX_PROGRESS_FILENAME}: {e}")))?;
     Ok(())
+}
+
+/// Record what the semantic pass could not index, for `dreamd doctor`
+/// (AILAB-700).
+///
+/// Best-effort by design, unlike [`write_progress`]: the watermark is
+/// crash-recovery state, this is a diagnostic. A store whose `.dreamd/` is
+/// read-only must still open its index and serve recall, so a failure here
+/// logs and returns rather than failing the pass — doctor then reports the
+/// previous pass, which is a stale hint, not a wrong index.
+fn write_semantic_pass_record(agent_root: &AgentRoot, record: &SemanticPassRecord) {
+    let dir = agent_root.dreamd_dir();
+    let path = dir.join(SEMANTIC_PASS_FILENAME);
+    let written = serde_json::to_vec(record)
+        .map_err(|e| format!("serialize {SEMANTIC_PASS_FILENAME}: {e}"))
+        .and_then(|bytes| {
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| write_atomic(&path, &bytes))
+                .map_err(|e| format!("write {SEMANTIC_PASS_FILENAME}: {e}"))
+        });
+    if let Err(e) = written {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not record the semantic pass report; `dreamd doctor` will \
+             report the previous pass until the next one lands"
+        );
+    }
 }
 
 fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
@@ -685,9 +1097,9 @@ fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
     }
     let manifest = IndexManifest::current();
     let bytes = serde_json::to_vec(&manifest)
-        .map_err(|e| IndexError(format!("serialize {INDEX_MANIFEST_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("serialize {INDEX_MANIFEST_FILENAME}: {e}")))?;
     write_atomic(path, &bytes)
-        .map_err(|e| IndexError(format!("write {INDEX_MANIFEST_FILENAME}: {e}")))?;
+        .map_err(|e| IndexError::Other(format!("write {INDEX_MANIFEST_FILENAME}: {e}")))?;
     Ok(())
 }
 
@@ -726,23 +1138,42 @@ fn try_open_or_create(
     Index::open_or_create(mmap_dir, schema).map_err(tantivy_to_index)
 }
 
+/// Does this open failure mean the on-disk index was written under a different
+/// schema and must be rebuilt? Gates a `remove_dir_all`, so it is narrowed
+/// twice. First by variant: only [`IndexError::Tantivy`] can qualify, which
+/// excludes `tantivy_io_to_index`'s [`IndexError::TantivyDirectory`] outright —
+/// that payload embeds the *directory path*, so a store living under a path
+/// containing "schema" must never reach the substring test. Then by substring:
+/// the exact rendering tantivy gives `TantivyError::SchemaError` (`"Schema
+/// error: '{0}'"`) rather than a bare `"schema"`, since a `Tantivy` payload may
+/// mention a schema without being a schema mismatch.
+///
+/// Deliberately does not try to catch `TantivyError::IncompatibleIndex` (a
+/// tantivy index-*format* mismatch). That variant renders through
+/// `Incompatibility`'s hand-written `Debug`, which emits `"Library version: N,
+/// index version: M. …"` — containing neither "incompatible" nor "schema". The
+/// `|| msg.contains("incompatible")` alternative that used to sit here
+/// therefore never matched it and only widened the false-positive surface. A
+/// format mismatch stays a loud startup error, not a silent wipe.
 fn is_schema_incompatible(err: &IndexError) -> bool {
-    let msg = err.0.to_ascii_lowercase();
-    msg.contains("schema") || msg.contains("incompatible")
+    match err {
+        IndexError::Tantivy(s) => s.to_ascii_lowercase().contains("schema error:"),
+        _ => false,
+    }
 }
 
 // Error helpers
 
 fn io_to_index(e: std::io::Error) -> IndexError {
-    IndexError(format!("io: {e}"))
+    IndexError::Io(format!("{e}"))
 }
 
 fn tantivy_to_index<E: std::fmt::Display>(e: E) -> IndexError {
-    IndexError(format!("tantivy: {e}"))
+    IndexError::Tantivy(format!("{e}"))
 }
 
 fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryError) -> IndexError {
-    IndexError(format!("tantivy directory: {e}"))
+    IndexError::TantivyDirectory(format!("{e}"))
 }
 
 // Tests
@@ -843,13 +1274,9 @@ mod tests {
     }
 
     async fn flush(handle: &TantivyIndexHandle) -> Result<(), IndexError> {
-        let (tx, rx) = oneshot::channel();
-        handle
-            .sender()
-            .send(IndexerMsg::Flush { ack: tx })
-            .await
-            .expect("send flush");
-        rx.await.expect("flush ack")
+        // Delegates to the promoted `pub(crate)` method (AILAB-162) so tests
+        // and the shutdown drain exercise the same flush path.
+        handle.flush().await
     }
 
     // AC-1
@@ -1258,15 +1685,34 @@ mod tests {
         coord_handle.await.unwrap();
     }
 
+    /// A full indexer channel must BLOCK the coordinator, not shed the message.
+    ///
+    /// Shedding is unrecoverable: `replay_two_pass` keeps `id > last_indexed_id`,
+    /// and that watermark is the newest *committed* id, not a contiguous prefix
+    /// — so a dropped event followed by any indexed event is skipped forever.
+    ///
+    /// The setup makes the backpressure deterministic without a sleep. The
+    /// consumer is gated shut, so the capacity-1 indexer channel stays full. The
+    /// coordinator inbox is *also* capacity 1, but be precise about what that
+    /// buys: the inbox permit is released at the coordinator's `recv`, strictly
+    /// *before* `route_to_indexer` runs, so `coord_tx.send(second)` returning
+    /// proves only that the first message was dequeued. On the current-thread
+    /// runtime `#[tokio::test]` gives us, the coordinator then runs on to its
+    /// first await — the indexer `send`, which has no room — before this task is
+    /// polled again; under `flavor = "multi_thread"` that last step would be a
+    /// race. The count assertion, not the timing, is what makes the test sound:
+    /// opening the gate must let both appends through, for three
+    /// `IndexerMsg::Append`s total (the filler plus both appends). A
+    /// drop-on-`Full` regression loses one or both and fails the count.
     #[tokio::test]
-    async fn coordinator_continues_when_indexer_channel_full() {
+    async fn coordinator_blocks_then_delivers_when_indexer_channel_full() {
         let dir = unique_tmpdir("coord-full");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        // Capacity 1; pre-fill it so the next try_send returns Full.
-        let (idx_tx, _idx_rx) = mpsc::channel::<IndexerMsg>(1);
+        // Capacity 1, pre-filled: the coordinator's next `send` finds it full.
+        let (idx_tx, mut idx_rx) = mpsc::channel::<IndexerMsg>(1);
         idx_tx
             .send(IndexerMsg::Append {
                 event_id: make_event_id('Z'),
@@ -1275,7 +1721,23 @@ mod tests {
             .await
             .unwrap();
 
-        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        // Consumer, held shut by `gate_rx`. Every message it eventually sees is
+        // relayed onto `seen_rx` — the relay is roomier than the traffic, so the
+        // consumer itself never blocks. Holding an undrained receiver here
+        // instead would deadlock the coordinator, which is exactly the point.
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        let (seen_tx, mut seen_rx) = mpsc::channel::<IndexerMsg>(16);
+        let consumer = tokio::spawn(async move {
+            let _ = gate_rx.await;
+            while let Some(msg) = idx_rx.recv().await {
+                if seen_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Capacity 1 so the second `send` below proves the coordinator is parked.
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
         let coord = MemoryCoordinator::open_at(
             &agent_root.episodic_jsonl(),
             agent_root.project_root(),
@@ -1285,22 +1747,52 @@ mod tests {
         .expect("open coord");
         let coord_handle = tokio::spawn(coord.run());
 
-        let (resp_tx, resp_rx) = oneshot::channel();
+        let (r1_tx, r1_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::AppendLearning {
-                learning: sample_learning(make_event_id('0'), "rust.test", "should still succeed"),
+                learning: sample_learning(
+                    make_event_id('0'),
+                    "rust.test",
+                    "first through a full channel",
+                ),
                 client_dedup_key: None,
-                response_tx: resp_tx,
+                response_tx: r1_tx,
             })
             .await
-            .expect("send append");
+            .expect("send first append");
 
-        let minted = resp_rx
+        // Returns once the coordinator has dequeued the first message (the inbox
+        // permit frees at `recv`); on this current-thread runtime it then runs on
+        // into the parked `route_to_indexer` send before we are polled again.
+        let (r2_tx, r2_rx) = oneshot::channel();
+        coord_tx
+            .send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(
+                    make_event_id('1'),
+                    "rust.test",
+                    "second through a full channel",
+                ),
+                client_dedup_key: None,
+                response_tx: r2_tx,
+            })
             .await
-            .expect("recv resp")
-            .expect("append must succeed even when indexer channel is full")
-            .id;
-        assert!(minted.as_str().starts_with("evt_"));
+            .expect("send second append");
+
+        // Release the consumer; the parked send can now make progress.
+        gate_tx.send(()).expect("open consumer gate");
+
+        // 5s bounds turn a backpressure regression that deadlocks into a fast
+        // failure instead of a hung suite.
+        let first = tokio::time::timeout(Duration::from_secs(5), r1_rx)
+            .await
+            .expect("first append must not hang behind a full indexer channel")
+            .expect("recv first resp")
+            .expect("first append ok");
+        let second = tokio::time::timeout(Duration::from_secs(5), r2_rx)
+            .await
+            .expect("second append must not hang behind a full indexer channel")
+            .expect("recv second resp")
+            .expect("second append ok");
 
         let (sh_tx, sh_rx) = oneshot::channel();
         coord_tx
@@ -1309,6 +1801,34 @@ mod tests {
             .unwrap();
         sh_rx.await.unwrap();
         coord_handle.await.unwrap();
+        // Coordinator dropped => its `idx_tx` clone dropped => consumer exits.
+        consumer.await.expect("consumer joined");
+
+        let mut appends = 0usize;
+        while let Some(msg) = seen_rx.recv().await {
+            match msg {
+                IndexerMsg::Append { .. } => appends += 1,
+                _ => panic!("coordinator must emit only IndexerMsg::Append"),
+            }
+        }
+        assert_eq!(
+            appends, 3,
+            "1 pre-filled filler + 2 coordinator appends must all be delivered; \
+             a full channel backpressures the coordinator, it never sheds"
+        );
+
+        // Both appends are durable on disk, not just in the indexer channel.
+        let raw = std::fs::read_to_string(agent_root.episodic_jsonl()).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "both appends must be durable in the JSONL");
+        assert!(
+            raw.contains(first.id.as_str()),
+            "first minted id missing from JSONL"
+        );
+        assert!(
+            raw.contains(second.id.as_str()),
+            "second minted id missing from JSONL"
+        );
     }
 
     #[tokio::test]
@@ -1827,8 +2347,27 @@ mod tests {
         );
     }
 
+    /// An append that met a full indexer channel is still searchable after the
+    /// ordinary flush — no restart, no startup replay.
+    ///
+    /// A capacity-1 channel sits in front of the real [`TantivyIndexHandle`]
+    /// sender, pre-filled so there is no room for the coordinator's `send`. The
+    /// forwarder that relays into the live indexer is held shut by `gate_rx` so
+    /// the channel *stays* full until we say otherwise — an ungated forwarder
+    /// would drain the filler before the coordinator ever sent, and the
+    /// coordinator would never meet a full channel at all. The coordinator inbox
+    /// is capacity 1 for the same reason as
+    /// [`coordinator_blocks_then_delivers_when_indexer_channel_full`]: the
+    /// second `coord_tx.send` cannot return until the coordinator has dequeued
+    /// the append. Only then is the gate opened.
+    ///
+    /// Because the coordinator awaits instead of shedding, the marker token
+    /// reaches Tantivy through the normal path and recall finds it. Under a
+    /// drop-on-`Full` regression the token never reaches the indexer and the
+    /// recall assertion fails. Startup replay is deliberately not exercised —
+    /// it only ever heals the tail after `last_indexed_id`.
     #[tokio::test]
-    async fn channel_saturation_stale_recall_until_restart_replay() {
+    async fn full_indexer_channel_still_reaches_recall_after_flush() {
         let dir = unique_tmpdir("chan-full-recall");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -1838,8 +2377,8 @@ mod tests {
             TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open index");
         let real_tx = handle.sender();
 
-        // Capacity 1, pre-filled — coordinator try_send will drop the next Append.
-        let (idx_tx, _idx_rx) = mpsc::channel::<IndexerMsg>(1);
+        // Capacity 1, pre-filled — the coordinator's `send` blocks for a slot.
+        let (idx_tx, mut idx_rx) = mpsc::channel::<IndexerMsg>(1);
         idx_tx
             .send(IndexerMsg::Append {
                 event_id: make_event_id('Z'),
@@ -1848,7 +2387,23 @@ mod tests {
             .await
             .unwrap();
 
-        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        // Forward everything the coordinator queues into the real indexer, FIFO
+        // — but not before `gate_tx` fires. Ungated, this would empty the
+        // capacity-1 channel immediately and the coordinator would never meet a
+        // full one, leaving the test vacuous.
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        let forwarder = tokio::spawn(async move {
+            let _ = gate_rx.await;
+            while let Some(msg) = idx_rx.recv().await {
+                if real_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Capacity 1 so the `Shutdown` send below cannot return until the
+        // coordinator has dequeued the append.
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
         let coord = MemoryCoordinator::open_at(
             &agent_root.episodic_jsonl(),
             agent_root.project_root(),
@@ -1868,47 +2423,569 @@ mod tests {
             })
             .await
             .expect("send append");
-        resp_rx
-            .await
-            .expect("recv")
-            .expect("append must succeed when indexer channel is full");
 
+        // The inbox permit frees at the coordinator's `recv`, so this returning
+        // proves only that the append was dequeued; on the current-thread test
+        // runtime the coordinator then runs on to its first await — the indexer
+        // `send`, which has no room — before this task is polled again. The
+        // recall assertion below, not this timing, is what makes the test sound:
+        // the point of the gate is that the filler is still occupying the
+        // channel's one slot when the coordinator routes.
         let (sh_tx, sh_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
             .await
             .unwrap();
-        sh_rx.await.unwrap();
-        coord_handle.await.unwrap();
 
-        let stale = assess_index_freshness(&agent_root).expect("assess");
-        assert!(stale.stale, "dropped indexer msg must leave index stale");
+        // Release the forwarder; the parked send can now make progress.
+        gate_tx.send(()).expect("open forwarder gate");
+
+        tokio::time::timeout(Duration::from_secs(5), resp_rx)
+            .await
+            .expect("append must not hang behind a full indexer channel")
+            .expect("recv")
+            .expect("append must succeed when the indexer channel is full");
+
+        tokio::time::timeout(Duration::from_secs(5), sh_rx)
+            .await
+            .expect("shutdown ack must not hang behind a full indexer channel")
+            .unwrap();
+        coord_handle.await.unwrap();
+        // Coordinator dropped => `idx_tx` dropped => the forwarder drains and
+        // exits, so the real indexer has both messages before we flush.
+        forwarder.await.expect("forwarder joined");
+
+        flush(&handle).await.expect("flush");
+        handle.reader().reload().expect("reload after flush");
 
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
-        let misses = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
-            .expect("recall before replay");
-        assert!(
-            misses.is_empty(),
-            "recall must miss unindexed append after channel saturation"
-        );
-
-        drop(real_tx);
-        handle.shutdown().await.expect("shutdown first handle");
-
-        let handle2 =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("reopen replay");
-        handle2.reader().reload().expect("reload after replay");
-        let hits = crate::recall(handle2.reader(), &fields, unique, 5, None, now_sec)
-            .expect("recall after replay");
+        let hits = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
+            .expect("recall after flush");
         assert!(
             !hits.is_empty(),
-            "startup replay must make saturated append searchable"
+            "an append queued behind a full indexer channel must be recallable \
+             after the ordinary flush, with no restart replay"
         );
 
-        let fresh = assess_index_freshness(&agent_root).expect("assess after");
-        assert!(!fresh.stale, "replay must heal freshness: {fresh:?}");
+        let fresh = assess_index_freshness(&agent_root).expect("assess after flush");
+        assert!(
+            !fresh.stale,
+            "backpressured append must leave the index fresh: {fresh:?}"
+        );
 
-        handle2.shutdown().await.expect("shutdown");
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// `is_schema_incompatible` gates a `remove_dir_all` of the index cache, so
+    /// it must fire on a real tantivy schema mismatch and on nothing else.
+    /// The false-positive cases below are the reason it matches
+    /// `"schema error:"` rather than a bare `"schema"` substring.
+    #[test]
+    fn schema_incompat_matches_tantivy_schema_error_only() {
+        // The real trigger: tantivy renders SchemaError as "Schema error: '..'",
+        // wrapped by `tantivy_to_index`.
+        let schema_err = tantivy_to_index(tantivy::TantivyError::SchemaError(
+            "field 'skill_action' not found".to_string(),
+        ));
+        assert!(
+            is_schema_incompatible(&schema_err),
+            "a tantivy SchemaError must trigger the rebuild: {schema_err:?}"
+        );
+
+        // A store whose path merely contains "schema" must NOT wipe the index.
+        // `tantivy_io_to_index` embeds the directory path in its message.
+        let path_err = IndexError::TantivyDirectory(
+            "Failed to open the directory: \
+             '/home/dev/schema-tools/.agent/.dreamd/index'"
+                .to_string(),
+        );
+        assert!(
+            !is_schema_incompatible(&path_err),
+            "a path containing 'schema' must not trigger a wipe: {path_err:?}"
+        );
+
+        // A tantivy index-FORMAT mismatch renders through Incompatibility's
+        // Debug and contains neither "incompatible" nor "schema error:". It
+        // stays a loud error rather than a silent rebuild.
+        let format_err = IndexError::Tantivy(
+            "Library version: 6, index version: 5. Change tantivy to a \
+             version compatible with index format 5 (e.g. 0.21.x) and rebuild \
+             your project."
+                .to_string(),
+        );
+        assert!(
+            !is_schema_incompatible(&format_err),
+            "an index-format mismatch must not be treated as a schema rebuild: {format_err:?}"
+        );
+
+        // Plain io failures must never wipe a healthy index.
+        let io_err = io_to_index(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(
+            !is_schema_incompatible(&io_err),
+            "a permission error must not trigger a wipe: {io_err:?}"
+        );
+    }
+
+    // DR-211 / AILAB-205 — semantic (LESSONS.md) pass, pure-helper unit level.
+    // End-to-end recall behavior lives in tests/semantic_indexing.rs.
+
+    /// In-RAM writer, so these cases exercise the pass without a 50 MB
+    /// on-disk writer heap or a tokio task.
+    fn ram_writer() -> (Index, IndexWriter<TantivyDocument>, SchemaFields) {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let writer = index.writer(15_000_000).expect("create writer");
+        (index, writer, fields)
+    }
+
+    fn write_lessons(
+        agent_root: &AgentRoot,
+        cluster_key: &str,
+        lessons: Vec<crate::lessons::Lesson>,
+    ) {
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        crate::lessons::write_lessons_file(
+            &agent_root.lessons_md(),
+            &crate::lessons::LessonsFile {
+                last_updated: DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
+                cluster_key: cluster_key.to_string(),
+                citations: Vec::new(),
+                lessons,
+            },
+        )
+        .expect("write LESSONS.md");
+    }
+
+    fn lesson(id: &str, content: &str) -> crate::lessons::Lesson {
+        crate::lessons::Lesson {
+            id: id.to_string(),
+            content: content.to_string(),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn cluster_member_count_counts_children_by_prefix() {
+        // consolidation promotes at the deepest prefix that met the threshold,
+        // so leaf events must count toward the promoted parent.
+        let events = vec![
+            sample_learning(make_event_id('0'), "rust::eh", "a"),
+            sample_learning(make_event_id('1'), "rust::eh::unwrap", "b"),
+            sample_learning(make_event_id('2'), "rust::eh::expect", "c"),
+            // Sibling with a shared textual prefix but a different segment —
+            // must NOT count.
+            sample_learning(make_event_id('3'), "rust::ehlers", "d"),
+            sample_learning(make_event_id('4'), "python::pytest", "e"),
+        ];
+        assert_eq!(cluster_member_count(&events, "rust::eh"), 3);
+        assert_eq!(cluster_member_count(&events, "rust::eh::unwrap"), 1);
+        assert_eq!(cluster_member_count(&events, "python::pytest"), 1);
+        assert_eq!(cluster_member_count(&events, "go::testing"), 0);
+    }
+
+    #[test]
+    fn semantic_event_id_namespaces_the_exemplar_id() {
+        let raw = make_event_id('0');
+        let id = semantic_event_id(raw.as_str());
+        assert!(
+            id.starts_with("lsn_"),
+            "lesson ids carry the lsn_ namespace"
+        );
+        assert_ne!(
+            id,
+            raw.as_str(),
+            "a lesson must never carry its exemplar's raw id — both delete \
+             paths key on event_id"
+        );
+        assert!(
+            id.ends_with(raw.as_str()),
+            "provenance stays one hop away: the exemplar id is recoverable"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_clears_the_layer_when_lessons_md_is_missing() {
+        let dir = unique_tmpdir("sem-missing");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(
+            outcome,
+            SemanticPassOutcome {
+                indexed: 0,
+                skipped: 0,
+                touched: true,
+            },
+            "AILAB-699: an absent LESSONS.md means zero lessons, so the pass \
+             deletes the semantic layer and reports touched — otherwise a \
+             retired lesson keeps answering recall until restart. On a store \
+             that never dreamed this is an empty-layer delete plus a commit."
+        );
+    }
+
+    /// Commit `writer`, then count the live documents carrying `layer`.
+    ///
+    /// `layer` is STRING (raw-tokenized), so a `TermQuery` over it is the same
+    /// exact match the pass deletes with.
+    fn count_layer(
+        index: &Index,
+        writer: &mut IndexWriter<TantivyDocument>,
+        fields: &SchemaFields,
+        layer: Layer,
+    ) -> usize {
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        let term = tantivy::Term::from_field_text(fields.layer, layer.as_str());
+        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
+        reader
+            .searcher()
+            .search(&query, &tantivy::collector::Count)
+            .unwrap()
+    }
+
+    #[test]
+    fn semantic_pass_retires_an_indexed_lesson_when_lessons_md_is_unlinked() {
+        let dir = unique_tmpdir("sem-retire");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let exemplar = make_event_id('0');
+        let mate = make_event_id('1');
+        // Both episodic events sit in the lesson's cluster: if retirement
+        // deleted by cluster_key instead of layer it would take them too.
+        let events = [
+            sample_learning(exemplar.clone(), "rust::eh", "unwrap panicked"),
+            sample_learning(mate.clone(), "rust::eh::unwrap", "and again"),
+        ];
+        prime_jsonl(&dir, &events);
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![lesson(exemplar.as_str(), "prefer ? over unwrap")],
+        );
+        let (index, mut writer, fields) = ram_writer();
+        for event in &events {
+            add_document(&mut writer, &fields, event, 1).expect("index episodic event");
+        }
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("first pass ok");
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Semantic),
+            1,
+            "the lesson is indexed before retirement"
+        );
+
+        // The no-promotion dream cycle's unlink.
+        std::fs::remove_file(agent_root.lessons_md()).expect("unlink LESSONS.md");
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert!(outcome.touched, "the retiring pass must force a commit");
+
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Semantic),
+            0,
+            "unlinking LESSONS.md must retire the lesson from the live index; \
+             leaving it is the AILAB-205 hole AILAB-699 closes"
+        );
+        assert_eq!(
+            count_layer(&index, &mut writer, &fields, Layer::Episodic),
+            2,
+            "episodic cluster mates must survive the layer delete"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_is_untouched_when_lessons_md_is_malformed() {
+        let dir = unique_tmpdir("sem-malformed");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        std::fs::write(agent_root.lessons_md(), b"not frontmatter\n").unwrap();
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert!(
+            !outcome.touched,
+            "a malformed LESSONS.md must not delete the already-indexed lessons"
+        );
+        assert_eq!(outcome.indexed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn semantic_pass_skips_a_lesson_whose_exemplar_is_absent() {
+        let dir = unique_tmpdir("sem-no-exemplar");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let present = make_event_id('0');
+        prime_jsonl(
+            &dir,
+            &[sample_learning(
+                present.clone(),
+                "rust::eh",
+                "borrow checker",
+            )],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(present.as_str(), "prefer ? over unwrap"),
+                lesson("evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ", "orphaned lesson"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(outcome.indexed, 1);
+        assert_eq!(
+            outcome.skipped, 1,
+            "a lesson with no exemplar has no pain/importance to inherit and \
+             must be skipped, not indexed at score 0.0"
+        );
+        assert!(outcome.touched);
+    }
+
+    /// Commit `writer` and pull `timestamp_sec` off every document in an in-RAM
+    /// index, via the same fast field the salience collector reads.
+    fn read_timestamps(index: &Index, writer: &mut IndexWriter<TantivyDocument>) -> Vec<u64> {
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        let searcher = reader.searcher();
+        let mut out = Vec::new();
+        for segment in searcher.segment_readers() {
+            let ts = segment
+                .fast_fields()
+                .u64(crate::index::TIMESTAMP_SEC_FIELD)
+                .unwrap()
+                .first_or_default_col(0);
+            for doc in segment.doc_ids_alive() {
+                out.push(ts.get_val(doc));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn semantic_doc_timestamp_is_the_consolidation_time() {
+        let dir = unique_tmpdir("sem-timestamp");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id = make_event_id('0');
+        prime_jsonl(&dir, &[sample_learning(id.clone(), "rust::eh", "exemplar")]);
+        // `write_lessons` stamps last_updated = 2026-05-20T00:00:00Z, six days
+        // after `sample_learning`'s 2026-05-14T08:00:00Z timestamp.
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![lesson(id.as_str(), "prefer ? over unwrap")],
+        );
+        let exemplar_sec = DateTime::parse_from_rfc3339("2026-05-14T08:00:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let consolidated_sec = DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let (index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let timestamps = read_timestamps(&index, &mut writer);
+        assert_eq!(timestamps.len(), 1);
+        assert_eq!(
+            timestamps[0], consolidated_sec,
+            "recency asks how stale the claim is; for a lesson that is when \
+             consolidation last re-affirmed it"
+        );
+        assert_ne!(
+            timestamps[0], exemplar_sec,
+            "inheriting the exemplar's timestamp buries the lesson under \
+             exp(-age/14)"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_reports_indexed_count_for_a_full_file() {
+        let dir = unique_tmpdir("sem-full");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let a = make_event_id('0');
+        let b = make_event_id('1');
+        prime_jsonl(
+            &dir,
+            &[
+                sample_learning(a.clone(), "rust::eh", "one"),
+                sample_learning(b.clone(), "rust::eh::unwrap", "two"),
+            ],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(a.as_str(), "lesson one"),
+                lesson(b.as_str(), "lesson two"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+        assert_eq!(
+            outcome,
+            SemanticPassOutcome {
+                indexed: 2,
+                skipped: 0,
+                touched: true
+            }
+        );
+    }
+
+    // AILAB-700 — the `.dreamd/semantic_pass.json` channel from the pass to
+    // `dreamd doctor`.
+
+    /// A `SemanticPassRecord` naming one skipped lesson, for the tests that
+    /// need a *prior* report on disk to prove a path did or did not clear it.
+    fn stale_record() -> SemanticPassRecord {
+        SemanticPassRecord {
+            skipped_lesson_ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ".to_string()],
+            cluster_key: "rust::eh".to_string(),
+            indexed: 3,
+        }
+    }
+
+    #[test]
+    fn semantic_pass_records_the_skipped_lesson_for_doctor() {
+        let dir = unique_tmpdir("sem-sidecar-skip");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let present = make_event_id('0');
+        let orphan = "evt_01ARZ3NDEKTSV4RRFFQ69G5FZZ";
+        prime_jsonl(
+            &dir,
+            &[sample_learning(
+                present.clone(),
+                "rust::eh",
+                "borrow checker",
+            )],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(present.as_str(), "prefer ? over unwrap"),
+                lesson(orphan, "orphaned lesson"),
+            ],
+        );
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("a pass over a real LESSONS.md must leave a report");
+        assert_eq!(
+            record,
+            SemanticPassRecord {
+                skipped_lesson_ids: vec![orphan.to_string()],
+                cluster_key: "rust::eh".to_string(),
+                indexed: 1,
+            },
+            "doctor needs the lesson id and its cluster to name the condition; \
+             the count alone cannot be acted on"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_clears_the_record_when_every_exemplar_resolves() {
+        let dir = unique_tmpdir("sem-sidecar-clean");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let a = make_event_id('0');
+        let b = make_event_id('1');
+        prime_jsonl(
+            &dir,
+            &[
+                sample_learning(a.clone(), "rust::eh", "one"),
+                sample_learning(b.clone(), "rust::eh::unwrap", "two"),
+            ],
+        );
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![
+                lesson(a.as_str(), "lesson one"),
+                lesson(b.as_str(), "lesson two"),
+            ],
+        );
+        // A prior pass reported a skip; this one must overwrite it.
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert!(
+            record.skipped_lesson_ids.is_empty(),
+            "writing on the zero-skip path is load-bearing: a restored exemplar \
+             must stop doctor reporting yesterday's skip, forever otherwise; \
+             got: {record:?}"
+        );
+        assert_eq!(record.indexed, 2);
+    }
+
+    #[test]
+    fn semantic_pass_clears_the_record_when_lessons_md_is_missing() {
+        let dir = unique_tmpdir("sem-sidecar-missing");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert_eq!(
+            record,
+            SemanticPassRecord::default(),
+            "AILAB-699 retirement removes the lessons themselves, so there is \
+             nothing left that could not be indexed"
+        );
+    }
+
+    #[test]
+    fn semantic_pass_leaves_the_record_alone_when_lessons_md_is_malformed() {
+        let dir = unique_tmpdir("sem-sidecar-malformed");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+        std::fs::write(agent_root.lessons_md(), b"not frontmatter\n").unwrap();
+        write_semantic_pass_record(&agent_root, &stale_record());
+        let (_index, mut writer, fields) = ram_writer();
+
+        index_semantic_lessons(&mut writer, &fields, &agent_root).expect("pass ok");
+
+        let record = read_semantic_pass_record(&agent_root)
+            .expect("read sidecar")
+            .expect("report present");
+        assert_eq!(
+            record,
+            stale_record(),
+            "a malformed file leaves the index untouched, so the prior report \
+             is still the truth about what is in it — overwriting it here would \
+             claim a clean pass that never happened"
+        );
     }
 }

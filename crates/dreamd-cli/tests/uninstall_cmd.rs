@@ -19,6 +19,7 @@ fn no_op_stop(_: &mut dyn std::io::Write) -> StopReport {
     StopReport {
         attempted: true,
         matched: false,
+        spared: false,
     }
 }
 
@@ -179,6 +180,39 @@ fn uninstall_cleans_everything_and_is_idempotent() {
     );
 }
 
+/// A candidate left running because it was not attributable to this `$HOME` /
+/// native cache (AILAB-584) must be reported as such — never as "no running
+/// dreamd mcp/watch processes found", which is what `attempted && !matched`
+/// printed before `StopReport::spared` existed, directly above the stderr
+/// warning naming the pid that is still running.
+#[test]
+fn uninstall_reports_spared_processes_instead_of_claiming_none_were_found() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    let mut spared_stop = |_: &mut dyn std::io::Write| StopReport {
+        attempted: true,
+        matched: false,
+        spared: true,
+    };
+    let req = uninstall_req(&f, &socket, &cache_tree, false, false);
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    uninstall::run(&req, &mut spared_stop, &mut out, &mut err).unwrap();
+
+    let stdout = String::from_utf8(out.into_inner()).unwrap();
+    assert!(
+        !stdout.contains("no running dreamd mcp/watch processes found"),
+        "a spared process must not be reported as none found; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("left dreamd mcp/watch process(es) running")
+            && stdout.contains("see the warnings above"),
+        "uninstall must say what was left running and point at the detail; got: {stdout:?}"
+    );
+}
+
 /// (b) `--keep-caches` leaves both fake cache trees intact; the socket is
 /// still removed.
 #[test]
@@ -275,6 +309,7 @@ fn update_dry_run_mutates_nothing_and_prints_version() {
         StopReport {
             attempted: true,
             matched: false,
+            spared: false,
         }
     };
 
@@ -283,6 +318,7 @@ fn update_dry_run_mutates_nothing_and_prints_version() {
         cache_dir: Some(&cache_tree),
         dry_run: true,
         quiet: false,
+        restart: false,
         cargo_install_hint: None,
     };
     let mut out = Cursor::new(Vec::new());
@@ -324,6 +360,7 @@ fn update_real_path_clears_cache_and_socket() {
         StopReport {
             attempted: true,
             matched: false,
+            spared: false,
         }
     };
 
@@ -332,6 +369,7 @@ fn update_real_path_clears_cache_and_socket() {
         cache_dir: Some(&cache_tree),
         dry_run: false,
         quiet: false,
+        restart: false,
         cargo_install_hint: None,
     };
     let mut out = Cursor::new(Vec::new());
@@ -375,6 +413,7 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         cache_dir: Some(&cache_tree),
         dry_run: false,
         quiet: false,
+        restart: false,
         cargo_install_hint: Some("DREAMD_BIN is set".to_string()),
     };
     let mut out = Cursor::new(Vec::new());
@@ -398,6 +437,7 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         cache_dir: Some(&cache_tree),
         dry_run: true,
         quiet: false,
+        restart: false,
         cargo_install_hint: Some("DREAMD_BIN is set".to_string()),
     };
     let mut dry_out = Cursor::new(Vec::new());
@@ -407,5 +447,91 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
     assert!(
         dry_stdout.contains("cargo install --path crates/dreamd-cli"),
         "dry-run must include the cargo-install rebuild guidance; got: {dry_stdout:?}"
+    );
+}
+
+/// (e) A daemon still answering on the socket is a warn-and-continue case for
+/// `uninstall`, not an abort. The stop pass ahead of it is best-effort — no
+/// `pkill` on the box, or the signal denied — so unlinking would leave the
+/// daemon serving on a path no client resolves, silently dropping MCP back to
+/// the in-process backend. The socket stays; everything else still gets
+/// cleaned.
+///
+/// Holds the listener open for the whole call, so this deliberately waits out
+/// `lifecycle_cleanup::STOP_GRACE` (~5s) — that is the refuse path.
+#[cfg(unix)]
+#[test]
+fn uninstall_warns_and_continues_when_daemon_is_live() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    // Swap the fixture's placeholder file for a socket that actually answers.
+    std::fs::remove_file(&socket).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind test listener");
+
+    let req = uninstall_req(&f, &socket, &cache_tree, false, false);
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    uninstall::run(&req, &mut no_op_stop, &mut out, &mut err).unwrap();
+
+    assert!(
+        socket.exists(),
+        "a live daemon's socket must be left in place"
+    );
+    let stderr = String::from_utf8(err.into_inner()).unwrap();
+    assert!(
+        stderr.contains("still live") && stderr.contains("re-run to finish cleanup"),
+        "must warn with recovery guidance; got: {stderr:?}"
+    );
+
+    // Warn-and-continue: the refusal must not abort the rest of the uninstall.
+    assert!(
+        !cache_tree.exists(),
+        "a refused socket must not abort the native cache clear"
+    );
+    assert!(
+        !f.npx_ours().exists(),
+        "a refused socket must not abort the scoped npx clear"
+    );
+}
+
+/// (f) Same contract on the `update` path, with its own recovery wording —
+/// clearing the cache under a live daemon is fine, orphaning its socket is not.
+/// Also waits out `STOP_GRACE`; see (e).
+#[cfg(unix)]
+#[test]
+fn update_warns_and_continues_when_daemon_is_live() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+
+    std::fs::remove_file(&socket).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind test listener");
+
+    let req = update::UpdateRequest {
+        socket: Some(&socket),
+        cache_dir: Some(&cache_tree),
+        dry_run: false,
+        quiet: false,
+        restart: false,
+        cargo_install_hint: None,
+    };
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    update::run(&req, &mut no_op_stop, &mut out, &mut err).unwrap();
+
+    assert!(
+        socket.exists(),
+        "a live daemon's socket must be left in place"
+    );
+    let stderr = String::from_utf8(err.into_inner()).unwrap();
+    assert!(
+        stderr.contains("still live") && stderr.contains("re-run to finish the update"),
+        "must warn with update-specific recovery guidance; got: {stderr:?}"
+    );
+    assert!(
+        !cache_tree.exists(),
+        "a refused socket must not abort the native cache clear"
     );
 }

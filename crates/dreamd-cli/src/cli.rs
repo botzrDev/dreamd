@@ -35,8 +35,8 @@ pub struct Cli {
 /// Arguments for the `dreamd dream` subcommand.
 #[derive(Args, Debug)]
 pub struct DreamArgs {
-    /// Dry run: print what would change without writing.
-    /// Not yet implemented; ships v0.1.1.
+    /// Dry run: print the LESSONS.md this cycle would write, without writing
+    /// anything. Skips the daemon proxy; --no-commit is ignored.
     #[arg(long)]
     pub dry: bool,
     /// Schedule automatic dream cycles.
@@ -47,6 +47,9 @@ pub struct DreamArgs {
     /// only the git2 commit step is skipped. Useful in CI.
     #[arg(long)]
     pub no_commit: bool,
+    /// Force deterministic mode even when an API key is present.
+    #[arg(long)]
+    pub no_llm: bool,
 }
 
 impl DreamArgs {
@@ -104,8 +107,10 @@ pub enum Command {
     /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
     /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
     Score(ScoreArgs),
-    /// Reset scratch state (DR-113). Today only `workspace` is supported.
+    /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
+    /// Front door: scaffold .agent/ (via init) and print the harness wiring next steps.
+    Setup(SetupArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
     /// Stop local dreamd servers, unregister this project, and clear caches.
@@ -226,6 +231,48 @@ pub enum ResetCommand {
     },
 }
 
+/// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
+///
+/// `setup` is the install front door: it scaffolds `.agent/`, merges the
+/// `mcpServers.dreamd` block into the harness config, and prints the verify
+/// step. On a TTY without `--yes` the AILAB-551 wizard fills in the answers the
+/// user did not already type as flags; the clap surface itself is unchanged.
+#[derive(Args, Debug)]
+pub struct SetupArgs {
+    /// Accept defaults without prompting. Required when stdin is not a tty.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Harness(es) to wire up: `claude` writes .mcp.json, `cursor` writes
+    /// .cursor/mcp.json, `both` writes both, `none` writes neither.
+    #[arg(long, value_enum, default_value_t = commands::setup::Harness::Both)]
+    pub harness: commands::setup::Harness,
+    /// Do not write any harness MCP config.
+    #[arg(long)]
+    pub no_write_mcp: bool,
+    /// Replace an existing `mcpServers.dreamd` entry that does not run
+    /// `npx -y dreamd-mcp`. Other MCP servers are preserved. Does not override
+    /// a config file that is not valid JSON.
+    #[arg(long)]
+    pub force: bool,
+    /// Start the shared daemon in the background after scaffolding.
+    #[arg(long, overrides_with = "no_start_watch")]
+    pub start_watch: bool,
+    /// Only print the `dreamd watch` command instead of starting it (default).
+    #[arg(long, overrides_with = "start_watch")]
+    pub no_start_watch: bool,
+    /// Print the planned actions without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+impl SetupArgs {
+    /// Resolve the `--start-watch` / `--no-start-watch` pair. Both flags
+    /// override each other in clap, so the last one on the command line wins.
+    pub fn wants_start_watch(&self) -> bool {
+        self.start_watch && !self.no_start_watch
+    }
+}
+
 /// Arguments for the `dreamd uninstall` subcommand (AILAB-226).
 #[derive(Args)]
 pub struct UninstallArgs {
@@ -250,12 +297,15 @@ pub struct UpdateArgs {
     /// Suppress non-essential output (errors still print to stderr).
     #[arg(short = 'q', long)]
     pub quiet: bool,
+    /// Explicitly stop local `dreamd mcp` / `dreamd watch` (already the default; nothing is relaunched for you).
+    #[arg(long)]
+    pub restart: bool,
 }
 
 /// Render the `dreamd(1)` man page from the clap definition.
 ///
 /// Used by the `generate_man` bin; exposed so tests can assert the page
-/// renders without writing `doc/dreamd.1`.
+/// renders without writing `docs/dreamd.1`.
 pub fn render_man_page() -> std::io::Result<Vec<u8>> {
     use clap::CommandFactory;
     use clap_mangen::Man;
@@ -310,9 +360,49 @@ fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
     })
 }
 
-fn resolve_daemon_home() -> PathBuf {
+/// This invocation's `$HOME`, or `None` — **the single place this binary reads
+/// `HOME`**, so the empty-value rule below is stated once.
+///
+/// `HOME` set but *empty* is a real, ordinary environment: `env -i`, a
+/// systemd unit with `Environment=HOME=`, a Docker `ENV HOME=`, several CI
+/// runners. `var_os` returns `Some("")` for it, and every derived path then
+/// silently becomes **relative** — `.agent`, `.cache/dreamd-mcp`,
+/// `.npm/_npx` — which resolves against whatever directory the command happens
+/// to be run from.
+///
+/// For the AILAB-584 stop scope that is not a cosmetic bug: a relative
+/// `cache_dir` is canonicalized against this process's cwd, so a process whose
+/// executable sits under `$PWD/.cache/dreamd-mcp` attributes to us and gets
+/// SIGTERMed no matter whose `$HOME` it serves — the cross-home kill, re-opened
+/// by a blank variable (reproduced under `env HOME= dreamd update`). For
+/// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
+/// clear `./.npm/_npx`, and it *deletes* what it finds there.
+///
+/// Empty is therefore treated exactly like unset everywhere. Callers already
+/// have a defined "no home directory" behaviour (skip with a note, or in
+/// `lifecycle_cleanup` refuse to attribute anything), which is the correct
+/// answer for a process that genuinely has no home.
+fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+}
+
+/// Which subcommands own the shared daemon log at `~/.agent/dreamd.log`.
+///
+/// Only the daemon does. `init_tracing` opens the path with `truncate(true)`,
+/// so any short-lived invocation that got a path would wipe a running daemon's
+/// accumulated log — and, `archive` aside, no CLI one-shot emits a single
+/// `tracing` event into it anyway. `mcp` is long-running but is deliberately
+/// excluded: IDEs spawn several concurrently, so a file layer there would have
+/// two MCP servers truncating each other's log; its stderr already lands in the
+/// IDE's own MCP log. Everything else runs console-only on stderr. AILAB-184.
+fn wants_daemon_log(command: Option<&Command>) -> bool {
+    matches!(command, Some(Command::Watch(_)))
+}
+
+fn resolve_daemon_home() -> PathBuf {
+    home_dir()
         .map(|h| h.join(".agent"))
         .unwrap_or_else(|| PathBuf::from(".agent"))
 }
@@ -326,6 +416,12 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
     // a running daemon can't clobber the rewrite.
     let socket = dreamd_core::client::resolve_daemon_socket();
+    // lock-ok (AILAB-583): archive never opens a Tantivy index — it only reads
+    // and rewrites the episodic JSONL. The liveness probe below does spawn a
+    // thread and block on it, but that closure only connects to the socket —
+    // it emits no tracing, and the wait is bounded by LIVENESS_PROBE_TIMEOUT —
+    // so it cannot wait on a thread that wants the stderr lock we hold.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -382,10 +478,17 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let socket = dreamd_core::client::resolve_daemon_socket();
     #[cfg(not(unix))]
     let socket: Option<PathBuf> = None;
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles, deliberately — do NOT hoist a `.lock()` out here.
+    // `--repair` reopens the index, and Tantivy's `segment_updater` thread logs
+    // through the tracing console layer, which writes to `std::io::stderr`.
+    // `StdoutLock`/`StderrLock` are process-wide and reentrant only for the
+    // owning thread, so holding one across the rebuild deadlocks: the updater
+    // thread blocks writing its log line while this thread blocks on that same
+    // updater's commit, and `dreamd doctor --repair` never exits
+    // (AILAB-575 / AILAB-561). Each `writeln!` below locks and releases on its
+    // own, so no lock is ever held across `TantivyIndexHandle::open`.
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     let flags = commands::doctor::DoctorFlags {
         repair: args.repair,
         cluster_health: args.cluster_health,
@@ -426,10 +529,6 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if args.dry {
-        eprintln!("dreamd: --dry is not yet implemented (ships v0.1.1).");
-        return ExitCode::from(2);
-    }
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
@@ -449,10 +548,46 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         Ok(r) => r,
         Err(code) => return code,
     };
+    // AILAB-341: `--dry` writes nothing, so it forks off here — after config and
+    // store resolution (a preview still needs to know which store it is
+    // previewing), before the write path. It deliberately does NOT proxy to the
+    // daemon: `POST /api/v1/dream` performs the mutation the flag exists to
+    // avoid. `--no-commit` is a no-op alongside it, not an error.
+    if args.dry {
+        // lock-ok (AILAB-583 / AILAB-204): stdout stays UNLOCKED — the preview
+        // may sit on the model call for up to 90s.
+        // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
+        let outcome = commands::dream::run_dry(
+            agent_root.project_root(),
+            &mut std::io::stdout(),
+            args.no_llm,
+        );
+        return match outcome {
+            // Banner on stderr so stdout is exactly the would-be file bytes.
+            Ok(commands::dream::DryOutcome::WouldWrite) => {
+                eprintln!("dreamd: dry run; would write .agent/semantic/LESSONS.md (not written)");
+                ExitCode::SUCCESS
+            }
+            Ok(commands::dream::DryOutcome::WouldRetire) => {
+                eprintln!("dreamd: dry run; would retire LESSONS.md (not written)");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("dreamd: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    // lock-ok (AILAB-583 / AILAB-204): `&mut std::io::stdout()` stays UNLOCKED.
+    // The cycle opens a Tantivy index and — since AILAB-204 — may sit on a
+    // network call for up to 90s; holding a std stream lock across either is the
+    // documented deadlock. See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     match commands::dream::run(
         agent_root.project_root(),
         &mut std::io::stdout(),
         args.no_commit,
+        args.no_llm,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -468,6 +603,9 @@ fn run_init(args: InitArgs) -> ExitCode {
         Err(code) => return code,
     };
     let daemon_home = resolve_daemon_home();
+    // lock-ok (AILAB-583): init never opens a Tantivy index — it scaffolds or
+    // removes `.agent/` files and the registry entry.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -521,6 +659,9 @@ fn run_migrate(args: MigrateArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    // lock-ok (AILAB-583): migrate never opens a Tantivy index — it reads the
+    // index manifest JSON only (`dreamd_core::index::check_manifest_version`).
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -552,10 +693,13 @@ fn run_recall(args: RecallArgs) -> ExitCode {
     // live from this, so — unlike `dreamd dream` — it is not byte-stable
     // and takes no SOURCE_DATE_EPOCH override.
     let now_sec = chrono::Utc::now().timestamp();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles (AILAB-583): recall opens the Tantivy index (read-only
+    // `Index::open_in_dir` + `reader()`, whose reload policy owns a background
+    // watcher thread). No writer today, but per AGENTS.md
+    // `no-hoisted-stdio-lock-across-tantivy` an index-opening arm never holds a
+    // hoisted lock that a logging index thread could deadlock on (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     match commands::recall::run(
         &cwd,
         &args.query,
@@ -588,10 +732,13 @@ fn run_score(args: ScoreArgs) -> ExitCode {
     };
     // Query instant: wall clock (same as recall — age_days / salience decay).
     let now_sec = chrono::Utc::now().timestamp();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
+    // Unlocked handles (AILAB-583): score opens the Tantivy index the same way
+    // recall does (read-only `Index::open_in_dir` + `reader()`, background
+    // watcher thread). Per AGENTS.md `no-hoisted-stdio-lock-across-tantivy` an
+    // index-opening arm never holds a hoisted lock that a logging index thread
+    // could deadlock on (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     match commands::score::run(&cwd, args.n, args.explain, now_sec, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::score::ScoreError::NotFound) => ExitCode::from(2),
@@ -612,6 +759,11 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    // lock-ok (AILAB-583): reset never opens a Tantivy index — it rewrites
+    // `working/WORKSPACE.md` on disk. Note the confirm prompt holds these locks
+    // across a blocking stdin read: safe only while nothing under reset logs
+    // from another thread, so keep it index-free.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -628,28 +780,97 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
     }
 }
 
-fn run_status(status_log_tail: &[String]) -> ExitCode {
+/// Was this arg typed on the command line, as opposed to filled in by clap's
+/// default? The wizard skips a prompt only for a flag the user actually typed
+/// (AILAB-551 §1.7) — comparing against the default would wrongly treat
+/// `--harness both` as "unanswered".
+fn from_command_line(m: &clap::ArgMatches, id: &str) -> bool {
+    matches!(
+        m.value_source(id),
+        Some(clap::parser::ValueSource::CommandLine)
+    )
+}
+
+/// Which `setup` prompts survive the flags the user already typed.
+///
+/// `--no-write-mcp` has no prompt of its own — the harness prompt's option 4
+/// covers "skip" — so it only needs to be honoured, which `write_mcp` already
+/// does. Without matches (unreachable from the `Setup` arm) we prompt for
+/// nothing, since we cannot tell an explicit flag from a default.
+fn setup_interactive(m: Option<&clap::ArgMatches>) -> commands::setup::Interactive {
+    let Some(m) = m else {
+        return commands::setup::Interactive::default();
+    };
+    commands::setup::Interactive {
+        ask_harness: !from_command_line(m, "harness"),
+        ask_watch: !(from_command_line(m, "start_watch") || from_command_line(m, "no_start_watch")),
+    }
+}
+
+fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let daemon_home = resolve_daemon_home();
+    // Unlocked handles (AILAB-583): the success-path doctor beat calls into
+    // `doctor::run` (`setup::report_doctor`), which is writer-free only while
+    // `repair: false`. Doctor buffers its own output, but `StderrLock` is
+    // process-wide — a hoisted lock here would still deadlock against Tantivy's
+    // logging threads if any check under setup ever opens the index (AILAB-575).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    let req = commands::setup::SetupRequest {
+        cwd: &cwd,
+        daemon_home: &daemon_home,
+        harness: args.harness,
+        write_mcp: !args.no_write_mcp,
+        force: args.force,
+        start_watch: args.wants_start_watch(),
+        dry_run: args.dry_run,
+        yes: args.yes,
+        interactive,
+    };
+    match commands::setup::run(&req, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage — no project root to set up, or nowhere to ask the questions
+        // (both messages are already on stderr).
+        Err(commands::setup::SetupError::NoProjectRoot)
+        | Err(commands::setup::SetupError::NotATty) => ExitCode::from(2),
+        // Conflict / malformed / unwritable MCP config (message already on
+        // stderr, with the --force remedy where one exists).
+        Err(commands::setup::SetupError::Mcp(_)) => ExitCode::from(1),
+        Err(commands::setup::SetupError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_status() -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
     };
     // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
-    // registry resolves off $HOME the same way the tracing log path above does.
-    // The log tail was captured into `status_log_tail` before init_tracing ran.
+    // registry and the daemon log both resolve off $HOME via the one `home_dir()`
+    // helper. AILAB-184: `status` no longer installs a file layer, so nothing in
+    // this process truncates the log — the tail is read here, in-command, rather
+    // than pre-read in `run()` before `init_tracing` (the retired WEG-103 dance).
     let socket = dreamd_core::client::resolve_daemon_socket();
-    let registry_path = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));
+    let log_tail = home_dir()
+        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
+        .map(|p| commands::status::read_log_tail(&p))
+        .unwrap_or_default();
+    // lock-ok (AILAB-583): status never opens a Tantivy index — it probes the
+    // daemon socket and reads registry.toml, the WAL, and the daemon log tail.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match commands::status::run(
-        &cwd,
-        socket.as_deref(),
-        &registry_path,
-        status_log_tail,
-        &mut out,
-    ) {
+    match commands::status::run(&cwd, socket.as_deref(), &registry_path, &log_tail, &mut out) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -661,19 +882,28 @@ fn run_status(status_log_tail: &[String]) -> ExitCode {
 
 /// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`
 /// (parent of the per-version dirs; clearing it drops all versions).
-/// Resolved off `$HOME` the same way `resolve_daemon_home` is. `None` — no
+/// Resolved off [`home_dir`] the same way `resolve_daemon_home` is. `None` — no
 /// home directory; the commands print a skip note instead.
 fn resolve_shim_cache_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".cache").join("dreamd-mcp"))
+    home_dir().map(|h| h.join(".cache").join("dreamd-mcp"))
 }
 
-/// npx cache root (`~/.npm/_npx`) holding per-package cache entries.
+/// This invocation's `$HOME`, used as the process-stop attribution scope for
+/// `uninstall` / `update` (AILAB-584): a running `dreamd mcp` / `dreamd watch`
+/// is only ours to signal if its own `HOME=` resolves here. `None` — no home
+/// directory; the stop pass then has nothing to attribute against and skips
+/// with a warning rather than signalling machine-wide, which is what the bare
+/// `pkill -f` it replaced used to do. See [`home_dir`] for why an *empty*
+/// `HOME` counts as no home directory here.
+fn resolve_home() -> Option<PathBuf> {
+    home_dir()
+}
+
+/// npx cache root (`~/.npm/_npx`) holding per-package cache entries. `None` —
+/// no home directory; `uninstall` skips the npx step rather than scanning (and
+/// deleting under) a cwd-relative `./.npm/_npx`.
 fn resolve_npx_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".npm").join("_npx"))
+    home_dir().map(|h| h.join(".npm").join("_npx"))
 }
 
 /// Best-effort cargo-install detection for `dreamd update` messaging: an
@@ -701,7 +931,11 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     // same as the status arm — never a hardcoded path.
     let socket = dreamd_core::client::resolve_daemon_socket();
     let cache_dir = resolve_shim_cache_dir();
+    let home = resolve_home();
     let npx_dir = resolve_npx_dir();
+    // lock-ok (AILAB-583): uninstall never opens a Tantivy index — it signals
+    // this user's local servers and removes home/cache files.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -716,7 +950,16 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
         all_npx: args.all_npx,
         quiet: args.quiet,
     };
-    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    // AILAB-584 — the stop pass signals only processes attributable to this
+    // invocation's home/cache. The scope is captured here rather than threaded
+    // through `Stopper` so the command modules and their fake stoppers stay
+    // unchanged.
+    let scope = commands::lifecycle_cleanup::StopScope {
+        home: home.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+    };
+    let mut stop =
+        |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(&scope, e);
     match commands::uninstall::run(&req, &mut stop, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::uninstall::UninstallError::Io(e)) => {
@@ -730,6 +973,10 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock).
     let socket = dreamd_core::client::resolve_daemon_socket();
     let cache_dir = resolve_shim_cache_dir();
+    let home = resolve_home();
+    // lock-ok (AILAB-583): update never opens a Tantivy index — it signals this
+    // user's local servers and clears the native-binary cache.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
@@ -739,9 +986,16 @@ fn run_update(args: UpdateArgs) -> ExitCode {
         cache_dir: cache_dir.as_deref(),
         dry_run: args.dry_run,
         quiet: args.quiet,
+        restart: args.restart,
         cargo_install_hint: cargo_install_hint(),
     };
-    let mut stop = |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(e);
+    // AILAB-584 — see `run_uninstall`: scoped stop, captured not threaded.
+    let scope = commands::lifecycle_cleanup::StopScope {
+        home: home.as_deref(),
+        cache_dir: cache_dir.as_deref(),
+    };
+    let mut stop =
+        |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(&scope, e);
     match commands::update::run(&req, &mut stop, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(commands::update::UpdateError::Io(e)) => {
@@ -760,6 +1014,9 @@ fn run_watch() -> ExitCode {
 }
 
 fn run_version() -> ExitCode {
+    // lock-ok (AILAB-583): version never opens a Tantivy index — it prints
+    // compile-time build metadata only.
+    // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match commands::version::run(&mut out) {
@@ -776,28 +1033,34 @@ fn run_version() -> ExitCode {
 /// Returns [`ExitCode`] directly so `main` stays a one-liner.
 /// Exit `2` for usage errors; exit `1` for I/O / runtime errors.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
+    // Same parse as `Cli::parse()`, split in two so the `ArgMatches` survives:
+    // `setup`'s wizard needs `value_source` to tell a typed flag from a default
+    // (AILAB-551 §1.7), which the derived struct alone cannot express.
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    // `from_arg_matches` (NOT `from_arg_matches_mut`) is load-bearing, not
+    // stylistic: the `_mut` derive calls `matches.remove_subcommand()`, after
+    // which `matches.subcommand_matches("setup")` below returns `None`, the
+    // wizard silently degrades to `Interactive::default()` (ask nothing), and
+    // `dreamd setup` on a TTY takes clap's defaults without a question. Pinned
+    // by `cli::tests::setup_subcommand_matches_survive_from_arg_matches`.
+    let cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
 
     // WEG-32 / DR-004 — install the tracing subscriber once, before dispatch,
-    // so every subcommand's `tracing` callsites land on stderr + ~/.agent/dreamd.log.
+    // so every subcommand's `tracing` callsites land on stderr. AILAB-184: only
+    // the daemon (`dreamd watch`) additionally gets the file layer at
+    // ~/.agent/dreamd.log; see `wants_daemon_log` for why every other
+    // invocation passes None and stays console-only. The log path is resolved
+    // via the one `home_dir()` helper (empty HOME counts as none).
     // `_log_guard` MUST live until run() returns — `let _ =` would drop it
-    // immediately and discard buffered file logs. Resolve the log path via the
-    // existing HOME idiom (see the Init arm below); None → console-only.
-    let log_file = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file());
-
-    // WEG-103 — `dreamd status` tails the daemon log, but init_tracing opens it
-    // with truncate(true) at startup (as every subcommand does). Capture the
-    // tail BEFORE that truncation so status can surface a running daemon's real
-    // recent lines rather than the empty file it just cleared.
-    let status_log_tail = if matches!(cli.command, Some(Command::Status)) {
-        log_file
-            .as_deref()
-            .map(commands::status::read_log_tail)
-            .unwrap_or_default()
+    // immediately and discard buffered file logs — and it is still
+    // load-bearing whenever a file layer is installed.
+    let log_file = if wants_daemon_log(cli.command.as_ref()) {
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
     } else {
-        Vec::new()
+        None
     };
 
     let _log_guard = dreamd_core::observability::init_tracing(log_file);
@@ -824,7 +1087,10 @@ pub fn run() -> ExitCode {
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
-        Command::Status => run_status(&status_log_tail),
+        Command::Setup(args) => {
+            run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
+        }
+        Command::Status => run_status(),
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
         Command::Watch(_args) => run_watch(),
@@ -864,6 +1130,7 @@ mod tests {
             dry: true,
             auto: true,
             no_commit: false,
+            no_llm: false,
         };
         let err = args.validate().unwrap_err();
         assert!(
@@ -878,6 +1145,7 @@ mod tests {
             dry: true,
             auto: false,
             no_commit: false,
+            no_llm: false,
         }
         .validate()
         .is_ok());
@@ -885,6 +1153,7 @@ mod tests {
             dry: false,
             auto: true,
             no_commit: false,
+            no_llm: false,
         }
         .validate()
         .is_ok());
@@ -892,6 +1161,15 @@ mod tests {
             dry: false,
             auto: false,
             no_commit: true,
+            no_llm: false,
+        }
+        .validate()
+        .is_ok());
+        assert!(DreamArgs {
+            dry: false,
+            auto: false,
+            no_commit: false,
+            no_llm: true,
         }
         .validate()
         .is_ok());
@@ -912,6 +1190,35 @@ mod tests {
                 assert!(args.no_commit);
                 assert!(!args.dry);
                 assert!(!args.auto);
+                assert!(!args.no_llm, "--no-llm defaults off");
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    #[test]
+    fn parses_dream_no_llm() {
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--no-llm"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.no_llm);
+                assert!(!args.no_commit, "--no-llm must not imply --no-commit");
+                assert!(!args.dry);
+                assert!(!args.auto);
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    #[test]
+    fn parses_dream_no_llm_with_no_commit() {
+        // AILAB-204 §3.4 — the two flags are compatible and independent.
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--no-llm", "--no-commit"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.no_llm);
+                assert!(args.no_commit);
+                assert!(args.validate().is_ok(), "--no-llm + --no-commit is legal");
             }
             _ => panic!("expected Dream"),
         }
@@ -1060,6 +1367,43 @@ mod tests {
         }
     }
 
+    /// AILAB-184 — only the daemon owns `~/.agent/dreamd.log`. Everything else,
+    /// including the long-running `mcp` server (several run concurrently under
+    /// an IDE), stays console-only so nothing truncates the daemon's file.
+    #[test]
+    fn wants_daemon_log_true_for_watch_only() {
+        let watch = Cli::try_parse_from(["dreamd", "watch"]).unwrap();
+        assert!(
+            wants_daemon_log(watch.command.as_ref()),
+            "watch is the daemon and must get the file layer"
+        );
+
+        for argv in [
+            vec!["dreamd", "status"],
+            vec!["dreamd", "mcp"],
+            vec!["dreamd", "init"],
+            vec!["dreamd", "doctor"],
+            vec!["dreamd", "version"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(
+                !wants_daemon_log(cli.command.as_ref()),
+                "{argv:?} must stay console-only"
+            );
+        }
+    }
+
+    /// Bare `dreamd --version` leaves `command == None` and must not open the
+    /// daemon log either (AILAB-184 consequence #2).
+    #[test]
+    fn wants_daemon_log_false_without_subcommand() {
+        assert!(!wants_daemon_log(None));
+
+        let bare = Cli::try_parse_from(["dreamd", "--version"]).unwrap();
+        assert!(bare.command.is_none());
+        assert!(!wants_daemon_log(bare.command.as_ref()));
+    }
+
     #[test]
     fn parses_doctor_repair_and_cluster_health() {
         let bare = Cli::try_parse_from(["dreamd", "doctor"]).unwrap();
@@ -1099,6 +1443,170 @@ mod tests {
     }
 
     #[test]
+    fn parses_setup_flags() {
+        let cli = Cli::try_parse_from([
+            "dreamd",
+            "setup",
+            "--yes",
+            "--harness",
+            "none",
+            "--no-write-mcp",
+            "--no-start-watch",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => {
+                assert!(args.yes);
+                assert_eq!(args.harness, commands::setup::Harness::None);
+                assert!(args.no_write_mcp);
+                assert!(!args.wants_start_watch());
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_defaults_write_mcp_for_both_harnesses() {
+        let cli = Cli::try_parse_from(["dreamd", "setup"]).unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => {
+                assert!(!args.yes);
+                assert_eq!(
+                    args.harness,
+                    commands::setup::Harness::Both,
+                    "default harness is both (design: MCP config written by default)"
+                );
+                assert!(!args.no_write_mcp);
+                assert!(!args.force, "conflicts refuse unless --force is given");
+                assert!(!args.wants_start_watch(), "watch is print-only by default");
+                assert!(!args.dry_run);
+            }
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_parses_force() {
+        let cli = Cli::try_parse_from(["dreamd", "setup", "--force"]).unwrap();
+        match cli.command {
+            Some(Command::Setup(args)) => assert!(args.force),
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    #[test]
+    fn setup_start_watch_pair_is_last_one_wins() {
+        let on = Cli::try_parse_from(["dreamd", "setup", "--start-watch"]).unwrap();
+        match on.command {
+            Some(Command::Setup(args)) => assert!(args.wants_start_watch()),
+            _ => panic!("expected Setup"),
+        }
+        // Both flags must parse (no conflict error); the last one wins.
+        let off =
+            Cli::try_parse_from(["dreamd", "setup", "--start-watch", "--no-start-watch"]).unwrap();
+        match off.command {
+            Some(Command::Setup(args)) => assert!(!args.wants_start_watch()),
+            _ => panic!("expected Setup"),
+        }
+    }
+
+    /// Resolve the wizard's prompt plan the way `run()` does: real parse, then
+    /// `value_source` off the subcommand's own matches.
+    fn interactive_for(argv: &[&str]) -> commands::setup::Interactive {
+        let matches = <Cli as clap::CommandFactory>::command()
+            .try_get_matches_from(argv)
+            .unwrap();
+        setup_interactive(matches.subcommand_matches("setup"))
+    }
+
+    /// The seam the whole wizard hangs off. `run()` parses once and then reads
+    /// `value_source` back off `matches.subcommand_matches("setup")`; switching
+    /// that parse to `from_arg_matches_mut` would consume the subcommand
+    /// (`remove_subcommand`), leave `subcommand_matches("setup")` as `None`, and
+    /// delete every prompt — with no other test able to notice, because they all
+    /// build their own `ArgMatches`. This one asserts the real sequence.
+    #[test]
+    fn setup_subcommand_matches_survive_from_arg_matches() {
+        let matches = <Cli as clap::CommandFactory>::command()
+            .try_get_matches_from(["dreamd", "setup"])
+            .unwrap();
+        let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+            .expect("bare `dreamd setup` must parse");
+        assert!(matches!(cli.command, Some(Command::Setup(_))));
+        let sub = matches.subcommand_matches("setup");
+        assert!(
+            sub.is_some(),
+            "`from_arg_matches` must leave the setup subcommand on the matches; \
+             the `_mut` variant removes it and silently disables the wizard"
+        );
+        // And the plan derived from it is the real one, not the empty default.
+        let plan = setup_interactive(sub);
+        assert!(
+            plan.ask_harness && plan.ask_watch,
+            "a surviving subcommand must yield the live prompt plan, not \
+             `Interactive::default()`"
+        );
+
+        // The hazard is real, not hypothetical: the `_mut` variant consumes the
+        // subcommand, and the wizard collapses to asking nothing.
+        let mut consumed = matches;
+        let _ = <Cli as clap::FromArgMatches>::from_arg_matches_mut(&mut consumed)
+            .expect("bare `dreamd setup` must parse");
+        assert!(
+            consumed.subcommand_matches("setup").is_none(),
+            "if this ever stops holding, the comment at the `run()` callsite \
+             needs revisiting"
+        );
+        let degraded = setup_interactive(consumed.subcommand_matches("setup"));
+        assert!(
+            !degraded.ask_harness && !degraded.ask_watch,
+            "the `_mut` path is exactly the silent no-prompt regression this \
+             test exists to catch"
+        );
+    }
+
+    #[test]
+    fn bare_setup_asks_both_questions() {
+        let plan = interactive_for(&["dreamd", "setup"]);
+        assert!(
+            plan.ask_harness,
+            "no --harness typed, so the harness prompt runs \
+             (the clap default `both` must not read as an answer)"
+        );
+        assert!(
+            plan.ask_watch,
+            "no watch flag typed, so the watch prompt runs"
+        );
+    }
+
+    #[test]
+    fn typed_flags_skip_their_prompts() {
+        // AILAB-551 §1.7: a flag the user typed wins over its prompt. Note
+        // `--harness both` IS the clap default — detection must be by source.
+        let plan = interactive_for(&["dreamd", "setup", "--harness", "both"]);
+        assert!(
+            !plan.ask_harness,
+            "--harness both was typed; do not ask again"
+        );
+        assert!(plan.ask_watch, "the watch question is still unanswered");
+
+        for watch_flag in ["--start-watch", "--no-start-watch"] {
+            let plan = interactive_for(&["dreamd", "setup", watch_flag]);
+            assert!(
+                !plan.ask_watch,
+                "{watch_flag} was typed; do not ask the watch question"
+            );
+            assert!(plan.ask_harness, "the harness question is still unanswered");
+        }
+
+        // Both watch flags: last-one-wins in clap, still an explicit answer.
+        let plan = interactive_for(&["dreamd", "setup", "--start-watch", "--no-start-watch"]);
+        assert!(!plan.ask_watch, "an overridden pair is still user-typed");
+    }
+
+    #[test]
     fn parses_uninstall_flags() {
         let cli = Cli::try_parse_from(["dreamd", "uninstall", "--keep-caches", "--all-npx", "-q"])
             .unwrap();
@@ -1123,11 +1631,13 @@ mod tests {
 
     #[test]
     fn parses_update_flags() {
-        let cli = Cli::try_parse_from(["dreamd", "update", "--dry-run", "-q"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["dreamd", "update", "--dry-run", "-q", "--restart"]).unwrap();
         match cli.command {
             Some(Command::Update(args)) => {
                 assert!(args.dry_run);
                 assert!(args.quiet);
+                assert!(args.restart);
             }
             _ => panic!("expected Update"),
         }
@@ -1136,6 +1646,7 @@ mod tests {
             Some(Command::Update(args)) => {
                 assert!(!args.dry_run);
                 assert!(!args.quiet);
+                assert!(!args.restart);
             }
             _ => panic!("expected Update with default flags"),
         }
@@ -1158,6 +1669,7 @@ mod tests {
             "migrate",
             "uninstall",
             "update",
+            "setup",
         ] {
             assert!(
                 page.contains(sub),

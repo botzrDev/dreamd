@@ -1,6 +1,6 @@
 # Contributing to dreamd
 
-Thanks for your interest. `dreamd` is pre-release; the spec ([`SPEC.md`](./SPEC.md)) is v0.1 (on-disk contract frozen), the implementation is not. Expect churn.
+Thanks for your interest. `dreamd` is at v0.1.0. The spec ([`SPEC.md`](./SPEC.md)) is the frozen on-disk contract; the implementation still churns within that contract.
 
 ## Code of Conduct
 
@@ -22,16 +22,16 @@ https://github.com/botzrDev/dreamd/issues?q=is%3Aissue+is%3Aopen+label%3A%22good
 
 Requirements:
 
-- Rust stable. An MSRV will be pinned ahead of v0.1.
+- Rust stable. MSRV is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml) (`1.95.0`).
 
 ```bash
 git clone https://github.com/botzrDev/dreamd.git
 cd dreamd
 
 cargo build
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
+cargo test --all-features --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ### Task runner (`just`)
@@ -44,7 +44,7 @@ Common loops are wrapped in a root [`Justfile`](./Justfile) for convenience. Ins
 | `just test` | `cargo test --all-features --workspace` | Full test suite (mirrors the CI merge gate). |
 | `just lint` | `cargo fmt --all -- --check` then `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Formatting + clippy, exactly as CI runs them. |
 | `just bench` | `cargo bench -p dreamd-core` | Recall-latency Criterion benchmarks. |
-| `just release` | `cargo build --release -p dreamd`, `strip`, print size | Stripped `dreamd` CLI; prints its size (NFR-2 hard limit `< 15 MB` is enforced in CI, not here). |
+| `just release` | `cargo build --release -p dreamd`, `strip`, print size | Stripped `dreamd` CLI; prints its size (NFR-2 hard limit `< 20 MB` is enforced in CI, not here). |
 
 `just` is optional and never a CI dependency — CI calls cargo directly. Without `just`, run the underlying cargo commands from the table above.
 
@@ -55,7 +55,7 @@ Install the git hooks once per clone. The pre-commit hook runs `cargo fmt --all 
 git config core.hooksPath .githooks
 ```
 
-CI runs the same checks across Linux, macOS, and Windows. PRs must be green before merge.
+CI runs lint, test, and build on Linux and macOS as merge gates. Windows jobs exist but are `continue-on-error` (native Windows is v0.1.1). Linux and macOS gates must be green before merge.
 
 ## Your first contribution in ~15 minutes
 
@@ -87,7 +87,7 @@ A start-to-finish loop for your first PR. Each step links to the section with th
 3. Keep PRs focused. One concern per PR. If you find yourself bundling, split it.
 4. Update [`CHANGELOG.md`](./CHANGELOG.md) under `## [Unreleased]` for any user-visible change.
 5. Update tests. New behavior gets new tests; bug fixes get regression tests.
-6. Run `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test` locally before pushing.
+6. Run `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --all-features --workspace` locally before pushing (or `just lint` then `just test`).
 
 ### Commit messages
 

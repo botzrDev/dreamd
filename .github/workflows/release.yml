@@ -92,9 +92,9 @@ jobs:
           SIZE_BYTES=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY")
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
           echo "Stripped binary: ${SIZE_MB} MB"
-          MAX_BYTES=$((15 * 1024 * 1024))
+          MAX_BYTES=$((20 * 1024 * 1024))
           if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
-            echo "::error::Binary ${SIZE_MB} MB exceeds 15 MB limit (NFR-2)"
+            echo "::error::Binary ${SIZE_MB} MB exceeds 20 MB limit (NFR-2)"
             exit 1
           fi
 

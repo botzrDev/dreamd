@@ -16,6 +16,9 @@ Print version information
 Print help
 .SH SUBCOMMANDS
 .TP
+dreamd\-archive(1)
+Maintain the on\-disk memory log. Today: unpin entries with \-\-force\-unpin
+.TP
 dreamd\-doctor(1)
 Run health checks and print status (dream\-cycle mode, etc.)
 .TP
@@ -23,13 +26,34 @@ dreamd\-dream(1)
 Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
 .TP
 dreamd\-init(1)
-Scaffold per\-project .agent/ store and register it with the daemon
+Scaffold per\-project .agent/ store and register it with the daemon. Requires a project\-root sentinel in cwd or an ancestor
 .TP
 dreamd\-mcp(1)
 Start the MCP server (bridges to daemon if running, otherwise in\-process)
 .TP
+dreamd\-migrate(1)
+Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no\-op)
+.TP
+dreamd\-recall(1)
+Search stored memories by query, ranked by relevance and importance (markdown table)
+.TP
+dreamd\-score(1)
+List the top\-N stored memories by importance, without a search query
+.TP
 dreamd\-reset(1)
-Reset scratch state (DR\-113). Today only `workspace` is supported
+Reset scratch state. Today only `workspace` is supported
+.TP
+dreamd\-setup(1)
+Front door: scaffold .agent/ (via init) and print the harness wiring next steps
+.TP
+dreamd\-status(1)
+Print daemon liveness, resolved project, last dream cycle, and recent log
+.TP
+dreamd\-uninstall(1)
+Stop local dreamd servers, unregister this project, and clear caches
+.TP
+dreamd\-update(1)
+Clear the native binary cache so `npx \-y dreamd\-mcp` fetches latest
 .TP
 dreamd\-watch(1)
 Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM

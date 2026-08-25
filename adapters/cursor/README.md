@@ -2,27 +2,30 @@
 
 Quickstart for wiring `dreamd-mcp` into Cursor with the optional recall agent rule.
 
-## 1. Init the project store
+## 1. Set up the project
 
 ```bash
 cd ~/your-project
-npx -y dreamd-mcp init
+npx -y dreamd-mcp setup --harness cursor
 ```
+
+Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.cursor/mcp.json` in the project. Add `--yes` for non-interactive shells. `npx -y dreamd-mcp init` is the scaffold-only primitive if you'd rather wire MCP by hand.
 
 ## 2. Start the daemon (recommended)
 
 ```bash
-dreamd watch &
-# or: npx -y dreamd-mcp watch &
+npx -y dreamd-mcp watch &
 ```
 
-Without a daemon, MCP runs in-process (Phase 1). That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
+Without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
 
 ## 3. MCP config
 
-**Project-level (recommended):** copy [`.mcp.json.example`](./.mcp.json.example) into `.cursor/mcp.json`.
+`setup --harness cursor` already wrote the project-level config — skip to step 4. Wire it by hand only if you ran `--no-write-mcp` / `--harness none`, or want the global config.
 
-**Global (`~/.cursor/mcp.json`):** use [`.mcp.json.global.example`](./.mcp.json.global.example) — adds `--project-root` for non-project CWD launches.
+**Project-level:** copy [`.mcp.json.example`](./.mcp.json.example) into `.cursor/mcp.json`.
+
+**Global (`~/.cursor/mcp.json`):** use [`.mcp.json.global.example`](./.mcp.json.global.example) — adds `--project-root` for non-project CWD launches. `setup` only writes inside the project, so the global file is always a manual step.
 
 Or: Cursor Settings → Tools & Integrations → add MCP server.
 
@@ -34,7 +37,7 @@ Copy [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) to y
 
 Open a new agent session. Confirm `dreamd` in the MCP tools list with `append_node` and `search_nodes`.
 
-Stderr from the MCP server should show `Phase 2 (Remote backend)` when the daemon is running.
+Stderr from the MCP server should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is running. If no daemon is running there is no default-stderr fallback line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`).
 
 ## 6. Verify
 

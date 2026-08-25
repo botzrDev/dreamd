@@ -15,12 +15,14 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::daemon_state::{update_daemon_state, DaemonStateError};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 
-/// Schema version for daemon state (`state.json`). Versions independently of
-/// the record schema (`dreamd_protocol::RECORD_SCHEMA_VERSION`).
-pub const STATE_SCHEMA_VERSION: &str = "1.0";
+/// Schema version for daemon state (`state.json`). Re-exported from
+/// [`crate::daemon_state`], which owns the typed writer (AILAB-167);
+/// `crate::wal::STATE_SCHEMA_VERSION` remains a valid path.
+pub use crate::daemon_state::STATE_SCHEMA_VERSION;
 
 /// Destructive dream-cycle step recorded before it executes.
 ///
@@ -71,6 +73,15 @@ pub enum WalError {
     NoAgentStore(PathBuf),
 }
 
+impl From<DaemonStateError> for WalError {
+    fn from(e: DaemonStateError) -> Self {
+        match e {
+            DaemonStateError::Io(e) => WalError::Io(e),
+            DaemonStateError::Json(e) => WalError::Json(e),
+        }
+    }
+}
+
 /// Write a fresh WAL and set state.json to "in_progress".
 /// `_now_sec` is caller-provided for testability.
 pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError> {
@@ -92,7 +103,13 @@ pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError
         std::fs::create_dir_all(parent)?;
     }
     write_atomic(&wal_path, json.as_bytes())?;
-    update_state_json(agent_root, "in_progress", None)?;
+    // Status-only patch, deliberately (AILAB-167): a cycle that is starting has
+    // no completion timestamp, and the previous cycle's `last_dream_cycle_at`
+    // must survive. The pre-AILAB-167 from-scratch writer wrote JSON `null`
+    // here and wiped it on every begin.
+    update_daemon_state(agent_root, |s| {
+        s.last_dream_cycle_status = "in_progress".to_string()
+    })?;
     Ok(())
 }
 
@@ -117,7 +134,10 @@ pub fn commit_cycle(agent_root: &AgentRoot, now_sec: i64) -> Result<(), WalError
     let iso = DateTime::from_timestamp(now_sec, 0)
         .map(|dt: DateTime<Utc>| dt.to_rfc3339())
         .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string());
-    update_state_json(agent_root, "complete", Some(&iso))?;
+    update_daemon_state(agent_root, |s| {
+        s.last_dream_cycle_status = "complete".to_string();
+        s.last_dream_cycle_at = Some(iso);
+    })?;
     let wal_path = agent_root.wal_path();
     if wal_path.exists() {
         std::fs::remove_file(&wal_path)?;
@@ -140,7 +160,9 @@ pub fn recover_if_needed(
     let committed = wal.intents.contains(&WalIntent::Commit);
 
     if committed {
-        update_state_json(agent_root, "complete", None)?;
+        update_daemon_state(agent_root, |s| {
+            s.last_dream_cycle_status = "complete".to_string()
+        })?;
         std::fs::remove_file(&wal_path)?;
         return Ok(RecoveryOutcome::CommittedButUnclean);
     }
@@ -164,7 +186,9 @@ pub fn recover_if_needed(
     }
 
     std::fs::remove_file(&wal_path)?;
-    update_state_json(agent_root, "failed", None)?;
+    update_daemon_state(agent_root, |s| {
+        s.last_dream_cycle_status = "failed".to_string()
+    })?;
     Ok(RecoveryOutcome::Recovered {
         cleaned_files: cleaned,
     })
@@ -223,34 +247,10 @@ pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, W
         .map(|s| s.to_string()))
 }
 
-fn read_schema_version(agent_root: &AgentRoot) -> Option<String> {
-    let bytes = std::fs::read(agent_root.state_json()).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("schema_version")?.as_str().map(|s| s.to_string())
-}
-
-fn update_state_json(
-    agent_root: &AgentRoot,
-    status: &str,
-    cycle_at: Option<&str>,
-) -> Result<(), WalError> {
-    let daemon_version = env!("CARGO_PKG_VERSION");
-    let schema_version =
-        read_schema_version(agent_root).unwrap_or_else(|| STATE_SCHEMA_VERSION.to_string());
-    let state = serde_json::json!({
-        "schema_version": schema_version,
-        "daemon_version": daemon_version,
-        "last_dream_cycle_at": cycle_at,
-        "last_dream_cycle_status": status,
-    });
-    let json = serde_json::to_string_pretty(&state)?;
-    write_atomic(&agent_root.state_json(), json.as_bytes())?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon_state::{read_daemon_state, AutobiographySkip};
     use crate::test_support::{unique_tmpdir, DirGuard};
     use std::fs;
 
@@ -407,5 +407,72 @@ mod tests {
             matches!(outcome, RecoveryOutcome::Recovered { .. }),
             "outcome must be Recovered"
         );
+    }
+
+    fn skip_fixture() -> AutobiographySkip {
+        AutobiographySkip {
+            at: 42,
+            reason: "user_dirty_tree".to_string(),
+            files: vec![".agent/semantic/LESSONS.md".to_string()],
+        }
+    }
+
+    #[test]
+    fn skip_marker_survives_begin_cycle() {
+        let (root, _g) = setup_root("skip-survives-begin");
+        update_daemon_state(&root, |s| s.last_autobiography_skip = Some(skip_fixture())).unwrap();
+
+        begin_cycle(&root, NOW_SEC).unwrap();
+
+        let state = read_daemon_state(&root).unwrap();
+        let skip = state
+            .last_autobiography_skip
+            .expect("begin_cycle must not eat last_autobiography_skip");
+        assert_eq!(skip.reason, "user_dirty_tree");
+        assert_eq!(state.last_dream_cycle_status, "in_progress");
+    }
+
+    /// AILAB-167 AC: a full cycle is begin **and** commit; both edges wrote
+    /// state.json from scratch before the typed RMW writer landed.
+    #[test]
+    fn skip_marker_survives_begin_and_commit() {
+        let (root, _g) = setup_root("skip-survives-commit");
+        update_daemon_state(&root, |s| s.last_autobiography_skip = Some(skip_fixture())).unwrap();
+
+        begin_cycle(&root, NOW_SEC).unwrap();
+        commit_cycle(&root, NOW_SEC).unwrap();
+
+        let state = read_daemon_state(&root).unwrap();
+        let skip = state
+            .last_autobiography_skip
+            .expect("commit_cycle must not eat last_autobiography_skip");
+        assert_eq!(skip.reason, "user_dirty_tree");
+        assert_eq!(state.last_dream_cycle_status, "complete");
+        let at = state
+            .last_dream_cycle_at
+            .expect("commit_cycle must stamp last_dream_cycle_at");
+        assert!(at.contains('T'), "expected ISO date with time, got {at:?}");
+    }
+
+    #[test]
+    fn last_dream_cycle_at_survives_begin_cycle() {
+        let (root, _g) = setup_root("cycle-at-survives-begin");
+        begin_cycle(&root, NOW_SEC).unwrap();
+        commit_cycle(&root, NOW_SEC).unwrap();
+
+        let committed_at = read_daemon_state(&root)
+            .unwrap()
+            .last_dream_cycle_at
+            .expect("commit_cycle must stamp last_dream_cycle_at");
+
+        begin_cycle(&root, NOW_SEC).unwrap();
+
+        let state = read_daemon_state(&root).unwrap();
+        assert_eq!(
+            state.last_dream_cycle_at,
+            Some(committed_at),
+            "begin_cycle must preserve the prior cycle's completion timestamp",
+        );
+        assert_eq!(state.last_dream_cycle_status, "in_progress");
     }
 }

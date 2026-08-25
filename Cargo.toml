@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# RC: 0.1.0-rc.7. GA drops the -rc.N pre-release suffix (DR-009).
-version = "0.1.0-rc.7"
+# GA: 0.1.0. The -rc.N pre-release suffix is dropped at GA (DR-009).
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"
@@ -29,3 +29,7 @@ insta = { version = "1", features = ["filters"] }
 # Implements MCP spec 2025-11-25. Pinned to exact version; no crate adds this
 # directly until the mcp subcommand is wired.
 rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

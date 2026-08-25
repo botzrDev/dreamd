@@ -20,9 +20,11 @@ fn dreamd_bin() -> &'static str {
 fn reset_workspace_yes_overwrites_file_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
-    // WEG-32: daemon HOME, separate from the project dir. Sharing tmp would let
-    // init_tracing pre-create ~/.agent (= tmp/.agent), so init would skip the
-    // scaffold and `.agent/working/` would never exist for the reset to clear.
+    // Daemon HOME, separate from the project dir. Sharing tmp would let the
+    // `init` below pre-create ~/.agent (= tmp/.agent) by writing registry.toml,
+    // so init would skip the scaffold and `.agent/working/` would never exist
+    // for the reset to clear. (That was attributed to init_tracing before
+    // AILAB-184; the registry write is the real cause and still applies.)
     let home = tempfile::tempdir().unwrap();
 
     let init = Command::new(dreamd_bin())
@@ -73,8 +75,11 @@ fn reset_workspace_yes_overwrites_file_and_exits_zero() {
 fn reset_workspace_with_no_agent_dir_exits_two_and_creates_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     // intentionally no `.agent/` and no project-root sentinel either.
-    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
-    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    // Daemon HOME, separate from the project dir, so anything this invocation
+    // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
+    // Since AILAB-184 `reset workspace` writes nothing there (one-shots are
+    // console-only, and this run exits 2 before touching daemon home), so the
+    // split is defensive suite hygiene rather than load-bearing here.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())

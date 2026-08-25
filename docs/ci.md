@@ -19,10 +19,12 @@ This document covers the **CI** workflow. Contributors hit these gates on every 
 | [Security audit](#security-audit) | **Yes** | `cargo audit` against RustSec advisory DB |
 | [License & dependency policy](#license--dependency-policy) | **Yes** | `cargo deny check` (licenses + advisories) |
 | [Test](#test) | **Yes** (Linux + macOS) | `cargo test --workspace` on three OSes |
-| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be < 15 MB |
+| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be < 20 MB |
 | [Idle-RSS gate](#idle-rss-gate) | **Yes** | Daemon idle memory < 30 MB (Linux) |
 | [Tarball build sentinel](#tarball-build-sentinel) | **Yes** | `cargo build` without `.git/` must not leak vergen sentinels |
 | [DCO sign-off](#dco-sign-off) | **Yes** (PRs only) | Every commit must have `Signed-off-by` trailer |
+| [MCP shim](#mcp-shim) | **Yes** | `node --test` in `packages/dreamd-mcp` |
+| [Install funnel](#install-funnel) | **Yes** | `scripts/alpha/install-funnel-suite.sh` (setup / doctor / update / conflicts) |
 | [Binary size (macOS)](#binary-size-reporting) | No | Informational size report |
 | [Binary size (Windows)](#binary-size-reporting) | No | Informational; Windows daemon deferred |
 | [Test coverage](#test-coverage) | No | HTML + lcov report; warnings only |
@@ -39,8 +41,11 @@ Jobs marked **Yes** block merge when they fail. Informational jobs never fail th
 
 ```bash
 cargo fmt --all -- --check
+bash scripts/check-npx-floating.sh
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+Lint also runs `scripts/check-npx-floating.sh` (no hard-pinned `dreamd-mcp@` in user-facing copy).
 
 ### Common failures
 
@@ -104,15 +109,15 @@ cargo test --all-features --workspace
 
 **Runs on:** `ubuntu-latest`  
 **Blocks merge:** Yes  
-**Limit:** Stripped `target/release/dreamd` < **15 MB** (NFR-2)
+**Limit:** Stripped `target/release/dreamd` < **20 MB** (NFR-2)
 
 ```bash
 cargo build --release --workspace
 strip target/release/dreamd
-stat -c%s target/release/dreamd   # must be ≤ 15728640
+stat -c%s target/release/dreamd   # must be < 20971520
 ```
 
-CI emits a soft warning at **12 MB**. Check the job summary for the measured size.
+CI emits a soft warning at **16 MB**. Check the job summary for the measured size.
 
 ---
 
@@ -172,6 +177,34 @@ Or sign at commit time: `git commit -s -m "…"`
 
 ---
 
+## MCP shim
+
+**Runs on:** `ubuntu-latest`  
+**Blocks merge:** Yes
+
+```bash
+cd packages/dreamd-mcp
+node --test
+```
+
+Version ↔ manifest ↔ `server.json` consistency, arg routing, and redirect/tar safety for the `npx` shim. No Rust required.
+
+---
+
+## Install funnel
+
+**Runs on:** `ubuntu-latest`  
+**Blocks merge:** Yes
+
+```bash
+cargo build -p dreamd
+timeout 180 bash scripts/alpha/install-funnel-suite.sh
+```
+
+Cold `setup`, floating npx pin, `doctor` on the scaffold, idempotent re-run, `update --dry-run`, and the AILAB-548 MCP-conflict taxonomy. Starts no daemon.
+
+---
+
 ## Binary size reporting
 
 **macOS and Windows jobs** — informational only, do not block merge.
@@ -204,7 +237,7 @@ To promote 85% to a blocking gate, uncomment `exit 1` in the workflow's "Summari
 
 ## Notify on main CI failure
 
-Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
+Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, audit, deny. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
 
 ---
 
@@ -242,4 +275,4 @@ scripts/coverage.sh
 
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — DCO, commit conventions, dev setup
 - [../deny.toml](../deny.toml) — license and advisory policy
-- [documentation-plan.md](./documentation-plan.md) — documentation roadmap
+- [README.md](./README.md) — documentation index

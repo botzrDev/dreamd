@@ -6,7 +6,7 @@
 //! `supervisor_map`, so there is no deadlock.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::Config;
 use crate::server::index_map::IndexError;
@@ -27,8 +27,10 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 /// `config` — layered runtime config loaded at startup.
 ///
 /// `index_map` — lazy-opened per-project Tantivy handles. `Mutex` (not
-/// `RwLock`) because `ProjectIndexMap::get_or_open` is `&mut self` even
-/// for reads (mutates LRU ordering).
+/// `RwLock`) because every lookup is `&mut self` even for reads (it mutates LRU
+/// ordering) — as true of `ProjectIndexMap::get_handle` as it was of
+/// `get_or_open`. Opening a handle does NOT happen under this lock; see
+/// [`AppState::with_index_handle`] (AILAB-186).
 ///
 /// `daemon_uid` — UID of the process that started the daemon. Used by
 /// `peer_uid_middleware` (WEG-72 / DR-407) to reject connections from other
@@ -92,14 +94,38 @@ impl AppState {
         self
     }
 
+    /// Lock `index_map`, mapping poisoning onto [`IndexError`]. Exists so every
+    /// guard in [`Self::with_index_handle`] is one line and its scope is
+    /// unmistakable.
+    fn lock_index_map(
+        &self,
+    ) -> Result<MutexGuard<'_, ProjectIndexMap<TantivyIndexHandle>>, IndexError> {
+        self.index_map.lock().map_err(|_| IndexError::LockPoisoned)
+    }
+
     /// Resolve the live index handle for `root` and run `f` against it.
     ///
     /// If `root` is the daemon's pinned primary project, `f` runs against that
     /// shared handle (no lock, never evicted — the coordinator feeds it and
-    /// recall reads it). Otherwise the handle is looked up (or lazily opened)
-    /// in `index_map`. `f` does cheap, non-blocking work only — clone the
-    /// `IndexReader` or the indexer `Sender` and return it; never hold the
-    /// returned value's work across the `index_map` mutex.
+    /// recall reads it). Otherwise `index_map` is consulted under its mutex, and
+    /// on a miss the mutex is **released before** `TantivyIndexHandle::open`
+    /// runs, then re-taken to publish the result (AILAB-186). `open` replays the
+    /// entire JSONL, issues a Tantivy commit, and allocates a 50 MB
+    /// `IndexWriter`; holding the map lock across that blocked every *other*
+    /// project's requests for its duration.
+    ///
+    /// That window is racy by construction — two first-touches of one root can
+    /// both open. [`ProjectIndexMap::insert_or_adopt`] settles it: the handle
+    /// already in the map wins and the loser is closed, never leaked. If our own
+    /// open instead *fails* (Tantivy's writer lock is per-directory and
+    /// non-blocking, so a concurrent opener can take it), the map is re-checked
+    /// before the error is surfaced — under the old single-lock shape that
+    /// caller would have blocked and then found the winner's handle, and this
+    /// keeps that outcome.
+    ///
+    /// `f` does cheap, non-blocking work only — clone the `IndexReader` or the
+    /// indexer `Sender` and return it; never hold the returned value's work
+    /// across the `index_map` mutex.
     pub(crate) fn with_index_handle<T>(
         &self,
         root: &Path,
@@ -110,17 +136,33 @@ impl AppState {
                 return Ok(f(handle.as_ref()));
             }
         }
-        let mut map = self
-            .index_map
-            .lock()
-            .map_err(|_| IndexError("index map lock poisoned".to_string()))?;
-        let handle = map.get_or_open(root, |r| {
-            TantivyIndexHandle::open(
-                &crate::layout::AgentRoot::new(r),
-                crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
-            )
-        })?;
-        Ok(f(handle))
+
+        // Hit path. The guard dies at this block's closing brace.
+        {
+            let mut map = self.lock_index_map()?;
+            if let Some(handle) = map.get_handle(root) {
+                return Ok(f(handle));
+            }
+        }
+
+        // No lock is held from here to the re-lock below — the open is the only
+        // thing between them.
+        let opened = match TantivyIndexHandle::open(
+            &crate::layout::AgentRoot::new(root),
+            crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
+        ) {
+            Ok(handle) => handle,
+            Err(e) => {
+                let mut map = self.lock_index_map()?;
+                return match map.get_handle(root) {
+                    Some(handle) => Ok(f(handle)),
+                    None => Err(e),
+                };
+            }
+        };
+
+        let mut map = self.lock_index_map()?;
+        Ok(f(map.insert_or_adopt(root, opened)))
     }
 
     /// Resolve the coordinator that owns `root` (WEG-272).
@@ -147,8 +189,7 @@ impl AppState {
 
         // Non-boot root: recover any stale WAL before opening indexes or coordinators.
         let agent_root = crate::layout::AgentRoot::new(root);
-        crate::wal::recover_on_startup(&agent_root)
-            .map_err(|e| IndexError(format!("wal recovery: {e}")))?;
+        crate::wal::recover_on_startup(&agent_root).map_err(|e| IndexError::Wal(format!("{e}")))?;
 
         // Wire the per-root coordinator to the per-root indexer (the same handle
         // recall/dream use) so its appends become searchable. Resolve + release
@@ -158,7 +199,7 @@ impl AppState {
         let mut map = self
             .supervisor_map
             .lock()
-            .map_err(|_| IndexError("supervisor map lock poisoned".to_string()))?;
+            .map_err(|_| IndexError::LockPoisoned)?;
         map.get_or_start(root, || {
             Supervisor::start(
                 &agent_root,
@@ -166,6 +207,6 @@ impl AppState {
                 Some(indexer_tx),
             )
         })
-        .map_err(|e| IndexError(format!("supervisor start failed: {e}")))
+        .map_err(|e| IndexError::Supervisor(format!("{e}")))
     }
 }

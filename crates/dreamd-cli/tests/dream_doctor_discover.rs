@@ -62,8 +62,10 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     // Bare tmpdir: no `.agent/` anywhere up-tree. discover fails before the
     // daemon proxy, so no --no-commit is needed.
-    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
-    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    // Daemon HOME, separate from the project dir, so anything this invocation
+    // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
+    // Since AILAB-184 `dream` writes nothing there (one-shots are console-only,
+    // and discover fails first), so the split is defensive suite hygiene.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
@@ -93,8 +95,10 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
 #[test]
 fn doctor_with_no_store_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    // WEG-32: daemon HOME, separate from the project dir, so init_tracing's
-    // ~/.agent/dreamd.log lands off tmp and the `!tmp/.agent` assertion holds.
+    // Daemon HOME, separate from the project dir, so anything this invocation
+    // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
+    // Since AILAB-184 `doctor` writes nothing there (one-shots are console-only,
+    // and discover fails first), so the split is defensive suite hygiene.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())

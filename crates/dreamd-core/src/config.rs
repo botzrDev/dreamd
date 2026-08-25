@@ -9,8 +9,9 @@
 //! produces a typed [`ConfigError`]; this module never panics on the load
 //! path (no `unwrap`, no `expect`).
 //!
-//! Provider / model / cost_cap_usd are present on the struct but **inert at
-//! v0.1** — they ship for v0.1.1 LLM mode and are not read elsewhere yet.
+//! `provider` / `model` / `endpoint` are read by [`crate::llm`] (AILAB-204) to
+//! build the dream cycle's LLM backend. `cost_cap_usd` is still inert — the
+//! per-cycle spend cap is AILAB-196.
 //! `DREAMD_LOG` env-var handling is owned by DR-004 / WEG-32 (tracing
 //! baseline), implemented in [`crate::observability`] — not here.
 
@@ -34,11 +35,17 @@ pub struct Config {
     pub log_level: String,
     /// DR-315 — dream-cycle scheduling mode. v0.1 is manual-only.
     pub dream_cycle_mode: DreamCycleMode,
-    /// LLM provider id. Inert at v0.1; reserved for v0.1.1.
+    /// LLM provider id (`"anthropic"` | `"openai"`). Read by [`crate::llm`]
+    /// (AILAB-204). Empty — the default — lets genai infer the provider from
+    /// the model name.
     pub provider: String,
-    /// LLM model id. Inert at v0.1; reserved for v0.1.1.
+    /// LLM model id. Read by [`crate::llm`] (AILAB-204).
     pub model: String,
-    /// DR-307 — per-cycle USD spend cap. Inert at v0.1; reserved for v0.1.1.
+    /// Base URL override for the LLM provider. Read by [`crate::llm`]
+    /// (AILAB-204). Empty — the default — uses the provider's own endpoint.
+    pub endpoint: String,
+    /// DR-307 — per-cycle USD spend cap. Still **inert**: enforcement is
+    /// AILAB-196, which owns the tokenizer and the pre-flight estimate.
     pub cost_cap_usd: f64,
 }
 
@@ -60,6 +67,7 @@ impl Default for Config {
             dream_cycle_mode: DreamCycleMode::Manual,
             provider: String::new(),
             model: "claude-haiku-4-5".to_string(),
+            endpoint: String::new(),
             cost_cap_usd: 0.10,
         }
     }
@@ -90,10 +98,11 @@ pub const CONFIG_TEMPLATE: &str = "\
 # log_level = \"info\"            # trace | debug | info | warn | error
 # dream_cycle_mode = \"manual\"   # \"manual\" | \"auto\" — v0.1 is manual-only (DR-315)
 
-# --- LLM keys: present but inert until v0.1.1 ---
-# provider = \"\"                 # LLM provider id
+# --- LLM keys: read by the dream cycle (AILAB-204) ---
+# provider = \"\"                 # \"anthropic\" | \"openai\"; empty infers from model
 # model = \"claude-haiku-4-5\"    # model id
-# cost_cap_usd = 0.10           # hard per-cycle spend cap (DR-307)
+# endpoint = \"\"                 # base URL override; empty uses the provider default
+# cost_cap_usd = 0.10           # hard per-cycle spend cap — still inert (AILAB-196)
 ";
 
 /// User-config path on this platform (Linux/macOS XDG, Windows Roaming).
@@ -209,6 +218,33 @@ mod tests {
         fs::write(&project_path, &customized).unwrap();
         let cfg = load_config_from(None, &project_path).expect("uncommented parses");
         assert!(!cfg.redaction, "uncommented key takes effect");
+    }
+
+    #[test]
+    fn uncommented_endpoint_key_parses() {
+        // AILAB-204 §3.2 — `endpoint` ships commented like the other LLM keys;
+        // prove an operator can uncomment it verbatim and have the value land.
+        let customized = CONFIG_TEMPLATE.replace(
+            "# endpoint = \"\"                 #",
+            "endpoint = \"https://llm.internal/v1\" #",
+        );
+        assert!(
+            customized.contains("\nendpoint = \"https://llm.internal/v1\""),
+            "template line for endpoint did not uncomment cleanly:\n{customized}"
+        );
+
+        let tmp = tempdir().unwrap();
+        let project_path = tmp.path().join("config.toml");
+
+        // The fully commented template must still yield the default: empty,
+        // i.e. "use the provider's own base URL".
+        fs::write(&project_path, CONFIG_TEMPLATE).unwrap();
+        let cfg = load_config_from(None, &project_path).expect("template parses");
+        assert_eq!(cfg.endpoint, "", "commented endpoint = provider default");
+
+        fs::write(&project_path, &customized).unwrap();
+        let cfg = load_config_from(None, &project_path).expect("uncommented parses");
+        assert_eq!(cfg.endpoint, "https://llm.internal/v1");
     }
 
     #[test]
