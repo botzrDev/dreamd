@@ -10,8 +10,9 @@
 //! path (no `unwrap`, no `expect`).
 //!
 //! `provider` / `model` / `endpoint` are read by [`crate::llm`] (AILAB-204) to
-//! build the dream cycle's LLM backend. `cost_cap_usd` is still inert — the
-//! per-cycle spend cap is AILAB-196.
+//! build the dream cycle's LLM backend. `cost_cap_usd` is read and enforced by
+//! the dream cycle (AILAB-196): the composition prompt is priced before the
+//! call, and an over-cap estimate composes the deterministic body instead.
 //! `DREAMD_LOG` env-var handling is owned by DR-004 / WEG-32 (tracing
 //! baseline), implemented in [`crate::observability`] — not here.
 
@@ -44,8 +45,10 @@ pub struct Config {
     /// Base URL override for the LLM provider. Read by [`crate::llm`]
     /// (AILAB-204). Empty — the default — uses the provider's own endpoint.
     pub endpoint: String,
-    /// DR-307 — per-cycle USD spend cap. Still **inert**: enforcement is
-    /// AILAB-196, which owns the tokenizer and the pre-flight estimate.
+    /// DR-307 — per-cycle USD spend cap. **Enforced** by the dream cycle
+    /// (AILAB-196): [`crate::llm::estimate_prompt_cost`] prices the composition
+    /// prompt before the model call, and an over-cap estimate skips the call
+    /// and writes the deterministic exemplar body.
     pub cost_cap_usd: f64,
 }
 
@@ -102,7 +105,7 @@ pub const CONFIG_TEMPLATE: &str = "\
 # provider = \"\"                 # \"anthropic\" | \"openai\"; empty infers from model
 # model = \"claude-haiku-4-5\"    # model id
 # endpoint = \"\"                 # base URL override; empty uses the provider default
-# cost_cap_usd = 0.10           # hard per-cycle spend cap — still inert (AILAB-196)
+# cost_cap_usd = 0.10           # hard per-cycle spend cap — enforced pre-call (AILAB-196)
 ";
 
 /// User-config path on this platform (Linux/macOS XDG, Windows Roaming).

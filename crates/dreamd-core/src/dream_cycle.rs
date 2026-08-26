@@ -171,7 +171,19 @@ async fn filesystem_phases<B: LlmBackend>(
     // `None` = nothing promoted; `select_lesson_or_retire` already unlinked any
     // stale LESSONS.md (AILAB-699) and decay still runs below.
     if let Some(selected) = consolidation::select_lesson_or_retire(agent_root, now_sec)? {
-        let body = compose_lesson_body(&selected, llm_target).await;
+        // The spend cap (AILAB-196) is read here rather than threaded through
+        // `run_filesystem_phases_with_backend`, because that signature is the
+        // FakeLlm seam and its callers hold a backend, not a project config.
+        // Reading it inside this arm also keeps a cycle that promotes nothing
+        // free of the extra file read. Same degrade-to-defaults rule as the
+        // production entry point: a broken config.toml must never fail a cycle.
+        let cap_usd = crate::config::load_config(agent_root.project_root())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "config load failed; using the default LLM cost cap");
+                crate::config::Config::default()
+            })
+            .cost_cap_usd;
+        let body = compose_lesson_body(&selected, llm_target, cap_usd).await;
         consolidation::write_selected_lesson(agent_root, now_sec, &selected, body)?;
     }
 
@@ -183,15 +195,54 @@ async fn filesystem_phases<B: LlmBackend>(
 /// Compose the lesson body. **Infallible by construction** — every LLM failure
 /// mode resolves to [`LessonBodySource::Deterministic`], so a model outage can
 /// never abort a cycle or leave `LESSONS.md` unwritten.
+///
+/// `cap_usd` is the caller's [`crate::config::Config::cost_cap_usd`] (AILAB-196).
+/// A spend limit can only be enforced in the moment before the connection opens
+/// — there is no refund arm after a completion — so the estimate is a gate here
+/// rather than a reconciliation later.
 async fn compose_lesson_body<B: LlmBackend>(
     selected: &SelectedLesson,
     llm_target: Option<(&B, &str)>,
+    cap_usd: f64,
 ) -> LessonBodySource {
     let Some((backend, model)) = llm_target else {
         return LessonBodySource::Deterministic;
     };
 
     let prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
+
+    // Cost gate (AILAB-196), deliberately positioned between the prompt and the
+    // first attempt: it needs the exact bytes that are about to be sent, and
+    // estimating any deeper — inside the backend — would both re-count on every
+    // retry and arrive after the request it was supposed to prevent.
+    let Some(estimate) = llm::estimate_prompt_cost(model, &prompt) else {
+        // No published rate means no bound on what this call costs. Pricing the
+        // unknown at zero would make a typo'd `model` string the one way to run
+        // uncapped, so an unpriced model is refused like any breach.
+        tracing::warn!(
+            model = %model,
+            cap_usd,
+            cluster_key = %selected.cluster_key,
+            "no published rate for this model, so its cost estimate exceeds cap by \
+             default; writing the deterministic body"
+        );
+        return LessonBodySource::Deterministic;
+    };
+    if llm::exceeds_cap(&estimate, cap_usd) {
+        // `input_tokens` rides along because the two causes of a breach have
+        // different fixes: an oversized cluster is not a repriced model.
+        tracing::warn!(
+            model = %model,
+            estimated_usd = estimate.estimated_usd,
+            cap_usd,
+            input_tokens = estimate.input_tokens,
+            cluster_key = %selected.cluster_key,
+            "cost estimate exceeds cap; skipping the model call and writing the \
+             deterministic body"
+        );
+        return LessonBodySource::Deterministic;
+    }
+
     match llm::complete_with_retries(backend, model, &prompt).await {
         // Trim only the envelope whitespace; the prose itself is the model's.
         Ok(completion) => compose_from_completion(selected, completion.text.trim()),
@@ -415,7 +466,14 @@ async fn preview_phases(
 
     let body = if no_llm {
         // Turbofish only names the type the `None` needs; no client is built.
-        compose_lesson_body::<llm::GenaiBackend>(&selected, None).await
+        // The cap is never consulted on this arm — `None` returns deterministic
+        // before the estimate — so `--dry --no-llm` still reads no config.
+        compose_lesson_body::<llm::GenaiBackend>(
+            &selected,
+            None,
+            crate::config::Config::default().cost_cap_usd,
+        )
+        .await
     } else {
         // A broken config.toml must not fail a preview that would otherwise
         // render deterministically — degrade to defaults and say so.
@@ -424,10 +482,20 @@ async fn preview_phases(
             crate::config::Config::default()
         });
         match llm::resolve_backend(&config) {
+            // The preview spends real money on the same terms as the write path,
+            // so it is gated by the same `cost_cap_usd` — an over-cap `--dry`
+            // renders the deterministic body it is previewing.
             Some(backend) => {
-                compose_lesson_body(&selected, Some((&backend, config.model.as_str()))).await
+                compose_lesson_body(
+                    &selected,
+                    Some((&backend, config.model.as_str())),
+                    config.cost_cap_usd,
+                )
+                .await
             }
-            None => compose_lesson_body::<llm::GenaiBackend>(&selected, None).await,
+            None => {
+                compose_lesson_body::<llm::GenaiBackend>(&selected, None, config.cost_cap_usd).await
+            }
         }
     };
 
@@ -558,6 +626,7 @@ async fn prune_decayed_events(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::Ordering;
 
     const NOW_SEC: i64 = 1_747_137_600;
 
@@ -761,6 +830,9 @@ mod tests {
             "{COMPOSED}\n\ncitations: {expected_id} {other}"
         ));
 
+        // This also pins the happy side of the AILAB-196 gate: the fixture store
+        // has no config.toml, so the cycle runs under the default $0.10 cap and a
+        // real estimate of this prompt has to clear it for the LLM body to land.
         run_filesystem_phases_with_backend(
             &root,
             NOW_SEC,
@@ -810,6 +882,59 @@ mod tests {
         assert!(
             pinned(&other),
             "a cited cluster member must be pinned through the frontmatter union"
+        );
+    }
+
+    // ── AILAB-196: pre-call cost cap ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zero_cap_composes_deterministically_without_calling_the_model() {
+        let (_dir, root) = scaffold_fixture();
+        let selected = deterministic_exemplar(&root);
+        let ids = cluster_ids(&root);
+        // A completion the citation gate would happily accept, so the only thing
+        // that can keep it out of the body is the cap itself.
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
+
+        let body = compose_lesson_body(&selected, Some((&fake, "claude-haiku-4-5")), 0.0).await;
+
+        assert!(
+            matches!(body, LessonBodySource::Deterministic),
+            "cost_cap_usd = 0.0 is how an operator says \"never call the model\"; \
+             reading it as \"no limit\" would invert the one setting whose failure \
+             mode is a bill"
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            0,
+            "the cap has to abort BEFORE the request — a refusal logged after the \
+             connection opened has already spent what it was meant to save"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_model_composes_deterministically_without_calling_the_model() {
+        let (_dir, root) = scaffold_fixture();
+        let selected = deterministic_exemplar(&root);
+        let ids = cluster_ids(&root);
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
+
+        // Generous cap, unknown rate: the cap is not what refuses this call, the
+        // missing price is. Nothing bounds a call whose rate this build has never
+        // been told.
+        let body =
+            compose_lesson_body(&selected, Some((&fake, "totally-unpriced-model")), 100.0).await;
+
+        assert!(
+            matches!(body, LessonBodySource::Deterministic),
+            "an unpriced model must abort to the deterministic body; treating an \
+             unknown rate as $0 would make a typo'd model string the one way to \
+             run uncapped"
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            0,
+            "an unpriced model must never reach the backend, however generous the cap"
         );
     }
 

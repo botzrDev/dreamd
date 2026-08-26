@@ -25,13 +25,14 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use dreamd_core::autobiography::AutobiographySkip;
-use dreamd_core::config::{Config, DreamCycleMode};
+use dreamd_core::config::{load_config, Config, DreamCycleMode};
 use dreamd_core::consolidation;
 use dreamd_core::index::{
     check_manifest_version, ManifestCheckOutcome, ManifestVersionError, RecurrenceSidecar,
     INDEX_MANIFEST_FILENAME, SCHEMA_VERSION as INDEX_SCHEMA_VERSION,
 };
 use dreamd_core::layout::AgentRoot;
+use dreamd_core::llm;
 use dreamd_protocol::{AgentLearning, RECORD_SCHEMA_VERSION};
 
 /// Mode flags for a doctor run. Mirrors `cli::DoctorArgs` without pulling
@@ -231,6 +232,8 @@ pub fn run(
 
     if flags.cluster_health {
         all_ok &= check_cluster_health(agent_root, events.as_deref(), now_sec, out)?;
+        // AILAB-196 — additive report, deliberately not `&=`-ed into `all_ok`.
+        report_next_cycle_cost(agent_root, now_sec, out)?;
     }
 
     if flags.repair {
@@ -520,6 +523,100 @@ fn check_cluster_health(
         )?;
         Ok(false)
     }
+}
+
+/// `--cluster-health` addendum (AILAB-196 / DR-307): price what the **next**
+/// dream cycle's LLM composition would cost, before it happens.
+///
+/// This is a *report, not a gate*. It returns `io::Result<()>`, not a health
+/// `bool`, and its call site does not fold it into `all_ok` — an over-cap
+/// estimate must never change doctor's exit code. Sidecar drift still owns the
+/// WARNING/exit contract; a spend the operator has already capped is
+/// information, not ill health. Every failure arm below still returns `Ok(())`
+/// for the same reason.
+///
+/// Doctor must never call `select_lesson_or_retire` (it unlinks
+/// `semantic/LESSONS.md`) and must never call `run_cluster_engine` (it writes
+/// `semantic/recurrence_counts.json`). Selection therefore goes through
+/// [`consolidation::preview_select_lesson`], the read-only `--dry` seam: a
+/// health check must not mutate the store it is auditing.
+///
+/// The estimate is purely local: [`llm::estimate_prompt_cost`] tokenizes with
+/// the bundled `cl100k_base` table. No genai client is constructed and no
+/// network call is made.
+///
+/// `now_sec` is caller-provided for the same determinism reason as [`run`] —
+/// do not call `Utc::now()` here.
+fn report_next_cycle_cost(
+    agent_root: &AgentRoot,
+    now_sec: i64,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    // Same degrade-to-defaults rule the dream cycle itself uses: a broken
+    // config.toml must not fail a check that would otherwise report cleanly.
+    let config = load_config(agent_root.project_root()).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "config load failed; using defaults for the cost estimate");
+        Config::default()
+    });
+
+    let selected = match consolidation::preview_select_lesson(agent_root, now_sec) {
+        Ok(selected) => selected,
+        Err(e) => {
+            // Informational: an unreadable episodic log is already reported by
+            // `schema_record` above, and pricing must not double-count it into
+            // the exit code.
+            writeln!(
+                out,
+                "cluster_health: next_cycle_est_usd=unavailable (could not preview the next \
+                 cycle: {e})"
+            )?;
+            return Ok(());
+        }
+    };
+
+    let Some(selected) = selected else {
+        writeln!(
+            out,
+            "cluster_health: next_cycle_est_usd=0.00 (no promotion)"
+        )?;
+        return Ok(());
+    };
+
+    let prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
+    let model = config.model.as_str();
+    let cap_usd = config.cost_cap_usd;
+
+    match llm::estimate_prompt_cost(model, &prompt) {
+        Some(est) => {
+            let usd = est.estimated_usd;
+            let tokens = est.input_tokens;
+            // Over cap keeps the line shape but swaps the parenthetical:
+            // repeating `(within cap)` next to an abort warning would be false.
+            let verdict = if llm::exceeds_cap(&est, cap_usd) {
+                "(over cap) [WARNING: would abort LLM]"
+            } else {
+                "(within cap)"
+            };
+            writeln!(
+                out,
+                "cluster_health: next_cycle_est_usd={usd:.4} cap_usd={cap_usd:.2} \
+                 model={model} tokens={tokens} {verdict}"
+            )?;
+        }
+        // An unknown model has no price row, so there is no USD figure and no
+        // token count that would be honest to print — a `0.0000` here reads as
+        // "free", which is the opposite of what this arm means. Both unknowable
+        // fields therefore say `unknown` while the line keeps its shape and both
+        // greppable markers (`next_cycle_est_usd=` and the abort WARNING). The
+        // cycle treats `None` as over-cap, so the warning is accurate.
+        None => writeln!(
+            out,
+            "cluster_health: next_cycle_est_usd=unknown cap_usd={cap_usd:.2} model={model} \
+             tokens=unknown (unknown model — not in the price table) [WARNING: would abort LLM]"
+        )?,
+    }
+
+    Ok(())
 }
 
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
@@ -1308,6 +1405,55 @@ mod tests {
             "a stale sidecar must be flagged; got: {output:?}"
         );
         assert!(!ok, "genuine drift must return all_ok=false");
+    }
+
+    /// AILAB-196 §3.3 — the cost report rides along with `--cluster-health`
+    /// and must stay read-only. The fixture is seeded with `seed_events` alone
+    /// rather than `run_cluster_engine`, unlike the drift tests above, so that
+    /// the three absence assertions actually mean something: any write found
+    /// afterwards came from the code under test.
+    #[test]
+    fn cluster_health_reports_next_cycle_cost_without_writing() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("ch-cost");
+        // PROMOTION_THRESHOLD is 3, so this store promotes and the reporter
+        // takes the `Some(selected)` arm that actually builds a prompt.
+        seed_events(
+            &root,
+            &[
+                learning('A', "rust::borrow", RECORD_SCHEMA_VERSION),
+                learning('B', "rust::borrow", RECORD_SCHEMA_VERSION),
+                learning('C', "rust::borrow", RECORD_SCHEMA_VERSION),
+            ],
+        );
+        let flags = DoctorFlags {
+            cluster_health: true,
+            ..Default::default()
+        };
+        let (ok, output, _) = run_with(&cfg, &root, None, None, flags);
+        assert!(
+            output.contains("next_cycle_est_usd="),
+            "a promoting store must be priced; got: {output:?}"
+        );
+        assert!(
+            !root.lessons_md().exists(),
+            "doctor must never take select_lesson_or_retire's write path, which \
+             unlinks LESSONS.md; got: {output:?}"
+        );
+        assert!(
+            !root.semantic_dir().join("recurrence_counts.json").exists(),
+            "doctor must never take run_cluster_engine's write path, which \
+             writes the recurrence sidecar; got: {output:?}"
+        );
+        assert!(
+            !root.wal_path().exists(),
+            "pricing must not open a dream-cycle WAL; got: {output:?}"
+        );
+        assert!(
+            ok,
+            "the cost line is informational: it must not flip the exit code, \
+             which here is owned by the benign absent-sidecar arm; got: {output:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -30,6 +30,8 @@ insta = { version = "1", features = ["filters"] }
 # directly until the mcp subcommand is wired.
 rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
 
+# NFR-2 (stripped `dreamd` ≤ 20 MB) was already red on main at ~20.5 MB under the
+# default profile; fat LTO is the shrink, not a gate raise (AILAB-196).
 [profile.release]
 lto = "fat"
 codegen-units = 1

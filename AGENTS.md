@@ -373,7 +373,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. Linear AILAB-204 originally said `[dream.llm]`; the issue description was reconciled to flat keys when 204 moved to Done (2026-08-23).
 - **Why:** WEG-14 / DR-112 shipped flat keys and a commented template; a nested table would break `CONFIG_TEMPLATE` parse tests and every existing `config.toml`.
-- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. AILAB-196 reads `cost_cap_usd`; it does not introduce `max_cost_usd` or a nested table.
+- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. AILAB-196 has shipped: the dream cycle reads and enforces the flat `cost_cap_usd`; it did not introduce `max_cost_usd` or a nested table.
 - **Cross-refs:** `migrate-from-to-is-record-schema`
 
 ### doctor-cluster-health-flag-already-exists
@@ -410,6 +410,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-196 §4 originally grepped `count_tokens|count-tokens|messages/count` in `llm.rs`. Phase 1 rustdoc explaining the rejected remote token-count endpoint tripped it. Same family as `guards-vs-mandates-same-line`.
 - **How to apply:** Grep call syntax / URLs (`\.count_tokens\(`, `messages/count`) and drop `///` / `//!` / `//` lines. Do not ban the English words in docs.
 - **Cross-refs:** `guards-vs-mandates-same-line`
+
+### spec-grep-file-wide-hits-the-tickets-own-fixtures
+
+- **Rule:** An anti-pattern grep over a whole `.rs` file will hit `#[cfg(test)]` fixtures that *must* call the banned production function. Narrow to production code (above `#[cfg(test)]`) or to `git diff` added lines — do not fail a ticket because pre-existing tests seed state with the helper the production path must not use.
+- **Why:** AILAB-196 §4 grep 3 (`select_lesson_or_retire|run_cluster_engine` in `commands/doctor.rs`) was already red at `d2d5fa9` on three drift-test lines (comment + two `run_cluster_engine` calls). Those tests need a real sidecar on disk. `head -n` of the `#[cfg(test)]` line (784) was empty; `git diff` added lines naming the symbols all carried `never` / `rather than`. Weakening the fixtures to satisfy the grep would delete the only proof the sidecar-diff arm works.
+- **How to apply:** Pair a file-wide grep with (1) a production-only slice through the first `#[cfg(test)]` and (2) `git diff -- path | grep -E '^\+.*(banned)'`. Same family as `spec-grep-count-guard-contradicts-ac-test-code` / `guards-vs-mandates-same-line`.
+- **Cross-refs:** `select-lesson-or-retire-unlinks`, `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`
 
 ### v2-beats-linear-ac
 

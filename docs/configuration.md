@@ -44,7 +44,7 @@ This is the exact template written by `dreamd init` (`CONFIG_TEMPLATE`):
 # provider = ""                 # "anthropic" | "openai"; empty infers from model
 # model = "claude-haiku-4-5"    # model id
 # endpoint = ""                 # base URL override; empty uses the provider default
-# cost_cap_usd = 0.10           # hard per-cycle spend cap — still inert (AILAB-196)
+# cost_cap_usd = 0.10           # hard per-cycle spend cap — enforced pre-call (AILAB-196)
 ```
 
 A fully commented project config parses successfully and yields built-in defaults.
@@ -61,7 +61,7 @@ A fully commented project config parses successfully and yields built-in default
 | `provider` | string | `""` | user, project | LLM provider id — `"anthropic"` or `"openai"`. Empty (default) infers the provider from the model name. Read by the dream cycle (AILAB-204) |
 | `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id used to compose `LESSONS.md` bodies. Read by the dream cycle (AILAB-204) |
 | `endpoint` | string | `""` | user, project | Base URL override for the LLM provider. Empty (default) uses the provider's own endpoint. Read by the dream cycle (AILAB-204) |
-| `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap. **Still inert** — enforcement is AILAB-196 |
+| `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap, **enforced** by the dream cycle (AILAB-196). The composition prompt is priced before the model call; over the cap the call is skipped and the deterministic exemplar body is written instead. The estimate is approximate — see [llm-cost-accuracy.md](./llm-cost-accuracy.md) |
 
 ### `redaction`
 
@@ -173,6 +173,7 @@ See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [..
 ## See also
 
 - [../GUIDE.md](../GUIDE.md) — first-run walkthrough (learn / recall / watch)
+- [llm-cost-accuracy.md](./llm-cost-accuracy.md) — how `cost_cap_usd` is estimated, and why the estimate is approximate
 - [http-api.md](./http-api.md) — API affected by `redaction`
 - [../SPEC.md](../SPEC.md) — schema and on-disk layout
 - [../SECURITY.md](../SECURITY.md) — `DREAMD_SOCK` / `DREAMD_BIN` threat model
