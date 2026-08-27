@@ -50,6 +50,9 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
             NOW_SEC,
             &cycle_date,
             true,
+            // AILAB-199: no consent. `no_llm = true` reads no `personal/` in any
+            // case, so the snapshot bytes are unaffected either way.
+            false,
         ))
         .expect("dream cycle must succeed on valid fixture");
 

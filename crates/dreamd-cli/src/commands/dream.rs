@@ -10,7 +10,8 @@
 //! `--no-commit` is the ONLY flag that skips the proxy. `--no-llm` (AILAB-204)
 //! travels *through* it as the `x-dreamd-no-llm: 1` header — skipping the daemon
 //! to honor it locally would run a second writer against a JSONL the daemon's
-//! coordinator owns.
+//! coordinator owns. `--share-personal` (AILAB-199) follows the same rule, as
+//! `x-dreamd-share-personal: 1`, for the same reason.
 //!
 //! ## WAL protocol
 //!
@@ -81,12 +82,16 @@ impl From<std::io::Error> for DreamCliError {
 /// Run the full dream cycle from the CLI.
 ///
 /// `no_llm` forces the deterministic lesson body on whichever path runs; it does
-/// not change *which* path runs.
+/// not change *which* path runs. `share_personal` (AILAB-199) is per-call consent
+/// to put `.agent/personal/` in the composition prompt and likewise does not
+/// change which path runs — it travels through the proxy as a header, or is
+/// taken directly by the in-process cycle.
 pub fn run(
     project_root: &Path,
     out: &mut impl Write,
     no_commit: bool,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<(), DreamCliError> {
     // WEG-271 fast-follow: if a daemon owns this project, proxy the cycle to it
     // (one writer). --no-commit always runs in-process (determinism / commit
@@ -94,7 +99,7 @@ pub fn run(
     // never AND-ed into this condition.
     #[cfg(unix)]
     if !no_commit {
-        if let Some(decided) = try_proxy_to_daemon(project_root, out, no_llm)? {
+        if let Some(decided) = try_proxy_to_daemon(project_root, out, no_llm, share_personal)? {
             return Ok(decided); // daemon ran it (409 already surfaced as Err)
         }
         // None → no daemon for this project; fall through to in-process.
@@ -114,6 +119,7 @@ pub fn run(
         now_sec,
         no_commit,
         no_llm,
+        share_personal,
         dirty_at_cycle_start,
     )
     .map_err(DreamCliError::DreamCycle)?;
@@ -140,6 +146,7 @@ fn try_proxy_to_daemon(
     project_root: &Path,
     out: &mut impl Write,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<Option<()>, DreamCliError> {
     use dreamd_core::client::{proxy_dream_cycle, resolve_daemon_socket, DreamProxyOutcome};
 
@@ -147,7 +154,12 @@ fn try_proxy_to_daemon(
         return Ok(None);
     };
     let outcome = tokio::runtime::Runtime::new()?
-        .block_on(proxy_dream_cycle(&sock, project_root, no_llm))
+        .block_on(proxy_dream_cycle(
+            &sock,
+            project_root,
+            no_llm,
+            share_personal,
+        ))
         .map_err(|e| DreamCliError::DaemonProxy(e.to_string()))?;
     match outcome {
         DreamProxyOutcome::Ran => {
@@ -183,13 +195,20 @@ pub enum DryOutcome {
 /// the proxy because the daemon is the single writer; `--dry` skips it because
 /// there is nothing to write and `POST /api/v1/dream` would write anyway.
 /// `no_commit` is not a parameter: with no writes there is no commit to skip.
+///
+/// `share_personal` therefore cannot travel as a header here and is taken
+/// in-process (AILAB-199). Dropping it on this path would be the worse of the
+/// two errors it could make: the preview exists to show the operator the prompt
+/// the real cycle will send, and one that silently omitted the consented bytes
+/// would misreport exactly the disclosure the flag is about.
 pub fn run_dry(
     project_root: &Path,
     out: &mut impl Write,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<DryOutcome, DreamCliError> {
     let now_sec = resolve_now_sec()?;
-    let preview = dream_cycle::preview_in_process(project_root, now_sec, no_llm)
+    let preview = dream_cycle::preview_in_process(project_root, now_sec, no_llm, share_personal)
         .map_err(DreamCliError::DreamCycle)?;
 
     match preview.lessons_markdown {
@@ -316,7 +335,7 @@ mod tests {
         fs::write(root.episodic_jsonl(), &body).unwrap();
 
         let mut out = Vec::new();
-        let outcome = run_dry(tmp.path(), &mut out, true).expect("dry run");
+        let outcome = run_dry(tmp.path(), &mut out, true, false).expect("dry run");
 
         assert_eq!(outcome, DryOutcome::WouldWrite);
         let stdout = String::from_utf8(out).unwrap();
@@ -352,7 +371,7 @@ mod tests {
         fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();
 
         let mut out = Vec::new();
-        let outcome = run_dry(tmp.path(), &mut out, true).expect("dry run");
+        let outcome = run_dry(tmp.path(), &mut out, true, false).expect("dry run");
 
         assert_eq!(outcome, DryOutcome::WouldRetire);
         assert!(out.is_empty(), "stdout must be empty on a retire preview");
@@ -366,7 +385,7 @@ mod tests {
         fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();
 
         let mut out = Vec::new();
-        run(tmp.path(), &mut out, true, true).unwrap();
+        run(tmp.path(), &mut out, true, true, false).unwrap();
         let stdout = String::from_utf8(out).unwrap();
         assert!(
             stdout.contains("dream cycle complete"),

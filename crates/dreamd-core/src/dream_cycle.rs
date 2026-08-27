@@ -107,15 +107,27 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 /// `false`, the backend is resolved from the project's [`crate::config::Config`]
 /// plus [`llm::resolve_llm_credentials`]; absent credentials log
 /// [`llm::NO_API_KEY_FALLBACK`] and fall through to the same deterministic path.
+///
+/// `share_personal` is the per-call consent from `dreamd dream --share-personal`
+/// (or `x-dreamd-share-personal: 1`). It is **only** permission to read
+/// `.agent/personal/`; it never causes a model call that would not otherwise
+/// happen, so `no_llm = true` ignores it entirely and reads nothing (AILAB-199).
 pub async fn run_filesystem_phases(
     agent_root: &AgentRoot,
     now_sec: i64,
     cycle_date: &str,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     if no_llm {
         // Turbofish only names the type the `None` needs; no client is built.
-        return filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None).await;
+        // `share_personal` is deliberately dropped on this arm rather than
+        // forwarded: with no backend there is no payload to consent to, and
+        // reading `personal/` here would be a disclosure with no recipient.
+        return filesystem_phases::<llm::GenaiBackend>(
+            agent_root, now_sec, cycle_date, None, false,
+        )
+        .await;
     }
 
     // A broken config.toml must not fail a cycle that would otherwise run
@@ -132,23 +144,39 @@ pub async fn run_filesystem_phases(
                 now_sec,
                 cycle_date,
                 Some((&backend, config.model.as_str())),
+                share_personal,
             )
             .await
         }
-        None => filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None).await,
+        None => {
+            filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None, false)
+                .await
+        }
     }
 }
 
 /// [`run_filesystem_phases`] with an explicit backend — the seam tests use to
 /// drive the LLM path with a fake and no network.
+///
+/// `share_personal` is `false` for every pre-AILAB-199 caller; the flag exists
+/// here so a test can drive the consent path against the same fake backend the
+/// rest of the LLM assertions use.
 pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     agent_root: &AgentRoot,
     now_sec: i64,
     cycle_date: &str,
     backend: &B,
     model: &str,
+    share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
-    filesystem_phases(agent_root, now_sec, cycle_date, Some((backend, model))).await
+    filesystem_phases(
+        agent_root,
+        now_sec,
+        cycle_date,
+        Some((backend, model)),
+        share_personal,
+    )
+    .await
 }
 
 /// The one WAL envelope. `llm` is `None` for every deterministic trigger
@@ -158,6 +186,7 @@ async fn filesystem_phases<B: LlmBackend>(
     now_sec: i64,
     cycle_date: &str,
     llm_target: Option<(&B, &str)>,
+    share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     // ARCH-2: ONE WAL envelope spans BOTH filesystem phases. begin_cycle guards
     // `.agent/` existence (WEG-281) and sets state=in_progress; commit_cycle sets
@@ -183,7 +212,8 @@ async fn filesystem_phases<B: LlmBackend>(
                 crate::config::Config::default()
             })
             .cost_cap_usd;
-        let body = compose_lesson_body(&selected, llm_target, cap_usd).await;
+        let body =
+            compose_lesson_body(&selected, llm_target, cap_usd, agent_root, share_personal).await;
         consolidation::write_selected_lesson(agent_root, now_sec, &selected, body)?;
     }
 
@@ -200,16 +230,53 @@ async fn filesystem_phases<B: LlmBackend>(
 /// A spend limit can only be enforced in the moment before the connection opens
 /// — there is no refund arm after a completion — so the estimate is a gate here
 /// rather than a reconciliation later.
+///
+/// `share_personal` is the per-call consent gate for `.agent/personal/`
+/// (AILAB-199). This is the **only** place in the tree that turns that flag into
+/// a read, which is what makes "default excludes the personal layer" a property
+/// of one branch rather than a convention several call sites have to keep.
+/// Ordering inside this function is load-bearing twice over: the personal bytes
+/// are appended *after* `build_lesson_prompt` (so the cluster prompt stays
+/// cluster-only and can never carry them by construction) and *before*
+/// [`llm::estimate_prompt_cost`] (so the AILAB-196 cap prices the string that is
+/// actually about to be sent, not a shorter one).
 async fn compose_lesson_body<B: LlmBackend>(
     selected: &SelectedLesson,
     llm_target: Option<(&B, &str)>,
     cap_usd: f64,
+    agent_root: &AgentRoot,
+    share_personal: bool,
 ) -> LessonBodySource {
     let Some((backend, model)) = llm_target else {
+        // No backend, no request, nothing to consent to — `personal/` is not
+        // read on this arm even with the flag set. `--no-llm --share-personal`
+        // is a legal combination that discloses nothing.
         return LessonBodySource::Deterministic;
     };
 
-    let prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
+    let mut prompt = llm::build_lesson_prompt(&selected.cluster_key, &selected.events);
+
+    // One line, one gate: consent is the *only* thing that can produce a read of
+    // `personal/`, and keeping the flag and the call in one expression is what
+    // lets a grep prove that without reading the surrounding block. The
+    // `.flatten()` sits on the consumer instead: outer `None` is "not
+    // consented", inner `None` is "consented, nothing to attach".
+    let personal = share_personal.then(|| llm::load_personal_prompt_context(agent_root));
+    if let Some(context) = personal.flatten() {
+        // WARN on the cycle that actually attaches bytes, not on daemon boot:
+        // an operator grepping their log for a disclosure wants one line per
+        // disclosure, and a startup banner that fires when nothing was shared
+        // would train them to ignore exactly this line.
+        tracing::warn!(
+            bytes = context.len(),
+            cluster_key = %selected.cluster_key,
+            "share-personal is set; attaching personal/ context to the composition prompt"
+        );
+        prompt.push_str("\n\n");
+        prompt.push_str(llm::PERSONAL_CONTEXT_HEADING);
+        prompt.push('\n');
+        prompt.push_str(&context);
+    }
 
     // Cost gate (AILAB-196), deliberately positioned between the prompt and the
     // first attempt: it needs the exact bytes that are about to be sent, and
@@ -359,6 +426,7 @@ pub fn run_in_process(
     now_sec: i64,
     no_commit: bool,
     no_llm: bool,
+    share_personal: bool,
     dirty_at_cycle_start: Vec<PathBuf>,
 ) -> Result<DreamCycleResult, DreamCycleError> {
     let agent_root = AgentRoot::new(project_root);
@@ -370,7 +438,9 @@ pub fn run_in_process(
         .expect("tokio runtime for dream cycle");
 
     runtime.block_on(async {
-        let decay = run_filesystem_phases(&agent_root, now_sec, &cycle_date, no_llm).await?;
+        let decay =
+            run_filesystem_phases(&agent_root, now_sec, &cycle_date, no_llm, share_personal)
+                .await?;
 
         #[cfg(unix)]
         {
@@ -432,6 +502,11 @@ pub struct DryPreview {
 /// flag. Composition stays infallible: any LLM failure degrades to the
 /// deterministic exemplar copy, exactly as on the write path.
 ///
+/// `share_personal` is honored here too (AILAB-199). `--dry` skips the daemon
+/// proxy, so the consent cannot arrive as a header on this path and has to be
+/// taken in-process — and a preview that silently dropped it would show the
+/// operator a prompt the real cycle is not going to send.
+///
 /// Uses the same current-thread runtime shape as [`run_in_process`] so the body
 /// composition can `await`; building a second runtime inside an existing one
 /// would panic at the nested `block_on`.
@@ -439,6 +514,7 @@ pub fn preview_in_process(
     project_root: &Path,
     now_sec: i64,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<DryPreview, DreamCycleError> {
     let agent_root = AgentRoot::new(project_root);
 
@@ -447,7 +523,7 @@ pub fn preview_in_process(
         .build()
         .expect("tokio runtime for dream preview");
 
-    runtime.block_on(preview_phases(&agent_root, now_sec, no_llm))
+    runtime.block_on(preview_phases(&agent_root, now_sec, no_llm, share_personal))
 }
 
 /// Async half of [`preview_in_process`]: select, compose, render.
@@ -455,6 +531,7 @@ async fn preview_phases(
     agent_root: &AgentRoot,
     now_sec: i64,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<DryPreview, DreamCycleError> {
     let Some(selected) = consolidation::preview_select_lesson(agent_root, now_sec)? else {
         // Nothing promotes. The write path would unlink a stale LESSONS.md here;
@@ -472,6 +549,8 @@ async fn preview_phases(
             &selected,
             None,
             crate::config::Config::default().cost_cap_usd,
+            agent_root,
+            false,
         )
         .await
     } else {
@@ -490,11 +569,20 @@ async fn preview_phases(
                     &selected,
                     Some((&backend, config.model.as_str())),
                     config.cost_cap_usd,
+                    agent_root,
+                    share_personal,
                 )
                 .await
             }
             None => {
-                compose_lesson_body::<llm::GenaiBackend>(&selected, None, config.cost_cap_usd).await
+                compose_lesson_body::<llm::GenaiBackend>(
+                    &selected,
+                    None,
+                    config.cost_cap_usd,
+                    agent_root,
+                    false,
+                )
+                .await
             }
         }
     };
@@ -649,9 +737,15 @@ mod tests {
     /// keeps these tests network-free and byte-identical to the old behavior
     /// regardless of whether the developer running them has an API key exported.
     async fn run_deterministic(root: &AgentRoot) -> DecayResult {
-        run_filesystem_phases(root, NOW_SEC, &cycle_date_from_now_sec(NOW_SEC), true)
-            .await
-            .expect("filesystem phases")
+        run_filesystem_phases(
+            root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            true,
+            false,
+        )
+        .await
+        .expect("filesystem phases")
     }
 
     #[tokio::test]
@@ -670,7 +764,7 @@ mod tests {
         let (_dir, root) = scaffold_fixture();
         let project_root = root.project_root().to_path_buf();
 
-        let result = run_in_process(&project_root, NOW_SEC, true, true, Vec::new())
+        let result = run_in_process(&project_root, NOW_SEC, true, true, false, Vec::new())
             .expect("full in-process cycle");
 
         assert!(root.lessons_md().exists());
@@ -705,7 +799,7 @@ mod tests {
         let sidecar = root.semantic_dir().join("recurrence_counts.json");
         let jsonl_before = fs::read(root.episodic_jsonl()).unwrap();
 
-        let preview = preview_in_process(&project_root, NOW_SEC, true).expect("preview");
+        let preview = preview_in_process(&project_root, NOW_SEC, true, false).expect("preview");
         let markdown = preview
             .lessons_markdown
             .expect("the fixture promotes a cluster");
@@ -722,7 +816,7 @@ mod tests {
             "a dry run must not rewrite the episodic log"
         );
 
-        run_in_process(&project_root, NOW_SEC, true, true, Vec::new()).expect("real cycle");
+        run_in_process(&project_root, NOW_SEC, true, true, false, Vec::new()).expect("real cycle");
 
         assert_eq!(
             markdown,
@@ -765,7 +859,7 @@ mod tests {
             .max()
             .expect("fixture is non-empty");
         let later = newest + consolidation::WINDOW_30_DAYS_SEC + 1;
-        let preview = preview_in_process(&project_root, later, true).expect("preview");
+        let preview = preview_in_process(&project_root, later, true, false).expect("preview");
 
         assert!(
             preview.lessons_markdown.is_none(),
@@ -839,6 +933,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("llm cycle");
@@ -896,7 +992,14 @@ mod tests {
         // that can keep it out of the body is the cap itself.
         let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
 
-        let body = compose_lesson_body(&selected, Some((&fake, "claude-haiku-4-5")), 0.0).await;
+        let body = compose_lesson_body(
+            &selected,
+            Some((&fake, "claude-haiku-4-5")),
+            0.0,
+            &root,
+            false,
+        )
+        .await;
 
         assert!(
             matches!(body, LessonBodySource::Deterministic),
@@ -922,8 +1025,14 @@ mod tests {
         // Generous cap, unknown rate: the cap is not what refuses this call, the
         // missing price is. Nothing bounds a call whose rate this build has never
         // been told.
-        let body =
-            compose_lesson_body(&selected, Some((&fake, "totally-unpriced-model")), 100.0).await;
+        let body = compose_lesson_body(
+            &selected,
+            Some((&fake, "totally-unpriced-model")),
+            100.0,
+            &root,
+            false,
+        )
+        .await;
 
         assert!(
             matches!(body, LessonBodySource::Deterministic),
@@ -955,6 +1064,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("a hallucinated citation must NEVER fail the cycle");
@@ -997,6 +1108,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("cycle must still commit");
@@ -1023,6 +1136,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("a missing trailer must NEVER fail the cycle");
@@ -1052,6 +1167,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("cycle must still commit");
@@ -1077,6 +1194,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("a failing model must NEVER fail the cycle");
@@ -1107,6 +1226,8 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
+            // AILAB-199: no consent — the default for every pre-199 assertion.
+            false,
         )
         .await
         .expect("empty completion must not fail the cycle");
@@ -1132,6 +1253,193 @@ mod tests {
             vec![lesson.id.clone()],
             "the deterministic body cites exactly the exemplar it copied, so \
              --no-llm pin behavior is unchanged by AILAB-200"
+        );
+    }
+
+    // ── AILAB-199: personal-layer consent ────────────────────────────────────
+
+    /// Unique enough that a match cannot be coincidence, and shaped so a
+    /// substring search over the whole prompt is a sound test.
+    const PERSONAL_CANARY: &str = "AILAB199-CANARY-do-not-send-this-to-a-model";
+
+    /// Plant the canary in `personal/PREFERENCES.md`. Nothing else in the
+    /// fixture writes to `personal/`, so a prompt containing this string can
+    /// only have got it from the personal layer.
+    fn write_personal_canary(root: &AgentRoot) {
+        fs::create_dir_all(root.personal_dir()).expect("personal/ dir");
+        fs::write(
+            root.preferences_md(),
+            format!("# Preferences\n\n{PERSONAL_CANARY}\n"),
+        )
+        .expect("write canary");
+    }
+
+    /// **The default-exclude proof.** A populated `personal/` plus a live model
+    /// and no consent: the model is called, and what it is handed contains no
+    /// personal byte.
+    ///
+    /// The assertion is on `FakeLlm::last_prompt` rather than on the written
+    /// lesson deliberately — the fake never reads its input, so a leaking prompt
+    /// and a clean one produce byte-identical `LESSONS.md`. Only the recorded
+    /// request payload can tell them apart.
+    #[tokio::test]
+    async fn default_cycle_never_sends_personal_bytes_to_the_model() {
+        let (_dir, root) = scaffold_fixture();
+        write_personal_canary(&root);
+
+        let ids = cluster_ids(&root);
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
+
+        run_filesystem_phases_with_backend(
+            &root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+            false,
+        )
+        .await
+        .expect("llm cycle");
+
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "the model must actually have been called — a test that leaks no \
+             personal bytes because it made no request proves nothing"
+        );
+        let prompt = fake.last_prompt().expect("the backend recorded its prompt");
+        assert!(
+            !prompt.contains(PERSONAL_CANARY),
+            "personal/ content reached the LLM request payload without \
+             --share-personal; prompt was:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains(crate::llm::PERSONAL_CONTEXT_HEADING),
+            "the personal block must not be present at all by default"
+        );
+        // The cluster half is unchanged — the exclusion is not achieved by
+        // sending less of the log.
+        assert!(prompt.contains(&ids[0]), "cluster events still travel");
+    }
+
+    /// The consent path: with `--share-personal` the same store's canary is in
+    /// the payload, under the heading that makes it distinguishable from an
+    /// event body that happened to repeat the same words.
+    #[tokio::test]
+    async fn share_personal_attaches_the_personal_layer_under_its_heading() {
+        let (_dir, root) = scaffold_fixture();
+        write_personal_canary(&root);
+
+        let ids = cluster_ids(&root);
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
+
+        run_filesystem_phases_with_backend(
+            &root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+            true,
+        )
+        .await
+        .expect("llm cycle");
+
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        let prompt = fake.last_prompt().expect("the backend recorded its prompt");
+        assert!(
+            prompt.contains(crate::llm::PERSONAL_CONTEXT_HEADING),
+            "opted-in personal bytes must be introduced by their heading; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(PERSONAL_CANARY),
+            "--share-personal must actually attach personal/; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("PREFERENCES.md"),
+            "each attached file is named, so a reader of the prompt can tell \
+             which personal file a line came from"
+        );
+        // The heading precedes the canary: the personal block is appended after
+        // the cluster prompt, never interleaved into it.
+        let heading_at = prompt
+            .find(crate::llm::PERSONAL_CONTEXT_HEADING)
+            .expect("heading present");
+        let canary_at = prompt.find(PERSONAL_CANARY).expect("canary present");
+        assert!(
+            heading_at < canary_at,
+            "personal bytes follow their heading"
+        );
+    }
+
+    /// `--no-llm --share-personal` is legal and discloses nothing: consent to a
+    /// request that is never made is not a disclosure. Zero backend calls.
+    #[tokio::test]
+    async fn no_llm_with_share_personal_calls_no_backend_and_stays_deterministic() {
+        let (_dir, root) = scaffold_fixture();
+        write_personal_canary(&root);
+        let selected = deterministic_exemplar(&root);
+
+        // `--no-llm` becomes `llm_target = None` one frame up in
+        // `filesystem_phases`; a backend exists here only so "it was not called"
+        // is asserted against an object that records calls.
+        let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
+        let body =
+            compose_lesson_body::<crate::llm::fake::FakeLlm>(&selected, None, 100.0, &root, true)
+                .await;
+        assert!(matches!(body, LessonBodySource::Deterministic));
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            0,
+            "no request may be made when there is no backend to make it to"
+        );
+        assert_eq!(fake.last_prompt(), None, "and no payload may be built");
+
+        // The full cycle agrees, and the artifact carries no personal byte
+        // either — `personal/` is never distilled into `semantic/`.
+        run_filesystem_phases(
+            &root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            true,
+            true,
+        )
+        .await
+        .expect("deterministic cycle");
+        let (file, _) = read_only_lesson(&root);
+        assert_eq!(file.prompt_version, consolidation::DETERMINISTIC_PROMPT_ID);
+        assert!(
+            !fs::read_to_string(root.lessons_md())
+                .unwrap()
+                .contains(PERSONAL_CANARY),
+            "personal/ must never be distilled into semantic/"
+        );
+    }
+
+    /// An empty (or absent) `personal/` yields no block at all under consent —
+    /// a bare heading with nothing under it would be noise in every prompt.
+    #[tokio::test]
+    async fn share_personal_with_an_empty_personal_dir_attaches_nothing() {
+        let (_dir, root) = scaffold_fixture();
+        fs::create_dir_all(root.personal_dir()).expect("personal/ dir");
+
+        let ids = cluster_ids(&root);
+        let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {}", ids[0]));
+
+        run_filesystem_phases_with_backend(
+            &root,
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+            true,
+        )
+        .await
+        .expect("llm cycle");
+
+        let prompt = fake.last_prompt().expect("prompt recorded");
+        assert!(
+            !prompt.contains(crate::llm::PERSONAL_CONTEXT_HEADING),
+            "an empty personal/ must not produce an empty block"
         );
     }
 

@@ -29,7 +29,7 @@ A compliant `init` scaffolds:
   working/      # Short-lived scratchpad for the active session. Format and lifecycle are implementation-defined. Implementations MAY omit `working/`.
   episodic/     # Append-only JSONL log of timestamped events. Canonical file: AGENT_LEARNINGS.jsonl.
   semantic/     # Lessons distilled from episodic by the dream cycle. Canonical file: LESSONS.md.
-  personal/     # User preferences scoped to the human, not the project. Markdown. Implementations MUST NOT include `personal/` contents in any LLM invocation (local or remote) without explicit per-call user consent. The dream cycle MUST NOT distill `personal/` into `semantic/`.
+  personal/     # User preferences scoped to the human, not the project. Markdown. Implementations MUST NOT include `personal/` contents in any LLM invocation (local or remote) without explicit per-call user consent. In the reference implementation that consent is `dreamd dream --share-personal`, or the `x-dreamd-share-personal: 1` header on `POST /api/v1/dream`; it authorizes exactly the one cycle it is passed to and is never persisted. The dream cycle MUST NOT distill `personal/` into `semantic/`.
 ```
 
 All text files MUST be UTF-8. `.agent/` is checked into the project's repo. Implementations MAY keep derived state (indexes, snapshots, write-ahead logs) under a hidden subfolder such as `.<impl>/`; such state MUST be `.gitignore`d.

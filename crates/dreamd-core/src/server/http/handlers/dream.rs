@@ -18,6 +18,9 @@ use super::super::state::AppState;
 /// * `x-dreamd-no-llm: 1` (optional) — force the deterministic lesson body even
 ///   when credentials exist (AILAB-204). Absent, or any other value, means the
 ///   LLM path is allowed.
+/// * `x-dreamd-share-personal: 1` (optional) — per-call consent to include
+///   `.agent/personal/` in the composition prompt (AILAB-199). Absent, or any
+///   other value, means the personal layer is excluded, which is the default.
 ///
 /// # Responses
 /// * `200` — `{"status":"ok"}` cycle completed
@@ -37,6 +40,7 @@ pub(crate) async fn post_dream(
     let agent_root = crate::layout::AgentRoot::new(&entry.root);
 
     let no_llm = read_no_llm_header(&headers);
+    let share_personal = read_share_personal_header(&headers);
 
     // One SystemTime::now() call — both now_sec and cycle_date derive from it.
     let now_sec = SystemTime::now()
@@ -86,6 +90,7 @@ pub(crate) async fn post_dream(
         now_sec,
         cycle_date: cycle_date.clone(),
         no_llm,
+        share_personal,
         response_tx: resp_tx,
     };
     match supervisor.try_send(msg).await {
@@ -167,6 +172,21 @@ fn read_no_llm_header(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v == crate::client::NO_LLM_HEADER_VALUE)
 }
 
+/// Read `x-dreamd-share-personal` (AILAB-199).
+///
+/// Deliberately the same shape as [`read_no_llm_header`]: `dreamd dream
+/// --share-personal` proxies to the daemon rather than skipping it, so the
+/// consent arrives as a header. Missing header ⇒ `false` ⇒ `.agent/personal/`
+/// stays out of the prompt. The value match is exact and case-sensitive — a
+/// client that guesses the wire format gets no disclosure rather than one it did
+/// not mean to authorize, which is the only direction this default may fail in.
+fn read_share_personal_header(headers: &HeaderMap) -> bool {
+    headers
+        .get(crate::client::SHARE_PERSONAL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == crate::client::SHARE_PERSONAL_HEADER_VALUE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +196,15 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             crate::client::NO_LLM_HEADER,
+            HeaderValue::from_bytes(value).unwrap(),
+        );
+        h
+    }
+
+    fn share_personal_headers_with(value: &[u8]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            crate::client::SHARE_PERSONAL_HEADER,
             HeaderValue::from_bytes(value).unwrap(),
         );
         h
@@ -209,5 +238,46 @@ mod tests {
                 "value {value:?} must not be honored"
             );
         }
+    }
+
+    // ── AILAB-199: x-dreamd-share-personal ───────────────────────────────────
+
+    #[test]
+    fn absent_share_personal_header_excludes_the_personal_layer() {
+        assert!(!read_share_personal_header(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn exact_one_grants_share_personal_consent() {
+        assert!(read_share_personal_header(&share_personal_headers_with(
+            b"1"
+        )));
+    }
+
+    #[test]
+    fn any_other_share_personal_value_reads_as_absent() {
+        for value in [
+            &b"0"[..],
+            b"true",
+            b"TRUE",
+            b"yes",
+            b"",
+            b"1 ",
+            b"11",
+            // Non-UTF-8 — `to_str()` fails, which must degrade to absent, not panic.
+            &[0xff, 0xfe][..],
+        ] {
+            assert!(
+                !read_share_personal_header(&share_personal_headers_with(value)),
+                "value {value:?} must not be read as consent"
+            );
+        }
+    }
+
+    /// The two headers are independent: neither implies the other.
+    #[test]
+    fn the_two_dream_headers_do_not_alias() {
+        assert!(!read_share_personal_header(&headers_with(b"1")));
+        assert!(!read_no_llm_header(&share_personal_headers_with(b"1")));
     }
 }

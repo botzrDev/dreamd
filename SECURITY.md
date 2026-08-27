@@ -37,12 +37,13 @@ At v0.1, the daemon enforces:
 
 - **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected.
 
+- **`personal/` LLM exclusion.** `.agent/personal/` is never included in the dream-cycle composition prompt unless the operator passes `dreamd dream --share-personal` (or sends `x-dreamd-share-personal: 1` to `POST /api/v1/dream`). Consent is **per call**: there is no config key, no environment variable, and no sticky state — a cycle that was not asked, on that invocation, to share the personal layer does not read it. See [Personal-layer consent](#personal-layer-consent-v01) below.
+- **LLM cost cap** ($0.10/cycle by default, `cost_cap_usd`) enforced *before* the request, with deterministic fallback.
+
 **Planned for v0.1.1** (not in v0.1 binaries):
 
 - **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
 - **TCP binding to non-localhost** refused unless `--insecure` is passed (test environments only).
-- **`personal/` LLM exclusion** unless `--share-personal` is passed.
-- **LLM cost cap** ($0.10/cycle) with deterministic fallback.
 
 ### Same-user-cross-project surface (accepted for v0.1)
 
@@ -58,7 +59,22 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 
 ## Privacy and redaction (v0.1)
 
-**v0.1 makes no network calls.** LLM-assisted dream cycles are v0.1.1. No `AGENT_LEARNINGS.jsonl` content leaves the device in v0.1.
+**v0.1 makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `~/.config/dreamd/secrets.toml` (mode `0600`) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
+
+### Personal-layer consent (v0.1)
+
+`.agent/personal/` is excluded from that request **by default and by construction**. The composition prompt is built from the promoted cluster alone; the function that builds it is never handed the store, so it cannot reach `personal/` whatever the operator has put there.
+
+Passing `dreamd dream --share-personal` — or sending `x-dreamd-share-personal: 1` — appends `personal/` to that one prompt:
+
+- **Per call, never sticky.** The flag authorizes exactly the cycle it is passed to. There is no config key and no persisted consent.
+- **Only `personal/`.** Regular UTF-8 files directly under `.agent/personal/`, ordered `PREFERENCES.md`, `DECISIONS.md`, then the rest by name. Subdirectories are not walked, and a symlink whose target resolves outside `personal/` is refused rather than followed.
+- **16 KiB cap**, the same ceiling `GET /api/v1/preferences` truncates at. Over-cap content is truncated with a `WARN`.
+- **Logged every time.** A cycle that attaches personal bytes emits a `WARN` naming `share-personal` and `personal/`, so a disclosure is visible in the daemon log rather than silent.
+- **Nothing is persisted.** Personal bytes are prompt context only. The dream cycle still never distills `personal/` into `semantic/`, and the citation trailer still names only `evt_` ids from the episodic log.
+- **`--no-llm` wins.** `--no-llm --share-personal` is legal and discloses nothing: with no request, there is nobody to consent to. `personal/` is not even read.
+
+`GET /api/v1/preferences` is unaffected — it serves `PREFERENCES.md` to the local agent over the UDS and is not an LLM call.
 
 On every `POST /api/v1/learn`, a pattern scrubber runs **before persistence** (on by default; disable with `redaction = false` in config). It redacts AWS keys, bearer tokens, `sk-…` patterns, and common `*_KEY=` assignments — logging `redaction_hits` but not rejecting the request.
 

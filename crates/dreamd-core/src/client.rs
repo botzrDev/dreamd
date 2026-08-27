@@ -19,6 +19,24 @@ pub const NO_LLM_HEADER: &str = "x-dreamd-no-llm";
 /// change.
 pub const NO_LLM_HEADER_VALUE: &str = "1";
 
+/// Request header carrying per-call consent to include `.agent/personal/` in the
+/// dream-cycle composition prompt (AILAB-199).
+///
+/// Same wire shape as [`NO_LLM_HEADER`] for the same reason: `dreamd dream
+/// --share-personal` **proxies** to the daemon rather than skipping it — the
+/// daemon is the single writer of this project's JSONL — so the consent has to
+/// travel as a header. Omitted entirely when the flag is off, so a daemon built
+/// before this ticket sees an unchanged request rather than one it must know to
+/// ignore, and so the absence of consent is the absence of a header rather than
+/// a value that could be misread.
+pub const SHARE_PERSONAL_HEADER: &str = "x-dreamd-share-personal";
+
+/// The only value [`SHARE_PERSONAL_HEADER`] is honored at. Case-sensitive, and
+/// deliberately the same literal as [`NO_LLM_HEADER_VALUE`]: anything else
+/// (`"true"`, `"yes"`, `"0"`) is treated as absent, so a client that guesses the
+/// wire format gets *no disclosure* rather than an accidental one.
+pub const SHARE_PERSONAL_HEADER_VALUE: &str = "1";
+
 /// Outcome of attempting to proxy a dream cycle to a daemon. All four are
 /// "the proxy made a decision"; only `Ran` and `InProgress` mean the daemon
 /// acted. `NotReachable` / `ProjectNotRegistered` tell the caller to fall back
@@ -94,6 +112,7 @@ pub async fn proxy_dream_cycle(
     sock_path: &Path,
     project_root: &Path,
     no_llm: bool,
+    share_personal: bool,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
     use crate::daemon_client::{send_one, DaemonTransportError};
 
@@ -104,6 +123,9 @@ pub async fn proxy_dream_cycle(
         .header("x-agent-root", project_root.to_string_lossy().as_ref());
     if no_llm {
         builder = builder.header(NO_LLM_HEADER, NO_LLM_HEADER_VALUE);
+    }
+    if share_personal {
+        builder = builder.header(SHARE_PERSONAL_HEADER, SHARE_PERSONAL_HEADER_VALUE);
     }
     let req = builder
         .body(Full::new(Bytes::new()))
@@ -160,7 +182,7 @@ mod tests {
     async fn proxy_dream_cycle_unreachable_socket_is_not_reachable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("nonexistent.sock");
-        let outcome = proxy_dream_cycle(&sock, Path::new("/x"), false)
+        let outcome = proxy_dream_cycle(&sock, Path::new("/x"), false, false)
             .await
             .expect("unreachable socket is Ok(NotReachable), not Err");
         assert_eq!(outcome, DreamProxyOutcome::NotReachable);
@@ -172,12 +194,16 @@ mod tests {
         uri: String,
         agent_root: Option<String>,
         no_llm: Option<String>,
+        share_personal: Option<String>,
     }
 
     /// Stand up a one-shot UDS server using the same `serve_connection` +
     /// `TokioIo` idiom the daemon uses (`uds_server.rs`), reply 200, and return
     /// both the proxy outcome and the request the daemon actually saw.
-    async fn round_trip(no_llm: bool) -> (DreamProxyOutcome, CapturedRequest) {
+    async fn round_trip(
+        no_llm: bool,
+        share_personal: bool,
+    ) -> (DreamProxyOutcome, CapturedRequest) {
         use hyper::service::service_fn;
         use hyper_util::rt::{TokioExecutor, TokioIo};
 
@@ -204,6 +230,7 @@ mod tests {
                         uri: req.uri().to_string(),
                         agent_root: header("x-agent-root"),
                         no_llm: header(NO_LLM_HEADER),
+                        share_personal: header(SHARE_PERSONAL_HEADER),
                     });
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
@@ -219,7 +246,7 @@ mod tests {
         });
 
         let project_root = Path::new("/some/project/root");
-        let outcome = proxy_dream_cycle(&sock_path, project_root, no_llm)
+        let outcome = proxy_dream_cycle(&sock_path, project_root, no_llm, share_personal)
             .await
             .expect("proxy ok");
         let captured = req_rx.recv().await.expect("request captured");
@@ -228,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_dream_cycle_round_trips_over_uds() {
-        let (outcome, req) = round_trip(false).await;
+        let (outcome, req) = round_trip(false, false).await;
         assert_eq!(outcome, DreamProxyOutcome::Ran);
         assert_eq!(req.method, "POST");
         assert_eq!(req.uri, "/api/v1/dream");
@@ -239,17 +266,60 @@ mod tests {
             req.no_llm, None,
             "{NO_LLM_HEADER} must be absent when --no-llm is not set"
         );
+        // AILAB-199: same rule, and the one that matters most — the default
+        // request must carry no consent at all, not a falsy consent.
+        assert_eq!(
+            req.share_personal, None,
+            "{SHARE_PERSONAL_HEADER} must be absent when --share-personal is not set"
+        );
     }
 
     #[tokio::test]
     async fn proxy_dream_cycle_sends_no_llm_header_when_set() {
-        let (outcome, req) = round_trip(true).await;
+        let (outcome, req) = round_trip(true, false).await;
         assert_eq!(outcome, DreamProxyOutcome::Ran);
         assert_eq!(req.uri, "/api/v1/dream", "--no-llm must NOT skip the proxy");
         assert_eq!(
             req.no_llm.as_deref(),
             Some(NO_LLM_HEADER_VALUE),
             "--no-llm must travel as {NO_LLM_HEADER}: {NO_LLM_HEADER_VALUE}"
+        );
+        assert_eq!(
+            req.share_personal, None,
+            "--no-llm alone must not imply consent"
+        );
+    }
+
+    /// AILAB-199: `--share-personal` travels *through* the proxy, exactly like
+    /// `--no-llm`. Skipping the daemon to honor it locally would put a second
+    /// writer on a JSONL the daemon's coordinator owns.
+    #[tokio::test]
+    async fn proxy_dream_cycle_sends_share_personal_header_when_set() {
+        let (outcome, req) = round_trip(false, true).await;
+        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(
+            req.uri, "/api/v1/dream",
+            "--share-personal must NOT skip the proxy"
+        );
+        assert_eq!(
+            req.share_personal.as_deref(),
+            Some(SHARE_PERSONAL_HEADER_VALUE),
+            "--share-personal must travel as {SHARE_PERSONAL_HEADER}: {SHARE_PERSONAL_HEADER_VALUE}"
+        );
+        assert_eq!(
+            req.no_llm, None,
+            "--share-personal alone must not force deterministic mode"
+        );
+    }
+
+    /// The two flags are independent on the wire: both set means both headers.
+    #[tokio::test]
+    async fn proxy_dream_cycle_sends_both_headers_when_both_are_set() {
+        let (_, req) = round_trip(true, true).await;
+        assert_eq!(req.no_llm.as_deref(), Some(NO_LLM_HEADER_VALUE));
+        assert_eq!(
+            req.share_personal.as_deref(),
+            Some(SHARE_PERSONAL_HEADER_VALUE)
         );
     }
 }

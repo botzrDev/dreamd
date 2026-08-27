@@ -256,13 +256,17 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ### `POST /api/v1/dream`
 
-Run a full deterministic dream cycle for the resolved project: consolidate episodic learnings into `LESSONS.md`, apply decay/pruning, update recurrence sidecar.
+Run a full dream cycle for the resolved project: consolidate episodic learnings into `LESSONS.md`, apply decay/pruning, update recurrence sidecar.
 
 #### Request headers
 
-| Header | Required |
-|---|---|
-| `X-Agent-Root` | Yes |
+| Header | Required | Effect |
+|---|---|---|
+| `X-Agent-Root` | Yes | Canonical project root, as registered in `registry.toml`. |
+| `x-dreamd-no-llm` | No | Exactly `1` forces the deterministic lesson body even when credentials exist (AILAB-204). Absent, or any other value, allows the LLM path. |
+| `x-dreamd-share-personal` | No | Exactly `1` is per-call consent to include `.agent/personal/` in the composition prompt, capped at 16 KiB (AILAB-199). Absent, or any other value, excludes the personal layer — which is the default. Ignored under `x-dreamd-no-llm: 1`, where no request is made to consent to. |
+
+Both optional headers match **exactly** and case-sensitively: `true`, `yes`, `0`, and non-UTF-8 bytes all read as absent, so a client that guesses the wire format gets the documented default rather than a silent behavior change. They are the wire form of `dreamd dream --no-llm` and `dreamd dream --share-personal`, which proxy to the daemon rather than skipping it — the daemon is the single writer of the project's episodic log.
 
 No request body.
 

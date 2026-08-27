@@ -11,7 +11,11 @@ use super::super::state::AppState;
 /// Maximum bytes served from `PREFERENCES.md` in a single response.
 /// Responses exceeding this cap are truncated and annotated with
 /// `X-Dreamd-Truncated: true` and `X-Dreamd-Original-Size: <n>`.
-pub(crate) const PREFERENCES_SIZE_CAP: usize = 16 * 1024; // 16 KB
+///
+/// AILAB-199 gave the dream-cycle prompt the same 16 KiB ceiling on the same
+/// `personal/` bytes, so the number now has one definition and this is a
+/// re-export of it rather than a second copy. Behavior here is unchanged.
+pub(crate) use crate::llm::PERSONAL_LAYER_MAX_BYTES as PREFERENCES_SIZE_CAP;
 
 /// `GET /api/v1/preferences` — read `.agent/personal/PREFERENCES.md`.
 ///

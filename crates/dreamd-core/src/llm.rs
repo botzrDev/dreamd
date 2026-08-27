@@ -24,9 +24,18 @@
 //! tested without a backend, and what keeps the count from being re-run per
 //! retry attempt.
 //!
+//! Since AILAB-199 it also owns [`crate::llm::load_personal_prompt_context`],
+//! the reader that turns `.agent/personal/` into prompt bytes. The reader is
+//! here rather than in `dream_cycle` for the same reason the cost estimate is:
+//! it is a pure input-shaping function with no authority to run. Whether it is
+//! *called* is `dream_cycle::compose_lesson_body`'s decision, gated on the
+//! per-call `--share-personal` consent, and default-off.
+//!
 //! ## What this module does NOT own
 //!
-//! * Personal-layer redaction of prompt inputs — AILAB-199.
+//! * Redaction of the JSONL event bodies it forwards. `build_lesson_prompt`
+//!   still includes them verbatim — AILAB-199 governs the **personal layer**,
+//!   which this module now excludes by default and appends only on consent.
 //!
 //! ## Credentials
 //!
@@ -44,6 +53,7 @@ use dreamd_protocol::{AgentLearning, EventId};
 use serde::Deserialize;
 
 use crate::config::Config;
+use crate::layout::AgentRoot;
 
 /// `prompt_version` written to `LESSONS.md` frontmatter when the body came from
 /// the model (AILAB-201).
@@ -283,8 +293,11 @@ pub const LESSON_PROMPT: &str = include_str!("prompts/v1.1.txt");
 
 /// Build the composition prompt for one promoted cluster.
 ///
-/// Event bodies are included verbatim; redaction of the personal layer is
-/// AILAB-199 and is not applied here.
+/// **Cluster-only, always.** Event bodies are included verbatim; nothing from
+/// `.agent/personal/` can reach this string, because this function is never
+/// given the store to read it from. The opt-in personal context (AILAB-199) is
+/// appended by `dream_cycle::compose_lesson_body` *after* this call, so the
+/// default prompt is the one below whatever the operator's `personal/` holds.
 pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> String {
     let mut s = String::with_capacity(LESSON_PROMPT.len() + 256 * events.len());
     s.push_str(LESSON_PROMPT);
@@ -301,6 +314,130 @@ pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> Strin
         s.push('\n');
     }
     s
+}
+
+// ── Personal layer (AILAB-199 / DR-310) ──────────────────────────────────────
+
+/// Byte cap on personal-layer content handed to one consumer in one shot.
+///
+/// The same 16 KiB `GET /api/v1/preferences` has always truncated at — that
+/// handler now re-exports this constant as `PREFERENCES_SIZE_CAP` rather than
+/// restating the number, so the prompt budget and the HTTP budget cannot drift
+/// apart. Deliberately small next to `cost_cap_usd`: personal context is
+/// seasoning on a cluster prompt, and a `personal/` that has grown into a wiki
+/// must not be able to push an otherwise-affordable cycle over the AILAB-196
+/// cap as a side effect of opting in.
+pub const PERSONAL_LAYER_MAX_BYTES: usize = 16 * 1024; // 16 KiB
+
+/// Heading that introduces opted-in personal bytes in the composition prompt.
+///
+/// Load-bearing rather than decorative. Without it, a canary string in
+/// `PREFERENCES.md` is indistinguishable from an event body that happens to
+/// repeat the same words, so the default-exclude test could pass against a
+/// prompt that had in fact leaked. The heading also tells the model which half
+/// of its context is the operator speaking and which half is the log.
+pub const PERSONAL_CONTEXT_HEADING: &str = "Personal (operator opted in with --share-personal):";
+
+/// Bytes from `.agent/personal/` to append to the composition prompt.
+///
+/// `None` = attach nothing, which is the default, the `--no-llm` path, and the
+/// answer for any store whose `personal/` is absent, empty, or entirely skipped.
+/// Calling this at all is consent (`--share-personal` / `x-dreamd-share-personal:
+/// 1`); the function itself has no opinion on whether it should have been called,
+/// which is why the gate lives at the one call site in
+/// `dream_cycle::compose_lesson_body` rather than being re-checked here.
+///
+/// Reads **only** regular UTF-8 files directly under `personal_dir()`. Each
+/// entry is canonicalized and then proven to still live under the canonical
+/// `personal/` before it is opened, so a symlink planted in that directory
+/// cannot pull `~/.ssh/id_ed25519` into a prompt. Directories are skipped (no
+/// recursion — one flat layer is the documented shape), and so is any file whose
+/// bytes are not UTF-8, with a WARN naming it so a skipped file is visible
+/// rather than silently missing from the prompt the operator asked for.
+///
+/// Order is `PREFERENCES.md`, then `DECISIONS.md`, then everything else by file
+/// name: the two named files are the layer's documented contents, and putting
+/// them first keeps the head of the block stable as incidental files come and
+/// go. Total output is capped at [`PERSONAL_LAYER_MAX_BYTES`] and truncated with
+/// a WARN when over — the prompt is priced immediately after this returns
+/// (AILAB-196), so an unbounded read here would be an unbounded bill.
+pub fn load_personal_prompt_context(agent_root: &AgentRoot) -> Option<String> {
+    // Canonical `personal/` is both the directory we read and the containment
+    // yardstick below. `personal/` being a symlink itself is fine; a *member*
+    // resolving outside it is not.
+    let canonical_dir = std::fs::canonicalize(agent_root.personal_dir()).ok()?;
+
+    // (rank, file_name, resolved_path) — rank pins the two documented files to
+    // the front, file_name breaks ties so the block is deterministic across
+    // filesystems that hand back `read_dir` in arbitrary order.
+    let mut files: Vec<(u8, std::ffi::OsString, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&canonical_dir).ok()?.flatten() {
+        let path = entry.path();
+        let Ok(resolved) = std::fs::canonicalize(&path) else {
+            // Dangling symlink or a race with a delete. Nothing to read.
+            continue;
+        };
+        if !resolved.starts_with(&canonical_dir) {
+            tracing::warn!(
+                path = %path.display(),
+                "personal/ entry resolves outside the personal layer; not shared with the model"
+            );
+            continue;
+        }
+        if !resolved.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let rank = match name.to_str() {
+            Some("PREFERENCES.md") => 0,
+            Some("DECISIONS.md") => 1,
+            _ => 2,
+        };
+        files.push((rank, name, resolved));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut out = String::new();
+    for (_, name, path) in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            tracing::warn!(path = %path.display(), "personal/ file unreadable; skipped");
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            tracing::warn!(path = %path.display(), "personal/ file is not UTF-8; skipped");
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("### ");
+        out.push_str(&name.to_string_lossy());
+        out.push('\n');
+        out.push_str(text.trim_end());
+        out.push('\n');
+    }
+
+    if out.is_empty() {
+        return None;
+    }
+    if out.len() > PERSONAL_LAYER_MAX_BYTES {
+        // `truncate` panics off a char boundary, and a multi-byte grapheme
+        // straddling the cap is the normal case for prose, not an exotic one.
+        let mut end = PERSONAL_LAYER_MAX_BYTES;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        tracing::warn!(
+            original_size = out.len(),
+            cap = PERSONAL_LAYER_MAX_BYTES,
+            "personal/ context truncated to the 16 KiB cap before pricing the prompt"
+        );
+        out.truncate(end);
+    }
+    Some(out)
 }
 
 // ── Cost estimate (AILAB-196 / DR-307) ───────────────────────────────────────
@@ -692,6 +829,7 @@ pub fn resolve_backend(config: &Config) -> Option<GenaiBackend> {
 pub(crate) mod fake {
     use super::{LlmBackend, LlmCompletion, LlmError};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
 
     pub(crate) struct FakeLlm {
         text: Option<String>,
@@ -699,6 +837,16 @@ pub(crate) mod fake {
         /// Attempt counter, so a test can assert the retry budget was honored
         /// rather than merely that the final value was right.
         pub(crate) calls: AtomicU32,
+        /// The prompt of the most recent attempt (AILAB-199).
+        ///
+        /// Recorded rather than ignored because "no `personal/` content appears
+        /// in the LLM request payload" is only provable against the bytes the
+        /// backend was actually handed. Asserting on the composed *lesson*
+        /// would prove nothing: the model here is a fake that never reads its
+        /// input, so a leaking prompt and a clean one produce identical output.
+        /// `Mutex` rather than a channel or a `RefCell` — `LlmBackend: Sync`
+        /// and `complete` takes `&self`, and this is a std type, not a dep.
+        pub(crate) last_prompt: Mutex<Option<String>>,
     }
 
     impl FakeLlm {
@@ -708,6 +856,7 @@ pub(crate) mod fake {
                 text: Some(text.to_string()),
                 fail_with: None,
                 calls: AtomicU32::new(0),
+                last_prompt: Mutex::new(None),
             }
         }
         /// Always fails with a transport error — the retried variant.
@@ -716,13 +865,31 @@ pub(crate) mod fake {
                 text: None,
                 fail_with: Some(msg.to_string()),
                 calls: AtomicU32::new(0),
+                last_prompt: Mutex::new(None),
             }
+        }
+
+        /// The prompt of the last attempt, or `None` if the backend was never
+        /// called. A test that expects zero calls asserts on `None` here and on
+        /// `calls == 0`, which are two independent witnesses to the same claim.
+        pub(crate) fn last_prompt(&self) -> Option<String> {
+            self.last_prompt
+                .lock()
+                .expect("FakeLlm prompt mutex is never held across a panic")
+                .clone()
         }
     }
 
     impl LlmBackend for FakeLlm {
-        async fn complete(&self, _model: &str, _prompt: &str) -> Result<LlmCompletion, LlmError> {
+        async fn complete(&self, _model: &str, prompt: &str) -> Result<LlmCompletion, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            // Record BEFORE the failure arm: a retried transport error still
+            // sent these bytes, so a leak on a failing call is still a leak.
+            *self
+                .last_prompt
+                .lock()
+                .expect("FakeLlm prompt mutex is never held across a panic") =
+                Some(prompt.to_string());
             if let Some(msg) = &self.fail_with {
                 return Err(LlmError::Transport(msg.clone()));
             }
@@ -1240,5 +1407,125 @@ mod tests {
             !citations_are_valid(&[ID_A.to_string()], &[]),
             "no cluster, nothing valid"
         );
+    }
+
+    // ── Personal layer (AILAB-199) ───────────────────────────────────────────
+
+    /// A scratch store with a populated `personal/`. Returns the guard first so
+    /// the directory outlives the root the caller reads through.
+    fn personal_fixture(label: &str) -> (DirGuard, AgentRoot) {
+        let dir = unique_tmpdir(label);
+        let root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(root.personal_dir()).expect("personal/");
+        (DirGuard(dir), root)
+    }
+
+    #[test]
+    fn personal_context_is_none_when_the_dir_is_absent() {
+        let dir = unique_tmpdir("llm-personal-absent");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+        assert_eq!(load_personal_prompt_context(&root), None);
+    }
+
+    #[test]
+    fn personal_context_is_none_when_every_file_is_empty() {
+        let (_g, root) = personal_fixture("llm-personal-empty");
+        std::fs::write(root.preferences_md(), "").unwrap();
+        std::fs::write(root.decisions_md(), "   \n\t\n").unwrap();
+        assert_eq!(
+            load_personal_prompt_context(&root),
+            None,
+            "whitespace-only files must not produce a block with nothing in it"
+        );
+    }
+
+    #[test]
+    fn personal_context_orders_preferences_then_decisions_then_the_rest() {
+        let (_g, root) = personal_fixture("llm-personal-order");
+        std::fs::write(root.preferences_md(), "prefer tabs").unwrap();
+        std::fs::write(root.decisions_md(), "chose axum").unwrap();
+        std::fs::write(root.personal_dir().join("zebra.md"), "last").unwrap();
+        std::fs::write(root.personal_dir().join("apple.md"), "third").unwrap();
+
+        let got = load_personal_prompt_context(&root).expect("four files");
+        let positions: Vec<usize> = ["PREFERENCES.md", "DECISIONS.md", "apple.md", "zebra.md"]
+            .iter()
+            .map(|n| got.find(n).unwrap_or_else(|| panic!("{n} in block")))
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "documented files first, then the rest by name; got:\n{got}"
+        );
+        assert!(got.contains("prefer tabs") && got.contains("chose axum"));
+    }
+
+    #[test]
+    fn personal_context_skips_non_utf8_files_and_subdirectories() {
+        let (_g, root) = personal_fixture("llm-personal-skip");
+        std::fs::write(root.preferences_md(), "keep me").unwrap();
+        std::fs::write(root.personal_dir().join("binary.bin"), [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::create_dir_all(root.personal_dir().join("nested")).unwrap();
+        std::fs::write(root.personal_dir().join("nested/deep.md"), "not read").unwrap();
+
+        let got = load_personal_prompt_context(&root).expect("one readable file");
+        assert!(got.contains("keep me"));
+        assert!(!got.contains("binary.bin"), "non-UTF-8 file is skipped");
+        assert!(!got.contains("not read"), "the layer is one flat directory");
+    }
+
+    /// A symlink planted in `personal/` must not be able to pull an arbitrary
+    /// file into a prompt — the whole point of resolving before reading.
+    #[cfg(unix)]
+    #[test]
+    fn personal_context_refuses_a_symlink_that_escapes_the_layer() {
+        let (_g, root) = personal_fixture("llm-personal-escape");
+        std::fs::write(root.preferences_md(), "keep me").unwrap();
+
+        let outside = root.project_root().join("outside-secret.md");
+        std::fs::write(&outside, "SECRET-OUTSIDE-THE-PERSONAL-LAYER").unwrap();
+        std::os::unix::fs::symlink(&outside, root.personal_dir().join("escape.md")).unwrap();
+
+        let got = load_personal_prompt_context(&root).expect("the real file still loads");
+        assert!(got.contains("keep me"));
+        assert!(
+            !got.contains("SECRET-OUTSIDE-THE-PERSONAL-LAYER"),
+            "a symlink out of personal/ must not be followed; got:\n{got}"
+        );
+    }
+
+    #[test]
+    fn personal_context_truncates_at_the_shared_16_kib_cap() {
+        let (_g, root) = personal_fixture("llm-personal-cap");
+        std::fs::write(
+            root.preferences_md(),
+            "x".repeat(PERSONAL_LAYER_MAX_BYTES * 2),
+        )
+        .unwrap();
+
+        let got = load_personal_prompt_context(&root).expect("oversized file still loads");
+        assert!(
+            got.len() <= PERSONAL_LAYER_MAX_BYTES,
+            "an oversized personal/ must not be able to blow the AILAB-196 cap: \
+             {} bytes",
+            got.len()
+        );
+        assert_eq!(
+            PERSONAL_LAYER_MAX_BYTES,
+            16 * 1024,
+            "the prompt cap is the same 16 KiB GET /preferences truncates at"
+        );
+    }
+
+    /// Truncation must land on a char boundary — `String::truncate` panics
+    /// otherwise, and prose straddling the cap is the normal case, not exotic.
+    #[test]
+    fn personal_context_truncation_respects_char_boundaries() {
+        let (_g, root) = personal_fixture("llm-personal-utf8-cap");
+        // '€' is 3 bytes and 16 KiB is not divisible by 3, so the cap falls
+        // inside a character no matter where the block header ends.
+        std::fs::write(root.preferences_md(), "€".repeat(PERSONAL_LAYER_MAX_BYTES)).unwrap();
+        let got = load_personal_prompt_context(&root).expect("loads");
+        assert!(got.len() <= PERSONAL_LAYER_MAX_BYTES);
     }
 }

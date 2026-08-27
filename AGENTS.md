@@ -279,8 +279,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** Keep a Changelog historical version sections are immutable. Correct a factual error from a shipped tag under `## [Unreleased]`, never by rewriting the old bullet.
 - **Why:** AILAB-698 Linear AC cited `CHANGELOG.md:113`; live line is `:119` under `[0.1.0-rc.1]`, not `[0.1.0]`. Line numbers on CHANGELOG rot; the section heading is the identity.
-- **How to apply:** Identify the bullet by heading + wording, not by AC line number. Leave rc.* / released entries byte-identical unless the user explicitly authorizes a historical rewrite.
-- **Cross-refs:** none
+- **How to apply:** Identify the bullet by heading + wording, not by AC line number. Leave rc.* / released entries byte-identical unless the user explicitly authorizes a historical rewrite. An anti-pattern grep for a retired path (`docs/security.md`) will also hit those historical bullets — pair with `git diff` added lines, do not rewrite the old entry to satisfy the grep (`changelog-historical-entries-stay-put`).
+- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`
 
 ### daemon-state-module-avoids-wal-autobiography-cycle
 
@@ -424,6 +424,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-204 Linear still said `genai`, `[dream.llm]`, and env-only after the v2 spec and the ship. The implementing tree followed the v2 file. Next tickets (201, 196, 200) inherit those reconciliations.
 - **How to apply:** If `assignments/AILAB-NNN.v2.md` exists, that file is the contract. Treat Linear bullets as historical. Do not re-introduce `[dream.llm]`, `tiktoken-rs` on 201, or env-only credentials.
 - **Cross-refs:** `config-llm-keys-are-flat`, `linear-201-ac-is-pre-llm-module`
+
+### linear-folded-ac-may-already-be-in-the-blocker
+
+- **Rule:** When Linear folds a second story into a later ticket, grep the blocker before re-implementing the fold. The remaining ticket is only the unfinished half.
+- **Why:** AILAB-199 Linear still asks for `~/.config/dreamd/secrets.toml` mode `0600` (founder B9, folded 2026-05-10). AILAB-204 already shipped `resolve_llm_credentials`, env-then-secrets, and `NO_API_KEY_FALLBACK`. Re-doing that half would churn `llm.rs` and fight the 204 CHANGELOG bullet.
+- **How to apply:** Remaining 199 is `--share-personal` / `x-dreamd-share-personal` consent for `personal/` on the compose prompt. Do not add a second secrets reader. Same shape as `linear-todo-can-already-be-on-main`.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `v2-beats-linear-ac`
 
 ### linear-201-ac-is-pre-llm-module
 

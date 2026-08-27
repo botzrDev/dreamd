@@ -16,5 +16,8 @@ Options:
       --no-llm
           Force deterministic mode even when an API key is present
 
+      --share-personal
+          Include .agent/personal/ in the dream-cycle composition prompt for this call. Off by default: the personal layer never reaches a model unless this flag is passed. Capped at 16 KiB and ignored under --no-llm
+
   -h, --help
           Print help

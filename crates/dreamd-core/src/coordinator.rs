@@ -123,6 +123,11 @@ pub enum MemoryCoordinatorMsg {
         /// Force the deterministic lesson body even when credentials exist
         /// (AILAB-204). Set from the `x-dreamd-no-llm: 1` request header.
         no_llm: bool,
+        /// Per-call consent to include `.agent/personal/` in the composition
+        /// prompt (AILAB-199). Set from the `x-dreamd-share-personal: 1` request
+        /// header. A required field rather than a defaulted one: a new message
+        /// site that forgets it must fail to compile, not quietly disclose.
+        share_personal: bool,
         response_tx: oneshot::Sender<Result<crate::decay::DecayResult, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
@@ -234,6 +239,7 @@ impl MemoryCoordinator {
                     now_sec,
                     cycle_date,
                     no_llm,
+                    share_personal,
                     response_tx,
                 } => {
                     // AILAB-204: awaited here, in the actor loop, so the cycle
@@ -241,7 +247,7 @@ impl MemoryCoordinator {
                     // -writer window. Appends queue behind it; they are not
                     // raced by a second writer.
                     let result = self
-                        .handle_run_dream_cycle(now_sec, &cycle_date, no_llm)
+                        .handle_run_dream_cycle(now_sec, &cycle_date, no_llm, share_personal)
                         .await;
                     let _ = response_tx.send(result);
                 }
@@ -349,12 +355,14 @@ impl MemoryCoordinator {
         now_sec: i64,
         cycle_date: &str,
         no_llm: bool,
+        share_personal: bool,
     ) -> Result<crate::decay::DecayResult, CoordinatorError> {
         let decay = crate::dream_cycle::run_filesystem_phases(
             &self.agent_root,
             now_sec,
             cycle_date,
             no_llm,
+            share_personal,
         )
         .await
         .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;

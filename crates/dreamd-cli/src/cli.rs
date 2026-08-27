@@ -50,6 +50,11 @@ pub struct DreamArgs {
     /// Force deterministic mode even when an API key is present.
     #[arg(long)]
     pub no_llm: bool,
+    /// Include .agent/personal/ in the dream-cycle composition prompt for this
+    /// call. Off by default: the personal layer never reaches a model unless
+    /// this flag is passed. Capped at 16 KiB and ignored under --no-llm.
+    #[arg(long)]
+    pub share_personal: bool,
 }
 
 impl DreamArgs {
@@ -561,6 +566,9 @@ fn run_dream(args: DreamArgs) -> ExitCode {
             agent_root.project_root(),
             &mut std::io::stdout(),
             args.no_llm,
+            // AILAB-199: `--dry` skips the proxy, so consent cannot arrive as a
+            // header on this path and is taken in-process instead.
+            args.share_personal,
         );
         return match outcome {
             // Banner on stderr so stdout is exactly the would-be file bytes.
@@ -588,6 +596,7 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         &mut std::io::stdout(),
         args.no_commit,
         args.no_llm,
+        args.share_personal,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -1131,6 +1140,7 @@ mod tests {
             auto: true,
             no_commit: false,
             no_llm: false,
+            share_personal: false,
         };
         let err = args.validate().unwrap_err();
         assert!(
@@ -1146,6 +1156,7 @@ mod tests {
             auto: false,
             no_commit: false,
             no_llm: false,
+            share_personal: false,
         }
         .validate()
         .is_ok());
@@ -1154,6 +1165,7 @@ mod tests {
             auto: true,
             no_commit: false,
             no_llm: false,
+            share_personal: false,
         }
         .validate()
         .is_ok());
@@ -1162,6 +1174,7 @@ mod tests {
             auto: false,
             no_commit: true,
             no_llm: false,
+            share_personal: false,
         }
         .validate()
         .is_ok());
@@ -1170,6 +1183,7 @@ mod tests {
             auto: false,
             no_commit: false,
             no_llm: true,
+            share_personal: false,
         }
         .validate()
         .is_ok());
@@ -1191,6 +1205,11 @@ mod tests {
                 assert!(!args.dry);
                 assert!(!args.auto);
                 assert!(!args.no_llm, "--no-llm defaults off");
+                assert!(
+                    !args.share_personal,
+                    "--share-personal defaults off: the personal layer is excluded \
+                     from the composition prompt unless it is passed"
+                );
             }
             _ => panic!("expected Dream"),
         }
@@ -1219,6 +1238,45 @@ mod tests {
                 assert!(args.no_llm);
                 assert!(args.no_commit);
                 assert!(args.validate().is_ok(), "--no-llm + --no-commit is legal");
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    /// AILAB-199 §3.3 — the consent flag parses, is not hidden, and does not
+    /// drag any other flag on with it.
+    #[test]
+    fn parses_dream_share_personal() {
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--share-personal"]).unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.share_personal);
+                assert!(!args.no_llm, "--share-personal must not imply --no-llm");
+                assert!(!args.no_commit);
+                assert!(!args.dry);
+                assert!(!args.auto);
+                assert!(args.validate().is_ok());
+            }
+            _ => panic!("expected Dream"),
+        }
+    }
+
+    /// AILAB-199 §3.3 — compatible with both `--dry` and `--no-llm`. The
+    /// combination is legal and discloses nothing: `--no-llm` never opens a
+    /// request for the consent to apply to.
+    #[test]
+    fn parses_dream_share_personal_with_dry_and_no_llm() {
+        let cli = Cli::try_parse_from(["dreamd", "dream", "--dry", "--no-llm", "--share-personal"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Dream(args)) => {
+                assert!(args.share_personal);
+                assert!(args.no_llm);
+                assert!(args.dry);
+                assert!(
+                    args.validate().is_ok(),
+                    "--dry + --no-llm + --share-personal is legal"
+                );
             }
             _ => panic!("expected Dream"),
         }
