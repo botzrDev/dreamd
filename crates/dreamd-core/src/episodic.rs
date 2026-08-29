@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use dreamd_protocol::AgentLearning;
 
+use crate::layout::AgentRoot;
+
 /// Hard cap on one serialized JSONL line (including the trailing `\n`). This is
 /// a property of the on-disk line format, so it lives here; the coordinator
 /// re-exports it (`pub use crate::episodic::MAX_LEARNING_LINE_BYTES;`). Anything
@@ -233,10 +235,11 @@ fn append_quarantine(sidecar: &Path, skips: &[ScanSkip]) -> std::io::Result<()> 
 ///   because it was never a complete line.
 ///
 /// The rewrite is `seek(0)` → `write_all` → `set_len` → `sync_data` on the
-/// caller's own fd. It must never `rewrite_atomic` and swap inodes: the
-/// coordinator holds this fd across the call, so a fresh inode would leave
-/// every subsequent append writing into an unlinked file. Leaves `file`'s
-/// cursor unspecified; the caller re-seeks to end before appending.
+/// caller's own fd. It must never `rewrite_atomic` / `rewrite_guarded` / rename
+/// and swap inodes: the coordinator holds this fd across the call, so a fresh
+/// inode would leave every subsequent append writing into an unlinked file.
+/// Leaves `file`'s cursor unspecified; the caller re-seeks to end before
+/// appending.
 pub fn recover(file: &mut File, jsonl_path: &Path) -> std::io::Result<()> {
     recover_at(file, jsonl_path, chrono::Utc::now().date_naive())
 }
@@ -253,8 +256,9 @@ fn recover_at(file: &mut File, jsonl_path: &Path, date: chrono::NaiveDate) -> st
         let sidecar = quarantine_path(jsonl_path, date);
         append_quarantine(&sidecar, &skips)?;
 
-        // Re-serialize the survivors — byte-identical to what `rewrite_atomic`
-        // would have produced for the same values, minus the inode swap.
+        // Re-serialize the survivors in place — byte-identical to what
+        // `rewrite_atomic` would produce, but never that call: this fd is the
+        // coordinator's, so an inode swap here strands its appends (AILAB-163).
         let mut clean = String::with_capacity(records.len() * 256);
         for record in &records {
             // These values just round-tripped out of this file, so `to_string`
@@ -311,23 +315,63 @@ pub fn append(file: &mut File, learning: &AgentLearning) -> Result<usize, Episod
     Ok(size)
 }
 
-/// Atomically rewrite the whole episodic log at `path` with `records` (dream
-/// cycle / decay). `hook` runs after the temp file is fsynced and before the
-/// rename — the correct window to append a WAL prune intent, because the named
-/// temp (`path.with_extension("tmp")`) provably exists on disk at that point.
-/// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
-/// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
-pub fn rewrite_atomic(
-    path: &Path,
-    records: &[AgentLearning],
-    hook: impl FnOnce() -> std::io::Result<()>,
-) -> Result<(), EpisodicError> {
+/// Serialize `records` to the on-disk JSONL line stream shared by
+/// [`rewrite_atomic`] and [`rewrite_guarded`]. One serializer so the guarded and
+/// unguarded rewrites cannot drift into writing different bytes for the same
+/// records.
+fn serialize_records(records: &[AgentLearning]) -> Result<String, EpisodicError> {
     let mut out = String::with_capacity(records.len() * 256);
     for record in records {
         out.push_str(&serde_json::to_string(record).map_err(EpisodicError::Serialize)?);
         out.push('\n');
     }
-    crate::io::write_atomic_with_hook(path, out.as_bytes(), hook)?;
+    Ok(out)
+}
+
+/// Atomically rewrite the whole episodic log at `path` with `records`, with no
+/// WAL involvement.
+///
+/// For one-shot rewrites outside a dream cycle — `dreamd archive --force-unpin` —
+/// where
+/// there is no open WAL for an intent to land in. A cycle's own prune goes
+/// through [`rewrite_guarded`] instead; do not reintroduce a caller-supplied
+/// hook here to bolt one on (AILAB-164).
+///
+/// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
+/// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
+pub fn rewrite_atomic(path: &Path, records: &[AgentLearning]) -> Result<(), EpisodicError> {
+    crate::io::write_atomic(path, serialize_records(records)?.as_bytes())?;
+    Ok(())
+}
+
+/// [`rewrite_atomic`] under the dream-cycle WAL: the
+/// [`PruneEpisodicMemory`](crate::wal::WalIntent::PruneEpisodicMemory) intent is
+/// appended between the temp's fsync and the rename, naming the temp
+/// [`wal::guarded_replace`](crate::wal::guarded_replace) just wrote.
+///
+/// The pin pass and the decay pruner call this. Neither names a temp path, and
+/// neither passes a closure: the intent and the write are one call (AILAB-164).
+/// No-ops the intent — but still writes — when no cycle is open.
+pub fn rewrite_guarded(
+    agent_root: &AgentRoot,
+    path: &Path,
+    records: &[AgentLearning],
+) -> Result<(), EpisodicError> {
+    let out = serialize_records(records)?;
+    crate::wal::guarded_replace(
+        agent_root,
+        path,
+        out.as_bytes(),
+        crate::wal::GuardedReplaceKind::PruneEpisodicMemory,
+    )
+    .map_err(|e| match e {
+        // Unwrap rather than `Error::other(e)`: the inner error IS the rewrite's
+        // own I/O failure, and re-boxing it would flatten every `ErrorKind` to
+        // `Other` — including the `Unsupported` the Windows arm returns, which
+        // AILAB-164 keeps as it is today.
+        crate::wal::WalError::Io(io) => EpisodicError::Io(io),
+        other => EpisodicError::Io(std::io::Error::other(other)),
+    })?;
     Ok(())
 }
 

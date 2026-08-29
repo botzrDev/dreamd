@@ -37,24 +37,30 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        write_atomic_with_hook(path, contents, || Ok(()))
+        write_atomic_with_hook(path, contents, |_| Ok(()))
     }
 }
 
-/// Shared implementation behind [`write_atomic`] (and [`episodic::rewrite_atomic`](crate::episodic::rewrite_atomic)).
+/// Shared implementation behind [`write_atomic`] and
+/// [`wal::guarded_replace`](crate::wal::guarded_replace).
+///
 /// `hook` runs after the `.tmp` file is fully fsynced and before the rename into
-/// `path` — the only window any caller can wedge into the atomic write.
-/// Production callers pass a no-op hook (or, for the episodic log, a WAL prune
-/// intent append — the named `.tmp` provably exists at that point); tests inject
-/// a failing hook to assert the destination file is untouched on error and the
-/// `.tmp` survives as a recovery signal.
+/// `path` — the only window any caller can wedge into the atomic write — and is
+/// handed **the `.tmp` path this call actually created**. Passing it is the point
+/// (AILAB-164): the tmp name is `path.with_extension("tmp")`, and every caller
+/// that re-derived that formula to name a WAL intent was one edit away from
+/// recording a path this function had never written. The only production hook is
+/// `wal::guarded_replace`'s intent append, which fills
+/// [`WalIntent`](crate::wal::WalIntent)`::{ReplaceSemanticMemory,PruneEpisodicMemory}`
+/// from this argument; tests inject a failing hook to assert the destination file
+/// is untouched on error and the `.tmp` survives as a recovery signal.
 ///
 /// Returns [`io::ErrorKind::Unsupported`] on Windows (hook ignored), mirroring
 /// [`write_atomic`]; Windows durable writes land in v0.1.1 (see `docs/windows.md`).
 pub(crate) fn write_atomic_with_hook(
     path: &Path,
     contents: &[u8],
-    hook: impl FnOnce() -> io::Result<()>,
+    hook: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -71,7 +77,7 @@ pub(crate) fn write_atomic_with_hook(
         f.write_all(contents)?;
         f.sync_data()?;
         drop(f);
-        hook()?;
+        hook(&tmp)?;
         fs::rename(&tmp, path)?;
         if let Some(parent) = path.parent() {
             // `std::fs::rename` does not expose the parent-dir fd, and `PathBuf`
@@ -184,9 +190,14 @@ mod tests {
         let target = dir.join("LESSONS.md");
         fs::write(&target, b"original\n").unwrap();
 
-        let err =
-            write_atomic_with_hook(&target, b"unfinished\n", || Err(io::Error::other("boom")))
-                .expect_err("hook failure must surface");
+        let err = write_atomic_with_hook(&target, b"unfinished\n", |tmp| {
+            // The hook is handed the tmp the write just fsynced, not a path it
+            // re-derived (AILAB-164).
+            assert_eq!(tmp, target.with_extension("tmp"));
+            assert!(tmp.exists(), "hook must run after the .tmp is on disk");
+            Err(io::Error::other("boom"))
+        })
+        .expect_err("hook failure must surface");
         assert_eq!(err.kind(), io::ErrorKind::Other);
 
         // Destination is byte-identical to its pre-call state.

@@ -185,10 +185,11 @@ pub fn run(
         tracing::warn!(event_id = %cleared_id, "archive: force-unpinned episodic entry");
     }
 
-    // Only touch the file when something changed. No-op hook: a guarded one-shot
-    // CLI rewrite has no open WAL (that hook is for the daemon dream cycle).
+    // Only touch the file when something changed. `rewrite_atomic`, never
+    // `rewrite_guarded`: a one-shot CLI rewrite has no open WAL for an intent to
+    // land in (that seam is the daemon dream cycle's).
     if !cleared.is_empty() {
-        episodic::rewrite_atomic(&jsonl, &events, || Ok(()))?;
+        episodic::rewrite_atomic(&jsonl, &events)?;
     }
 
     let n = cleared.len();
@@ -234,7 +235,7 @@ mod tests {
         let root = AgentRoot::new(tmp.path());
         let jsonl = root.episodic_jsonl();
         fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
-        rewrite_atomic(&jsonl, records, || Ok(())).unwrap();
+        rewrite_atomic(&jsonl, records).unwrap();
         (tmp, jsonl)
     }
 

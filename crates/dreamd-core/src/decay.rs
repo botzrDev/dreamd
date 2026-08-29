@@ -14,7 +14,6 @@ use dreamd_protocol::{AgentLearning, EventId};
 use crate::episodic::{self, EpisodicError};
 use crate::layout::AgentRoot;
 use crate::salience::{salience_with_context, RecurrenceContext};
-use crate::wal::{self, WalIntent};
 
 /// Age threshold: events older than this are candidates for decay.
 pub const DECAY_AGE_THRESHOLD_SEC: i64 = 90 * 24 * 3600; // 90 days
@@ -117,8 +116,8 @@ impl From<EpisodicError> for DecayError {
 ///   4. fs::create_dir_all(snapshots_dir)
 ///   5. Append decayed records to snapshot_file(cycle_date) — one JSONL line each
 ///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rewrite
-///   7. `episodic::rewrite_atomic(…, hook)` — temp write+fsync, WAL prune intent in
-///      `hook` (after tmp-fsync / before rename), rename, parent-dir fsync
+///   7. `episodic::rewrite_guarded` — temp write+fsync, WAL prune intent naming
+///      that temp (after tmp-fsync / before rename), rename, parent-dir fsync
 ///   8. Return DecayResult { decayed_ids, kept_count }
 ///
 /// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
@@ -181,20 +180,11 @@ pub fn run_decay_pruner(
     }
 
     // Step 7: atomically rewrite the live JSONL with the kept records.
-    // `episodic::rewrite_atomic` writes the temp, fsyncs it, runs the hook, then
-    // renames and parent-dir fsyncs. The WAL prune intent is appended inside the
-    // hook — after tmp-fsync, before the rename — so the named temp provably
-    // exists when the intent references it (WEG-378).
-    let tmp_path = jsonl_path.with_extension("tmp");
-    episodic::rewrite_atomic(&jsonl_path, &kept, || {
-        wal::append_intent(
-            agent_root,
-            WalIntent::PruneEpisodicMemory {
-                temp_file_path: tmp_path.to_string_lossy().into_owned(),
-            },
-        )
-        .map_err(std::io::Error::other)
-    })?;
+    // `episodic::rewrite_guarded` writes the temp, fsyncs it, records the WAL
+    // prune intent naming that temp, then renames and parent-dir fsyncs. The
+    // intent's path comes from the write, so this pruner never names a temp of
+    // its own (AILAB-164).
+    episodic::rewrite_guarded(agent_root, &jsonl_path, &kept)?;
 
     let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();
     Ok(DecayResult {

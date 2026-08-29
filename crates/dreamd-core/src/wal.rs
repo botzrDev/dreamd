@@ -10,12 +10,12 @@
 //! [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index freshness contract) and
 //! [`assess_index_freshness`](crate::server::tantivy_handle::assess_index_freshness).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon_state::{update_daemon_state, DaemonStateError};
+use crate::daemon_state::{read_daemon_state, update_daemon_state, DaemonStateError};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 
@@ -127,6 +127,86 @@ pub fn append_intent(agent_root: &AgentRoot, intent: WalIntent) -> Result<(), Wa
     Ok(())
 }
 
+/// Which [`WalIntent`] a [`guarded_replace`] records for the file it is
+/// replacing.
+///
+/// A *kind*, not an intent: the `temp_file_path` half is supplied by
+/// [`guarded_replace`] from the tmp the atomic write actually created, so a
+/// caller has no way to name one (AILAB-164).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedReplaceKind {
+    /// `.agent/semantic/LESSONS.md` and friends.
+    ReplaceSemanticMemory,
+    /// `.agent/episodic/AGENT_LEARNINGS.jsonl`.
+    PruneEpisodicMemory,
+}
+
+impl GuardedReplaceKind {
+    /// Build the on-disk intent for `tmp`. Deliberately private: this is the
+    /// **only** place production code mints a `temp_file_path`, and `tmp` can
+    /// only come from [`crate::io::write_atomic_with_hook`]'s hook argument.
+    fn into_intent(self, tmp: &Path) -> WalIntent {
+        let temp_file_path = tmp.to_string_lossy().into_owned();
+        match self {
+            Self::ReplaceSemanticMemory => WalIntent::ReplaceSemanticMemory { temp_file_path },
+            Self::PruneEpisodicMemory => WalIntent::PruneEpisodicMemory { temp_file_path },
+        }
+    }
+}
+
+/// Replace `dest` with `contents` and record the matching [`WalIntent`] as one
+/// operation (AILAB-164).
+///
+/// Sequence, inside [`crate::io::write_atomic_with_hook`]: write `dest`'s `.tmp`,
+/// fsync it, **then** append the intent naming that exact tmp, then rename and
+/// fsync the parent dir. The intent therefore never references a tmp that does
+/// not exist yet, and never a tmp this call did not write — the two halves used
+/// to be separate statements at each call site, each re-deriving
+/// `dest.with_extension("tmp")` for itself, and `write_selected_lesson` even ran
+/// them in the opposite order (intent, *then* write).
+///
+/// Follows [`append_intent`]'s no-active-cycle rule: with no WAL on disk the
+/// intent append is a no-op and the replace still commits. One-shot CLI rewrites
+/// with no open cycle (`dreamd archive`) call
+/// [`episodic::rewrite_atomic`](crate::episodic::rewrite_atomic) instead and do
+/// not come through here at all.
+///
+/// Returns [`std::io::ErrorKind::Unsupported`] on Windows, inherited from
+/// `write_atomic_with_hook`; see `docs/windows.md`.
+pub fn guarded_replace(
+    agent_root: &AgentRoot,
+    dest: &Path,
+    contents: &[u8],
+    kind: GuardedReplaceKind,
+) -> Result<(), WalError> {
+    crate::io::write_atomic_with_hook(dest, contents, |tmp| {
+        append_intent(agent_root, kind.into_intent(tmp)).map_err(std::io::Error::other)
+    })?;
+    Ok(())
+}
+
+/// [`guarded_replace`] that crashes in the one window recovery exists for:
+/// after the `.tmp` is fsynced and the intent is durably appended, before the
+/// rename. Leaves `dest` byte-identical, the `.tmp` on disk, and the WAL naming
+/// it — exactly the state a `SIGKILL` there would.
+///
+/// Test-only, and the only supported way to produce that state: hand-writing WAL
+/// JSON tests the recovery *reader* against a fixture nothing in production
+/// emits.
+#[cfg(test)]
+pub(crate) fn guarded_replace_crash_after_intent(
+    agent_root: &AgentRoot,
+    dest: &Path,
+    contents: &[u8],
+    kind: GuardedReplaceKind,
+) -> Result<(), WalError> {
+    crate::io::write_atomic_with_hook(dest, contents, |tmp| {
+        append_intent(agent_root, kind.into_intent(tmp)).map_err(std::io::Error::other)?;
+        Err(std::io::Error::other("injected crash after intent"))
+    })?;
+    Ok(())
+}
+
 /// Append Commit intent, update state.json to "complete", delete WAL.
 /// Caller-provided `now_sec`.
 pub fn commit_cycle(agent_root: &AgentRoot, now_sec: i64) -> Result<(), WalError> {
@@ -219,32 +299,23 @@ pub fn recover_on_startup(agent_root: &AgentRoot) -> Result<RecoveryOutcome, Wal
 }
 
 /// Read `last_dream_cycle_status` from `state.json`.
-/// Returns `"idle"` if the file is absent or the key is missing.
+///
+/// Returns `"idle"` if the file is absent or the key is missing — the same two
+/// defaults the hand-rolled `serde_json::Value` walk this replaced produced, now
+/// inherited from [`DaemonState`](crate::daemon_state::DaemonState)`::default`
+/// and its container-level `#[serde(default)]` (AILAB-164 over AILAB-167).
 pub fn read_last_cycle_status(agent_root: &AgentRoot) -> Result<String, WalError> {
-    let path = agent_root.state_json();
-    if !path.exists() {
-        return Ok("idle".to_string());
-    }
-    let bytes = std::fs::read(&path)?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    Ok(v.get("last_dream_cycle_status")
-        .and_then(|s| s.as_str())
-        .unwrap_or("idle")
-        .to_string())
+    Ok(read_daemon_state(agent_root)?.last_dream_cycle_status)
 }
 
 /// Read `last_dream_cycle_at` from `state.json`.
-/// Returns `None` if the file is absent, the key is missing, or the value is JSON null.
+///
+/// Returns `None` if the file is absent, the key is missing, or the value is
+/// JSON null. Reads through the same typed state as
+/// [`read_last_cycle_status`]; the writer stays
+/// [`update_daemon_state`](crate::daemon_state::update_daemon_state).
 pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, WalError> {
-    let path = agent_root.state_json();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path)?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    Ok(v.get("last_dream_cycle_at")
-        .and_then(|s| s.as_str())
-        .map(|s| s.to_string()))
+    Ok(read_daemon_state(agent_root)?.last_dream_cycle_at)
 }
 
 #[cfg(test)]
@@ -375,29 +446,118 @@ mod tests {
         );
     }
 
+    /// Read back the WAL on disk and return the `temp_file_path` of its single
+    /// non-`Commit` intent. Pattern-binds by shorthand rather than reaching for
+    /// the field, so no test *names* a `temp_file_path` value either.
+    fn only_intent_tmp(root: &AgentRoot) -> PathBuf {
+        let wal: DreamWal =
+            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
+        let paths: Vec<PathBuf> = wal
+            .intents
+            .iter()
+            .filter_map(|i| match i {
+                WalIntent::ReplaceSemanticMemory { temp_file_path }
+                | WalIntent::PruneEpisodicMemory { temp_file_path } => {
+                    Some(PathBuf::from(temp_file_path))
+                }
+                WalIntent::Commit => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 1, "expected exactly one replace intent");
+        paths.into_iter().next().unwrap()
+    }
+
+    /// The seam's happy path: `dest` gets the new bytes, no `.tmp` is left, and
+    /// the recorded intent names the tmp the write actually created — not a path
+    /// the caller re-derived (AILAB-164).
+    #[test]
+    fn guarded_replace_records_the_tmp_it_wrote_then_renames_it() {
+        let (root, _g) = setup_root("guarded-happy");
+        let dest = root.lessons_md();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"old lesson\n").unwrap();
+
+        begin_cycle(&root, NOW_SEC).unwrap();
+        guarded_replace(
+            &root,
+            &dest,
+            b"new lesson\n",
+            GuardedReplaceKind::ReplaceSemanticMemory,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"new lesson\n");
+        let tmp = dest.with_extension("tmp");
+        assert!(!tmp.exists(), "happy path must leave no stray .tmp");
+        assert_eq!(
+            only_intent_tmp(&root),
+            tmp,
+            "intent must name the tmp the write created"
+        );
+    }
+
+    /// `append_intent`'s no-active-cycle rule survives the wrapper: with no WAL
+    /// on disk the replace still commits (AILAB-164 §1.6).
+    #[test]
+    fn guarded_replace_still_writes_with_no_open_wal() {
+        let (root, _g) = setup_root("guarded-no-wal");
+        let dest = root.lessons_md();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert!(!root.wal_path().exists(), "no cycle is open");
+
+        guarded_replace(
+            &root,
+            &dest,
+            b"unguarded\n",
+            GuardedReplaceKind::ReplaceSemanticMemory,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"unguarded\n");
+        assert!(!root.wal_path().exists(), "no WAL must be conjured");
+    }
+
+    /// Crash in the window recovery exists for — intent durable, rename not yet
+    /// done — driven through the real seam rather than a hand-written WAL
+    /// fixture, then unwound by `recover_if_needed`.
     #[test]
     fn recover_incomplete_deletes_tmp_and_marks_failed() {
         let (root, _g) = setup_root("recovery");
+        let dest = root.episodic_jsonl();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"pre-cycle record\n").unwrap();
 
-        // Create the tmp file that the WAL intent references.
-        let tmp_path = root.episodic_jsonl().with_extension("tmp");
-        fs::create_dir_all(tmp_path.parent().unwrap()).unwrap();
-        fs::write(&tmp_path, b"partial write\n").unwrap();
+        begin_cycle(&root, NOW_SEC).unwrap();
+        let err = guarded_replace_crash_after_intent(
+            &root,
+            &dest,
+            b"pruned record\n",
+            GuardedReplaceKind::PruneEpisodicMemory,
+        )
+        .expect_err("injected crash must surface");
+        assert!(
+            matches!(err, WalError::Io(_)),
+            "crash surfaces as I/O, got {err:?}"
+        );
 
-        // Write a WAL with a PruneEpisodicMemory intent but no Commit.
-        let wal = DreamWal {
-            schema_version: "1.0".to_string(),
-            intents: vec![WalIntent::PruneEpisodicMemory {
-                temp_file_path: tmp_path.to_string_lossy().into_owned(),
-            }],
-        };
-        let wal_json = serde_json::to_string_pretty(&wal).unwrap();
-        fs::write(root.wal_path(), wal_json.as_bytes()).unwrap();
+        // State at the crash: dest untouched, tmp on disk, WAL naming that tmp.
+        let tmp_path = dest.with_extension("tmp");
+        assert_eq!(fs::read(&dest).unwrap(), b"pre-cycle record\n");
+        assert!(
+            tmp_path.exists(),
+            ".tmp must survive as the recovery signal"
+        );
+        assert_eq!(only_intent_tmp(&root), tmp_path);
 
         let outcome = recover_if_needed(&root, NOW_SEC).unwrap();
 
         assert!(!tmp_path.exists(), ".tmp file must be deleted by recovery");
         assert!(!root.wal_path().exists(), "WAL must be deleted by recovery");
+        assert_eq!(
+            fs::read(&dest).unwrap(),
+            b"pre-cycle record\n",
+            "recovery must leave the destination pre-cycle"
+        );
 
         let state: serde_json::Value =
             serde_json::from_slice(&fs::read(root.state_json()).unwrap()).unwrap();

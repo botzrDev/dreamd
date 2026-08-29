@@ -7,9 +7,9 @@
 //! `apply_pin_unpin` rewrites `AGENT_LEARNINGS.jsonl`, setting `pinned` on IDs
 //! cited in the freshly-written `LESSONS.md` **unioned** with any `pinned` flag
 //! an external writer already set — the cycle never unsets a pin it did not
-//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after `write_lessons_file`,
-//! before `commit_cycle`; not safe to call before `LESSONS.md` exists (succeeds
-//! silently if absent).
+//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after the cycle's guarded
+//! `LESSONS.md` write, before `commit_cycle`; not safe to call before
+//! `LESSONS.md` exists (succeeds silently if absent).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -22,7 +22,7 @@ use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
 use crate::salience::{salience_with_context, RecurrenceContext};
-use crate::wal::{self, WalError, WalIntent};
+use crate::wal::{self, GuardedReplaceKind, WalError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidationError {
@@ -226,8 +226,8 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
 /// "Cited" means every [`Lesson::id`] **and** every id in the file-level
 /// `citations` frontmatter (AILAB-200).
 ///
-/// Called by WEG-61 (DR-308) after `write_lessons_file`, while the
-/// orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
+/// Called by WEG-61 (DR-308) after [`write_selected_lesson`] has replaced
+/// `LESSONS.md`, while the orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
 /// mutations if `LESSONS.md` or the JSONL is absent.
 pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError> {
     let lessons_path = agent_root.lessons_md();
@@ -258,20 +258,11 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
         event.pinned = event.pinned || cited_ids.contains(event.id.as_str());
     }
 
-    // WAL: record the prune intent inside the atomic rewrite's hook (WEG-378) —
-    // after the temp is fsynced, before the rename. This makes the named temp
-    // provably exist when the intent references it; recovery cleans up that
-    // temp on a mid-cycle crash. `append_intent` no-ops when no WAL is open.
-    let tmp_path = jsonl_path.with_extension("tmp");
-    episodic::rewrite_atomic(&jsonl_path, &events, || {
-        wal::append_intent(
-            agent_root,
-            WalIntent::PruneEpisodicMemory {
-                temp_file_path: tmp_path.to_string_lossy().into_owned(),
-            },
-        )
-        .map_err(std::io::Error::other)
-    })?;
+    // One call: the prune intent is recorded inside the atomic rewrite, between
+    // the temp's fsync and the rename, naming the temp the write itself created
+    // (AILAB-164). Recovery cleans up that temp on a mid-cycle crash. No WAL
+    // open (no cycle) still rewrites the log.
+    episodic::rewrite_guarded(agent_root, &jsonl_path, &events)?;
     Ok(())
 }
 
@@ -488,8 +479,15 @@ pub fn lessons_file_from_selected(
 
 /// Write `LESSONS.md` for `selected` with the chosen body, then apply pins.
 ///
-/// Records the `ReplaceSemanticMemory` intent into the orchestrator-owned WAL
-/// envelope before touching the file, exactly as the single-path version did.
+/// The `ReplaceSemanticMemory` intent lands in the orchestrator-owned WAL
+/// envelope as part of the write itself, naming the temp that write created
+/// (AILAB-164). It is deliberately **not** recorded ahead of the write any more:
+/// that order could put an intent in the WAL pointing at a `.tmp` that did not
+/// exist yet, so a crash between the two left recovery chasing a phantom.
+///
+/// The bytes are `lessons::render_lessons_file`'s — the same serializer
+/// `lessons::write_lessons_file` and `dreamd dream --dry` use (AILAB-341), so
+/// going around that writer to reach the WAL cannot change what lands on disk.
 pub fn write_selected_lesson(
     agent_root: &AgentRoot,
     now_sec: i64,
@@ -499,22 +497,16 @@ pub fn write_selected_lesson(
     let lessons_file = lessons_file_from_selected(now_sec, selected, body);
 
     let lessons_path = agent_root.lessons_md();
-    let temp_path = lessons_path
-        .with_extension("tmp")
-        .to_string_lossy()
-        .into_owned();
-    wal::append_intent(
+    std::fs::create_dir_all(agent_root.semantic_dir())?;
+    wal::guarded_replace(
         agent_root,
-        WalIntent::ReplaceSemanticMemory {
-            temp_file_path: temp_path,
-        },
+        &lessons_path,
+        lessons::render_lessons_file(&lessons_file).as_bytes(),
+        GuardedReplaceKind::ReplaceSemanticMemory,
     )?;
 
-    std::fs::create_dir_all(agent_root.semantic_dir())?;
-    lessons::write_lessons_file(&lessons_path, &lessons_file)?;
-
-    // Pin/unpin rewrites JSONL — `append_intent(PruneEpisodicMemory)` lands in
-    // the orchestrator-owned WAL envelope opened by `run_filesystem_phases`.
+    // Pin/unpin rewrites JSONL under the same envelope, via
+    // `episodic::rewrite_guarded` (opened by `run_filesystem_phases`).
     apply_pin_unpin(agent_root)?;
 
     Ok(())
@@ -614,6 +606,9 @@ mod tests {
     use crate::layout::AgentRoot;
     use crate::lessons::{read_lessons_file, write_lessons_file, Lesson, LessonsFile};
     use crate::test_support::{unique_tmpdir, DirGuard};
+    // Production code here mints no intents any more (AILAB-164); the assertions
+    // below still read them back off disk.
+    use crate::wal::WalIntent;
 
     fn test_id(n: u32) -> EventId {
         EventId::parse(&format!("evt_{:0>26}", n)).unwrap()
@@ -1306,18 +1301,6 @@ mod tests {
         }];
 
         let lessons_path = root.lessons_md();
-        let temp_path = lessons_path
-            .with_extension("tmp")
-            .to_string_lossy()
-            .into_owned();
-        wal::append_intent(
-            &root,
-            WalIntent::ReplaceSemanticMemory {
-                temp_file_path: temp_path,
-            },
-        )
-        .unwrap();
-
         let last_updated = DateTime::<Utc>::from_timestamp(NOW_SEC, 0).unwrap_or_default();
         let lessons_file = LessonsFile {
             last_updated,
@@ -1327,12 +1310,26 @@ mod tests {
             lessons,
         };
         fs::create_dir_all(root.semantic_dir()).unwrap();
-        lessons::write_lessons_file(&lessons_path, &lessons_file).unwrap();
+        // The lessons write records its own intent now — the test no longer
+        // stands in for the production path by minting one by hand.
+        wal::guarded_replace(
+            &root,
+            &lessons_path,
+            lessons::render_lessons_file(&lessons_file).as_bytes(),
+            GuardedReplaceKind::ReplaceSemanticMemory,
+        )
+        .unwrap();
 
         apply_pin_unpin(&root).unwrap();
 
         let wal: crate::wal::DreamWal =
             serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
+        assert!(
+            wal.intents
+                .iter()
+                .any(|i| matches!(i, WalIntent::ReplaceSemanticMemory { .. })),
+            "the lessons write must record ReplaceSemanticMemory while WAL is active"
+        );
         assert!(
             wal.intents
                 .iter()
@@ -1365,47 +1362,65 @@ mod tests {
 
         let lessons_path = root.lessons_md();
         fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
-        write_lessons_file(
+
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+
+        // Step one of the cycle, run for real: this lands `ReplaceSemanticMemory`
+        // in the WAL and renames its temp away. Recovery must therefore walk TWO
+        // intents, one of whose temps is already gone — the multi-intent shape
+        // the hand-written WAL fixture used to stand in for.
+        let lessons_file = LessonsFile {
+            last_updated: fixed_ts(),
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: "rust::types".to_string(),
+            citations: vec![],
+            lessons: vec![Lesson {
+                id: test_id(2).as_str().to_string(),
+                content: "exemplar".to_string(),
+                pinned: false,
+            }],
+        };
+        wal::guarded_replace(
+            &root,
             &lessons_path,
-            &LessonsFile {
-                last_updated: fixed_ts(),
-                prompt_version: "deterministic-only".to_string(),
-                cluster_key: "rust::types".to_string(),
-                citations: vec![],
-                lessons: vec![Lesson {
-                    id: test_id(2).as_str().to_string(),
-                    content: "exemplar".to_string(),
-                    pinned: false,
-                }],
-            },
+            lessons::render_lessons_file(&lessons_file).as_bytes(),
+            GuardedReplaceKind::ReplaceSemanticMemory,
         )
         .unwrap();
+        let lessons_bytes = fs::read(&lessons_path).unwrap();
+
+        // Crash the real pin rewrite in the window recovery exists for: the
+        // temp is fsynced and the intent is durable, the rename never happened.
+        // Driving the seam is the point — a hand-written WAL fixture would only
+        // exercise the recovery reader against bytes production never emits.
+        let mut pinned = events.clone();
+        pinned[2].pinned = true;
+        let pinned_bytes: String = pinned
+            .iter()
+            .map(|e| format!("{}\n", serde_json::to_string(e).unwrap()))
+            .collect();
+        crate::wal::guarded_replace_crash_after_intent(
+            &root,
+            &root.episodic_jsonl(),
+            pinned_bytes.as_bytes(),
+            GuardedReplaceKind::PruneEpisodicMemory,
+        )
+        .expect_err("injected crash must surface");
 
         let jsonl_tmp = root.episodic_jsonl().with_extension("tmp");
-        fs::write(&jsonl_tmp, b"partial pin/unpin rewrite\n").unwrap();
-
-        let lessons_tmp = lessons_path.with_extension("tmp");
-        let wal = crate::wal::DreamWal {
-            schema_version: "1.0".to_string(),
-            intents: vec![
-                WalIntent::ReplaceSemanticMemory {
-                    temp_file_path: lessons_tmp.to_string_lossy().into_owned(),
-                },
-                WalIntent::PruneEpisodicMemory {
-                    temp_file_path: jsonl_tmp.to_string_lossy().into_owned(),
-                },
-            ],
-        };
-        fs::write(
-            root.wal_path(),
-            serde_json::to_string_pretty(&wal).unwrap().as_bytes(),
-        )
-        .unwrap();
-        fs::write(
-            root.state_json(),
-            br#"{"schema_version":"1.0","last_dream_cycle_status":"in_progress"}"#,
-        )
-        .unwrap();
+        assert!(
+            jsonl_tmp.exists(),
+            "the pin rewrite's .tmp must survive the crash as the recovery signal"
+        );
+        let wal_json = fs::read_to_string(root.wal_path()).unwrap();
+        assert!(
+            wal_json.contains("PruneEpisodicMemory"),
+            "the crashed rewrite must have left its intent in the WAL"
+        );
+        assert!(
+            wal_json.contains("ReplaceSemanticMemory"),
+            "the completed lessons write must still be in the same WAL"
+        );
 
         let outcome = wal::recover_if_needed(&root, NOW_SEC).unwrap();
         assert!(
@@ -1428,6 +1443,15 @@ mod tests {
             "pre-cycle pin state must survive recovery"
         );
         assert!(!updated[2].pinned, "partial rewrite must not have landed");
+
+        // The committed half's temp was renamed away before the crash, so
+        // recovery walks an intent whose temp is already gone and leaves the
+        // promoted file alone rather than erroring on the missing path.
+        assert_eq!(
+            fs::read(&lessons_path).unwrap(),
+            lessons_bytes,
+            "an intent whose temp already renamed must not disturb the live file"
+        );
     }
 
     #[test]
