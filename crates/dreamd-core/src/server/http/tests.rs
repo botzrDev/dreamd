@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use super::handlers::PREFERENCES_SIZE_CAP;
+use super::router::request_trace_fields;
 use super::{build_router, AppState, PeerUid};
 use crate::config::Config;
 use crate::coordinator::MemoryCoordinatorMsg;
@@ -845,6 +846,97 @@ async fn health_reports_fresh_empty_store() {
     let json = body_json(resp).await;
     assert_eq!(json["index"]["stale"], serde_json::json!(false));
     assert_eq!(json["index"]["unindexed_count"], serde_json::json!(0));
+}
+
+// ── AILAB-189: per-request trace fields ──────────────────────────────────────
+
+/// The span's field extraction, asserted directly. `Span` does not expose its
+/// recorded values, so `request_trace_fields` is the seam that makes the rule
+/// testable without a capturing subscriber.
+#[test]
+fn request_trace_fields_reads_peer_uid_and_request_id() {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/learn?ignored=1")
+        .header("x-request-id", "abc")
+        .body(Body::empty())
+        .unwrap();
+    #[cfg(unix)]
+    req.extensions_mut().insert(PeerUid(42));
+
+    let fields = request_trace_fields(&req);
+
+    assert_eq!(fields.method, axum::http::Method::POST);
+    // Path only — the query string is deliberately not in the span, so a
+    // recall `q=` never lands in the log.
+    assert_eq!(fields.path, "/api/v1/learn");
+    assert_eq!(fields.request_id, "abc");
+    #[cfg(unix)]
+    assert_eq!(fields.peer_uid, Some(42));
+}
+
+/// No `x-request-id` header and no `PeerUid` extension: both degrade rather
+/// than panic. `"-"` is what a router exercised without `SetRequestIdLayer`
+/// would record.
+#[test]
+fn request_trace_fields_defaults_when_header_and_extension_absent() {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/health")
+        .body(Body::empty())
+        .unwrap();
+
+    let fields = request_trace_fields(&req);
+
+    assert_eq!(fields.request_id, "-");
+    #[cfg(unix)]
+    assert_eq!(fields.peer_uid, None);
+}
+
+/// End-to-end through the real layer stack: `SetRequestIdLayer` mints a UUID on
+/// a request that carries no id, and `PropagateRequestIdLayer` puts it on the
+/// response. Two calls must not share an id, or the generator is not running.
+///
+/// Shaped after `health_reports_fresh_empty_store`: a naked `/api/v1/health`
+/// with no `x-agent-root` is a 400 and would never reach the trace stack.
+#[tokio::test]
+async fn health_response_carries_generated_request_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_test_state(registry_path);
+    let router = build_router(state);
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let req = with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/health")
+                .header("x-agent-root", root_str)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let resp = router.clone().into_service().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id on response")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // Hyphenated UUID v4: 8-4-4-4-12.
+        assert_eq!(id.len(), 36, "not a hyphenated UUID: {id}");
+        assert_eq!(id.matches('-').count(), 4, "not a hyphenated UUID: {id}");
+        ids.push(id);
+    }
+
+    assert_ne!(ids[0], ids[1], "request ids must be generated per request");
 }
 
 #[tokio::test]

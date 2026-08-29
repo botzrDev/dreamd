@@ -45,8 +45,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 # WEG-67 / DR-401 — Axum 0.8 HTTP server skeleton. default-features = true
-# pulls hyper + tower-service; no explicit tower-http dep until WEG-144.
+# pulls hyper + tower-service; the explicit tower-http dep it used to defer to
+# WEG-144 now sits right below (AILAB-189).
 axum = { version = "0.8", default-features = true }
+# AILAB-189 / WEG-144 — per-request HTTP spans (peer UID + request id) on the
+# UDS router; `server::http::router::build_router` is the sole user. Pinned to
+# "0.6" to land on the 0.6.11 already resolved in Cargo.lock as a reqwest
+# transitive, so this adds no new version to the graph. `trace` and
+# `request-id` are NOT enabled on that transitive build, though, so turning
+# them on here is a real feature expansion rather than a no-op: `trace` brings
+# tower-http's own `tracing` integration, `request-id` brings its optional
+# `uuid` (v4) — deliberately preferred over taking a direct `uuid` dep in this
+# crate for one call site. `default-features = false` keeps compression /
+# fs / cors / auth off. MIT — already covered by the deny.toml global allow
+# list, no new per-crate exception.
+tower-http = { version = "0.6", default-features = false, features = ["trace", "request-id"] }
 # Tantivy 0.26 — promoted to a real library dependency by WEG-42 (DR-202).
 # `server::tantivy_handle::TantivyIndexHandle` opens the per-project index,
 # runs startup replay, and drives the 5-second commit cadence. The WEG-24

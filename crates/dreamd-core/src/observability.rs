@@ -19,8 +19,13 @@
 //!     via [`DaemonHome::log_file`].
 //!
 //! Level comes from `DREAMD_LOG` (default `info`). Per-request / peer-UID
-//! enrichment is DR-410 (WEG-144), still deferred — no new instrumentation
-//! ships here.
+//! enrichment (DR-410 / AILAB-189) is a router concern, not a subscriber one:
+//! it ships as a `TraceLayer` in [`server::http::router`], which opens an INFO
+//! span per UDS HTTP request. This module still installs no instrumentation of
+//! its own — it only provides the subscriber those spans land in, so the INFO
+//! default below is what makes them visible.
+//!
+//! [`server::http::router`]: crate::server::http
 //!
 //! [`DaemonHome::log_file`]: crate::layout::DaemonHome::log_file
 

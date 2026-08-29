@@ -6,7 +6,9 @@
 //!   * [`types`] — re-exports wire shapes from [`crate::ingress`]
 //!   * [`handlers`] — `learn`, `recall`, `dream`, `preferences` handlers
 //!
-//! Out of scope here: TraceLayer (WEG-144), TCP binding (WEG-73).
+//! Per-request tracing (peer UID, request id, status, latency) is mounted by
+//! [`router::build_router`] as of AILAB-189 — see `http_make_span` there.
+//! Out of scope here: TCP binding (WEG-73).
 //! Recall already goes through `TantivyIndexHandle::reader` (WEG-69).
 
 mod handlers;
