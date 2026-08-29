@@ -129,7 +129,7 @@ Write order:
 
 `POST /api/v1/learn` returns 201 only after `sync_data` completes. Idempotency LRU is in-memory only (cap 1024, keyed by canonicalized agent-root path + `client_dedup_key`); restart clears it.
 
-On startup, `truncate_malformed_tail` retains lines up to the last cleanly parseable `\n`-terminated record and truncates torn tails. Writers must never emit blank lines.
+On startup, `episodic::recover` truncates a torn tail (a final line with no trailing `\n`) and quarantines any mid-file blank or malformed `\n`-terminated line to `.corrupt-<YYYY-MM-DD>.jsonl` beside the log, rewriting the live file in place to the well-formed records. Writers must never emit blank lines.
 
 Concurrent third-party writers to the JSONL are not supported in v0.1.
 
@@ -173,7 +173,7 @@ sequenceDiagram
 
 | Layer | Durability | Recovery |
 |---|---|---|
-| JSONL append | `write_all` + `sync_data` before HTTP 201 | `truncate_malformed_tail` on coordinator open |
+| JSONL append | `write_all` + `sync_data` before HTTP 201 | `episodic::recover` on coordinator open (torn-tail truncate + `.corrupt-<date>.jsonl` quarantine) |
 | Dream cycle | WAL before destructive ops | `recover_on_startup` |
 | Tantivy index | 5 s commit cadence; coordinator → indexer awaited `send` (backpressures when full) | Startup two-pass replay in `TantivyIndexHandle::open` |
 

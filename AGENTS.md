@@ -110,7 +110,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-08-27
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -494,3 +494,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-341: `tests/fixtures/dream-cycle-snapshot/` is dated 2026-05, a year ahead of `NOW_SEC = 1_747_137_600` (2025-05-13). `NOW_SEC + 30d` still sits inside the window, so a naive retire-preview test keeps promoting.
 - **How to apply:** `newest_event_ts + WINDOW_30_DAYS_SEC + 1`. See `preview_without_promotion_reports_none_and_leaves_lessons_md` in `dream_cycle.rs`.
 - **Cross-refs:** `select-lesson-or-retire-unlinks`
+
+### linear-project-is-dreamd-eng-on-botzr-ai-labs
+
+- **Rule:** dreamd engineering tickets live on Linear **project** `dreamd-eng` under team **Botzr-AI-Labs**. There is no Linear team named `dreamd-eng`. `list_issues(team: "dreamd-eng")` returns empty; `list_issues(team: "DREAMD-SVS")` is the services board.
+- **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while AILAB-199 had just moved to Done on project `dreamd-eng`.
+- **How to apply:** Filter `project: dreamd-eng` (or team `Botzr-AI-Labs` plus the project). Do not treat an empty team query as an empty backlog.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`
+
+### ailab-210-ac-is-pre-watch-architecture
+
+- **Rule:** AILAB-210 Linear AC (MCP-client refcount, 30s/90s application heartbeats, PID file, idle-exit of a shared writer) does not describe the live process model. Do not implement it as written.
+- **Why:** Live `dreamd mcp` is stdio (`Backend::Remote` HTTP-over-UDS or `Backend::Local` in-process). `dreamd watch` is the UDS HTTP daemon and exits only on SIGINT/SIGTERM (`AILAB-162` / `AILAB-748` `DRAIN_TIMEOUT` 30s). No PID file, no client registry, no heartbeat. Map idle 30 min is per-project index/supervisor eviction (`project_resource_map.rs`), not MCP clients. Cited `context/PRD.md` is gone. Linear itself demoted 210 off the v0.1 short list (2026-07-20) and again to Backlog (2026-08-22).
+- **How to apply:** A v2 must remap onto UDS connection tracking on `watch` (scope change — ask) or skip until dogfood shows zombie writers. Do not add a PID file or MCP ping protocol to satisfy the May AC. Do not conflate 210 with `DRAIN_TIMEOUT`.
+- **Cross-refs:** `ailab-162-drain-not-sigterm`, `linear-todo-can-already-be-on-main`
+
+### ailab-163-excise-skips-not-suffix
+
+- **Rule:** AILAB-163 quarantines **only** mid-file blank/malformed `\n`-terminated lines into `.corrupt-YYYY-MM-DD.jsonl` and rewrites the live JSONL to keep every well-formed record. Do not quarantine the suffix from the first anomaly through EOF. Torn no-`\n` tails still truncate in place. Implement `assignments/AILAB-163.v2.md`, not Linear’s silent-truncate story.
+- **Why:** By `9ddd4b5`, WEG-378/`episodic::scan` already skips mid-file corruption and `recover` only `set_len`s torn tails (`recover_leaves_midfile_corruption_in_place`). Linear AC and the 2026-08-27 queue Q01 blurb still claim silent truncate. Suffix quarantine would regress “neither good lost.”
+- **How to apply:** Change `recover` to take the JSONL path; in-place fd rewrite only (no `rewrite_atomic`/`rename` while the coordinator holds the fd). Sidecar is a sibling `.corrupt-<date>.jsonl`, same-day append, `warn!` on quarantine. Call site: `MemoryCoordinator::open_at`.
+- **Cross-refs:** `weg378-skip-midfile-halt-torn-tail`, `jsonl-torn-tail-validation`, `v2-beats-linear-ac`, `linear-todo-can-already-be-on-main`

@@ -11,8 +11,12 @@
 //! (logged with line number + reason); scanning continues. A torn final line
 //! with no trailing `\n` (crash mid-append) halts ingestion — everything after
 //! the last complete line is dropped. [`read_all`] emits ONE `tracing::warn!`
-//! for a genuine torn tail; [`recover`] truncates only a no-newline torn tail
-//! via `set_len` (mid-file holes cannot be excised without deleting valid data).
+//! for a genuine torn tail and rewrites nothing. Open-time [`recover`] goes
+//! further (AILAB-163): it appends the raw skipped lines to a
+//! `.corrupt-<YYYY-MM-DD>.jsonl` sidecar beside the log, then rewrites the live
+//! file in place to the well-formed record stream — so a mid-file hole IS
+//! excised, and the valid records on both sides of it survive. A torn tail with
+//! no mid-file skips is still truncated by `set_len` alone, with no sidecar.
 //! Never hard-error a torn tail; never silently swallow corruption.
 //!
 //! Free-function module by design (matches `io.rs` / `wal.rs` / `lessons.rs`):
@@ -21,7 +25,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dreamd_protocol::AgentLearning;
 
@@ -49,6 +53,10 @@ pub enum EpisodicError {
 struct ScanSkip {
     line_number: usize,
     reason: String,
+    /// The exact `\n`-terminated bytes that were skipped, so [`recover`] can
+    /// quarantine them without a second parse (AILAB-163). [`assess_bytes`]
+    /// and [`read_all`] ignore this field.
+    raw: Vec<u8>,
 }
 
 /// Cap on [`EpisodicLogHealth::malformed_line_numbers`]: only the first N
@@ -118,6 +126,7 @@ fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64, Vec<ScanSkip>) {
             skips.push(ScanSkip {
                 line_number,
                 reason: "blank line".to_string(),
+                raw: bytes[cursor..line_end].to_vec(),
             });
             clean_len = line_end as u64;
             cursor = line_end;
@@ -135,6 +144,7 @@ fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64, Vec<ScanSkip>) {
                 skips.push(ScanSkip {
                     line_number,
                     reason: e.to_string(),
+                    raw: bytes[cursor..line_end].to_vec(),
                 });
                 clean_len = line_end as u64;
                 cursor = line_end;
@@ -177,15 +187,98 @@ pub fn read_all(path: &Path) -> Result<Vec<AgentLearning>, EpisodicError> {
     Ok(records)
 }
 
-/// Coordinator open-time recovery: truncate any torn tail in place via
-/// `set_len` + `sync_data`. Routine on restart, so it logs at `debug!` — never
-/// `warn!`. Leaves `file`'s cursor unspecified; the caller re-seeks to end
-/// before appending.
-pub fn recover(file: &mut File) -> std::io::Result<()> {
+/// Sidecar path for quarantined lines: sibling of the episodic log, named
+/// `.corrupt-<YYYY-MM-DD>.jsonl` from the UTC date of the recovery. One file
+/// per day, so repeated opens on the same day append to the same sidecar.
+fn quarantine_path(jsonl_path: &Path, date: chrono::NaiveDate) -> PathBuf {
+    let name = format!(".corrupt-{}.jsonl", date.format("%Y-%m-%d"));
+    match jsonl_path.parent() {
+        Some(dir) => dir.join(name),
+        None => PathBuf::from(name),
+    }
+}
+
+/// Append the raw skipped lines to `sidecar` (create-or-append, so a same-day
+/// second recovery concatenates), fsync, and clamp the mode to `0600` — the
+/// quarantined bytes are episodic content, so they get the same posture as the
+/// UDS socket and the secrets file.
+fn append_quarantine(sidecar: &Path, skips: &[ScanSkip]) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(sidecar)?;
+    for skip in skips {
+        out.write_all(&skip.raw)?;
+    }
+    out.sync_data()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Coordinator open-time recovery (AILAB-163). Reads the whole log, then:
+///
+/// * **Mid-file skips** — blank or schema-invalid `\n`-terminated lines — are
+///   appended verbatim to [`quarantine_path`]'s sidecar and excised from the
+///   live log, which is rewritten in place to the well-formed record stream.
+///   Every valid record on *either* side of the hole survives; the suffix from
+///   the first anomaly onward is never quarantined. Logged once at `warn!`,
+///   because bytes moved out of the live log and the operator should know.
+/// * **A torn final line** with no trailing `\n` and no mid-file skips is
+///   truncated by `set_len` alone at `debug!` — routine on restart, no sidecar.
+///   When both are present, the rewrite already drops the torn fragment,
+///   because it was never a complete line.
+///
+/// The rewrite is `seek(0)` → `write_all` → `set_len` → `sync_data` on the
+/// caller's own fd. It must never `rewrite_atomic` and swap inodes: the
+/// coordinator holds this fd across the call, so a fresh inode would leave
+/// every subsequent append writing into an unlinked file. Leaves `file`'s
+/// cursor unspecified; the caller re-seeks to end before appending.
+pub fn recover(file: &mut File, jsonl_path: &Path) -> std::io::Result<()> {
+    recover_at(file, jsonl_path, chrono::Utc::now().date_naive())
+}
+
+/// [`recover`] with the sidecar's date injected, so tests get a deterministic
+/// filename instead of racing the wall clock across a UTC midnight.
+fn recover_at(file: &mut File, jsonl_path: &Path, date: chrono::NaiveDate) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let (_records, clean_len, _skips) = scan(&bytes);
+    let (records, clean_len, skips) = scan(&bytes);
+
+    if !skips.is_empty() {
+        let sidecar = quarantine_path(jsonl_path, date);
+        append_quarantine(&sidecar, &skips)?;
+
+        // Re-serialize the survivors — byte-identical to what `rewrite_atomic`
+        // would have produced for the same values, minus the inode swap.
+        let mut clean = String::with_capacity(records.len() * 256);
+        for record in &records {
+            // These values just round-tripped out of this file, so `to_string`
+            // cannot fail; surface it as I/O rather than panicking on open.
+            clean.push_str(&serde_json::to_string(record).map_err(std::io::Error::other)?);
+            clean.push('\n');
+        }
+
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(clean.as_bytes())?;
+        file.set_len(clean.len() as u64)?;
+        file.sync_data()?;
+
+        tracing::warn!(
+            path = %jsonl_path.display(),
+            sidecar = %sidecar.display(),
+            skipped = skips.len(),
+            records = records.len(),
+            torn_tail_bytes = bytes.len() as u64 - clean_len,
+            "episodic log: quarantined malformed lines and rewrote the clean record stream in place"
+        );
+        return Ok(());
+    }
+
     if clean_len < bytes.len() as u64 {
         tracing::debug!(
             dropped_bytes = bytes.len() as u64 - clean_len,
@@ -270,6 +363,28 @@ mod tests {
         let mut s = serde_json::to_string(l).unwrap();
         s.push('\n');
         s.into_bytes()
+    }
+
+    /// Fixed recovery date so the sidecar filename is deterministic.
+    fn test_date() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 27).expect("valid date")
+    }
+
+    const SIDECAR_NAME: &str = ".corrupt-2026-08-27.jsonl";
+
+    fn open_rw(path: &std::path::Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn assert_mode_0600(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "sidecar must be 0600, got {mode:o}");
     }
 
     // ── Test 1: absent → empty; clean → all records ────────────────────────
@@ -370,10 +485,52 @@ mod tests {
         assert_eq!(got[1].content, "after-bad");
     }
 
-    // ── Test 5: recover leaves mid-file corruption; valid suffix survives ───
+    // ── Test 5a: mid-file blank → quarantined; both goods stay live ────────
     #[test]
-    fn recover_leaves_midfile_corruption_in_place() {
-        let dir = unique_tmpdir("recover-midfile");
+    fn recover_quarantines_midfile_blank_line() {
+        let dir = unique_tmpdir("recover-midfile-blank");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        let good = make_learning('A', "before-gap");
+        let after = make_learning('B', "after-gap");
+        let mut bytes = line_of(&good);
+        bytes.push(b'\n'); // mid-file blank (\n\n) — hand-edit only
+        bytes.extend_from_slice(&line_of(&after));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
+
+        // Live file is exactly A then B — the blank is gone, neither good is.
+        let mut expected = line_of(&good);
+        expected.extend_from_slice(&line_of(&after));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            expected,
+            "live log must be the clean record stream, blank excised"
+        );
+
+        let got = read_all(&path).unwrap();
+        assert_eq!(got.len(), 2, "both valid records survive recovery");
+        assert_eq!(got[0].content, "before-gap");
+        assert_eq!(got[1].content, "after-gap");
+
+        // The excised bytes are recoverable from the sidecar.
+        let sidecar = dir.join(SIDECAR_NAME);
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"\n",
+            "sidecar holds the raw blank line"
+        );
+        #[cfg(unix)]
+        assert_mode_0600(&sidecar);
+    }
+
+    // ── Test 5b: mid-file unparseable → quarantined; both goods stay live ──
+    #[test]
+    fn recover_quarantines_midfile_unparseable_line() {
+        let dir = unique_tmpdir("recover-midfile-bad");
         let _g = DirGuard(dir.clone());
         let path = dir.join("AGENT_LEARNINGS.jsonl");
 
@@ -382,26 +539,141 @@ mod tests {
         let mut bytes = line_of(&good);
         bytes.extend_from_slice(b"{not valid json}\n");
         bytes.extend_from_slice(&line_of(&after));
-        let original_len = bytes.len();
         std::fs::write(&path, &bytes).unwrap();
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        recover(&mut file).unwrap();
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
 
+        let mut expected = line_of(&good);
+        expected.extend_from_slice(&line_of(&after));
         assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            original_len as u64,
-            "mid-file corruption must not be truncated away"
+            std::fs::read(&path).unwrap(),
+            expected,
+            "live log keeps the record after the hole, not just the prefix"
         );
 
         let got = read_all(&path).unwrap();
         assert_eq!(got.len(), 2, "both valid records survive recovery");
         assert_eq!(got[0].content, "before-bad");
         assert_eq!(got[1].content, "after-bad");
+
+        let sidecar = dir.join(SIDECAR_NAME);
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"{not valid json}\n",
+            "sidecar holds the raw malformed line"
+        );
+        #[cfg(unix)]
+        assert_mode_0600(&sidecar);
+    }
+
+    // ── Test 5c: torn tail only → truncate as before, no sidecar ───────────
+    #[test]
+    fn recover_torn_tail_only_writes_no_sidecar() {
+        let dir = unique_tmpdir("recover-torn-only");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        let good = make_learning('A', "kept");
+        let clean_prefix = line_of(&good);
+        let mut bytes = clean_prefix.clone();
+        bytes.extend_from_slice(b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_TORN"); // no \n
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            clean_prefix,
+            "torn tail truncated to the clean prefix"
+        );
+        assert!(
+            !dir.join(SIDECAR_NAME).exists(),
+            "a torn tail alone must not create a quarantine sidecar"
+        );
+    }
+
+    // ── Test 5d: mid-file bad + torn tail → both dropped, goods kept ───────
+    #[test]
+    fn recover_quarantines_midfile_bad_and_drops_torn_tail() {
+        let dir = unique_tmpdir("recover-midfile-mixed");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+
+        let good = make_learning('A', "before-bad");
+        let after = make_learning('B', "after-bad");
+        let mut bytes = line_of(&good);
+        bytes.extend_from_slice(b"{not valid json}\n");
+        bytes.extend_from_slice(&line_of(&after));
+        bytes.extend_from_slice(b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_TORN"); // no \n
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
+
+        let mut expected = line_of(&good);
+        expected.extend_from_slice(&line_of(&after));
+        let live = std::fs::read(&path).unwrap();
+        assert_eq!(live, expected, "live log is exactly the two good records");
+        assert!(
+            !live.windows(8).any(|w| w == b"evt_TORN"),
+            "no torn-tail bytes may remain in the live log"
+        );
+
+        // The rewrite drops the torn fragment; only the complete bad line is
+        // recoverable, so an append still lands on a clean boundary.
+        assert_eq!(
+            std::fs::read(dir.join(SIDECAR_NAME)).unwrap(),
+            b"{not valid json}\n",
+            "sidecar holds the bad line only — the torn fragment was never a line"
+        );
+
+        file.seek(SeekFrom::End(0)).unwrap();
+        append(&mut file, &make_learning('C', "appended")).unwrap();
+        let got = read_all(&path).unwrap();
+        assert_eq!(got.len(), 3, "two survivors + one clean append");
+        assert_eq!(got[2].content, "appended");
+    }
+
+    // ── Test 5e: two recoveries, same UTC date → one appended sidecar ──────
+    #[test]
+    fn recover_appends_to_same_day_sidecar() {
+        let dir = unique_tmpdir("recover-sidecar-append");
+        let _g = DirGuard(dir.clone());
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let sidecar = dir.join(SIDECAR_NAME);
+
+        let good = make_learning('A', "kept");
+
+        // First recovery quarantines a malformed line.
+        let mut bytes = line_of(&good);
+        bytes.extend_from_slice(b"{first bad}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"{first bad}\n");
+
+        // Second recovery on the same date appends rather than clobbering.
+        let mut bytes = line_of(&good);
+        bytes.extend_from_slice(b"{second bad}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file = open_rw(&path);
+        recover_at(&mut file, &path, test_date()).unwrap();
+
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"{first bad}\n{second bad}\n",
+            "same-day sidecar concatenates both quarantines"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            line_of(&good),
+            "live log is the single good record after each recovery"
+        );
+        #[cfg(unix)]
+        assert_mode_0600(&sidecar);
     }
 
     // ── Test 6: recover truncates torn tail; append lands on clean boundary ─
@@ -417,12 +689,8 @@ mod tests {
         bytes.extend_from_slice(b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_TORN"); // no \n
         std::fs::write(&path, &bytes).unwrap();
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        recover(&mut file).unwrap();
+        let mut file = open_rw(&path);
+        recover(&mut file, &path).unwrap();
 
         // On-disk length is exactly the clean prefix.
         assert_eq!(

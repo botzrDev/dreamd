@@ -200,7 +200,7 @@ impl MemoryCoordinator {
             .truncate(false)
             .open(jsonl_path)?;
 
-        episodic::recover(&mut file)?;
+        episodic::recover(&mut file, jsonl_path)?;
         // Seek to end for subsequent appends. We deliberately do NOT open
         // with `.append(true)` because the recovery path needs `set_len`
         // and explicit positioning.
