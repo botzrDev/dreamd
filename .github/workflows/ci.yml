@@ -346,6 +346,46 @@ jobs:
           echo "macOS stripped binary: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
           echo "### macOS binary size: ${SIZE_MB} MB" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Idle RSS reporting — macOS (informational, AILAB-176) ────────────────────
+  # Same spawn/socket/settle path as idle-rss-gate; scripts/idle-rss.sh branches
+  # on `uname -s` and samples `ps -o rss=` on Darwin. Records the number only:
+  # no limit, not a merge gate, not in notify-failure. A build or daemon-spawn
+  # failure still fails the job; the RSS value never does.
+  idle-rss-report-macos:
+    name: Idle-RSS (macOS, informational)
+    runs-on: macos-latest
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-idle-rss-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-idle-rss-
+      - name: Build release binary
+        run: cargo build --release -p dreamd
+      - name: Measure idle RSS
+        id: rss
+        run: |
+          MB=$(scripts/idle-rss.sh)
+          echo "rss_mb=$MB" >> "$GITHUB_OUTPUT"
+      - name: Write step summary
+        if: always()
+        run: |
+          MB="${{ steps.rss.outputs.rss_mb }}"
+          {
+            echo "### Idle-RSS (macOS, informational)"
+            echo "Daemon idle \`ps -o rss=\`: **${MB} MB** (no limit; NFR-1 Linux 30 MB gate unchanged)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ── Binary size reporting — Windows (informational, DR-809) ──────────────────
   size-report-windows:
     name: Binary size (Windows, informational)

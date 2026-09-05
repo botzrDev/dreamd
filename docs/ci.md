@@ -27,6 +27,7 @@ This document covers the **CI** workflow. Contributors hit these gates on every 
 | [Install funnel](#install-funnel) | **Yes** | `scripts/alpha/install-funnel-suite.sh` (setup / doctor / update / conflicts) |
 | [Binary size (macOS)](#binary-size-reporting) | No | Informational size report |
 | [Binary size (Windows)](#binary-size-reporting) | No | Informational; Windows daemon deferred |
+| [Idle-RSS (macOS)](#idle-rss-macos-informational) | No | Informational `ps -o rss=` (no limit) |
 | [Test coverage](#test-coverage) | No | HTML + lcov report; warnings only |
 | [Notify on main CI failure](#notify-on-main-ci-failure) | No | Slack webhook on `main` push failure |
 
@@ -134,7 +135,16 @@ scripts/idle-rss.sh
 
 The script spawns `dreamd watch` in a throwaway workspace, waits for the socket, samples `/proc/<pid>/status`, and prints MB to stdout. Override with `LIMIT_MB=30` or `SETTLE_SECS=2`.
 
-macOS `phys_footprint` is not comparable — no macOS RSS gate.
+### Idle-RSS (macOS, informational)
+
+**Runs on:** `macos-latest`  
+**Blocks merge:** No (informational; not in `notify-failure`)  
+**Job:** `idle-rss-report-macos`  
+**Metric:** `ps -o rss=` of the `dreamd watch` child (KiB → MB), no limit
+
+Same build and measure commands as the Linux gate above. `scripts/idle-rss.sh` branches on `uname -s`: on Darwin it reuses the spawn / socket-readiness / 2 s settle path, samples `ps -o rss=`, prints MB, and exits 0 without comparing to `LIMIT_MB` (the env var is ignored on macOS). A build or daemon-spawn failure still fails the job; the RSS number never does. Read the value from the job's step summary and record it in `PERF.md` by hand.
+
+`ps -o rss=` is not `phys_footprint` (Activity Monitor "Memory" uses a different accounting that excludes clean file-backed pages such as shared dylib text). The macOS number is recorded on its own and is not compared to the Linux 30 MB gate; a macOS threshold will be calibrated from the observed value + 20% headroom on a later ticket (AILAB-176).
 
 ---
 

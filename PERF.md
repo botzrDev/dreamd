@@ -5,14 +5,21 @@ CI enforces the limits below. This file records the last measured values.
 
 ## Idle daemon RSS (NFR-1)
 
-| Limit   | Measured   | Gate                        |
-| ------- | ---------- | --------------------------- |
-| < 30 MB | **11.37** MB | `idle-rss-gate` (CI, Linux) |
+| Limit                     | Measured                         | Gate                                 |
+| ------------------------- | -------------------------------- | ------------------------------------ |
+| < 30 MB                   | **11.37** MB                     | `idle-rss-gate` (CI, Linux)          |
+| (informational, no limit) | pending first `macos-latest` run | `idle-rss-report-macos` (CI, macOS)  |
 
 _Methodology:_ `dreamd watch` (release build) in a temp workspace with an empty
-`.agent/`. Readiness = `~/.agent/dreamd.sock` present. Settle = 2 s. Metric =
-`VmRSS` from `/proc/<daemon_pid>/status`. Linux only; macOS deferred (separate
-ticket — phys_footprint accounting is not comparable to VmRSS).
+`.agent/`. Readiness = `~/.agent/dreamd.sock` present. Settle = 2 s. Linux
+metric = `VmRSS` from `/proc/<daemon_pid>/status`, gated at 30 MB. macOS metric
+= `ps -o rss=` (KiB) of the `dreamd watch` child after the same socket + settle
+path. It is **not** `phys_footprint` (Activity Monitor "Memory" uses a different
+accounting that excludes clean file-backed pages such as shared dylib text), and
+it is **not** compared to the Linux 30 MB gate. The macOS measured cell stays
+`pending first macos-latest run` until read off the `idle-rss-report-macos`
+step summary — CI does not auto-commit this file. A macOS threshold (observed +
+20% headroom) is a later founder decision (AILAB-176).
 
 ## Stripped binary size (NFR-2)
 

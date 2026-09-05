@@ -527,5 +527,26 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `TraceLayer::new_for_http()` without a custom MakeSpan emits DEBUG spans. `DREAMD_LOG` defaults to `info` (`observability.rs`), so those spans never appear. HTTP request spans must be `info_span!` (AILAB-189).
 - **Why:** Linear AC says `TraceLayer::new_for_http()` as if that were the whole job. The lockfile `tower-http 0.6.11` from reqwest does not even enable the `trace` feature. Peer UID lives on `Extension(PeerUid)` injected in `uds_server.rs`, not in `build_router`. Last `.layer()` is outermost — `SetRequestIdLayer` must sit outside TraceLayer or MakeSpan sees no `x-request-id`.
-- **How to apply:** Implement `assignments/AILAB-189.v2.md`. Direct `tower-http` with `default-features = false, features = ["trace", "request-id"]`. Do not change `init_tracing` or coordinator log levels. Measure stripped `dreamd` after `build_router` actually calls TraceLayer (`fat-lto-dead-strips-unreferenced-tokenizer`, `nfr-2-stripped-binary-is-20mb`). Stop if over 20 MB.
-- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `fat-lto-dead-strips-unreferenced-tokenizer`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`
+- **How to apply:** Implement `assignments/AILAB-189.v2.md`. Direct `tower-http` with `default-features = false, features = ["trace", "request-id"]`. Do not change `init_tracing` or coordinator log levels. Measure stripped `dreamd` after `build_router` actually calls TraceLayer (`fat-lto-dead-strips-unreferenced-tokenizer`, `nfr-2-stripped-binary-is-20mb`). Stop if over 20 MB. An `info_span!` is not a log line — see `info-span-alone-logs-nothing-fmtspan-none`. `SetRequestIdLayer` must sit outside both `PropagateRequestIdLayer` and TraceLayer (`set-request-id-must-be-outside-propagate`).
+- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `fat-lto-dead-strips-unreferenced-tokenizer`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `info-span-alone-logs-nothing-fmtspan-none`, `set-request-id-must-be-outside-propagate`
+
+### info-span-alone-logs-nothing-fmtspan-none
+
+- **Rule:** `observability::init_tracing` uses `fmt::layer()` with the default `FmtSpan::NONE`. A span, even INFO, writes nothing until an *event* fires inside it. HTTP tracing therefore records onto the span *and* emits one `info!(parent: span, "http request")`. Do not treat "do not emit a second INFO event" as "do not emit any INFO event."
+- **Why:** AILAB-189 v2 §3 banned a second INFO line to stop `DefaultOnResponse` at INFO duplicating status/latency under different names. Literal reading would ship a correct INFO span that is silent under the shipping subscriber. Shipped (`968e67b`): one event into the span, fields on the span, not `DefaultOnResponse`.
+- **How to apply:** Do not flip `with_span_events` to `NEW|CLOSE` (two lines per request). Do not promote `on_request` to INFO (arrival + completion = two INFO lines). Leave `DefaultOnFailure` at ERROR for 5xx.
+- **Cross-refs:** `tracelayer-default-span-is-debug`
+
+### set-request-id-must-be-outside-propagate
+
+- **Rule:** Axum last `.layer()` is outermost. `SetRequestIdLayer` must sit **outside** both `PropagateRequestIdLayer` and `TraceLayer`. `PropagateRequestId::call` stashes `x-request-id` off the request it is handed; if it runs before the generator, the response has no header and MakeSpan records `"-"`.
+- **Why:** AILAB-189 v2 §3 snippet ordered Trace → SetRequestId → Propagate (Propagate outermost). That compiles and looks layered, but oneshot would see no `x-request-id`. Live (`968e67b`): Trace → Propagate → SetRequestId → Unix `peer_uid`.
+- **How to apply:** Inbound on Unix is `peer_uid` → `SetRequestId` → `Propagate` → `Trace` → `agent_root`. Do not "fix" it to match `ServiceBuilder` inner-first examples without flipping for axum.
+- **Cross-refs:** `tracelayer-default-span-is-debug`
+
+### macos-rss-is-ps-rss-not-phys-footprint
+
+- **Rule:** AILAB-176 measures macOS idle daemon memory with `ps -o rss=` (KiB). That is not `phys_footprint`. The CI job is informational: no macOS limit, not in `notify-failure`. Linux `idle-rss-gate` stays VmRSS < 30 MB.
+- **Why:** Linear AILAB-176 title said “< 30 MB on macOS” and the preamble equated `phys_footprint` with `ps -o rss=`. Those are different Mach metrics; a 30 MB fail on `macos-latest` would be an invented gate. Founder lock at queue time: informational job, `ps -o rss=` only, threshold later.
+- **How to apply:** Darwin branch in `scripts/idle-rss.sh` (reuse spawn/socket/cleanup; never `/proc`, never `LIMIT_MB` compare). New job `idle-rss-report-macos` copies `size-report-macos`. `PERF.md` macOS measured cell is pending first CI run — do not guess a number. Do not sample `task_info` / `memory_pressure` to “be more accurate.”
+- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`

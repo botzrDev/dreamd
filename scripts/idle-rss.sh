@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Idle-RSS gate for the dreamd daemon (NFR-1: resident memory < 30 MB at idle).
+# Idle-RSS measurement for the dreamd daemon (NFR-1).
 #
 # Spawns the real `dreamd watch` daemon in a throwaway workspace, waits for its
-# UDS to appear, lets allocations settle, then reads VmRSS from
-# /proc/<daemon_pid>/status and fails if it exceeds LIMIT_MB. See WEG-53 / DR-808.
+# UDS to appear, lets allocations settle, then samples the daemon's resident
+# memory. See WEG-53 / DR-808 (Linux gate) and AILAB-176 (macOS).
 #
-# Linux-only: VmRSS is the metric. macOS phys_footprint counts shared dylib
-# pages and is not comparable to a 30 MB Linux threshold (deferred ticket).
+# Linux (gating): metric is VmRSS from /proc/<daemon_pid>/status; the script
+#   fails (exit 1) if it exceeds LIMIT_MB, default 30 MB.
+# macOS / Darwin (informational): metric is `ps -o rss=` (KiB) of the daemon
+#   child, sampled after the same socket-readiness + settle path. It is printed
+#   and the script exits 0. It is never compared to LIMIT_MB — no macOS limit
+#   is chosen on this ticket (threshold is a later founder decision).
 #
 # Usage:
-#   scripts/idle-rss.sh                 # gate at 30 MB
-#   LIMIT_MB=30 scripts/idle-rss.sh     # explicit limit (MB)
+#   scripts/idle-rss.sh                 # Linux: gate at 30 MB; macOS: report
+#   LIMIT_MB=30 scripts/idle-rss.sh     # explicit limit (MB) — Linux only, ignored on macOS
 #   SETTLE_SECS=2 scripts/idle-rss.sh   # seconds to settle before sampling
 #
 # Prints the measured MB to stdout (machine-readable); a human summary and any
@@ -67,10 +71,10 @@ cd "$WORKDIR"
 "$BIN" init >/dev/null
 
 # CRITICAL: start the daemon directly — NOT inside a ( ... ) & subshell. A
-# subshell wrapper makes $! the subshell PID, so /proc/$!/status would measure
-# the wrong process. Redirect the daemon's stdout to stderr: this script's
-# stdout is captured by the CI step (`MB=$(scripts/idle-rss.sh)`) and the
-# background child inherits that fd.
+# subshell wrapper makes $! the subshell PID, so /proc/$!/status (Linux) or
+# ps -p $! (macOS) would measure the wrong process. Redirect the daemon's
+# stdout to stderr: this script's stdout is captured by the CI step
+# (`MB=$(scripts/idle-rss.sh)`) and the background child inherits that fd.
 "$BIN" watch >&2 &
 DAEMON_PID=$!
 
@@ -98,11 +102,29 @@ fi
 # Let allocations settle before sampling resident memory.
 sleep "$SETTLE_SECS"
 
-# Measure VmRSS of the DAEMON child (KiB) — NOT /proc/self, that is this shell.
-# The 50 MB WRITER_HEAP_BYTES tantivy arena inflates VmSize, not VmRSS, until
-# written; gating on VmRSS is what makes 30 MB achievable.
-RSS_KIB="$(awk '/^VmRSS:/{print $2}' "/proc/$DAEMON_PID/status")"
+# Process name is shared by both arms (portable `ps` column).
 COMM="$(ps -o comm= -p "$DAEMON_PID" 2>/dev/null || echo '?')"
+
+# macOS / Darwin arm (AILAB-176): informational only. Sample `ps -o rss=` (KiB)
+# of the DAEMON child, print MB, exit 0. No /proc here, and no LIMIT_MB
+# comparison even if the env var is set — no macOS limit exists yet.
+OS="$(uname -s)"
+if [[ "$OS" == "Darwin" ]]; then
+    RSS_KIB="$(ps -o rss= -p "$DAEMON_PID" | tr -d '[:space:]')"
+    if [[ -z "$RSS_KIB" || ! "$RSS_KIB" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: ps -o rss= empty/non-numeric for pid $DAEMON_PID" >&2
+        exit 2
+    fi
+    RSS_MB="$(echo "scale=2; $RSS_KIB / 1024" | bc)"
+    echo "idle-rss: pid=$DAEMON_PID comm=$COMM rss=${RSS_MB} MB (macOS informational, no limit)" >&2
+    echo "$RSS_MB"
+    exit 0
+fi
+
+# Linux arm (gating). Measure VmRSS of the DAEMON child (KiB) — NOT /proc/self,
+# that is this shell. The 50 MB WRITER_HEAP_BYTES tantivy arena inflates VmSize,
+# not VmRSS, until written; gating on VmRSS is what makes 30 MB achievable.
+RSS_KIB="$(awk '/^VmRSS:/{print $2}' "/proc/$DAEMON_PID/status")"
 RSS_MB="$(echo "scale=2; $RSS_KIB / 1024" | bc)"
 
 # Human summary on stderr; machine-readable MB on stdout.
