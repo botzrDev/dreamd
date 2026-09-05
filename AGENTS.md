@@ -555,5 +555,26 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). Do not call `detach_double_fork`. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
 - **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
-- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent / status / restart / uninstall are later tickets. Tests must not require a live `systemctl --user`.
-- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`
+- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). status / restart / uninstall remain later. Tests must not require a live `systemctl --user`.
+- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`
+
+### launchd-supervises-foreground-watch
+
+- **Rule:** macOS `dreamd service install` writes `~/Library/LaunchAgents/dev.dreamd.dreamd.plist` that `ProgramArguments`s foreground `dreamd watch`. Do not call `detach_double_fork`. Do not set `AbandonProcessGroup`. `WorkingDirectory` is the install-time `AgentRoot` project root (same founder lock as the systemd unit).
+- **Why:** Linear AILAB-169 AC assumed a new command and `docs/install.md` (file was missing). Live clap is already `service install`/`start` from AILAB-190. Launchd tracking a double-forked grandchild is the same PID lie as systemd `Type=simple` plus `detach_double_fork`.
+- **How to apply:** Inject `launchctl` like `systemctl`; inject `uid` (production `id -u`, no `unsafe` / no CLI `nix` dep). `bootstrap gui/<uid> <plist>` on install; `--force` is the overwrite confirmation (no stdin) and does `bootout` then `bootstrap`; `start` is `kickstart -k gui/<uid>/dev.dreamd.dreamd`. Linux `NoSystemd` copy must still not contain `LaunchAgent`. Darwin-path tests must run on Linux CI via `run_*_with`, not only `cfg(macos)`.
+- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `plist-must-not-redirect-dreamd-log`, `npm-shim-must-list-new-subcommands`
+
+### plist-must-not-redirect-dreamd-log
+
+- **Rule:** The LaunchAgent plist omits `StandardOutPath` / `StandardErrorPath`. `~/.agent/dreamd.log` is owned by `watch`’s tracing file layer (`wants_daemon_log` is Watch-only; `init_tracing` truncates).
+- **Why:** Linear AILAB-169 said “logs to `~/.agent/dreamd.log`.” That is already true. Pointing launchd at the same file gives two writers and a truncate race with AILAB-184.
+- **How to apply:** `KeepAlive` / `SuccessfulExit=false` analogue of `Restart=on-failure`. Never `EnvironmentVariables` / empty `HOME`. One-shots stay console-only.
+- **Cross-refs:** `launchd-supervises-foreground-watch`, `systemd-user-unit-is-foreground-watch`
+
+### npm-shim-must-list-new-subcommands
+
+- **Rule:** Every new `dreamd` clap subcommand that users might type after `npx -y dreamd-mcp` must be added to `DREAMD_SUBCOMMANDS` in `packages/dreamd-mcp/bin/dreamd-mcp.js`. Unlisted tokens become `dreamd mcp <token>`.
+- **Why:** AILAB-190 shipped `service` on the binary and left the shim set unchanged, so `npx -y dreamd-mcp service install` silently starts MCP. The file comment already says keep in sync with `Command`.
+- **How to apply:** Add the token + a `packages/dreamd-mcp/test/route.test.js` case. Docs that show the npx form are a lie until the set includes it.
+- **Cross-refs:** `cargo-run-dreamd-needs-bin`, `launchd-supervises-foreground-watch`

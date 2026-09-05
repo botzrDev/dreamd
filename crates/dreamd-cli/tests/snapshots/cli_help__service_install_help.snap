@@ -2,10 +2,13 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "nested_subcommand_help(\"service\", \"install\")"
 ---
-Write a systemd --user unit for `dreamd watch` and enable it now (Linux only)
+Write a user-scope service for `dreamd watch` and enable it now (Linux systemd --user / macOS LaunchAgent)
 
-Usage: install
+Usage: install [OPTIONS]
 
 Options:
+      --force
+          Overwrite an existing LaunchAgent plist (macOS). No effect on Linux
+
   -h, --help
           Print help

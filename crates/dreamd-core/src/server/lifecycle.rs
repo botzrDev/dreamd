@@ -9,8 +9,10 @@
 //!    controlling terminal. Still zero production call sites, and deliberately
 //!    NOT the `dreamd service install` call site: the systemd user unit
 //!    (AILAB-190) supervises foreground `dreamd watch` under `Type=simple`,
-//!    so this helper is not used there. Kept only for a possible future
-//!    non-systemd background path. See ARCHITECTURE.md §8.1.
+//!    so this helper is not used there; the macOS LaunchAgent (AILAB-169,
+//!    `KeepAlive` + foreground `ProgramArguments`) supervises that same
+//!    foreground `dreamd watch` and likewise does not call it. Kept only for
+//!    a possible future path with no OS supervisor. See ARCHITECTURE.md §8.1.
 //!
 //! 2. [`Supervisor`] — owns the [`MemoryCoordinator`] task handle plus all
 //!    senders into the actor channel. Shutdown-drain contract (decision

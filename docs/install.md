@@ -1,0 +1,188 @@
+# Installing dreamd as a per-user service
+
+`dreamd service install` registers `dreamd watch` with your login session's
+service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS — so
+the daemon starts at login and is restarted if it dies. `dreamd service start`
+starts it on demand. Both verbs shell out to `systemctl --user` / `launchctl`
+as you; neither needs `sudo`, and neither should ever be run with it.
+
+This is **optional**. If you run one agent, the in-process MCP server that
+`npx -y dreamd-mcp` starts is enough — nothing on this page is required.
+Install the service when several agents on one machine share a project and you
+want one long-lived `dreamd watch` to be the single writer, instead of leaving
+it running in a terminal ([GUIDE.md §5](../GUIDE.md#5-daemon-mode)).
+
+## One daemon per user, not per machine
+
+The daemon binds `~/.agent/dreamd.sock` with mode `0600`, so only your user can
+connect. The first process to bind it is the writer: a second `dreamd watch`
+finds the live socket and exits instead of taking it over, while a stale socket
+file left behind by a crashed daemon is unlinked and rebound. Every request is
+then checked against the connecting peer's UID (`SO_PEERCRED` on Linux,
+`getpeereid` on macOS) and rejected with `403` if it is not the daemon owner's
+— see [../SECURITY.md](../SECURITY.md).
+
+That is why the service is a **user** unit / LaunchAgent and not a system
+daemon: it has to run as the same user as the agents that talk to it, and its
+socket and log live under that user's home. Never `sudo dreamd service install`.
+If you need the daemon under a different account, log in as that account and
+run `dreamd watch` there.
+
+## Linux (systemd `--user`)
+
+Run from inside the project you want the daemon to serve:
+
+```bash
+cd ~/your-project
+dreamd service install
+```
+
+This writes `~/.config/systemd/user/dreamd.service` (`Type=simple`,
+`ExecStart=<this binary> watch`, `WorkingDirectory=<project root>`,
+`Restart=on-failure`), then runs `systemctl --user daemon-reload` and
+`systemctl --user enable --now dreamd.service`. Re-running it overwrites the
+unit silently; `--force` is accepted and ignored on Linux.
+
+To start it later without reinstalling:
+
+```bash
+dreamd service start          # systemctl --user start dreamd.service
+```
+
+To check on it:
+
+```bash
+systemctl --user status dreamd.service
+journalctl --user -u dreamd.service
+ls -l ~/.agent/dreamd.sock    # srw------- owned by you
+tail -f ~/.agent/dreamd.log
+```
+
+Without a systemd user instance (probe: `/run/systemd/system` — most
+containers, WSL without systemd, non-systemd distros) both verbs exit 2 and
+tell you to run `dreamd watch` in the foreground instead. Nothing is written.
+
+## macOS (LaunchAgent)
+
+```bash
+cd ~/your-project
+dreamd service install
+```
+
+This writes `~/Library/LaunchAgents/dev.dreamd.dreamd.plist` — Label
+`dev.dreamd.dreamd`, `ProgramArguments` = this binary + `watch`,
+`WorkingDirectory` = the project root, `RunAtLoad`, and `KeepAlive` with
+`SuccessfulExit=false` (restart on failure, stay down after a clean exit) — and
+loads it with `launchctl bootstrap gui/$(id -u) <plist>`.
+
+If the plist already exists, `install` refuses with exit 2 and leaves the
+existing file untouched. Pass `--force` to overwrite it:
+
+```bash
+dreamd service install --force
+```
+
+`--force` **is** the confirmation — there is no interactive prompt, so the
+command behaves the same from a script, a non-tty, or `npx`. It rewrites the
+plist, runs `launchctl bootout gui/$(id -u)/dev.dreamd.dreamd` (errors ignored
+— the agent may not be loaded yet), then `bootstrap`s the new file.
+
+To (re)start the loaded agent:
+
+```bash
+dreamd service start          # launchctl kickstart -k gui/$(id -u)/dev.dreamd.dreamd
+```
+
+To inspect it:
+
+```bash
+launchctl print gui/$(id -u)/dev.dreamd.dreamd
+tail -f ~/.agent/dreamd.log
+ls -l ~/.agent/dreamd.sock
+```
+
+Logs are in `~/.agent/dreamd.log`, written by `dreamd watch` itself through its
+tracing file layer, not by launchd. The plist deliberately sets no
+`StandardOutPath` / `StandardErrorPath` (that would be a second writer on a
+file the daemon truncates at start) and no `EnvironmentVariables`.
+
+The `gui/<uid>` domain requires a GUI login session. Over headless SSH — no
+desktop session for your user — `bootstrap` and `kickstart` fail; run
+`dreamd watch` in the foreground there instead.
+
+## Which project the service serves
+
+The unit's `WorkingDirectory` (the plist's `WorkingDirectory`) is the project
+root discovered from your current directory at install time: the nearest
+ancestor of that directory that contains a `.agent/` directory — that is, a
+project where `dreamd init` has already been run. Without one, `install` exits
+2 with:
+
+```text
+no .agent/ directory found. Run `dreamd init` first.
+```
+
+`dreamd watch` needs the project root too: with none it exits 2, and under a
+supervisor that becomes a restart loop. Always run `install` from inside the
+project.
+
+There is one service per user, so it points at one project at a time. To move
+it, `cd` into the other project and reinstall — silently on Linux, with
+`--force` on macOS. The daemon still answers requests for other project roots
+(every request names its root in `X-Agent-Root`, see
+[http-api.md](./http-api.md)); the working directory decides which project the
+daemon boots in and pins at start.
+
+## Via npx
+
+```bash
+npx -y dreamd-mcp service install
+npx -y dreamd-mcp service start
+```
+
+The shim forwards `service` to the native binary. The `ExecStart` /
+`ProgramArguments` path written into the unit is that binary's own resolved
+path (`current_exe`, canonicalized) — under `npx` that is the cached native
+`dreamd` the shim downloaded, not `npx` or `node`. If you clear the npm cache
+or upgrade the package, reinstall the service so the unit points at the new
+binary (`--force` on macOS).
+
+## Fallback: foreground `dreamd watch`
+
+The service is a convenience around the same foreground process:
+
+```bash
+cd ~/your-project
+dreamd watch                  # or: npx -y dreamd-mcp watch
+```
+
+Use this when there is no systemd user instance, on a headless macOS session,
+on Windows (native Windows is out of scope — see [windows.md](./windows.md)), or
+whenever you would rather see the daemon in a terminal. It binds the same
+socket, writes the same log, and is exactly what the service supervises.
+
+## Removing the service
+
+Status / restart / uninstall verbs are not shipped yet. To remove the service
+today:
+
+```bash
+# Linux
+systemctl --user disable --now dreamd.service
+rm ~/.config/systemd/user/dreamd.service
+systemctl --user daemon-reload
+
+# macOS
+launchctl bootout gui/$(id -u)/dev.dreamd.dreamd
+rm ~/Library/LaunchAgents/dev.dreamd.dreamd.plist
+```
+
+The daemon's data — the project's `.agent/` store and `~/.agent/dreamd.log` —
+is untouched.
+
+## See also
+
+- [../GUIDE.md §5](../GUIDE.md#5-daemon-mode) — running `dreamd watch` by hand
+- [troubleshooting.md — Socket permission denied](./troubleshooting.md#socket-permission-denied)
+- [../SECURITY.md](../SECURITY.md) — threat model and socket auth
+- [../ARCHITECTURE.md §8.1](../ARCHITECTURE.md#81-vestigial--deferred-machinery-v01) — why the service supervises a foreground process and `detach_double_fork` stays unused

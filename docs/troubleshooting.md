@@ -122,7 +122,7 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 - Don't use `sudo dreamd watch` unless MCP also runs as root (don't)
 - Check `ls -l ~/.agent/dreamd.sock` — should be your user, mode `srw-------`
 
-**Prevention:** Run `dreamd watch` from your normal login session, not a system service account (until v0.1.1 service docs land).
+**Prevention:** Run `dreamd watch` from your normal login session, not a system service account. `dreamd service install` keeps that property: it registers a per-user systemd unit / LaunchAgent that runs `watch` as you, never a system service account — see [install.md](./install.md).
 
 ---
 

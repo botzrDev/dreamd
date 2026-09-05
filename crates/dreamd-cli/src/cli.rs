@@ -114,7 +114,7 @@ pub enum Command {
     Score(ScoreArgs),
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
-    /// Manage the Linux systemd --user unit that runs `dreamd watch`.
+    /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent).
     // Nested so status/restart/uninstall can land later without reshuffling
     // top-level parsing (same shape as `reset`).
     Service(ServiceArgs),
@@ -251,9 +251,14 @@ pub struct ServiceArgs {
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
-    /// Write a systemd --user unit for `dreamd watch` and enable it now (Linux only).
-    Install,
-    /// Run `systemctl --user start dreamd.service` (Linux only).
+    /// Write a user-scope service for `dreamd watch` and enable it now
+    /// (Linux systemd --user / macOS LaunchAgent).
+    Install {
+        /// Overwrite an existing LaunchAgent plist (macOS). No effect on Linux.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Start the user-scope service (systemctl --user start / launchctl kickstart).
     Start,
 }
 
@@ -1043,39 +1048,49 @@ fn run_watch() -> ExitCode {
     commands::watch::run(&cwd)
 }
 
-/// `dreamd service install` (AILAB-190). Writes the systemd --user unit for
-/// this binary's `watch` against the project discovered from cwd, then
-/// `daemon-reload` + `enable --now`. Console-only one-shot: it only writes a
-/// unit file and execs `systemctl`, never opens a Tantivy index, and uses
-/// unlocked `println!`/`eprintln!` so no stdio lock is hoisted.
-fn run_service_install() -> ExitCode {
+/// `dreamd service install` (AILAB-190 / AILAB-169). Writes the per-user
+/// service for this binary's `watch` against the project discovered from cwd:
+/// a systemd --user unit on Linux (then `daemon-reload` + `enable --now`) or a
+/// LaunchAgent plist on macOS (then `launchctl bootstrap gui/<uid>`; `--force`
+/// overwrites an existing plist and is ignored on Linux). Console-only
+/// one-shot: it only writes a service file and execs `systemctl` /
+/// `launchctl`, never opens a Tantivy index, and uses unlocked
+/// `println!`/`eprintln!` so no stdio lock is hoisted.
+fn run_service_install(force: bool) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
     };
     let Some(home) = home_dir() else {
-        eprintln!("dreamd: error — HOME is not set; cannot locate ~/.config/systemd/user");
+        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
         return ExitCode::from(1);
     };
-    service_exit(commands::service::run_install(&cwd, &home))
+    service_exit(commands::service::run_install(&cwd, &home, force))
 }
 
-/// `dreamd service start` (AILAB-190): `systemctl --user start dreamd.service`.
-/// Same console-only, index-free contract as `run_service_install`.
+/// `dreamd service start` (AILAB-190 / AILAB-169): `systemctl --user start
+/// dreamd.service` on Linux, `launchctl kickstart -k` on macOS. Same
+/// console-only, index-free contract as `run_service_install`.
 fn run_service_start() -> ExitCode {
     service_exit(commands::service::run_start())
 }
 
-/// Map a `service` verb result onto the exit-code contract. The two usage
-/// refusals — no systemd --user on this host, no project root under cwd —
-/// exit 2 exactly like `dreamd watch` without a project root; every other
-/// failure (unit write, `systemctl` spawn or non-zero exit) is a runtime
-/// error and exits 1. The refusal copy lives in `ServiceError`'s `Display`.
+/// Map a `service` verb result onto the exit-code contract. The usage
+/// refusals — no supported backend on this host, no project root under cwd,
+/// an existing LaunchAgent plist without `--force` — exit 2 exactly like
+/// `dreamd watch` without a project root; every other failure (service file
+/// write, `systemctl` / `launchctl` / `id -u` spawn or non-zero exit) is a
+/// runtime error and exits 1. The refusal copy lives in `ServiceError`'s
+/// `Display`.
 fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode {
     use commands::service::ServiceError;
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e @ (ServiceError::NoSystemd | ServiceError::NoProjectRoot)) => {
+        Err(
+            e @ (ServiceError::NoSystemd
+            | ServiceError::NoProjectRoot
+            | ServiceError::PlistExists(_)),
+        ) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(2)
         }
@@ -1161,7 +1176,7 @@ pub fn run() -> ExitCode {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
         Command::Service(args) => match args.command {
-            ServiceCommand::Install => run_service_install(),
+            ServiceCommand::Install { force } => run_service_install(force),
             ServiceCommand::Start => run_service_start(),
         },
         Command::Setup(args) => {
@@ -1389,7 +1404,14 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Service(ServiceArgs {
-                command: ServiceCommand::Install
+                command: ServiceCommand::Install { force: false }
+            }))
+        ));
+        let cli = Cli::try_parse_from(["dreamd", "service", "install", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                command: ServiceCommand::Install { force: true }
             }))
         ));
         let cli = Cli::try_parse_from(["dreamd", "service", "start"]).unwrap();
@@ -1420,9 +1442,24 @@ mod tests {
             "no project root is a usage refusal, like watch without a project"
         );
         assert_eq!(
-            service_exit(Err(ServiceError::Spawn(std::io::Error::other("x")))),
+            service_exit(Err(ServiceError::PlistExists(PathBuf::from(
+                "/h/Library/LaunchAgents/dev.dreamd.dreamd.plist"
+            )))),
+            ExitCode::from(2),
+            "an existing plist without --force is a usage refusal"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::Spawn {
+                program: "systemctl",
+                source: std::io::Error::other("x"),
+            })),
             ExitCode::from(1),
             "a systemctl spawn failure is a runtime error"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::Uid("garbage".into()))),
+            ExitCode::from(1),
+            "an unreadable uid is a runtime error"
         );
         assert_eq!(
             service_exit(Err(ServiceError::CurrentExe(std::io::Error::other("x")))),
@@ -1559,6 +1596,7 @@ mod tests {
             vec!["dreamd", "doctor"],
             vec!["dreamd", "version"],
             vec!["dreamd", "service", "install"],
+            vec!["dreamd", "service", "install", "--force"],
             vec!["dreamd", "service", "start"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();

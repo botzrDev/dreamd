@@ -73,7 +73,9 @@ before:
   `unsafe_code` from `forbid` (workspace) to `deny`. The sole authorised
   callsite is `server::lifecycle::detach_double_fork`, which calls
   `nix::unistd::fork` (an `unsafe fn`). **Zero production call sites in
-  v0.1** — the helper is reserved for v0.1.1 `dreamd service` install
+  any shipped path** — `dreamd service install` (systemd `--user` unit,
+  AILAB-190; macOS LaunchAgent, AILAB-169) supervises the foreground
+  `dreamd watch` it registers rather than calling this helper
   (see `ARCHITECTURE.md` §8.1). All other modules in the crate still
   surface unsafe usage at compile time.
 
@@ -490,8 +492,10 @@ the child a session leader; the second fork ensures the final process is
 not a session leader and therefore can never acquire a controlling
 terminal. The session-leader process exits, leaving the kernel to reap the
 final detached child via the grandparent (init / launchd / systemd).
-**Not called in v0.1 production** — `dreamd watch` runs in the foreground;
-this helper is reserved for v0.1.1 service install (ARCHITECTURE.md §8.1).
+**Not called in production** — `dreamd watch` runs in the foreground, and
+`dreamd service install` (systemd `--user` unit, AILAB-190; macOS LaunchAgent,
+AILAB-169) supervises that foreground `watch` rather than calling this helper
+(ARCHITECTURE.md §8.1).
 Windows daemonisation is DR-121 / WEG-135, deferred to v0.1.1.
 
 ## API backpressure

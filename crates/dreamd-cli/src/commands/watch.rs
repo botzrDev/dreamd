@@ -4,8 +4,9 @@
 //! command boots a per-project Supervisor against `cwd`'s AgentRoot, binds
 //! `~/.agent/dreamd.sock`, serves the API router, and blocks until SIGINT.
 //!
-//! `dreamd watch` is the foreground form of the daemon — multi-project
-//! support and OS-level service registration are v0.1.1 work.
+//! `dreamd watch` is the foreground form of the daemon. OS-level service
+//! registration is `dreamd service install`, which supervises this same
+//! foreground process (systemd `--user` on Linux, a LaunchAgent on macOS).
 
 use std::path::Path;
 use std::process::ExitCode;
