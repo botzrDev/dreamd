@@ -114,6 +114,10 @@ pub enum Command {
     Score(ScoreArgs),
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
+    /// Manage the Linux systemd --user unit that runs `dreamd watch`.
+    // Nested so status/restart/uninstall can land later without reshuffling
+    // top-level parsing (same shape as `reset`).
+    Service(ServiceArgs),
     /// Front door: scaffold .agent/ (via init) and print the harness wiring next steps.
     Setup(SetupArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
@@ -234,6 +238,23 @@ pub enum ResetCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// Args for `dreamd service`. Wraps the nested verb so later verbs
+/// (status / restart / uninstall — separate tickets) slot in without
+/// reshuffling top-level command parsing. Same shape as [`ResetArgs`].
+#[derive(Args)]
+pub struct ServiceArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ServiceCommand {
+    /// Write a systemd --user unit for `dreamd watch` and enable it now (Linux only).
+    Install,
+    /// Run `systemctl --user start dreamd.service` (Linux only).
+    Start,
 }
 
 /// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
@@ -1022,6 +1043,49 @@ fn run_watch() -> ExitCode {
     commands::watch::run(&cwd)
 }
 
+/// `dreamd service install` (AILAB-190). Writes the systemd --user unit for
+/// this binary's `watch` against the project discovered from cwd, then
+/// `daemon-reload` + `enable --now`. Console-only one-shot: it only writes a
+/// unit file and execs `systemctl`, never opens a Tantivy index, and uses
+/// unlocked `println!`/`eprintln!` so no stdio lock is hoisted.
+fn run_service_install() -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let Some(home) = home_dir() else {
+        eprintln!("dreamd: error — HOME is not set; cannot locate ~/.config/systemd/user");
+        return ExitCode::from(1);
+    };
+    service_exit(commands::service::run_install(&cwd, &home))
+}
+
+/// `dreamd service start` (AILAB-190): `systemctl --user start dreamd.service`.
+/// Same console-only, index-free contract as `run_service_install`.
+fn run_service_start() -> ExitCode {
+    service_exit(commands::service::run_start())
+}
+
+/// Map a `service` verb result onto the exit-code contract. The two usage
+/// refusals — no systemd --user on this host, no project root under cwd —
+/// exit 2 exactly like `dreamd watch` without a project root; every other
+/// failure (unit write, `systemctl` spawn or non-zero exit) is a runtime
+/// error and exits 1. The refusal copy lives in `ServiceError`'s `Display`.
+fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode {
+    use commands::service::ServiceError;
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e @ (ServiceError::NoSystemd | ServiceError::NoProjectRoot)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_version() -> ExitCode {
     // lock-ok (AILAB-583): version never opens a Tantivy index — it prints
     // compile-time build metadata only.
@@ -1095,6 +1159,10 @@ pub fn run() -> ExitCode {
         Command::Score(args) => run_score(args),
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
+        },
+        Command::Service(args) => match args.command {
+            ServiceCommand::Install => run_service_install(),
+            ServiceCommand::Start => run_service_start(),
         },
         Command::Setup(args) => {
             run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
@@ -1316,6 +1384,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_service_install_and_start() {
+        let cli = Cli::try_parse_from(["dreamd", "service", "install"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                command: ServiceCommand::Install
+            }))
+        ));
+        let cli = Cli::try_parse_from(["dreamd", "service", "start"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                command: ServiceCommand::Start
+            }))
+        ));
+        assert!(
+            Cli::try_parse_from(["dreamd", "service"]).is_err(),
+            "bare `service` needs a verb"
+        );
+    }
+
+    #[test]
+    fn service_exit_maps_usage_refusals_to_2_and_runtime_failures_to_1() {
+        use commands::service::ServiceError;
+        assert_eq!(service_exit(Ok(())), ExitCode::SUCCESS);
+        assert_eq!(
+            service_exit(Err(ServiceError::NoSystemd)),
+            ExitCode::from(2),
+            "no systemd --user is a usage refusal, like watch without a project"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::NoProjectRoot)),
+            ExitCode::from(2),
+            "no project root is a usage refusal, like watch without a project"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::Spawn(std::io::Error::other("x")))),
+            ExitCode::from(1),
+            "a systemctl spawn failure is a runtime error"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::CurrentExe(std::io::Error::other("x")))),
+            ExitCode::from(1),
+            "an unresolvable binary path is a runtime error"
+        );
+    }
+
+    #[test]
     fn parses_archive_force_unpin_with_id() {
         let cli = Cli::try_parse_from(["dreamd", "archive", "--force-unpin", "evt_123"]).unwrap();
         match cli.command {
@@ -1442,6 +1558,8 @@ mod tests {
             vec!["dreamd", "init"],
             vec!["dreamd", "doctor"],
             vec!["dreamd", "version"],
+            vec!["dreamd", "service", "install"],
+            vec!["dreamd", "service", "start"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();
             assert!(
@@ -1728,6 +1846,7 @@ mod tests {
             "uninstall",
             "update",
             "setup",
+            "service",
         ] {
             assert!(
                 page.contains(sub),

@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"service\", \"install\")"
+---
+Write a systemd --user unit for `dreamd watch` and enable it now (Linux only)
+
+Usage: install
+
+Options:
+  -h, --help
+          Print help

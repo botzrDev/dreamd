@@ -550,3 +550,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** Linear AILAB-176 title said “< 30 MB on macOS” and the preamble equated `phys_footprint` with `ps -o rss=`. Those are different Mach metrics; a 30 MB fail on `macos-latest` would be an invented gate. Founder lock at queue time: informational job, `ps -o rss=` only, threshold later.
 - **How to apply:** Darwin branch in `scripts/idle-rss.sh` (reuse spawn/socket/cleanup; never `/proc`, never `LIMIT_MB` compare). New job `idle-rss-report-macos` copies `size-report-macos`. `PERF.md` macOS measured cell is pending first CI run — do not guess a number. Do not sample `task_info` / `memory_pressure` to “be more accurate.”
 - **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
+
+### systemd-user-unit-is-foreground-watch
+
+- **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). Do not call `detach_double_fork`. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
+- **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
+- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent / status / restart / uninstall are later tickets. Tests must not require a live `systemctl --user`.
+- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`

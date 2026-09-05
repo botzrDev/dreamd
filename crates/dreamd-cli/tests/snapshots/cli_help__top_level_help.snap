@@ -17,6 +17,7 @@ Commands:
   recall     Search stored memories by query, ranked by relevance and importance (markdown table)
   score      List the top-N stored memories by importance, without a search query
   reset      Reset scratch state. Today only `workspace` is supported
+  service    Manage the Linux systemd --user unit that runs `dreamd watch`
   setup      Front door: scaffold .agent/ (via init) and print the harness wiring next steps
   status     Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall  Stop local dreamd servers, unregister this project, and clear caches

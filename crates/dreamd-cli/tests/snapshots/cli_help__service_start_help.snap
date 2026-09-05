@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"service\", \"start\")"
+---
+Run `systemctl --user start dreamd.service` (Linux only)
+
+Usage: start
+
+Options:
+  -h, --help
+          Print help

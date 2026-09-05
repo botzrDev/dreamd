@@ -6,8 +6,11 @@
 //!    pattern. The first fork escapes the parent's process group; `setsid`
 //!    makes the child a session leader; the second fork ensures the final
 //!    process is not a session leader and therefore can never acquire a
-//!    controlling terminal. Zero production call sites in v0.1 — reserved for
-//!    v0.1.1 `dreamd service` install (WEG-99–104). See ARCHITECTURE.md §8.1.
+//!    controlling terminal. Still zero production call sites, and deliberately
+//!    NOT the `dreamd service install` call site: the systemd user unit
+//!    (AILAB-190) supervises foreground `dreamd watch` under `Type=simple`,
+//!    so this helper is not used there. Kept only for a possible future
+//!    non-systemd background path. See ARCHITECTURE.md §8.1.
 //!
 //! 2. [`Supervisor`] — owns the [`MemoryCoordinator`] task handle plus all
 //!    senders into the actor channel. Shutdown-drain contract (decision

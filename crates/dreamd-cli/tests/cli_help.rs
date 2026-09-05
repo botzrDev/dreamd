@@ -2,8 +2,9 @@
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
 //! top-level `--help`, each subcommand `--help` (archive, init, dream, mcp, migrate,
-//! doctor, recall, score, watch, reset, status, uninstall, update, version), nested
-//! `reset workspace --help`, plus the WEG-18 version output contract
+//! doctor, recall, score, watch, reset, service, setup, status, uninstall, update,
+//! version), nested `reset workspace --help` and `service install|start --help`,
+//! plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`).
 //!
 //! Help snapshots are deterministic clap output and use no filters. Version
@@ -128,6 +129,27 @@ fn snapshot_reset_workspace_help() {
     assert_snapshot!(
         "reset_workspace_help",
         nested_subcommand_help("reset", "workspace")
+    );
+}
+
+#[test]
+fn snapshot_service_help() {
+    assert_snapshot!("service_help", subcommand_help("service"));
+}
+
+#[test]
+fn snapshot_service_install_help() {
+    assert_snapshot!(
+        "service_install_help",
+        nested_subcommand_help("service", "install")
+    );
+}
+
+#[test]
+fn snapshot_service_start_help() {
+    assert_snapshot!(
+        "service_start_help",
+        nested_subcommand_help("service", "start")
     );
 }
 

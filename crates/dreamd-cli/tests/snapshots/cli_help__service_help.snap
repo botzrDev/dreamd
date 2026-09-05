@@ -1,0 +1,16 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"service\")"
+---
+Manage the Linux systemd --user unit that runs `dreamd watch`
+
+Usage: service <COMMAND>
+
+Commands:
+  install  Write a systemd --user unit for `dreamd watch` and enable it now (Linux only)
+  start    Run `systemctl --user start dreamd.service` (Linux only)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
