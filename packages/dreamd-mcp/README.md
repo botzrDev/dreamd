@@ -149,6 +149,11 @@ binary — rebuild it instead.
 
 ### Manual fallback
 
+The same cleanup by hand, if you prefer explicit steps. Follow the same order as
+the command above: perform the dreamd cleanup first, then remove the MCP client
+configuration entry and reload the client. If the client respawns dreamd while
+you work through these steps, finish removing the configuration entry before
+reloading it.
 **Use `npx -y dreamd-mcp uninstall` instead of the recipe below** — it does all
 four steps in one command. (`dreamd update` covers steps 1 and 3 only: it never
 unregisters the project and never touches `~/.npm/_npx`.)
@@ -191,6 +196,10 @@ done
 # Windows / WSL with Windows Node — same pattern under:
 #   "$LOCALAPPDATA/npm-cache/_npx"
 ```
+
+After cleanup, remove the `dreamd` entry from the MCP client configuration and
+reload the client. Until that entry is gone, a later client session can respawn
+`dreamd mcp`.
 
 > **Warning:** `rm -rf ~/.npm/_npx` deletes **every** npx-cached package on your
 > machine, not just dreamd. Use the scoped loop — or `dreamd uninstall`, which
