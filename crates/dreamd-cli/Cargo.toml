@@ -34,6 +34,11 @@ clap = { version = "4", features = ["derive"] }
 # the binary transitively via dreamd-core, so this direct edge adds no weight.
 tantivy = "0.26"
 clap_mangen = "0.2"
+# AILAB-203 — `dreamd service install` mints ~/.agent/auth.json (32 random
+# bytes). Pinned to 0.2 (already resolved as 0.2.17 in Cargo.lock); 0.3/0.4
+# would add a second copy. A plain dependency, not [target.'cfg(windows)'],
+# so Linux CI compiles and tests the mint path.
+getrandom = "0.2"
 const_format = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

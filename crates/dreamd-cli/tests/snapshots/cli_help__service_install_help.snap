@@ -8,7 +8,7 @@ Usage: install [OPTIONS]
 
 Options:
       --force
-          Overwrite an existing LaunchAgent plist (macOS). No effect on Linux
+          Overwrite an existing LaunchAgent plist (macOS) or scheduled-task XML (Windows). No effect on Linux
 
   -h, --help
           Print help

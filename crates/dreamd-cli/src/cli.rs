@@ -6,6 +6,7 @@
 //!   - `1` -- runtime / I/O error
 //!   - `2` -- usage error (missing subcommand, no project root)
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -257,7 +258,7 @@ pub enum ServiceCommand {
     /// Write a user-scope service for `dreamd watch` and enable it now
     /// (Linux systemd --user / macOS LaunchAgent).
     Install {
-        /// Overwrite an existing LaunchAgent plist (macOS). No effect on Linux.
+        /// Overwrite an existing LaunchAgent plist (macOS) or scheduled-task XML (Windows). No effect on Linux.
         #[arg(long)]
         force: bool,
     },
@@ -424,8 +425,37 @@ fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
     })
 }
 
-/// This invocation's `$HOME`, or `None` — **the single place this binary reads
-/// `HOME`**, so the empty-value rule below is stated once.
+/// This invocation's home directory, or `None` — **the single place this
+/// binary reads `HOME`** (and, on Windows, `USERPROFILE`), so the rules in
+/// [`resolve_home_from_vars`] are stated once. The environment reads live
+/// here and the decision lives there, which is what makes the decision
+/// testable at all.
+fn home_dir() -> Option<PathBuf> {
+    resolve_home_from_vars(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    )
+}
+
+/// `$HOME`, falling back on Windows **only** to `%USERPROFILE%` when `$HOME`
+/// is unset or empty. Native `cmd.exe` and PowerShell set `USERPROFILE` and
+/// no `HOME` at all, so without this `dreamd service install` (AILAB-203)
+/// would never find `~/.agent` on the one OS whose service path depends on
+/// it; Git-Bash and WSL do set `HOME`, and it keeps winning there. Unix
+/// behaviour is byte-for-byte what it has always been: `USERPROFILE` is never
+/// consulted.
+///
+/// Named for the two *variables* it arbitrates, because the plain
+/// `resolve_home` in this module is already taken by the AILAB-584
+/// attribution scope — a wrapper over [`home_dir`], i.e. a consumer of this
+/// function rather than a sibling of it.
+///
+/// Split out of [`home_dir`] and driven by a `windows` **argument** rather
+/// than a `#[cfg(windows)]` branch on purpose. A cfg-gated fallback would
+/// never be compiled, let alone executed, by the Linux checks that gate every
+/// merge — a Windows-only path nobody can run is how a Windows-only bug
+/// ships. As a parameter, both answers are ordinary unit tests on any host.
 ///
 /// `HOME` set but *empty* is a real, ordinary environment: `env -i`, a
 /// systemd unit with `Environment=HOME=`, a Docker `ENV HOME=`, several CI
@@ -442,14 +472,42 @@ fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
 /// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
 /// clear `./.npm/_npx`, and it *deletes* what it finds there.
 ///
-/// Empty is therefore treated exactly like unset everywhere. Callers already
-/// have a defined "no home directory" behaviour (skip with a note, or in
+/// Empty is therefore treated exactly like unset everywhere, and — since a
+/// blank `%USERPROFILE%` derails a path in precisely the same way — that rule
+/// applies to both variables here, not just to `HOME`. Callers already have a
+/// defined "no home directory" behaviour (skip with a note, or in
 /// `lifecycle_cleanup` refuse to attribute anything), which is the correct
 /// answer for a process that genuinely has no home.
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+fn resolve_home_from_vars(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    fn non_empty(value: Option<OsString>) -> Option<PathBuf> {
+        value.filter(|v| !v.is_empty()).map(PathBuf::from)
+    }
+    non_empty(home).or_else(|| {
+        if windows {
+            non_empty(userprofile)
+        } else {
+            None
+        }
+    })
+}
+
+/// The `dreamd service` refusal copy for a host with no usable home
+/// directory. Windows names both variables because
+/// [`resolve_home_from_vars`] consults both there; Unix keeps the wording it
+/// has always had, since `USERPROFILE` is never read on that side and naming
+/// it would only send the reader after a variable that could not have helped.
+/// Only the three `service` verbs use this: every other `home_dir` caller has
+/// its own "skip with a note" behaviour and its own wording.
+fn no_home_message() -> &'static str {
+    if cfg!(windows) {
+        "neither HOME nor USERPROFILE is set; cannot locate the per-user service path"
+    } else {
+        "HOME is not set; cannot locate the per-user service path"
+    }
 }
 
 /// Which subcommands own the shared daemon log at `~/.agent/dreamd.log`.
@@ -1107,7 +1165,7 @@ fn run_service_install(force: bool) -> ExitCode {
         Err(code) => return code,
     };
     let Some(home) = home_dir() else {
-        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
+        eprintln!("dreamd: error — {}", no_home_message());
         return ExitCode::from(1);
     };
     service_exit(commands::service::run_install(&cwd, &home, force))
@@ -1140,7 +1198,7 @@ fn run_service_restart() -> ExitCode {
 /// index-free, unlocked `print!` — same contract as `run_service_install`.
 fn run_service_status() -> ExitCode {
     let Some(home) = home_dir() else {
-        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
+        eprintln!("dreamd: error — {}", no_home_message());
         return ExitCode::from(1);
     };
     let log_tail = commands::status::read_log_tail_n(
@@ -1165,7 +1223,7 @@ fn run_service_status() -> ExitCode {
 /// `run_service_install`: unlocked `println!`, no hoisted stdio lock.
 fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
     let Some(home) = home_dir() else {
-        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
+        eprintln!("dreamd: error — {}", no_home_message());
         return ExitCode::from(1);
     };
     let daemon_home = home.join(".agent");
@@ -1179,12 +1237,13 @@ fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
 
 /// Map a `service` verb result onto the exit-code contract. The usage
 /// refusals — no supported backend on this host, no project root under cwd,
-/// an existing LaunchAgent plist without `--force`, and the two `service
-/// uninstall --purge` confirmation refusals (non-tty stdin without `--yes`,
-/// and a declined prompt) — exit 2 exactly like `dreamd watch` without a
-/// project root; every other failure (service file write, `systemctl` /
-/// `launchctl` / `id -u` spawn or non-zero exit) is a runtime error and exits
-/// 1. The refusal copy lives in `ServiceError`'s `Display`.
+/// an existing LaunchAgent plist or scheduled-task XML without `--force`, and
+/// the two `service uninstall --purge` confirmation refusals (non-tty stdin
+/// without `--yes`, and a declined prompt) — exit 2 exactly like `dreamd
+/// watch` without a project root; every other failure (service file write,
+/// `systemctl` / `launchctl` / `schtasks` / `icacls` / `id -u` /
+/// `whoami /user` spawn or non-zero exit) is a runtime error and exits 1. The
+/// refusal copy lives in `ServiceError`'s `Display`.
 fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode {
     use commands::service::ServiceError;
     match result {
@@ -1193,6 +1252,7 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
             e @ (ServiceError::NoSystemd
             | ServiceError::NoProjectRoot
             | ServiceError::PlistExists(_)
+            | ServiceError::TaskExists(_)
             | ServiceError::NotATty
             | ServiceError::Declined),
         ) => {
@@ -1613,6 +1673,13 @@ mod tests {
             "an existing plist without --force is a usage refusal"
         );
         assert_eq!(
+            service_exit(Err(ServiceError::TaskExists(PathBuf::from(
+                "/h/AppData/Roaming/dreamd/dev.dreamd.dreamd.xml"
+            )))),
+            ExitCode::from(2),
+            "an existing scheduled-task XML without --force is a usage refusal, like the plist"
+        );
+        assert_eq!(
             service_exit(Err(ServiceError::NotATty)),
             ExitCode::from(2),
             "non-tty stdin without --yes is a usage refusal, like reset workspace"
@@ -1645,6 +1712,93 @@ mod tests {
             ExitCode::from(1),
             "an unresolvable binary path is a runtime error"
         );
+    }
+
+    /// AILAB-203 — `$HOME` wins wherever it is set, on **both** sides of the
+    /// `windows` switch: Git-Bash and WSL do export it, and a user who went to
+    /// the trouble of setting it must not be overruled by the profile
+    /// directory. The switch is an argument rather than a `#[cfg(windows)]`
+    /// branch precisely so both answers are ordinary tests on any host — a
+    /// Windows-only path nobody can run is how a Windows-only bug ships.
+    #[test]
+    fn resolve_home_prefers_home_over_userprofile_on_both_targets() {
+        for windows in [true, false] {
+            assert_eq!(
+                resolve_home_from_vars(
+                    Some(OsString::from("/home/u")),
+                    Some(OsString::from("C:\\Users\\u")),
+                    windows,
+                ),
+                Some(PathBuf::from("/home/u")),
+                "HOME must win (windows={windows})"
+            );
+        }
+    }
+
+    /// The fallback itself, and the fact that it is Windows-only. Native
+    /// `cmd.exe` and PowerShell set `USERPROFILE` and no `HOME` at all, so
+    /// without this `dreamd service install` would never find `~/.agent` on
+    /// the one OS whose service path depends on it; Unix never consults the
+    /// variable, so the identical environment answers `None` there.
+    #[test]
+    fn resolve_home_falls_back_to_userprofile_only_on_windows() {
+        assert_eq!(
+            resolve_home_from_vars(None, Some(OsString::from("C:\\Users\\u")), true),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        assert_eq!(
+            resolve_home_from_vars(None, Some(OsString::from("C:\\Users\\u")), false),
+            None,
+            "USERPROFILE is never read on Unix"
+        );
+    }
+
+    /// A variable that is set but *empty* is an ordinary environment (`env -i`,
+    /// a systemd `Environment=HOME=`, a Docker `ENV HOME=`, several CI
+    /// runners), and every path derived from it silently becomes **relative**.
+    /// Empty is therefore treated exactly like unset — for both variables,
+    /// since a blank `%USERPROFILE%` derails a path in precisely the same way.
+    #[test]
+    fn resolve_home_treats_empty_variables_as_unset() {
+        for windows in [true, false] {
+            assert_eq!(
+                resolve_home_from_vars(Some(OsString::new()), None, windows),
+                None,
+                "an empty HOME must not become a relative root (windows={windows})"
+            );
+            assert_eq!(
+                resolve_home_from_vars(
+                    Some(OsString::new()),
+                    Some(OsString::from("C:\\Users\\u")),
+                    windows,
+                ),
+                if windows {
+                    Some(PathBuf::from("C:\\Users\\u"))
+                } else {
+                    None
+                },
+                "an empty HOME must behave exactly like an unset one (windows={windows})"
+            );
+            assert_eq!(
+                resolve_home_from_vars(None, Some(OsString::new()), windows),
+                None,
+                "an empty USERPROFILE is unset too (windows={windows})"
+            );
+            assert_eq!(
+                resolve_home_from_vars(Some(OsString::new()), Some(OsString::new()), windows),
+                None,
+                "two empty variables are still no home (windows={windows})"
+            );
+        }
+    }
+
+    /// Neither variable set is the genuine "no home directory" case, which
+    /// every caller already has a defined behaviour for (skip with a note, or
+    /// refuse to attribute anything).
+    #[test]
+    fn resolve_home_without_either_variable_is_none() {
+        assert_eq!(resolve_home_from_vars(None, None, true), None);
+        assert_eq!(resolve_home_from_vars(None, None, false), None);
     }
 
     #[test]

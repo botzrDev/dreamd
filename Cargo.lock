@@ -924,6 +924,7 @@ dependencies = [
  "const_format",
  "dreamd-core",
  "dreamd-protocol",
+ "getrandom 0.2.17",
  "insta",
  "serde",
  "serde_json",

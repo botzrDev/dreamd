@@ -1,12 +1,13 @@
 # Installing dreamd as a per-user service
 
 `dreamd service install` registers `dreamd watch` with your login session's
-service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS — so
-the daemon starts at login and is restarted if it dies. `dreamd service start`
-starts it on demand; `dreamd service restart` bounces it; `dreamd service
-status` reports what the service manager thinks of it. All four verbs shell out
-to `systemctl --user` / `launchctl` as you; none needs `sudo`, and none should
-ever be run with it.
+service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS, a
+logon-triggered scheduled task on Windows — so the daemon starts at login and
+is restarted if it dies. `dreamd service start` starts it on demand; `dreamd
+service restart` bounces it; `dreamd service status` reports what the service
+manager thinks of it. All four verbs shell out to `systemctl --user` /
+`launchctl` / `schtasks` as you; none needs `sudo` or an elevated prompt, and
+none should ever be run with one.
 
 This is **optional**. If you run one agent, the in-process MCP server that
 `npx -y dreamd-mcp` starts is enough — nothing on this page is required.
@@ -136,6 +137,79 @@ The `gui/<uid>` domain requires a GUI login session. Over headless SSH — no
 desktop session for your user — `bootstrap` and `kickstart` fail; run
 `dreamd watch` in the foreground there instead.
 
+## Windows (Task Scheduler)
+
+```bash
+cd ~/your-project
+dreamd service install
+```
+
+This writes a Task Scheduler 1.2 XML to
+`%USERPROFILE%\AppData\Roaming\dreamd\dev.dreamd.dreamd.xml` — a `LogonTrigger`
+task named `dev.dreamd.dreamd`, `InteractiveToken` / `LeastPrivilege` (never
+`HighestAvailable`), whose `Actions/Exec` is this binary + `watch` with
+`WorkingDirectory` = the project root — and registers it:
+
+```text
+schtasks /Create /TN dev.dreamd.dreamd /XML %USERPROFILE%\AppData\Roaming\dreamd\dev.dreamd.dreamd.xml
+```
+
+It is a scheduled task, not a Windows Service: no `sc.exe`, no SCM, no detached
+process, no PID file. The trigger is **logon**, not boot, so the task runs in
+your own interactive session — the analogue of the LaunchAgent's `RunAtLoad`,
+not of a system daemon.
+
+`install` also mints the daemon-home token `%USERPROFILE%\.agent\auth.json`:
+32 cryptographically random bytes rendered as 64 lowercase hex characters in
+`{"token":"…"}`. Straight after writing it, `install` runs
+
+```text
+icacls %USERPROFILE%\.agent\auth.json /inheritance:r /grant:r <your SID>:F
+```
+
+so inheritance is stripped and only your SID keeps full control. The token is
+never printed and never logged — `install` prints the two paths it wrote and
+the task name it registered, nothing else.
+
+As on macOS, `--force` **is** the overwrite confirmation:
+
+```bash
+dreamd service install --force
+```
+
+Without it, an existing task XML makes `install` exit 2 naming the path and the
+flag: nothing is rewritten, `schtasks` is never spawned, and an existing
+`auth.json` is left exactly as it was. With it, the XML is rewritten, the token
+is **rotated**, and `/F` is added to the `schtasks /Create` line.
+
+The other verbs are thin wrappers over `schtasks`:
+
+```bash
+dreamd service start          # schtasks /Run /TN dev.dreamd.dreamd
+dreamd service restart        # schtasks /End … (best effort), then /Run
+dreamd service status         # schtasks /Query /TN dev.dreamd.dreamd /FO LIST /V
+dreamd service uninstall      # schtasks /Delete /TN … /F, then remove the XML
+```
+
+`install` itself deliberately does **not** `/Run` the task.
+
+Via npx:
+
+```bash
+npx -y dreamd-mcp service install
+npx -y dreamd-mcp service start
+```
+
+**`dreamd watch` still refuses to start on Windows.** It exits 2 with
+`Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see
+docs/windows.md)`, and so does `dreamd mcp`, until AILAB-192 lands TCP on
+localhost with a bearer token read from that `auth.json`. So the verbs above
+report what Task Scheduler thinks, not what the daemon did: a successful
+`start` can still leave `status` at `stopped`, because the task ran `watch` and
+`watch` exited. Registering the logon task and minting the token now is what
+makes the first useful run possible later. For a working daemon today, use
+WSL2 — see [windows.md](./windows.md).
+
 ## Restart is a bounce, not a reinstall
 
 `dreamd service restart` restarts the **supervised process** and nothing else.
@@ -145,7 +219,7 @@ what you want after upgrading a binary **in place** — `cargo install --path
 crates/dreamd-cli` over the same path, say: the path is unchanged, so a bounce
 picks up the new build. If the binary **moved** — an npx cache bump, a
 different install prefix — restart would just relaunch the old path, so rerun
-`dreamd service install` (`--force` on macOS) first.
+`dreamd service install` (`--force` on macOS and Windows) first.
 
 `dreamd update --restart` is a different verb. Every `dreamd update` stops local
 `mcp` / `watch` processes — `--restart` only says so out loud — and that includes
@@ -175,8 +249,8 @@ project.
 
 There is one service per user, so it points at one project at a time. To move
 it, `cd` into the other project and reinstall — silently on Linux, with
-`--force` on macOS. The daemon still answers requests for other project roots
-(every request names its root in `X-Agent-Root`, see
+`--force` on macOS and Windows. The daemon still answers requests for other
+project roots (every request names its root in `X-Agent-Root`, see
 [http-api.md](./http-api.md)); the working directory decides which project the
 daemon boots in and pins at start.
 
@@ -193,7 +267,7 @@ The shim forwards `service` to the native binary. The `ExecStart` /
 path (`current_exe`, canonicalized) — under `npx` that is the cached native
 `dreamd` the shim downloaded, not `npx` or `node`. If you clear the npm cache
 or upgrade the package, reinstall the service so the unit points at the new
-binary (`--force` on macOS).
+binary (`--force` on macOS and Windows).
 
 ## Fallback: foreground `dreamd watch`
 
@@ -205,9 +279,11 @@ dreamd watch                  # or: npx -y dreamd-mcp watch
 ```
 
 Use this when there is no systemd user instance, on a headless macOS session,
-on Windows (native Windows is out of scope — see [windows.md](./windows.md)), or
-whenever you would rather see the daemon in a terminal. It binds the same
-socket, writes the same log, and is exactly what the service supervises.
+or whenever you would rather see the daemon in a terminal. It binds the same
+socket, writes the same log, and is exactly what the service supervises. It is
+**not** a Windows fallback: `dreamd watch` exits 2 there until AILAB-192,
+whether you run it yourself or the scheduled task runs it for you — see
+[windows.md](./windows.md).
 
 ## Removing the service
 
@@ -218,9 +294,12 @@ dreamd service uninstall
 On Linux that is `systemctl --user disable --now dreamd.service`, removing
 `~/.config/systemd/user/dreamd.service`, then `systemctl --user daemon-reload`.
 On macOS it is `launchctl bootout gui/$(id -u)/dev.dreamd.dreamd` and removing
-`~/Library/LaunchAgents/dev.dreamd.dreamd.plist`. It is idempotent — a service
-that is already gone is not an error — and it prints what it removed and what
-it kept:
+`~/Library/LaunchAgents/dev.dreamd.dreamd.plist`. On Windows it is a best-effort
+`schtasks /Delete /TN dev.dreamd.dreamd /F` followed by removing
+`%USERPROFILE%\AppData\Roaming\dreamd\dev.dreamd.dreamd.xml`; `auth.json` is
+left in place unless you also pass `--purge`. It is idempotent — a service that
+is already gone is not an error — and it prints what it removed and what it
+kept:
 
 ```text
 removed: /home/you/.config/systemd/user/dreamd.service
@@ -262,6 +341,10 @@ systemctl --user daemon-reload
 # macOS
 launchctl bootout gui/$(id -u)/dev.dreamd.dreamd
 rm ~/Library/LaunchAgents/dev.dreamd.dreamd.plist
+
+# Windows
+schtasks /Delete /TN dev.dreamd.dreamd /F
+del %USERPROFILE%\AppData\Roaming\dreamd\dev.dreamd.dreamd.xml
 ```
 
 ## See also

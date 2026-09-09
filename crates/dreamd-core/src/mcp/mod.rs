@@ -67,7 +67,7 @@ pub enum McpRunError {
     #[error("DREAMD_SOCK is not an absolute path: {0}")]
     InvalidSockPath(PathBuf),
     /// Non-Unix host (AILAB-174). The daemon, the UDS bridge and
-    /// [`crate::io::write_atomic`] are all Unix-only until DR-121 / AILAB-203,
+    /// [`crate::io::write_atomic`] are all Unix-only until AILAB-192,
     /// so `dreamd mcp` refuses rather than serving a store it cannot durably
     /// write. Declared unconditionally so this copy is testable on Linux.
     #[error(
@@ -732,7 +732,7 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
 ///
 /// Returns [`McpRunError::Unsupported`] unconditionally. There is deliberately
 /// no in-process fallback here: the daemon, the UDS bridge and
-/// [`crate::io::write_atomic`] are all Unix-only until DR-121 / AILAB-203, so
+/// [`crate::io::write_atomic`] are all Unix-only until AILAB-192, so
 /// booting a `MemoryCoordinator` on Windows would accept `append_node` calls it
 /// could never durably persist. `dreamd mcp` maps this to exit 2.
 #[cfg(not(unix))]

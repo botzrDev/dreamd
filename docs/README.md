@@ -24,8 +24,8 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [troubleshooting.md](./troubleshooting.md) | Users | FAQ — symptom → cause → fix |
 | [operator-handbook.md](./operator-handbook.md) | Operators | Manual store-maintenance runbook (e.g. `archive --force-unpin`) |
 | [migrate.md](./migrate.md) | Operators | `dreamd migrate` — episodic schema migration (v0.1 no-op stub), `--from`/`--to` tokens, `.bak` behavior |
-| [install.md](./install.md) | Operators | Optional per-user daemon service — `dreamd service install` / `start` / `restart` / `uninstall` on Linux (systemd `--user` unit) and macOS (LaunchAgent) |
-| [windows.md](./windows.md) | Operators | v0.1.1 deferral — why native Windows is out of scope in v0.1 |
+| [install.md](./install.md) | Operators | Optional per-user daemon service — `dreamd service install` / `start` / `restart` / `status` / `uninstall` on Linux (systemd `--user` unit), macOS (LaunchAgent) and Windows (Task Scheduler logon task) |
+| [windows.md](./windows.md) | Operators | Native Windows status — what `service install` registers (logon task + `auth.json`), and why `watch` / `mcp` still refuse and `write_atomic` is still unsupported |
 | [glossary.md](./glossary.md) | Everyone | Domain term definitions |
 
 ## Marketing & narrative

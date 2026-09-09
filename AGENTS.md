@@ -588,7 +588,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### windows-compile-is-not-the-port
 
-- **Rule:** AILAB-174 makes the crate compile on `windows-latest`. It does not ungate `pub mod server` / `client` / `daemon_client`, does not implement `write_atomic` on Windows, and does not drop `continue-on-error` on the Windows test job. DR-121 / AILAB-203 is the daemon port.
+- **Rule:** AILAB-174 makes the crate compile on `windows-latest`. It does not ungate `pub mod server` / `client` / `daemon_client`, does not implement `write_atomic` on Windows, and does not drop `continue-on-error` on the Windows test job. AILAB-203 is the Windows schtasks logon task plus the `auth.json` token, not the port; **AILAB-192** (TCP + localhost + bearer) is the daemon/API port.
 - **Why:** Linear AILAB-174 AC offered Option A (compile) or Option B (intentional red). Option B already shipped (`continue-on-error` on `windows-latest`). The remaining holes are ungated `crate::server` / `daemon_client` imports in `mcp/mod.rs` plus CLI `watch` / `archive` / `cli.rs` `client::resolve_daemon_socket` sites — not “mcp only,” and not a reason to compile `Supervisor` on Windows. A half-written `#[cfg(not(unix))] Supervisor::start` branch never typechecks.
 - **How to apply:** `#[cfg(unix)]` those imports. Split `run_mcp_server`; Windows returns `McpRunError::Unsupported` (exit 2). Copy `run_doctor`'s socket idiom (`cli.rs` unix `resolve_daemon_socket` / not-unix `None`). If a test fails on Windows because it calls a unix-only API, `#[cfg(unix)]` the test. That advice is right for `tests/*.rs` (rustc synthesizes `main`) and **wrong** for `tests/bin/*.rs`: `cargo test --workspace` still builds every `[[bin]]`, and a crate-level `#![cfg(unix)]` strips `fn main` (`E0601`). Gate items individually and give `main` a `not(unix)` twin. Do not add `windows-sys`.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
@@ -613,3 +613,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-190 shipped `service` on the binary and left the shim set unchanged, so `npx -y dreamd-mcp service install` silently starts MCP. The file comment already says keep in sync with `Command`.
 - **How to apply:** Add the token + a `packages/dreamd-mcp/test/route.test.js` case. Docs that show the npx form are a lie until the set includes it.
 - **Cross-refs:** `cargo-run-dreamd-needs-bin`, `launchd-supervises-foreground-watch`
+
+### windows-service-is-schtasks-foreground-watch
+
+- **Rule:** Windows `dreamd service install` writes a logon-triggered scheduled task whose action is foreground `dreamd watch` (`WorkingDirectory` = install-time `AgentRoot`) and mints `~/.agent/auth.json` (256-bit token, owner-only ACL via `icacls`). It does not `CreateProcess` detach, does not call `detach_double_fork`, does not write a PID file, and does not ungate `pub mod server`. Token rotation on `--force` / reinstall; start-time rotation is AILAB-192. `watch` still exits 2 until 192.
+- **Why:** Linear AILAB-203 AC named `DETACHED_PROCESS`, heartbeat/refcount (AILAB-210’s model), PID stale-lock, CI-gating, 15 MB / 30 MB Windows gates. Live Unix is systemd/launchd supervising foreground `watch`. `write_atomic` is still `Unsupported` on Windows, so the daemon cannot run.
+- **How to apply:** `ServiceBackend::Schtasks`; XML + `schtasks /Create /XML`; inject `schtasks` / `icacls` / SID like `launchctl` / `id -u`. Tests on Linux via `run_schtasks_*_with`. Do not add `windows-sys`. Do not `/Run` at install. Do not implement TCP/bearer here (AILAB-192).
+- **Cross-refs:** `windows-compile-is-not-the-port`, `launchd-supervises-foreground-watch`, `systemd-user-unit-is-foreground-watch`, `ailab-210-ac-is-pre-watch-architecture`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
