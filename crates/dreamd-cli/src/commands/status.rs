@@ -16,22 +16,30 @@ use dreamd_core::{registry, wal};
 /// Number of trailing log lines echoed by the report.
 pub(crate) const LOG_TAIL_LINES: usize = 5;
 
-/// Read the last [`LOG_TAIL_LINES`] lines of the daemon log for the report.
+/// Read the last `n` lines of the daemon log.
 ///
-/// Returns an empty vec when the file is absent or unreadable (`status` then
+/// Returns an empty vec when the file is absent or unreadable (the caller then
 /// prints "recent log: (none)"). There is no ordering constraint against the
-/// tracing subscriber any more (AILAB-184): only `dreamd watch` passes a log
-/// path to `init_tracing`, so a `status` process never opens that file with
-/// `truncate(true)` and never has to race its own startup to read it. The read
-/// happens in-command, in `cli::run_status`; what it sees is whatever a running
-/// daemon has written.
-pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
+/// tracing subscriber (AILAB-184): only `dreamd watch` passes a log path to
+/// `init_tracing`, so no one-shot ever opens that file with `truncate(true)`
+/// or has to race its own startup to read it; the read happens in-command and
+/// sees whatever a running daemon has written. `dreamd status` reads
+/// [`LOG_TAIL_LINES`] through [`read_log_tail`]; `dreamd service status` reads
+/// its own, longer tail (`service::STATUS_LOG_TAIL_LINES`, AILAB-178).
+pub(crate) fn read_log_tail_n(log_file: &Path, n: usize) -> Vec<String> {
     let Ok(contents) = std::fs::read_to_string(log_file) else {
         return Vec::new();
     };
     let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+    let start = lines.len().saturating_sub(n);
     lines[start..].iter().map(|s| s.to_string()).collect()
+}
+
+/// Read the last [`LOG_TAIL_LINES`] lines of the daemon log for the report —
+/// [`read_log_tail_n`] at this report's fixed width; see it for the read
+/// contract. Called in-command from `cli::run_status`.
+pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
+    read_log_tail_n(log_file, LOG_TAIL_LINES)
 }
 
 /// Run `dreamd status` and write the report to `out`.
@@ -316,6 +324,24 @@ mod tests {
             tail,
             vec!["l3", "l4", "l5", "l6", "l7"],
             "must keep last five"
+        );
+    }
+
+    #[test]
+    fn read_log_tail_n_returns_last_n() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("dreamd.log");
+        let body: String = (1..=12).map(|i| format!("l{i}\n")).collect();
+        fs::write(&log, body).unwrap();
+
+        let expected: Vec<String> = (3..=12).map(|i| format!("l{i}")).collect();
+        assert_eq!(read_log_tail_n(&log, 10), expected, "must keep last ten");
+        // The `dreamd status` reader on the same file is still the five-line
+        // tail (AILAB-178 leaves LOG_TAIL_LINES alone).
+        assert_eq!(
+            read_log_tail(&log),
+            vec!["l8", "l9", "l10", "l11", "l12"],
+            "dreamd status must stay at LOG_TAIL_LINES"
         );
     }
 

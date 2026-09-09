@@ -241,7 +241,7 @@ pub enum ResetCommand {
 }
 
 /// Args for `dreamd service`. Wraps the nested verb so later verbs
-/// (status / restart / uninstall — separate tickets) slot in without
+/// (restart / uninstall — separate tickets) slot in without
 /// reshuffling top-level command parsing. Same shape as [`ResetArgs`].
 #[derive(Args)]
 pub struct ServiceArgs {
@@ -260,6 +260,9 @@ pub enum ServiceCommand {
     },
     /// Start the user-scope service (systemctl --user start / launchctl kickstart).
     Start,
+    /// Report whether the user-scope service is running (systemd / launchd).
+    /// Daemon-level liveness (UDS) is `dreamd status`.
+    Status,
 }
 
 /// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
@@ -1075,6 +1078,24 @@ fn run_service_start() -> ExitCode {
     service_exit(commands::service::run_start())
 }
 
+/// `dreamd service status` (AILAB-178): the OS supervisor's view of the unit /
+/// LaunchAgent (running / stopped / failed / not-installed, PID, active-since)
+/// plus the last `STATUS_LOG_TAIL_LINES` lines of `~/.agent/dreamd.log`, read
+/// in-command like `run_status` does. Daemon-level UDS liveness is `dreamd
+/// status` (WEG-103); the two are deliberately separate. Console-only,
+/// index-free, unlocked `print!` — same contract as `run_service_install`.
+fn run_service_status() -> ExitCode {
+    let Some(home) = home_dir() else {
+        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
+        return ExitCode::from(1);
+    };
+    let log_tail = commands::status::read_log_tail_n(
+        &dreamd_core::layout::DaemonHome::new(home.join(".agent")).log_file(),
+        commands::service::STATUS_LOG_TAIL_LINES,
+    );
+    service_exit(commands::service::run_status(&home, &log_tail))
+}
+
 /// Map a `service` verb result onto the exit-code contract. The usage
 /// refusals — no supported backend on this host, no project root under cwd,
 /// an existing LaunchAgent plist without `--force` — exit 2 exactly like
@@ -1178,6 +1199,7 @@ pub fn run() -> ExitCode {
         Command::Service(args) => match args.command {
             ServiceCommand::Install { force } => run_service_install(force),
             ServiceCommand::Start => run_service_start(),
+            ServiceCommand::Status => run_service_status(),
         },
         Command::Setup(args) => {
             run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
@@ -1428,6 +1450,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_service_status() {
+        let cli = Cli::try_parse_from(["dreamd", "service", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                command: ServiceCommand::Status
+            }))
+        ));
+    }
+
+    #[test]
     fn service_exit_maps_usage_refusals_to_2_and_runtime_failures_to_1() {
         use commands::service::ServiceError;
         assert_eq!(service_exit(Ok(())), ExitCode::SUCCESS);
@@ -1598,6 +1631,7 @@ mod tests {
             vec!["dreamd", "service", "install"],
             vec!["dreamd", "service", "install", "--force"],
             vec!["dreamd", "service", "start"],
+            vec!["dreamd", "service", "status"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();
             assert!(

@@ -418,6 +418,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **How to apply:** Pair a file-wide grep with (1) a production-only slice through the first `#[cfg(test)]` and (2) `git diff -- path | grep -E '^\+.*(banned)'`. Same family as `spec-grep-count-guard-contradicts-ac-test-code` / `guards-vs-mandates-same-line`.
 - **Cross-refs:** `select-lesson-or-retire-unlinks`, `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`
 
+### spec-grep-status-word-hits-interpolation
+
+- **Rule:** An anti-pattern grep `systemctl.*status` will match a `Display` impl that interpolates `{status}` (the child's exit status), not the banned `systemctl status` verb. Pair with `git diff` added lines and a tighter pattern (`"systemctl".*"status"|systemctl --user status`).
+- **Why:** AILAB-178 §5 grep 2 was red on a pre-existing byte-identical line: `"systemctl --user {args} failed ({status}): {}`". No added line in the 178 diff matched. Same family as `rustdoc-trips-word-grep-that-meant-call-sites`.
+- **How to apply:** Ban the argv (`status dreamd.service`, `systemctl --user status`), not the English word `status`. Confirm with `git diff -- path | grep '^+' | grep -E 'banned'` so a HEAD-identical Display string cannot fail a new ticket.
+- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`, `service-status-is-not-dreamd-status`
+
 ### v2-beats-linear-ac
 
 - **Rule:** For dreamd-eng tickets that have `assignments/AILAB-*.v2.md`, implement the v2, not Linear AC as written.
@@ -555,8 +562,15 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). Do not call `detach_double_fork`. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
 - **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
-- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). status / restart / uninstall remain later. Tests must not require a live `systemctl --user`.
-- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`
+- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; restart / uninstall remain later. Tests must not require a live `systemctl --user`.
+- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`
+
+### service-status-is-not-dreamd-status
+
+- **Rule:** `dreamd service status` is the OS supervisor (systemd `--user` / launchd). `dreamd status` is UDS daemon liveness + project + last dream cycle. Do not merge them. Do not call `systemctl status` (pager); query `systemctl show --no-pager -p …`.
+- **Why:** Linear AILAB-178 AC said `systemctl --user status` and “last 10 log lines” as if `dreamd status` did not exist. WEG-103 already tails 5 lines of `~/.agent/dreamd.log` without truncating it. The two commands can disagree (foreground `watch` live, no unit; unit running, socket dead).
+- **How to apply:** Nested `ServiceCommand::Status`. Log tail via `read_log_tail_n(path, 10)`; leave `LOG_TAIL_LINES = 5`. Four states: running / stopped / failed / not-installed. Exit 0 on a successful query including stopped. Inject a stdout-returning runner; never spawn live `systemctl` / `launchctl` in tests.
+- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `plist-must-not-redirect-dreamd-log`
 
 ### launchd-supervises-foreground-watch
 

@@ -3,8 +3,9 @@
 `dreamd service install` registers `dreamd watch` with your login session's
 service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS — so
 the daemon starts at login and is restarted if it dies. `dreamd service start`
-starts it on demand. Both verbs shell out to `systemctl --user` / `launchctl`
-as you; neither needs `sudo`, and neither should ever be run with it.
+starts it on demand; `dreamd service status` reports what the service manager
+thinks of it. All three verbs shell out to `systemctl --user` / `launchctl`
+as you; none needs `sudo`, and none should ever be run with it.
 
 This is **optional**. If you run one agent, the in-process MCP server that
 `npx -y dreamd-mcp` starts is enough — nothing on this page is required.
@@ -52,15 +53,22 @@ dreamd service start          # systemctl --user start dreamd.service
 To check on it:
 
 ```bash
-systemctl --user status dreamd.service
-journalctl --user -u dreamd.service
+dreamd service status         # running / stopped / failed / not-installed, PID, last 10 log lines
+journalctl --user -u dreamd.service   # optional: the daemon's stderr in the user journal
 ls -l ~/.agent/dreamd.sock    # srw------- owned by you
 tail -f ~/.agent/dreamd.log
 ```
 
+`dreamd status` is the daemon-level view — Unix-socket liveness, the project
+under your current directory, when the last dream cycle ran — and works for a
+foreground `dreamd watch` too, whereas `dreamd service status` reports what
+systemd (or launchd) thinks of the unit; the two can disagree, e.g. a foreground
+`watch` live with no unit installed.
+
 Without a systemd user instance (probe: `/run/systemd/system` — most
-containers, WSL without systemd, non-systemd distros) both verbs exit 2 and
-tell you to run `dreamd watch` in the foreground instead. Nothing is written.
+containers, WSL without systemd, non-systemd distros) all three verbs exit 2
+and tell you to run `dreamd watch` in the foreground instead. Nothing is
+written.
 
 ## macOS (LaunchAgent)
 
@@ -96,7 +104,8 @@ dreamd service start          # launchctl kickstart -k gui/$(id -u)/dev.dreamd.d
 To inspect it:
 
 ```bash
-launchctl print gui/$(id -u)/dev.dreamd.dreamd
+dreamd service status         # running / stopped / not-installed, PID, last 10 log lines
+launchctl print gui/$(id -u)/dev.dreamd.dreamd   # raw launchd view of the agent
 tail -f ~/.agent/dreamd.log
 ls -l ~/.agent/dreamd.sock
 ```
@@ -163,8 +172,7 @@ socket, writes the same log, and is exactly what the service supervises.
 
 ## Removing the service
 
-Status / restart / uninstall verbs are not shipped yet. To remove the service
-today:
+Restart / uninstall verbs are not shipped yet. To remove the service today:
 
 ```bash
 # Linux

@@ -1,5 +1,5 @@
-//! `dreamd service install` / `dreamd service start` — the per-user service
-//! that supervises the daemon: a Linux systemd **user** unit (AILAB-190) or a
+//! `dreamd service install` / `start` / `status` — the per-user service that
+//! supervises the daemon: a Linux systemd **user** unit (AILAB-190) or a
 //! macOS **LaunchAgent** (AILAB-169). One module, one backend picked at
 //! runtime by [`detect_backend`].
 //!
@@ -10,6 +10,15 @@
 //! `launchctl bootstrap gui/<uid> <plist>` (after a best-effort `bootout` when
 //! `--force` replaces an existing plist); `start` runs
 //! `launchctl kickstart -k gui/<uid>/dev.dreamd.dreamd`.
+//!
+//! `status` (AILAB-178) is the supervisor's own view of that service —
+//! running / stopped / failed / not-installed, PID, active-since — plus the
+//! last [`STATUS_LOG_TAIL_LINES`] lines of `~/.agent/dreamd.log`. On Linux it
+//! reads `systemctl --user show dreamd.service` as a `Key=Value` dump (never
+//! the human-oriented `status` verb, which is pager-, colour- and
+//! locale-bound); on macOS `launchctl print gui/<uid>/dev.dreamd.dreamd`.
+//! Daemon-level UDS liveness stays `dreamd status` (WEG-103); the two verbs
+//! answer different questions and are deliberately separate.
 //!
 //! The unit is `Type=simple`, and launchd's `KeepAlive` plus a **foreground**
 //! `ProgramArguments = [exe, watch]` is the plist analogue of it: the OS
@@ -44,7 +53,7 @@
 //!   tracing file layer, which truncates on open, so a second writer aimed at
 //!   the same file would clobber it. Likewise never `AbandonProcessGroup`:
 //!   launchd must keep tracking the PID it spawned.
-//! - **Both verbs are one-shots and stay console-only** (AILAB-184): the
+//! - **All three verbs are one-shots and stay console-only** (AILAB-184): the
 //!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
 //!   in `cli.rs` never grants it to `service`. The supervised `watch` still
 //!   gets the file layer, and its stderr additionally lands in the user
@@ -55,10 +64,12 @@
 //! are pointed at foreground `dreamd watch`. The probe is `/run/systemd/system`
 //! — systemd's documented "booted with systemd" check — and never spawns
 //! `systemctl`; macOS is picked by `cfg!(target_os = "macos")` and never
-//! probed. Both process runners are injected ([`Systemctl`], [`Launchctl`]),
-//! so unit tests pass a recording closure and can never spawn either — that
-//! is how Linux CI exercises the macOS path. The uid for the `gui/<uid>`
-//! domain is injected too (production reads `id -u` stdout; no FFI).
+//! probed. Every process runner is injected — [`Systemctl`] / [`Launchctl`]
+//! for the verbs that only need an exit status, the stdout-returning
+//! [`Query`] for the one that reads a report — so unit tests pass a recording
+//! closure and can never spawn either supervisor; that is how Linux CI
+//! exercises the macOS path. The uid for the `gui/<uid>` domain is injected
+//! too (production reads `id -u` stdout; no FFI).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -73,6 +84,10 @@ pub(crate) const UNIT_NAME: &str = "dreamd.service";
 /// plist's basename (`<label>.plist`) and the service name under `gui/<uid>/`.
 pub(crate) const LAUNCHD_LABEL: &str = "dev.dreamd.dreamd";
 
+/// Number of trailing `~/.agent/dreamd.log` lines `service status` echoes
+/// (Linear AILAB-178). `dreamd status` keeps its own 5 (`status::LOG_TAIL_LINES`).
+pub(crate) const STATUS_LOG_TAIL_LINES: usize = 10;
+
 /// How `install` / `start` reach systemd. Production passes [`systemctl_user`];
 /// tests pass a recording closure, so no unit test can ever spawn `systemctl`
 /// (this dev box has a live user manager; GHA runners mostly do not).
@@ -84,13 +99,69 @@ type Systemctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 /// `macos-latest` has a live `launchctl` under the runner user).
 type Launchctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
-/// Which OS supervisor `install` / `start` talk to on this host.
+/// How `status` reads the supervisor: the same injection shape as
+/// [`Systemctl`] / [`Launchctl`], but the runner yields the captured stdout of
+/// a successful call. Production passes [`systemctl_user_query`] /
+/// [`launchctl_query`]; tests pass a closure answering with a fixture, so no
+/// unit test can ever query a live supervisor.
+type Query<'a> = &'a mut dyn FnMut(&[&str]) -> Result<String, ServiceError>;
+
+/// Which OS supervisor `install` / `start` / `status` talk to on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceBackend {
     /// Linux systemd `--user` unit (`systemctl --user`).
     Systemd,
     /// macOS LaunchAgent (`launchctl` in the `gui/<uid>` domain).
     Launchd,
+}
+
+impl ServiceBackend {
+    /// The word `service status` prints on its `backend:` line.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Systemd => "systemd",
+            Self::Launchd => "launchd",
+        }
+    }
+}
+
+/// The supervisor's view of the service, as `service status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceState {
+    /// The supervised `watch` is up (`ActiveState=active` / `state = running`).
+    Running,
+    /// Installed but not running: a loaded, inactive unit; or a plist on disk
+    /// that launchd has not loaded, or has loaded and is not running.
+    Stopped,
+    /// systemd's `ActiveState=failed` — the unit gave up restarting.
+    Failed,
+    /// No unit at all (`LoadState=not-found`); no plist file and no loaded label.
+    NotInstalled,
+}
+
+impl std::fmt::Display for ServiceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+            Self::NotInstalled => "not-installed",
+        })
+    }
+}
+
+/// What `service status` learned from the supervisor; [`render_report`]
+/// turns it into the locked stdout block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceReport {
+    pub(crate) backend: ServiceBackend,
+    pub(crate) state: ServiceState,
+    /// systemd `MainPID` / launchd `pid = …`; `None` when absent, unparseable,
+    /// or `0` (systemd's "no main process").
+    pub(crate) pid: Option<u32>,
+    /// systemd's `ActiveEnterTimestamp`, passed through raw (no duration
+    /// math). Always `None` on launchd: `launchctl print` has no start time.
+    pub(crate) active_since: Option<String>,
 }
 
 #[derive(Debug)]
@@ -497,11 +568,200 @@ pub(crate) fn run_start_with(
     Ok(())
 }
 
-/// Run `systemctl --user <args>` with captured output. A spawn failure is
+/// `dreamd service status` (AILAB-178): pick the backend, query it, print the
+/// report with the pre-read log tail. Never opens the log itself and never
+/// touches the tracing file layer — `log_tail` comes from
+/// `status::read_log_tail_n` in `cli::run_service_status`. No backend →
+/// [`ServiceError::NoSystemd`] before any process is spawned. Unlocked
+/// `print!`: this one-shot never opens a Tantivy index, so there is no lock
+/// to hoist.
+pub fn run_status(home: &Path, log_tail: &[String]) -> Result<(), ServiceError> {
+    let report = run_status_with(
+        detect_backend(),
+        home,
+        current_uid,
+        &mut systemctl_user_query,
+        &mut launchctl_query,
+    )?;
+    print!("{}", render_report(&report, log_tail));
+    Ok(())
+}
+
+/// Same as [`run_status`] with the backend pick, the uid resolver, and both
+/// query runners injected. `resolve_uid` is only ever called on the launchd
+/// arm: passing `current_uid()?` as a call argument would spawn `id` on Linux
+/// too, and ahead of the no-backend refusal — the AILAB-169 shape this
+/// deliberately avoids. Tests pass fixtures and panicking runners and never
+/// spawn anything.
+pub(crate) fn run_status_with(
+    backend: Option<ServiceBackend>,
+    home: &Path,
+    resolve_uid: impl FnOnce() -> Result<u32, ServiceError>,
+    systemctl: Query<'_>,
+    launchctl: Query<'_>,
+) -> Result<ServiceReport, ServiceError> {
+    match backend {
+        None => Err(ServiceError::NoSystemd),
+        Some(ServiceBackend::Systemd) => query_systemd_status(systemctl),
+        Some(ServiceBackend::Launchd) => query_launchd_status(home, resolve_uid, launchctl),
+    }
+}
+
+/// Linux: `systemctl --user show dreamd.service --no-pager -p …`, a stable
+/// `Key=Value` dump — never the human-oriented `status` verb (paged,
+/// coloured, localised). systemd exits 0 for an unknown unit and answers
+/// `LoadState=not-found`, so a runner `Err` here is a genuine failure and
+/// propagates. `SubState` is part of the locked argv but is not rendered.
+pub(crate) fn query_systemd_status(query: Query<'_>) -> Result<ServiceReport, ServiceError> {
+    let stdout = query(&[
+        "show",
+        UNIT_NAME,
+        "--no-pager",
+        "-p",
+        "LoadState",
+        "-p",
+        "ActiveState",
+        "-p",
+        "SubState",
+        "-p",
+        "MainPID",
+        "-p",
+        "ActiveEnterTimestamp",
+    ])?;
+    Ok(parse_systemd_show(&stdout))
+}
+
+/// Parse `systemctl show` output into a report. `LoadState=not-found` wins
+/// (there is no unit at all); otherwise `ActiveState` decides — `failed`,
+/// `active` → running, anything else (`inactive`, `activating`,
+/// `deactivating`, …) → stopped. `MainPID` is `None` when `0`, absent, or
+/// unparseable; `ActiveEnterTimestamp` is passed through raw when non-empty.
+pub(crate) fn parse_systemd_show(stdout: &str) -> ServiceReport {
+    let mut load_state = "";
+    let mut active_state = "";
+    let mut main_pid = "";
+    let mut active_since = "";
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "LoadState" => load_state = value,
+            "ActiveState" => active_state = value,
+            "MainPID" => main_pid = value,
+            "ActiveEnterTimestamp" => active_since = value,
+            _ => {}
+        }
+    }
+    let state = if load_state == "not-found" {
+        ServiceState::NotInstalled
+    } else {
+        match active_state {
+            "failed" => ServiceState::Failed,
+            "active" => ServiceState::Running,
+            _ => ServiceState::Stopped,
+        }
+    };
+    ServiceReport {
+        backend: ServiceBackend::Systemd,
+        state,
+        pid: main_pid.parse::<u32>().ok().filter(|pid| *pid != 0),
+        active_since: (!active_since.is_empty()).then(|| active_since.to_string()),
+    }
+}
+
+/// macOS: `launchctl print gui/<uid>/dev.dreamd.dreamd`. A non-zero exit is
+/// what launchd says for a label that is not loaded — a state answer, not a
+/// [`ServiceError::Launchctl`] failure: stopped when the plist is on disk
+/// (installed, not loaded), not-installed when it is absent. Any other error
+/// (a `launchctl` that could not be spawned, an unreadable uid) propagates.
+/// `active_since` is always `None`: `launchctl print` has no start timestamp.
+pub(crate) fn query_launchd_status(
+    home: &Path,
+    resolve_uid: impl FnOnce() -> Result<u32, ServiceError>,
+    query: Query<'_>,
+) -> Result<ServiceReport, ServiceError> {
+    let uid = resolve_uid()?;
+    let (state, pid) = match query(&["print", &format!("gui/{uid}/{LAUNCHD_LABEL}")]) {
+        Ok(stdout) => parse_launchctl_print(&stdout),
+        Err(ServiceError::Launchctl { .. }) => {
+            let state = if plist_path(home).exists() {
+                ServiceState::Stopped
+            } else {
+                ServiceState::NotInstalled
+            };
+            (state, None)
+        }
+        Err(other) => return Err(other),
+    };
+    Ok(ServiceReport {
+        backend: ServiceBackend::Launchd,
+        state,
+        pid,
+        active_since: None,
+    })
+}
+
+/// Parse `launchctl print` output: the first `state = …` line (`running` →
+/// running; any other word, or no such line → stopped) and the first
+/// `pid = …` line (unparseable → `None`). Lines are trimmed on both sides,
+/// so the tab-indented dump and a flat one parse alike.
+pub(crate) fn parse_launchctl_print(stdout: &str) -> (ServiceState, Option<u32>) {
+    fn first<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
+        stdout
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::trim)
+    }
+    let state = match first(stdout, "state = ") {
+        Some("running") => ServiceState::Running,
+        _ => ServiceState::Stopped,
+    };
+    let pid = first(stdout, "pid = ").and_then(|word| word.parse::<u32>().ok());
+    (state, pid)
+}
+
+/// Render the report the way the spec locks it (byte-tested): four
+/// `key: value` lines, then the log tail two-space-indented under a
+/// `recent log (last N lines):` header — or the single line
+/// `recent log: (none)`, the same wording as `dreamd status`. `pid` and
+/// `active_since` print `-` when unknown. The header always names
+/// [`STATUS_LOG_TAIL_LINES`], just as `dreamd status` always names its five.
+pub(crate) fn render_report(report: &ServiceReport, log_tail: &[String]) -> String {
+    let mut lines = vec![
+        format!("service: {}", report.state),
+        format!("backend: {}", report.backend.label()),
+        format!(
+            "pid: {}",
+            report
+                .pid
+                .map_or_else(|| "-".to_string(), |pid| pid.to_string())
+        ),
+        format!(
+            "active_since: {}",
+            report.active_since.as_deref().unwrap_or("-")
+        ),
+    ];
+    if log_tail.is_empty() {
+        lines.push("recent log: (none)".to_string());
+    } else {
+        lines.push(format!("recent log (last {STATUS_LOG_TAIL_LINES} lines):"));
+        lines.extend(log_tail.iter().map(|line| format!("  {line}")));
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Spawn `systemctl --user <args>` and capture its output. A spawn failure is
 /// [`ServiceError::Spawn`]; a non-zero exit is [`ServiceError::Systemctl`]
-/// carrying the subcommand words and systemd's stderr. One of the three
-/// places in the module that spawn a process ([`launchctl`], [`current_uid`]).
-fn systemctl_user(args: &[&str]) -> Result<(), ServiceError> {
+/// carrying the subcommand words and systemd's stderr. Both `systemctl`
+/// runners go through here — [`systemctl_user`] discards stdout,
+/// [`systemctl_user_query`] returns it — so this is one of the three places
+/// in the module that spawn a process ([`launchctl_output`], [`current_uid`]).
+fn systemctl_user_output(args: &[&str]) -> Result<std::process::Output, ServiceError> {
     let output = std::process::Command::new("systemctl")
         .arg("--user")
         .args(args)
@@ -511,7 +771,7 @@ fn systemctl_user(args: &[&str]) -> Result<(), ServiceError> {
             source,
         })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
     Err(ServiceError::Systemctl {
         args: args.join(" "),
@@ -520,10 +780,25 @@ fn systemctl_user(args: &[&str]) -> Result<(), ServiceError> {
     })
 }
 
-/// Run `launchctl <args>` with captured output. A spawn failure is
+/// The [`Systemctl`] runner `install` / `start` use: stdout is discarded.
+fn systemctl_user(args: &[&str]) -> Result<(), ServiceError> {
+    systemctl_user_output(args)?;
+    Ok(())
+}
+
+/// The [`Query`] runner the report verb uses: the (lossy) stdout of a
+/// successful `systemctl --user <args>`.
+fn systemctl_user_query(args: &[&str]) -> Result<String, ServiceError> {
+    let output = systemctl_user_output(args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Spawn `launchctl <args>` and capture its output. A spawn failure is
 /// [`ServiceError::Spawn`]; a non-zero exit is [`ServiceError::Launchctl`]
-/// carrying the subcommand words and launchd's stderr.
-fn launchctl(args: &[&str]) -> Result<(), ServiceError> {
+/// carrying the subcommand words and launchd's stderr. Both `launchctl`
+/// runners go through here ([`launchctl`] discards stdout,
+/// [`launchctl_query`] returns it).
+fn launchctl_output(args: &[&str]) -> Result<std::process::Output, ServiceError> {
     let output = std::process::Command::new("launchctl")
         .args(args)
         .output()
@@ -532,13 +807,26 @@ fn launchctl(args: &[&str]) -> Result<(), ServiceError> {
             source,
         })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
     Err(ServiceError::Launchctl {
         args: args.join(" "),
         status: output.status,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+/// The [`Launchctl`] runner `install` / `start` use: stdout is discarded.
+fn launchctl(args: &[&str]) -> Result<(), ServiceError> {
+    launchctl_output(args)?;
+    Ok(())
+}
+
+/// The [`Query`] runner the report verb uses: the (lossy) stdout of a
+/// successful `launchctl <args>`.
+fn launchctl_query(args: &[&str]) -> Result<String, ServiceError> {
+    let output = launchctl_output(args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// The current uid for launchd's `gui/<uid>` domain, read from `id -u`
@@ -1359,6 +1647,361 @@ WantedBy=default.target
                 "-k".to_string(),
                 "gui/501/dev.dreamd.dreamd".to_string()
             ]]
+        );
+    }
+
+    // ---- `service status` (AILAB-178) ---------------------------------------
+    //
+    // Same rule as above: no test here can spawn `systemctl`, `launchctl`, or
+    // `id`. Every supervisor query is a recording closure answering with a
+    // fixture, or a panicking one on paths that must refuse first; the uid is
+    // `FAKE_UID` via an injected closure; the macOS paths run on Linux.
+
+    /// A [`Query`] runner that must never be reached.
+    fn never_query(args: &[&str]) -> Result<String, ServiceError> {
+        panic!("no supervisor query must be reached, got {args:?}")
+    }
+
+    /// The exact argv the report verb hands its `Query` runner: the words
+    /// after `--user`, which production prepends.
+    const EXPECTED_SHOW_ARGV: [&str; 13] = [
+        "show",
+        "dreamd.service",
+        "--no-pager",
+        "-p",
+        "LoadState",
+        "-p",
+        "ActiveState",
+        "-p",
+        "SubState",
+        "-p",
+        "MainPID",
+        "-p",
+        "ActiveEnterTimestamp",
+    ];
+
+    /// `systemctl --user show` stdout for a loaded, running unit.
+    const SHOW_RUNNING: &str = "\
+LoadState=loaded
+ActiveState=active
+SubState=running
+MainPID=1234
+ActiveEnterTimestamp=Sat 2026-09-05 16:00:00 UTC
+";
+
+    /// `systemctl --user show` stdout for a unit that was never installed.
+    /// systemd exits 0 here and reports `LoadState=not-found`, so the runner
+    /// answers `Ok` — a runner `Err` on this path is a genuine failure.
+    const SHOW_NOT_FOUND: &str = "\
+LoadState=not-found
+ActiveState=inactive
+SubState=dead
+MainPID=0
+ActiveEnterTimestamp=
+";
+
+    /// A realistic `launchctl print gui/501/dev.dreamd.dreamd` dump for a
+    /// running agent. Tab-indented like the real thing; `\t` escapes keep the
+    /// tabs visible and safe from editors.
+    const LAUNCHCTL_PRINT_RUNNING: &str = "\
+gui/501/dev.dreamd.dreamd = {
+\tactive count = 1
+\tpath = /Users/u/Library/LaunchAgents/dev.dreamd.dreamd.plist
+\tstate = running
+\tprogram = /opt/dreamd/bin/dreamd
+\targuments = {
+\t\t/opt/dreamd/bin/dreamd
+\t\twatch
+\t}
+\tworking directory = /Users/u/proj
+\tspawn type = daemon (3)
+\tpid = 99
+\truns = 1
+}
+";
+
+    #[test]
+    fn status_systemd_argv_is_show_with_properties() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let report = query_systemd_status(&mut |args: &[&str]| {
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            Ok(SHOW_RUNNING.to_string())
+        })
+        .unwrap();
+        assert_eq!(report.state, ServiceState::Running);
+        assert_eq!(calls.len(), 1, "exactly one `show` query: {calls:?}");
+        assert_eq!(calls[0], EXPECTED_SHOW_ARGV);
+    }
+
+    #[test]
+    fn status_systemd_not_found_is_not_installed() {
+        let mut calls = 0;
+        let report = run_status_with(
+            Some(ServiceBackend::Systemd),
+            Path::new("/h"),
+            || -> Result<u32, ServiceError> {
+                panic!("uid must not be resolved on the systemd arm")
+            },
+            &mut |_args: &[&str]| {
+                calls += 1;
+                Ok(SHOW_NOT_FOUND.to_string())
+            },
+            &mut never_query,
+        )
+        .unwrap();
+        assert_eq!(calls, 1, "the query runner must be called exactly once");
+        assert_eq!(
+            report,
+            ServiceReport {
+                backend: ServiceBackend::Systemd,
+                state: ServiceState::NotInstalled,
+                pid: None,
+                active_since: None,
+            }
+        );
+        let rendered = render_report(&report, &[]);
+        assert!(rendered.contains("service: not-installed\n"), "{rendered}");
+        assert!(rendered.contains("pid: -\n"), "{rendered}");
+    }
+
+    #[test]
+    fn status_systemd_active_is_running_with_pid_and_timestamp() {
+        assert_eq!(
+            parse_systemd_show(SHOW_RUNNING),
+            ServiceReport {
+                backend: ServiceBackend::Systemd,
+                state: ServiceState::Running,
+                pid: Some(1234),
+                active_since: Some("Sat 2026-09-05 16:00:00 UTC".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn status_systemd_failed() {
+        let report = parse_systemd_show(
+            "LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n\
+             ActiveEnterTimestamp=Sat 2026-09-05 16:00:00 UTC\n",
+        );
+        assert_eq!(report.state, ServiceState::Failed);
+        assert_eq!(report.pid, None, "MainPID=0 is unknown, never pid 0");
+    }
+
+    #[test]
+    fn status_systemd_inactive_loaded_is_stopped() {
+        let report = parse_systemd_show(
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n\
+             ActiveEnterTimestamp=\n",
+        );
+        assert_eq!(report.state, ServiceState::Stopped);
+        assert_eq!(report.pid, None);
+        assert_eq!(
+            report.active_since, None,
+            "an empty timestamp is unknown, never an empty string"
+        );
+    }
+
+    #[test]
+    fn render_report_is_byte_stable() {
+        let running = ServiceReport {
+            backend: ServiceBackend::Systemd,
+            state: ServiceState::Running,
+            pid: Some(1234),
+            active_since: Some("Sat 2026-09-05 16:00:00 UTC".to_string()),
+        };
+        let tail = vec!["line-a".to_string(), "line-b".to_string()];
+        let expected = "\
+service: running
+backend: systemd
+pid: 1234
+active_since: Sat 2026-09-05 16:00:00 UTC
+recent log (last 10 lines):
+  line-a
+  line-b
+";
+        assert_eq!(render_report(&running, &tail), expected);
+
+        let absent = ServiceReport {
+            backend: ServiceBackend::Systemd,
+            state: ServiceState::NotInstalled,
+            pid: None,
+            active_since: None,
+        };
+        assert_eq!(
+            render_report(&absent, &[]),
+            "service: not-installed\nbackend: systemd\npid: -\nactive_since: -\nrecent log: (none)\n"
+        );
+    }
+
+    #[test]
+    fn status_launchd_argv_and_running_fixture() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let report = run_status_with(
+            Some(ServiceBackend::Launchd),
+            Path::new("/h"),
+            || Ok(FAKE_UID),
+            &mut never_query,
+            &mut |args: &[&str]| {
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                Ok(LAUNCHCTL_PRINT_RUNNING.to_string())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            calls,
+            [["print".to_string(), "gui/501/dev.dreamd.dreamd".to_string()]]
+        );
+        assert_eq!(
+            report,
+            ServiceReport {
+                backend: ServiceBackend::Launchd,
+                state: ServiceState::Running,
+                pid: Some(99),
+                active_since: None,
+            }
+        );
+        let rendered = render_report(&report, &[]);
+        assert!(rendered.contains("backend: launchd\n"), "{rendered}");
+        assert!(rendered.contains("pid: 99\n"), "{rendered}");
+        assert!(
+            rendered.contains("active_since: -\n"),
+            "launchctl print carries no start timestamp: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_launchd_print_error_without_plist_is_not_installed() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            !plist_path(home.path()).exists(),
+            "precondition: fresh HOME"
+        );
+
+        let mut calls = 0;
+        let report = query_launchd_status(home.path(), || Ok(FAKE_UID), &mut |args: &[&str]| {
+            calls += 1;
+            // What launchd says for a label that is not loaded: a non-zero
+            // exit, which is a state answer here rather than a failure.
+            Err(ServiceError::Launchctl {
+                args: args.join(" "),
+                status: ExitStatus::from_raw(113 << 8),
+                stderr: "Could not find service \"dev.dreamd.dreamd\" in domain for uid: 501"
+                    .into(),
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            report,
+            ServiceReport {
+                backend: ServiceBackend::Launchd,
+                state: ServiceState::NotInstalled,
+                pid: None,
+                active_since: None,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_launchd_print_error_with_plist_is_stopped() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = plist_path(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"sentinel: not a plist").unwrap();
+
+        let report = query_launchd_status(home.path(), || Ok(FAKE_UID), &mut |args: &[&str]| {
+            Err(ServiceError::Launchctl {
+                args: args.join(" "),
+                status: ExitStatus::from_raw(113 << 8),
+                stderr: "Could not find service \"dev.dreamd.dreamd\" in domain for uid: 501"
+                    .into(),
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            report,
+            ServiceReport {
+                backend: ServiceBackend::Launchd,
+                state: ServiceState::Stopped,
+                pid: None,
+                active_since: None,
+            },
+            "an installed plist that launchd has not loaded is stopped, not absent"
+        );
+    }
+
+    #[test]
+    fn status_launchd_spawn_failure_propagates() {
+        let result =
+            query_launchd_status(Path::new("/h"), || Ok(FAKE_UID), &mut |_args: &[&str]| {
+                Err(ServiceError::Spawn {
+                    program: "launchctl",
+                    source: std::io::Error::other("ENOENT"),
+                })
+            });
+        assert!(
+            matches!(
+                result,
+                Err(ServiceError::Spawn {
+                    program: "launchctl",
+                    ..
+                })
+            ),
+            "a launchctl spawn failure is a real error, not a state: {result:?}"
+        );
+    }
+
+    #[test]
+    fn status_without_backend_refuses_before_any_runner() {
+        let result = run_status_with(
+            None,
+            Path::new("/h"),
+            || -> Result<u32, ServiceError> { panic!("uid must not be resolved") },
+            &mut never_query,
+            &mut never_query,
+        );
+        assert!(
+            matches!(result, Err(ServiceError::NoSystemd)),
+            "expected NoSystemd, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn status_systemd_arm_never_resolves_uid() {
+        let mut calls = 0;
+        let result = run_status_with(
+            Some(ServiceBackend::Systemd),
+            Path::new("/h"),
+            || -> Result<u32, ServiceError> {
+                panic!("uid must not be resolved on the systemd arm")
+            },
+            &mut |_args: &[&str]| {
+                calls += 1;
+                Ok(SHOW_RUNNING.to_string())
+            },
+            &mut never_query,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn parse_launchctl_print_without_state_line_is_stopped() {
+        assert_eq!(parse_launchctl_print(""), (ServiceState::Stopped, None));
+        assert_eq!(
+            parse_launchctl_print("gui/501/dev.dreamd.dreamd = {\n\tactive count = 0\n}\n"),
+            (ServiceState::Stopped, None)
+        );
+        // A loaded-but-idle agent reports a non-`running` state word.
+        assert_eq!(
+            parse_launchctl_print("\tstate = not running\n"),
+            (ServiceState::Stopped, None)
         );
     }
 }
