@@ -209,10 +209,49 @@ on Windows (native Windows is out of scope — see [windows.md](./windows.md)), 
 whenever you would rather see the daemon in a terminal. It binds the same
 socket, writes the same log, and is exactly what the service supervises.
 
-## Removing the service (no `uninstall` verb yet)
+## Removing the service
 
-A `dreamd service uninstall` verb is not shipped yet (AILAB-202). To remove the
-service today:
+```bash
+dreamd service uninstall
+```
+
+On Linux that is `systemctl --user disable --now dreamd.service`, removing
+`~/.config/systemd/user/dreamd.service`, then `systemctl --user daemon-reload`.
+On macOS it is `launchctl bootout gui/$(id -u)/dev.dreamd.dreamd` and removing
+`~/Library/LaunchAgents/dev.dreamd.dreamd.plist`. It is idempotent — a service
+that is already gone is not an error — and it prints what it removed and what
+it kept:
+
+```text
+removed: /home/you/.config/systemd/user/dreamd.service
+preserved: /home/you/.agent (daemon home)
+preserved: per-project .agent/ stores
+```
+
+**By default nothing is deleted but the service entry itself.** Your memory is
+untouched: every project's `.agent/` store, and the daemon home `~/.agent/`
+with its registry, socket and `dreamd.log`.
+
+To also delete the daemon home, add `--purge`:
+
+```bash
+dreamd service uninstall --purge --yes
+```
+
+`--purge` removes `~/.agent/` — the registry, the socket and `dreamd.log` — and
+nothing else. It **never** touches a per-project `<repo>/.agent/` store; to
+clear one of those, see the *Full fresh store* row in
+[troubleshooting.md](./troubleshooting.md#how-do-i-reset-or-clear-memory).
+Because it is destructive it asks first, like `dreamd reset workspace`: pass
+`--yes`, or answer `y` at the prompt. Without `--yes` on a non-interactive
+stdin it refuses and changes nothing.
+
+Note this is not `dreamd uninstall`, which is a different verb: that one stops
+running `dreamd` processes, drops the socket and clears the download cache,
+while leaving the systemd unit or LaunchAgent in place.
+
+If you ever need to undo the service by hand — a unit installed by a build of
+`dreamd` you no longer have, say — the equivalent commands are:
 
 ```bash
 # Linux
@@ -224,9 +263,6 @@ systemctl --user daemon-reload
 launchctl bootout gui/$(id -u)/dev.dreamd.dreamd
 rm ~/Library/LaunchAgents/dev.dreamd.dreamd.plist
 ```
-
-The daemon's data — the project's `.agent/` store and `~/.agent/dreamd.log` —
-is untouched.
 
 ## See also
 

@@ -1,7 +1,7 @@
-//! `dreamd service install` / `start` / `restart` / `status` — the per-user
-//! service that supervises the daemon: a Linux systemd **user** unit
-//! (AILAB-190) or a macOS **LaunchAgent** (AILAB-169). One module, one backend
-//! picked at runtime by [`detect_backend`].
+//! `dreamd service install` / `start` / `restart` / `status` / `uninstall` —
+//! the per-user service that supervises the daemon: a Linux systemd **user**
+//! unit (AILAB-190) or a macOS **LaunchAgent** (AILAB-169). One module, one
+//! backend picked at runtime by [`detect_backend`].
 //!
 //! Linux: `install` writes `~/.config/systemd/user/dreamd.service` and runs
 //! `systemctl --user daemon-reload` + `enable --now`; `start` runs
@@ -31,6 +31,33 @@
 //! locale-bound); on macOS `launchctl print gui/<uid>/dev.dreamd.dreamd`.
 //! Daemon-level UDS liveness stays `dreamd status` (WEG-103); the two verbs
 //! answer different questions and are deliberately separate.
+//!
+//! `uninstall` (AILAB-202) is the inverse of `install`, and **only** of
+//! `install`: it tears down the OS service entry — Linux `disable --now`, the
+//! unit file unlinked in-process, then `daemon-reload`; macOS a best-effort
+//! `bootout gui/<uid>/<label>` and the plist unlinked. Unlike `start`, it is
+//! idempotent: a unit or plist that is already gone is not a failure, and on
+//! Linux an absent unit file means `systemctl` is never spawned at all. By
+//! default it deletes no data whatsoever and says so, reporting the daemon
+//! home and the per-project stores on `preserved:` lines.
+//!
+//! `--purge` widens that to exactly one directory: the daemon home
+//! `~/.agent/` — the registry, the socket and `dreamd.log`. It never walks or
+//! deletes a per-project `<repo>/.agent/` store (that wipe is still the manual
+//! "Full fresh store" in `docs/troubleshooting.md`) and never touches
+//! `~/.config/dreamd/`. Because it is destructive it borrows the
+//! `reset workspace` confirmation idiom wholesale — `--yes`, or a typed `y` /
+//! `Y` on a tty, and a refusal (exit 2) on non-tty stdin — and confirms
+//! **before** any mutation, so a declined prompt leaves the unit installed.
+//! The tty probe and the line read are injected for the same reason the
+//! process runners are: no unit test may block on real stdin.
+//!
+//! `service uninstall` is **not** the top-level `dreamd uninstall`
+//! (AILAB-226), which stops local `mcp` / `watch` processes, drops the socket
+//! and clears caches while leaving the unit in place. This module never calls
+//! `commands::uninstall::run`, never reaches for `lifecycle_cleanup`, and
+//! never signals a process: on a supervised host `disable --now` / `bootout`
+//! *is* how the daemon stops.
 //!
 //! The unit is `Type=simple`, and launchd's `KeepAlive` plus a **foreground**
 //! `ProgramArguments = [exe, watch]` is the plist analogue of it: the OS
@@ -65,7 +92,7 @@
 //!   tracing file layer, which truncates on open, so a second writer aimed at
 //!   the same file would clobber it. Likewise never `AbandonProcessGroup`:
 //!   launchd must keep tracking the PID it spawned.
-//! - **All four verbs are one-shots and stay console-only** (AILAB-184): the
+//! - **All five verbs are one-shots and stay console-only** (AILAB-184): the
 //!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
 //!   in `cli.rs` never grants it to `service`. The supervised `watch` still
 //!   gets the file layer, and its stderr additionally lands in the user
@@ -83,6 +110,7 @@
 //! exercises the macOS path. The uid for the `gui/<uid>` domain is injected
 //! too (production reads `id -u` stdout; no FFI).
 
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
@@ -100,16 +128,16 @@ pub(crate) const LAUNCHD_LABEL: &str = "dev.dreamd.dreamd";
 /// (Linear AILAB-178). `dreamd status` keeps its own 5 (`status::LOG_TAIL_LINES`).
 pub(crate) const STATUS_LOG_TAIL_LINES: usize = 10;
 
-/// How `install` / `start` / `restart` reach systemd. Production passes
-/// [`systemctl_user`]; tests pass a recording closure, so no unit test can ever
-/// spawn `systemctl` (this dev box has a live user manager; GHA runners mostly
-/// do not).
+/// How `install` / `start` / `restart` / `uninstall` reach systemd. Production
+/// passes [`systemctl_user`]; tests pass a recording closure, so no unit test
+/// can ever spawn `systemctl` (this dev box has a live user manager; GHA
+/// runners mostly do not).
 type Systemctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
-/// How `install` / `start` / `restart` reach launchd. Same shape as [`Systemctl`]:
-/// production passes [`launchctl`]; tests pass a recording or panicking
-/// closure, so no unit test can ever bootstrap a real LaunchAgent (GHA
-/// `macos-latest` has a live `launchctl` under the runner user).
+/// How `install` / `start` / `restart` / `uninstall` reach launchd. Same shape
+/// as [`Systemctl`]: production passes [`launchctl`]; tests pass a recording or
+/// panicking closure, so no unit test can ever bootstrap a real LaunchAgent
+/// (GHA `macos-latest` has a live `launchctl` under the runner user).
 type Launchctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
 /// How `status` reads the supervisor: the same injection shape as
@@ -119,8 +147,18 @@ type Launchctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 /// unit test can ever query a live supervisor.
 type Query<'a> = &'a mut dyn FnMut(&[&str]) -> Result<String, ServiceError>;
 
-/// Which OS supervisor `install` / `start` / `restart` / `status` talk to on
-/// this host.
+/// How `uninstall --purge` asks for confirmation, in the same injection shape
+/// as the process runners above. The argument is the prompt (so the wording
+/// stays in [`confirm_purge`] next to the decision it guards); `Some(line)` is
+/// one line read from a tty, and `None` means stdin is not a tty, which the
+/// caller turns into [`ServiceError::NotATty`] — the runner itself never
+/// decides, it only answers. Production passes [`confirm_on_tty`]; tests pass
+/// a closure, so no unit test can ever block on real stdin or be at the mercy
+/// of how the harness wired it up.
+type Confirm<'a> = &'a mut dyn FnMut(&str) -> Result<Option<String>, ServiceError>;
+
+/// Which OS supervisor `install` / `start` / `restart` / `status` /
+/// `uninstall` talk to on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceBackend {
     /// Linux systemd `--user` unit (`systemctl --user`).
@@ -187,6 +225,16 @@ pub enum ServiceError {
     NoProjectRoot,
     /// macOS: the LaunchAgent plist already exists and `--force` was absent.
     PlistExists(PathBuf),
+    /// `uninstall --purge` without `--yes` on non-tty stdin: refuse rather
+    /// than delete the daemon home unattended in a pipeline. Nothing is
+    /// mutated. Same wording as `reset workspace`.
+    NotATty,
+    /// `uninstall --purge` prompted on a tty and the answer was not `y` / `Y`.
+    /// Nothing is mutated — the confirmation runs before any teardown.
+    Declined,
+    /// The `uninstall --purge` prompt could not be written or its answer could
+    /// not be read. Nothing is mutated.
+    Stdin(std::io::Error),
     /// `std::env::current_exe()` / canonicalize failed.
     CurrentExe(std::io::Error),
     /// Creating the service directory or writing the service file failed.
@@ -232,6 +280,9 @@ impl std::fmt::Display for ServiceError {
                 "LaunchAgent plist {} already exists; rerun `dreamd service install --force` to overwrite it.",
                 path.display()
             ),
+            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
+            Self::Declined => write!(f, "uninstall declined"),
+            Self::Stdin(e) => write!(f, "could not read the confirmation from stdin: {e}"),
             Self::CurrentExe(e) => write!(f, "could not resolve this binary's path: {e}"),
             Self::Io { path, source } => {
                 write!(f, "could not write {}: {source}", path.display())
@@ -638,6 +689,239 @@ pub(crate) fn run_restart_with(
     Ok(())
 }
 
+/// `dreamd service uninstall` (AILAB-202): pick the backend, then tear down
+/// its service entry. Linux → [`run_uninstall_with`], macOS →
+/// [`run_launchd_uninstall_with`] with the uid from `id -u`. No backend →
+/// [`ServiceError::NoSystemd`], nothing removed and nothing prompted: a host
+/// with no supervisor has no unit to take away.
+///
+/// `current_uid()?` sits inside the launchd arm for the same reason as in
+/// [`run_install`]: as a call argument it would spawn `id` on Linux too.
+pub fn run_uninstall(
+    home: &Path,
+    daemon_home: &Path,
+    purge: bool,
+    yes: bool,
+) -> Result<(), ServiceError> {
+    match detect_backend() {
+        None => Err(ServiceError::NoSystemd),
+        Some(ServiceBackend::Systemd) => run_uninstall_with(
+            home,
+            daemon_home,
+            true,
+            purge,
+            yes,
+            &mut confirm_on_tty,
+            &mut systemctl_user,
+        ),
+        Some(ServiceBackend::Launchd) => run_launchd_uninstall_with(
+            home,
+            daemon_home,
+            purge,
+            yes,
+            current_uid()?,
+            &mut confirm_on_tty,
+            &mut launchctl,
+        ),
+    }
+}
+
+/// Same as [`run_uninstall`] on Linux with the probe result, the confirmation
+/// reader and the `systemctl` runner injected.
+///
+/// Order is load-bearing, and differs from the other verbs in one way: the
+/// destructive confirmation comes **before** any mutation, so a refused or
+/// declined `--purge` leaves the unit installed and `systemctl` unspawned.
+/// The no-backend refusal still comes first of all — there is nothing to
+/// remove on such a host, so it must not prompt either.
+///
+/// The teardown itself is idempotent, unlike [`run_start_with`]: with no unit
+/// file on disk the runner is never called at all (there is nothing to
+/// `disable` and nothing for `daemon-reload` to pick up) and the report says
+/// `removed: (none)`. The unit file is unlinked in-process between `disable
+/// --now` and `daemon-reload` — never through `systemctl`, which has no verb
+/// for it.
+pub(crate) fn run_uninstall_with(
+    home: &Path,
+    daemon_home: &Path,
+    systemd_available: bool,
+    purge: bool,
+    yes: bool,
+    confirm: Confirm<'_>,
+    systemctl: Systemctl<'_>,
+) -> Result<(), ServiceError> {
+    if !systemd_available {
+        return Err(ServiceError::NoSystemd);
+    }
+    confirm_purge(daemon_home, purge, yes, confirm)?;
+    let unit = unit_path(home);
+    let removed = if unit.exists() {
+        systemctl(&["disable", "--now", UNIT_NAME])?;
+        remove_service_file(&unit)?;
+        systemctl(&["daemon-reload"])?;
+        Some(unit)
+    } else {
+        None
+    };
+    finish_uninstall(removed.as_deref(), daemon_home, purge)
+}
+
+/// Same as [`run_uninstall`] on macOS with the uid, the confirmation reader
+/// and the `launchctl` runner injected — so the Darwin path runs on Linux CI,
+/// exactly like the install / start / restart helpers.
+///
+/// The confirmation comes first here too. The `bootout` is best-effort and
+/// issued unconditionally: `bootout` of a label launchd never loaded exits
+/// non-zero, and so does one whose plist was already deleted by hand, but in
+/// both cases the end state is the one the user asked for. That is the same
+/// reasoning as the `--force` bootout in [`run_launchd_install_with`], and it
+/// is why the result is discarded rather than propagated. Only the plist
+/// unlink can fail the verb.
+pub(crate) fn run_launchd_uninstall_with(
+    home: &Path,
+    daemon_home: &Path,
+    purge: bool,
+    yes: bool,
+    uid: u32,
+    confirm: Confirm<'_>,
+    launchctl: Launchctl<'_>,
+) -> Result<(), ServiceError> {
+    confirm_purge(daemon_home, purge, yes, confirm)?;
+    let _ = launchctl(&["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")]);
+    let plist = plist_path(home);
+    let removed = if plist.exists() {
+        remove_service_file(&plist)?;
+        Some(plist)
+    } else {
+        None
+    };
+    finish_uninstall(removed.as_deref(), daemon_home, purge)
+}
+
+/// The `--purge` gate, run before any mutation. A no-op without `--purge`
+/// (there is nothing destructive to confirm) and with `--yes` (the flag *is*
+/// the confirmation, exactly as on `reset workspace` and on the macOS install
+/// `--force`). `--yes` without `--purge` therefore lands here and is ignored.
+///
+/// Otherwise this is the `reset workspace` decision verbatim: non-tty stdin is
+/// refused rather than silently obeyed in a pipeline, and only `y` / `Y`
+/// proceeds.
+///
+/// Neither refusal is printed here. The user-facing wording is carried by
+/// [`ServiceError::NotATty`] and [`ServiceError::Declined`], and printed
+/// exactly once by `cli::service_exit` — the same single-print contract
+/// `reset workspace` has, reached from the other end: there the copy is
+/// written inside `reset::run_workspace` and the caller returns a bare exit 2,
+/// here the copy lives in `Display` and the caller is the only writer.
+fn confirm_purge(
+    daemon_home: &Path,
+    purge: bool,
+    yes: bool,
+    confirm: Confirm<'_>,
+) -> Result<(), ServiceError> {
+    if !purge || yes {
+        return Ok(());
+    }
+    let prompt = format!("Delete the daemon home {}? [y/N] ", daemon_home.display());
+    let Some(line) = confirm(&prompt)? else {
+        return Err(ServiceError::NotATty);
+    };
+    let answer = line.trim();
+    if answer == "y" || answer == "Y" {
+        return Ok(());
+    }
+    Err(ServiceError::Declined)
+}
+
+/// The production [`Confirm`]: `None` when stdin is not a tty, otherwise the
+/// prompt on **stderr** (stdout stays the machine-readable report) and one
+/// line from stdin. Unlocked `eprint!` — this one-shot opens no Tantivy index,
+/// so there is no lock to hoist across the blocking read.
+fn confirm_on_tty(prompt: &str) -> Result<Option<String>, ServiceError> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    eprint!("{prompt}");
+    std::io::stderr().flush().map_err(ServiceError::Stdin)?;
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(ServiceError::Stdin)?;
+    Ok(Some(line))
+}
+
+/// Unlink one service file, naming it on failure. Deliberately not
+/// `remove_dir_all`: this only ever takes the unit file or the plist.
+fn remove_service_file(path: &Path) -> Result<(), ServiceError> {
+    std::fs::remove_file(path).map_err(|source| ServiceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Purge (if it was confirmed), then print the report. Purge goes first so a
+/// failed delete never gets announced as a success.
+fn finish_uninstall(
+    removed: Option<&Path>,
+    daemon_home: &Path,
+    purge: bool,
+) -> Result<(), ServiceError> {
+    if purge {
+        remove_daemon_home(daemon_home)?;
+    }
+    // Unlocked `print!`: this one-shot never opens a Tantivy index, so there
+    // is no lock to hoist (same as `run_status`).
+    print!("{}", render_uninstall_report(removed, daemon_home, purge));
+    Ok(())
+}
+
+/// `--purge`: delete the daemon home and nothing else.
+///
+/// The one `remove_dir_all` in this module, and it is reached only through
+/// [`confirm_purge`]. `daemon_home` is `$HOME/.agent` — the registry, the
+/// socket and `dreamd.log` — never a project root: nothing here discovers an
+/// [`AgentRoot`] or joins `.agent` onto a cwd, so a per-project
+/// `<repo>/.agent/` store cannot be reached from this path. An already-absent
+/// directory is success, which keeps `--purge` idempotent alongside the
+/// teardown.
+fn remove_daemon_home(daemon_home: &Path) -> Result<(), ServiceError> {
+    match std::fs::remove_dir_all(daemon_home) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ServiceError::Io {
+            path: daemon_home.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Render the locked `uninstall` stdout (byte-tested): what went away, then
+/// what did not. The daemon-home line flips from `preserved:` to `removed:`
+/// under `--purge`; the per-project line is unconditional, because no flag on
+/// this verb ever deletes a project store and the output is where that promise
+/// is visible.
+pub(crate) fn render_uninstall_report(
+    removed: Option<&Path>,
+    daemon_home: &Path,
+    purged: bool,
+) -> String {
+    let removed = removed.map_or_else(|| "(none)".to_string(), |path| path.display().to_string());
+    let daemon_home = daemon_home.display();
+    let lines = [
+        format!("removed: {removed}"),
+        if purged {
+            format!("removed: {daemon_home} (daemon home)")
+        } else {
+            format!("preserved: {daemon_home} (daemon home)")
+        },
+        "preserved: per-project .agent/ stores".to_string(),
+    ];
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 /// `dreamd service status` (AILAB-178): pick the backend, query it, print the
 /// report with the pre-read log tail. Never opens the log itself and never
 /// touches the tracing file layer — `log_tail` comes from
@@ -936,7 +1220,10 @@ mod tests {
     // live launchd, and a test must never enable a real unit or bootstrap a
     // real LaunchAgent under the developer's HOME. The uid is injected (501)
     // so `id -u` is never spawned either, and every launchd test runs on
-    // Linux — none is gated on the macOS target.
+    // Linux — none is gated on the macOS target. `uninstall`'s confirmation
+    // is injected on the same principle (AILAB-202): the tty probe and the
+    // line read are closures, so no test blocks on real stdin or depends on
+    // whether the harness gave the runner a terminal.
 
     const FAKE_EXE: &str = "/opt/dreamd/bin/dreamd";
     const FAKE_UID: u32 = 501;
@@ -1331,6 +1618,23 @@ WantedBy=default.target
         assert_eq!(
             uid.to_string(),
             "could not determine the current uid via `id -u`: unparseable `id -u` output \"abc\""
+        );
+    }
+
+    /// AILAB-202 — the `--purge` confirmation refusals. `NotATty` is worded
+    /// byte-identically to `reset workspace`'s, because it is the same idiom
+    /// and users meet it the same way.
+    #[test]
+    fn display_covers_uninstall_confirmation_variants() {
+        assert_eq!(
+            ServiceError::NotATty.to_string(),
+            "stdin is not a tty; pass --yes to confirm"
+        );
+        assert_eq!(ServiceError::Declined.to_string(), "uninstall declined");
+        let stdin = ServiceError::Stdin(std::io::Error::other("closed"));
+        assert_eq!(
+            stdin.to_string(),
+            "could not read the confirmation from stdin: closed"
         );
     }
 
@@ -2121,6 +2425,448 @@ recent log (last 10 lines):
         assert_eq!(
             parse_launchctl_print("\tstate = not running\n"),
             (ServiceState::Stopped, None)
+        );
+    }
+
+    // ---- uninstall (AILAB-202) ----------------------------------------------
+
+    /// A [`Confirm`] that must never be consulted: without `--purge` there is
+    /// nothing destructive to confirm, and with `--yes` the flag *is* the
+    /// confirmation.
+    fn never_confirm(prompt: &str) -> Result<Option<String>, ServiceError> {
+        panic!("confirmation must not be requested, got prompt {prompt:?}")
+    }
+
+    /// A [`Confirm`] standing in for non-tty stdin — a pipeline, or CI.
+    fn not_a_tty(_prompt: &str) -> Result<Option<String>, ServiceError> {
+        Ok(None)
+    }
+
+    /// A fake HOME carrying an installed unit file, an installed plist and a
+    /// populated daemon home, plus a **separate** project directory with its
+    /// own `.agent/` store. The project deliberately lives in its own tempdir,
+    /// not under HOME: that is the store `--purge` must not be able to reach.
+    /// Returns `(home_guard, project_guard)`.
+    #[cfg(unix)]
+    fn installed_home_and_project() -> (tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let unit = unit_path(home.path());
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, "[Unit]\n").unwrap();
+        let plist = plist_path(home.path());
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, "<plist/>\n").unwrap();
+        let daemon_home = home.path().join(".agent");
+        fs::create_dir_all(&daemon_home).unwrap();
+        fs::write(daemon_home.join("registry.toml"), "").unwrap();
+        fs::write(daemon_home.join("dreamd.log"), "log\n").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_store = project.path().join(".agent");
+        fs::create_dir_all(&project_store).unwrap();
+        fs::write(project_store.join("AGENT_LEARNINGS.jsonl"), "{}\n").unwrap();
+        (home, project)
+    }
+
+    /// A host with no supervisor has nothing to remove: exit-2 refusal, the
+    /// runner never reached, the confirmation never requested, and — the part
+    /// that matters — the unit file and the daemon home still on disk.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_without_systemd_refuses_and_touches_nothing() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            false,
+            true,
+            false,
+            &mut never_confirm,
+            &mut never_systemctl,
+        );
+        assert!(matches!(result, Err(ServiceError::NoSystemd)), "{result:?}");
+        assert!(unit_path(home.path()).is_file(), "unit must survive");
+        assert!(daemon_home.is_dir(), "daemon home must survive");
+    }
+
+    /// The locked Linux argv, in order, with the unit unlinked in-process
+    /// between them. `--user` is prepended by production's [`systemctl_user`],
+    /// so the runner sees only the words after it — exactly as for `start` and
+    /// `restart`. The bool records whether the unit still existed at each
+    /// call, pinning the unlink between `disable` and `daemon-reload`.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_disables_removes_unit_then_reloads() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let unit = unit_path(home.path());
+        let mut calls: Vec<(Vec<String>, bool)> = Vec::new();
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            false,
+            false,
+            &mut never_confirm,
+            &mut |args: &[&str]| {
+                calls.push((args.iter().map(|s| s.to_string()).collect(), unit.exists()));
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            calls,
+            [
+                (
+                    vec![
+                        "disable".to_string(),
+                        "--now".to_string(),
+                        UNIT_NAME.to_string()
+                    ],
+                    true
+                ),
+                (vec!["daemon-reload".to_string()], false),
+            ]
+        );
+        assert!(!unit.exists(), "the unit file must be gone");
+        assert!(
+            daemon_home.is_dir(),
+            "the daemon home must survive an unpurged uninstall"
+        );
+    }
+
+    /// Idempotent, unlike `start`: with no unit on disk there is nothing to
+    /// disable and nothing for `daemon-reload` to pick up, so `systemctl` is
+    /// never spawned and the verb still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_without_unit_is_idempotent_and_never_spawns() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            false,
+            false,
+            &mut never_confirm,
+            &mut never_systemctl,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Darwin teardown on Linux CI: the locked `bootout` argv against the
+    /// injected uid, and the plist unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn launchd_uninstall_boots_out_and_removes_plist() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let plist = plist_path(home.path());
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_launchd_uninstall_with(
+            home.path(),
+            &daemon_home,
+            false,
+            false,
+            FAKE_UID,
+            &mut never_confirm,
+            &mut |args: &[&str]| {
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            calls,
+            [[
+                "bootout".to_string(),
+                format!("gui/{FAKE_UID}/{LAUNCHD_LABEL}")
+            ]]
+        );
+        assert!(!plist.exists(), "the plist must be gone");
+        assert!(daemon_home.is_dir(), "the daemon home must survive");
+    }
+
+    /// A plist that is already gone: the `bootout` is still issued and its
+    /// non-zero exit — what launchd says for a label it never loaded — is
+    /// swallowed, so the verb succeeds and reports `(none)`.
+    #[cfg(unix)]
+    #[test]
+    fn launchd_uninstall_without_plist_ignores_bootout_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon_home = home.path().join(".agent");
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_launchd_uninstall_with(
+            home.path(),
+            &daemon_home,
+            false,
+            false,
+            FAKE_UID,
+            &mut never_confirm,
+            &mut |args: &[&str]| {
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                Err(ServiceError::Uid("no such service".into()))
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.len(), 1, "bootout is best-effort but still issued");
+        assert!(!plist_path(home.path()).exists());
+    }
+
+    /// Confirm-before-mutation on the Darwin path, run on Linux CI. `bootout`
+    /// is not a read: it stops a running LaunchAgent, so it counts as the
+    /// mutation the confirmation guards. A `--purge` refused for non-tty stdin
+    /// must therefore leave `launchctl` unspawned, the plist on disk and the
+    /// daemon home intact — the same guarantee
+    /// `purge_without_yes_on_non_tty_refuses_and_touches_nothing` pins on Linux.
+    #[cfg(unix)]
+    #[test]
+    fn launchd_purge_without_yes_on_non_tty_refuses_before_bootout() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let result = run_launchd_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            false,
+            FAKE_UID,
+            &mut not_a_tty,
+            &mut never_launchctl,
+        );
+        assert!(matches!(result, Err(ServiceError::NotATty)), "{result:?}");
+        assert!(plist_path(home.path()).is_file(), "the plist must survive");
+        assert!(daemon_home.is_dir(), "daemon home must survive");
+    }
+
+    /// `--purge` without `--yes` in a pipeline: exit-2 refusal *before* any
+    /// mutation, so the unit, the daemon home and the project store are all
+    /// untouched and `systemctl` was never spawned.
+    #[cfg(unix)]
+    #[test]
+    fn purge_without_yes_on_non_tty_refuses_and_touches_nothing() {
+        let (home, project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            false,
+            &mut not_a_tty,
+            &mut never_systemctl,
+        );
+        assert!(matches!(result, Err(ServiceError::NotATty)), "{result:?}");
+        assert!(unit_path(home.path()).is_file(), "unit must survive");
+        assert!(daemon_home.is_dir(), "daemon home must survive");
+        assert!(project.path().join(".agent").is_dir());
+    }
+
+    /// A tty that answers anything but `y` / `Y` declines: same
+    /// nothing-was-touched guarantee, a different exit-2 error.
+    #[cfg(unix)]
+    #[test]
+    fn purge_declined_on_tty_touches_nothing() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let mut prompts: Vec<String> = Vec::new();
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            false,
+            &mut |prompt: &str| {
+                prompts.push(prompt.to_string());
+                Ok(Some("n\n".to_string()))
+            },
+            &mut never_systemctl,
+        );
+        assert!(matches!(result, Err(ServiceError::Declined)), "{result:?}");
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains(&daemon_home.display().to_string()),
+            "the prompt must name the directory it is about to delete: {:?}",
+            prompts[0]
+        );
+        assert!(unit_path(home.path()).is_file(), "unit must survive");
+        assert!(daemon_home.is_dir(), "daemon home must survive");
+    }
+
+    /// The accept half of the same branch `purge_declined_on_tty_touches_nothing`
+    /// pins: a tty that answers `y` proceeds, the prompt was really issued and
+    /// named the directory, and the blast radius is still exactly the daemon
+    /// home — the sibling project store, in its own tree the way a user's repo
+    /// is, comes through untouched.
+    #[cfg(unix)]
+    #[test]
+    fn purge_accepted_on_tty_deletes_daemon_home() {
+        let (home, project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let project_store = project.path().join(".agent");
+        let mut prompts: Vec<String> = Vec::new();
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            false,
+            &mut |prompt: &str| {
+                prompts.push(prompt.to_string());
+                Ok(Some("y\n".to_string()))
+            },
+            &mut |args: &[&str]| {
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains(&daemon_home.display().to_string()),
+            "the prompt must name the directory it is about to delete: {:?}",
+            prompts[0]
+        );
+        assert!(
+            !daemon_home.exists(),
+            "a typed `y` must delete the daemon home"
+        );
+        assert!(
+            project_store.is_dir(),
+            "a typed `y` must never reach a per-project .agent/ store"
+        );
+        assert!(
+            project_store.join("AGENT_LEARNINGS.jsonl").is_file(),
+            "the project store's contents must be untouched"
+        );
+        assert_eq!(calls.len(), 2, "teardown still ran: {calls:?}");
+    }
+
+    /// The two edges of the typed answer. It is trimmed before it is judged, so
+    /// a leading space and an uppercase `Y` still proceed; anything else
+    /// declines and deletes nothing — `yes` included, which reads like consent
+    /// but is not one of the two accepted words. Fresh fixtures per case,
+    /// because the accepting half purges.
+    #[cfg(unix)]
+    #[test]
+    fn purge_answer_is_trimmed_and_only_y_or_upper_y_accepted() {
+        let (home, _project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            false,
+            &mut |_prompt: &str| Ok(Some(" Y\n".to_string())),
+            &mut |_args: &[&str]| Ok(()),
+        );
+        assert!(
+            result.is_ok(),
+            "` Y` must be trimmed and accepted: {result:?}"
+        );
+        assert!(!daemon_home.exists(), "` Y` must delete the daemon home");
+
+        let (home, project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            false,
+            &mut |_prompt: &str| Ok(Some("yes\n".to_string())),
+            &mut never_systemctl,
+        );
+        assert!(matches!(result, Err(ServiceError::Declined)), "{result:?}");
+        assert!(daemon_home.is_dir(), "`yes` must delete nothing");
+        assert!(unit_path(home.path()).is_file(), "unit must survive");
+        assert!(project.path().join(".agent").is_dir());
+    }
+
+    /// The founder lock, in one assertion: `--purge --yes` deletes the daemon
+    /// home and **only** the daemon home. The sibling project store — a real
+    /// `.agent/` directory in its own tree, exactly what a user's repo has —
+    /// is still there afterwards, and the report says so on the line that
+    /// always prints.
+    #[cfg(unix)]
+    #[test]
+    fn purge_with_yes_deletes_daemon_home_and_spares_project_store() {
+        let (home, project) = installed_home_and_project();
+        let daemon_home = home.path().join(".agent");
+        let project_store = project.path().join(".agent");
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            true,
+            &mut never_confirm,
+            &mut |args: &[&str]| {
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!daemon_home.exists(), "--purge must delete the daemon home");
+        assert!(
+            project_store.is_dir(),
+            "--purge must never reach a per-project .agent/ store"
+        );
+        assert!(
+            project_store.join("AGENT_LEARNINGS.jsonl").is_file(),
+            "the project store's contents must be untouched"
+        );
+        assert!(!unit_path(home.path()).exists());
+        assert_eq!(calls.len(), 2, "teardown still ran: {calls:?}");
+    }
+
+    /// `--purge` on a daemon home that is already gone is success, keeping the
+    /// flag as idempotent as the teardown it follows.
+    #[cfg(unix)]
+    #[test]
+    fn purge_with_missing_daemon_home_succeeds() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon_home = home.path().join(".agent");
+        let result = run_uninstall_with(
+            home.path(),
+            &daemon_home,
+            true,
+            true,
+            true,
+            &mut never_confirm,
+            &mut never_systemctl,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The locked stdout, both shapes. The per-project `preserved:` line is
+    /// present either way — it is the user-visible half of the promise that no
+    /// flag on this verb touches a project store.
+    #[test]
+    fn render_uninstall_report_is_byte_stable() {
+        let unit = PathBuf::from("/h/.config/systemd/user/dreamd.service");
+        let daemon_home = PathBuf::from("/h/.agent");
+        assert_eq!(
+            render_uninstall_report(Some(&unit), &daemon_home, false),
+            "removed: /h/.config/systemd/user/dreamd.service\n\
+             preserved: /h/.agent (daemon home)\n\
+             preserved: per-project .agent/ stores\n"
+        );
+        assert_eq!(
+            render_uninstall_report(Some(&unit), &daemon_home, true),
+            "removed: /h/.config/systemd/user/dreamd.service\n\
+             removed: /h/.agent (daemon home)\n\
+             preserved: per-project .agent/ stores\n"
+        );
+        assert_eq!(
+            render_uninstall_report(None, &daemon_home, false),
+            "removed: (none)\n\
+             preserved: /h/.agent (daemon home)\n\
+             preserved: per-project .agent/ stores\n"
         );
     }
 }

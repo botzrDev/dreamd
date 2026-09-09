@@ -1,0 +1,23 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"service\", \"uninstall\")"
+---
+Remove the user-scope service. Never deletes per-project .agent/ stores.
+
+Tears down the OS service entry only: the systemd --user unit (`disable --now`, remove the unit file, `daemon-reload`) or the macOS LaunchAgent (`launchctl bootout`, remove the plist). It is idempotent — a unit or plist that is already gone is not an error. By default no data is deleted at all: the daemon home `~/.agent/` and every per-project `.agent/` store are left exactly as they are, and both are reported on the `preserved:` lines.
+
+`--purge` additionally deletes the daemon home `~/.agent/` — the registry, the socket and `dreamd.log`, and nothing else. It never walks or removes a per-project `<repo>/.agent/` store. It needs `--yes` or a typed `y` on a tty, like `dreamd reset workspace`.
+
+This is not `dreamd uninstall`, which stops running processes, drops the socket and clears caches without touching the OS service entry.
+
+Usage: uninstall [OPTIONS]
+
+Options:
+      --purge
+          Also remove ~/.agent/ (registry, socket, log). Not per-project stores
+
+      --yes
+          Confirm --purge without a prompt (`reset workspace --yes`)
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -240,9 +240,12 @@ pub enum ResetCommand {
     },
 }
 
-/// Args for `dreamd service`. Wraps the nested verb so later verbs
-/// (uninstall — a separate ticket, AILAB-202) slot in without
-/// reshuffling top-level command parsing. Same shape as [`ResetArgs`].
+/// Args for `dreamd service`. Wraps the nested verb so the lifecycle set
+/// (install / start / restart / status / uninstall — the last landed with
+/// AILAB-202) grew without reshuffling top-level command parsing. Same shape
+/// as [`ResetArgs`]. The nested `uninstall` is not the top-level
+/// [`Command::Uninstall`] (AILAB-226), which stops processes and clears
+/// caches rather than removing the OS service entry.
 #[derive(Args)]
 pub struct ServiceArgs {
     #[command(subcommand)]
@@ -265,6 +268,31 @@ pub enum ServiceCommand {
     /// Report whether the user-scope service is running (systemd / launchd).
     /// Daemon-level liveness (UDS) is `dreamd status`.
     Status,
+    /// Remove the user-scope service. Never deletes per-project .agent/ stores.
+    ///
+    /// Tears down the OS service entry only: the systemd --user unit
+    /// (`disable --now`, remove the unit file, `daemon-reload`) or the macOS
+    /// LaunchAgent (`launchctl bootout`, remove the plist). It is idempotent —
+    /// a unit or plist that is already gone is not an error. By default no
+    /// data is deleted at all: the daemon home `~/.agent/` and every
+    /// per-project `.agent/` store are left exactly as they are, and both are
+    /// reported on the `preserved:` lines.
+    ///
+    /// `--purge` additionally deletes the daemon home `~/.agent/` — the
+    /// registry, the socket and `dreamd.log`, and nothing else. It never walks
+    /// or removes a per-project `<repo>/.agent/` store. It needs `--yes` or a
+    /// typed `y` on a tty, like `dreamd reset workspace`.
+    ///
+    /// This is not `dreamd uninstall`, which stops running processes, drops
+    /// the socket and clears caches without touching the OS service entry.
+    Uninstall {
+        /// Also remove ~/.agent/ (registry, socket, log). Not per-project stores.
+        #[arg(long)]
+        purge: bool,
+        /// Confirm --purge without a prompt (`reset workspace --yes`).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
@@ -1110,13 +1138,41 @@ fn run_service_status() -> ExitCode {
     service_exit(commands::service::run_status(&home, &log_tail))
 }
 
+/// `dreamd service uninstall` (AILAB-202): tear down the user-scope service
+/// entry — the systemd --user unit or the macOS LaunchAgent — and print the
+/// removed / preserved paths. Idempotent: a unit or plist that is already
+/// gone is not an error. `--purge` additionally deletes the daemon home
+/// `~/.agent/` after `--yes` or a typed `y` on a tty, and never a per-project
+/// `.agent/` store.
+///
+/// Not the top-level `dreamd uninstall` (AILAB-226), which stops local
+/// processes and clears caches: this verb never touches a process table.
+/// No project root is needed, so `current_dir_or_exit` is deliberately not
+/// called — one `HOME` read drives the unit path, the plist path and the
+/// daemon home alike. Same console-only, index-free contract as
+/// `run_service_install`: unlocked `println!`, no hoisted stdio lock.
+fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
+    let Some(home) = home_dir() else {
+        eprintln!("dreamd: error — HOME is not set; cannot locate the per-user service path");
+        return ExitCode::from(1);
+    };
+    let daemon_home = home.join(".agent");
+    service_exit(commands::service::run_uninstall(
+        &home,
+        &daemon_home,
+        purge,
+        yes,
+    ))
+}
+
 /// Map a `service` verb result onto the exit-code contract. The usage
 /// refusals — no supported backend on this host, no project root under cwd,
-/// an existing LaunchAgent plist without `--force` — exit 2 exactly like
-/// `dreamd watch` without a project root; every other failure (service file
-/// write, `systemctl` / `launchctl` / `id -u` spawn or non-zero exit) is a
-/// runtime error and exits 1. The refusal copy lives in `ServiceError`'s
-/// `Display`.
+/// an existing LaunchAgent plist without `--force`, and the two `service
+/// uninstall --purge` confirmation refusals (non-tty stdin without `--yes`,
+/// and a declined prompt) — exit 2 exactly like `dreamd watch` without a
+/// project root; every other failure (service file write, `systemctl` /
+/// `launchctl` / `id -u` spawn or non-zero exit) is a runtime error and exits
+/// 1. The refusal copy lives in `ServiceError`'s `Display`.
 fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode {
     use commands::service::ServiceError;
     match result {
@@ -1124,7 +1180,9 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
         Err(
             e @ (ServiceError::NoSystemd
             | ServiceError::NoProjectRoot
-            | ServiceError::PlistExists(_)),
+            | ServiceError::PlistExists(_)
+            | ServiceError::NotATty
+            | ServiceError::Declined),
         ) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(2)
@@ -1215,6 +1273,7 @@ pub fn run() -> ExitCode {
             ServiceCommand::Start => run_service_start(),
             ServiceCommand::Restart => run_service_restart(),
             ServiceCommand::Status => run_service_status(),
+            ServiceCommand::Uninstall { purge, yes } => run_service_uninstall(purge, yes),
         },
         Command::Setup(args) => {
             run_setup(args, setup_interactive(matches.subcommand_matches("setup")))
@@ -1488,6 +1547,38 @@ mod tests {
         ));
     }
 
+    /// AILAB-202 — the nested verb, and both of its flags. `--yes` alone
+    /// parses too: it is the `--purge` confirmation, so on its own it is
+    /// accepted and ignored, the same shape as `--force` on a Linux install.
+    #[test]
+    fn parses_service_uninstall() {
+        for (argv, want_purge, want_yes) in [
+            (vec!["dreamd", "service", "uninstall"], false, false),
+            (
+                vec!["dreamd", "service", "uninstall", "--purge"],
+                true,
+                false,
+            ),
+            (
+                vec!["dreamd", "service", "uninstall", "--purge", "--yes"],
+                true,
+                true,
+            ),
+            (vec!["dreamd", "service", "uninstall", "--yes"], false, true),
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            match cli.command {
+                Some(Command::Service(ServiceArgs {
+                    command: ServiceCommand::Uninstall { purge, yes },
+                })) => {
+                    assert_eq!(purge, want_purge, "{argv:?}");
+                    assert_eq!(yes, want_yes, "{argv:?}");
+                }
+                _ => panic!("expected Service(Uninstall) for {argv:?}"),
+            }
+        }
+    }
+
     #[test]
     fn service_exit_maps_usage_refusals_to_2_and_runtime_failures_to_1() {
         use commands::service::ServiceError;
@@ -1508,6 +1599,21 @@ mod tests {
             )))),
             ExitCode::from(2),
             "an existing plist without --force is a usage refusal"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::NotATty)),
+            ExitCode::from(2),
+            "non-tty stdin without --yes is a usage refusal, like reset workspace"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::Declined)),
+            ExitCode::from(2),
+            "a declined --purge prompt is a usage refusal, like reset workspace"
+        );
+        assert_eq!(
+            service_exit(Err(ServiceError::Stdin(std::io::Error::other("x")))),
+            ExitCode::from(1),
+            "an unreadable confirmation is a runtime error"
         );
         assert_eq!(
             service_exit(Err(ServiceError::Spawn {
@@ -1661,6 +1767,9 @@ mod tests {
             vec!["dreamd", "service", "start"],
             vec!["dreamd", "service", "restart"],
             vec!["dreamd", "service", "status"],
+            vec!["dreamd", "service", "uninstall"],
+            vec!["dreamd", "service", "uninstall", "--purge"],
+            vec!["dreamd", "service", "uninstall", "--purge", "--yes"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();
             assert!(

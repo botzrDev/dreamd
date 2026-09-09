@@ -562,8 +562,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). Do not call `detach_double_fork`. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
 - **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
-- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start,Status}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; `service restart` is AILAB-185 (bounce-only); uninstall remains later (AILAB-202). Tests must not require a live `systemctl --user`.
-- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `service-restart-is-not-update-restart`
+- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start,Restart,Status,Uninstall}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; `service restart` is AILAB-185 (bounce-only); `service uninstall` is AILAB-202 (unit/plist only; `--purge` is daemon home, not per-project stores). Tests must not require a live `systemctl --user`.
+- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `service-restart-is-not-update-restart`, `service-uninstall-is-not-dreamd-uninstall`
 
 ### service-status-is-not-dreamd-status
 
@@ -578,6 +578,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** Linear AILAB-185 AC named the Darwin kickstart line as if it were new, and the upgrade story is easy to collapse into `update --restart`. A first draft of 185 docs claimed update “leaves the supervised unit alone”; false — the unit inherits `HOME` (AILAB-584 forbids `Environment=HOME=`), so the stop pass matches it. An npx cache-path change still needs `service install` first.
 - **How to apply:** Nested `ServiceCommand::Restart`. Injected runners like `start`. Missing unit = same as `start` (supervisor fail, exit 1). `NoSystemd` stays exit 2. Docs: README one-liner plus `docs/install.md`; `update` stops, `service restart` brings the unit back.
 - **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `npm-shim-must-list-new-subcommands`
+
+### service-uninstall-is-not-dreamd-uninstall
+
+- **Rule:** `dreamd service uninstall` removes the systemd user unit / LaunchAgent only. `dreamd uninstall` (AILAB-226) stops processes and clears caches. `--purge` deletes daemon home `~/.agent/` after `--yes` or typed `y` (`reset workspace` idiom), never per-project `.agent/`.
+- **Why:** Linear AILAB-202 AC named `--purge` + typed-Y and cited gone PRD/plan1.md. A merge into `Command::Uninstall` would pkill and cache-wipe. Store wipe of project `.agent/` is still the manual troubleshooting “Full fresh store”.
+- **How to apply:** Nested `ServiceCommand::Uninstall { purge, yes }`. Injected runners. Idempotent if the unit/plist is already gone. Confirm `--purge` before any mutation. Do not call `commands::uninstall::run` or `lifecycle_cleanup`.
+- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `service-restart-is-not-update-restart`, `npm-shim-must-list-new-subcommands`
 
 ### launchd-supervises-foreground-watch
 

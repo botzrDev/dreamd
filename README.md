@@ -125,7 +125,7 @@ Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/h
 
 **Where does memory live?** In `<project>/.agent/`. The daemon and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL / Markdown by hand; durable appends should go through the daemon / MCP so the writer stays single-writer.
 
-**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. To uninstall dreamd itself, run `dreamd uninstall` — details: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset).
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. To uninstall dreamd itself, run `dreamd uninstall` — details: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset). That stops running processes and clears caches; removing the per-user *service* entry (the systemd unit or LaunchAgent) is the separate `dreamd service uninstall`, whose optional `--purge` deletes the daemon home `~/.agent/` and never a per-project `.agent/` store ([docs/install.md](./docs/install.md)).
 
 **Windows?** Not in v0.1. Linux and macOS only. Windows lifecycle is planned for v0.1.1.
 

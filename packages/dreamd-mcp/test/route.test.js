@@ -59,6 +59,16 @@ test('service -> dreamd service (AILAB-169/AILAB-185: install/start/restart not 
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'start']), ['service', 'start']);
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'restart']), ['service', 'restart']);
 });
+// AILAB-202: the nested `service uninstall` rides the `service` token that is
+// already in DREAMD_SUBCOMMANDS — no new top-level token (`uninstall` is
+// AILAB-226's own verb and is listed separately).
+test('service uninstall -> dreamd service uninstall (AILAB-202: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['service', 'uninstall']), ['service', 'uninstall']);
+  assert.deepStrictEqual(
+    resolveDreamdArgs(['service', 'uninstall', '--purge', '--yes']),
+    ['service', 'uninstall', '--purge', '--yes'],
+  );
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });
