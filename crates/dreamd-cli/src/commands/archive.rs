@@ -27,7 +27,6 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::episodic::{self, EpisodicError};
-use dreamd_core::server::is_daemon_socket_live;
 use dreamd_core::{AgentRoot, LayoutError};
 
 #[derive(Debug)]
@@ -84,6 +83,23 @@ impl std::fmt::Display for ArchiveError {
 
 impl std::error::Error for ArchiveError {}
 
+/// Daemon liveness probe for the resolved socket path. Mirrors
+/// `commands::status::daemon_liveness`.
+#[cfg(unix)]
+fn daemon_liveness(path: &Path) -> bool {
+    dreamd_core::server::is_daemon_socket_live(path)
+}
+
+/// Non-Unix probe (AILAB-174): there is no UDS daemon to collide with until
+/// DR-121, so the coexistence guard never fires and `--force-unpin` stays
+/// available. Deliberately not `path.exists()` (the `status` stub's choice) —
+/// `status` reports, this refuses, and refusing an unpin on a stale path would
+/// leave the operator with no escape hatch at all.
+#[cfg(not(unix))]
+fn daemon_liveness(_path: &Path) -> bool {
+    false
+}
+
 /// `dreamd archive --force-unpin <EVENT_ID | --all>` entry point.
 ///
 /// Validates the flag combination, refuses if a daemon is holding the log, then
@@ -139,7 +155,7 @@ pub fn run(
     // Refuse while a live daemon holds the log: its offset-append writes would
     // survive our rename and clobber the unpin. Stop the daemon, then retry.
     if let Some(sock) = socket {
-        if is_daemon_socket_live(sock) {
+        if daemon_liveness(sock) {
             writeln!(
                 err,
                 "dreamd: error — daemon is running; stop it first — dreamd cannot safely \

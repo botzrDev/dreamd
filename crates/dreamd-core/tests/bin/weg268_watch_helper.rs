@@ -13,11 +13,16 @@
 //! home; the parent then polls for that socket, delivers SIGTERM, and asserts
 //! the socket is gone after the daemon exits.
 
-#![cfg(unix)]
-
+// AILAB-174: was `#![cfg(unix)]`, which strips the whole crate on Windows —
+// including `main` — so the `[[bin]]` target failed with `E0601: main function
+// not found` rather than being skipped. Gate the items instead and give `main`
+// a `not(unix)` twin. `run_watch` itself stays Unix-only (DR-121 / AILAB-203).
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::ExitCode;
 
+#[cfg(unix)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -44,4 +49,12 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Non-Unix `main` so the `[[bin]]` target still links (AILAB-174). The only
+/// consumer, `tests/weg268_sigterm_socket.rs`, is `#![cfg(unix)]`.
+#[cfg(not(unix))]
+fn main() -> std::process::ExitCode {
+    eprintln!("weg268_watch_helper: unix-only test helper (DR-121)");
+    std::process::ExitCode::from(64)
 }

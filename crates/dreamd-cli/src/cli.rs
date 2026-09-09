@@ -479,7 +479,10 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     // Resolve the daemon socket the same way `status` does ($DREAMD_SOCK
     // else ~/.agent/dreamd.sock). The guard refuses if it probes live so
     // a running daemon can't clobber the rewrite.
+    #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> = None;
     // lock-ok (AILAB-583): archive never opens a Tantivy index — it only reads
     // and rewrites the episodic JSONL. The liveness probe below does spawn a
     // thread and block on it, but that closure only connects to the socket —
@@ -925,7 +928,10 @@ fn run_status() -> ExitCode {
     // helper. AILAB-184: `status` no longer installs a file layer, so nothing in
     // this process truncates the log — the tail is read here, in-command, rather
     // than pre-read in `run()` before `init_tracing` (the retired WEG-103 dance).
+    #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> = None;
     let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));
@@ -997,7 +1003,10 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     let daemon_home = resolve_daemon_home();
     // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock),
     // same as the status arm — never a hardcoded path.
+    #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> = None;
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
     let npx_dir = resolve_npx_dir();
@@ -1039,7 +1048,10 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
 
 fn run_update(args: UpdateArgs) -> ExitCode {
     // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock).
+    #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> = None;
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
     // lock-ok (AILAB-583): update never opens a Tantivy index — it signals this

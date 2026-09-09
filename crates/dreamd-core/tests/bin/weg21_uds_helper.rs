@@ -19,18 +19,35 @@
 //! process visible so it can wait on the child PID. Detachment is exercised
 //! separately by the production `server::run()` path.
 
+// AILAB-174: this helper is Unix-only — it binds a `std::os::unix::net`
+// socket and drives `dreamd_core::server`, which is `#[cfg(unix)]` in lib.rs.
+// `cargo test --workspace` still *builds* every `[[bin]]` target on Windows, so
+// each item is gated individually and `main` has a `not(unix)` twin. A
+// crate-level `#![cfg(unix)]` would strip `main` too — that is `E0601`, not a
+// gate. The Windows daemon port is DR-121 / AILAB-203.
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::ExitCode;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use dreamd_core::coordinator::MemoryCoordinatorMsg;
+#[cfg(unix)]
 use dreamd_core::layout::AgentRoot;
+#[cfg(unix)]
 use dreamd_core::server::{bind_writer_socket, Supervisor};
+#[cfg(unix)]
 use dreamd_protocol::{AgentLearning, EventId};
+#[cfg(unix)]
 use tokio::sync::oneshot;
 
+#[cfg(unix)]
 fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -40,6 +57,7 @@ fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     Ok(payload)
 }
 
+#[cfg(unix)]
 fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
     let len = (bytes.len() as u32).to_be_bytes();
     stream.write_all(&len)?;
@@ -47,6 +65,7 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
     stream.flush()
 }
 
+#[cfg(unix)]
 async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     // Make sure the per-project directories exist; the coordinator's open
     // does this for the episodic dir but the integration test asserts on
@@ -142,6 +161,7 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(unix)]
 fn run_client(socket_path: PathBuf) -> ExitCode {
     let mut stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
@@ -189,6 +209,7 @@ fn run_client(socket_path: PathBuf) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(unix)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -222,4 +243,13 @@ fn main() -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+/// Non-Unix `main` so the `[[bin]]` target still links (AILAB-174). The only
+/// consumer, `tests/weg21_writer_process.rs`, is `#![cfg(unix)]` and never
+/// spawns this on Windows.
+#[cfg(not(unix))]
+fn main() -> std::process::ExitCode {
+    eprintln!("weg21_uds_helper: unix-only test helper (DR-121)");
+    std::process::ExitCode::from(64)
 }

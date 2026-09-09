@@ -36,7 +36,11 @@ use tokio::sync::mpsc;
 use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::ingress::{LearnIngress, RecallIngress, RecallResponse, DEFAULT_RECALL_K};
+// AILAB-174: `server` is `#[cfg(unix)]` in lib.rs (DR-121 defers the Windows
+// daemon), and the disclosure is only printed by the unix `run_mcp_server`.
+#[cfg(unix)]
 use crate::privacy::DR413_DISCLOSURE;
+#[cfg(unix)]
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::AgentRoot;
 
@@ -62,6 +66,14 @@ pub enum McpRunError {
     /// `DREAMD_SOCK` was set to a relative path.
     #[error("DREAMD_SOCK is not an absolute path: {0}")]
     InvalidSockPath(PathBuf),
+    /// Non-Unix host (AILAB-174). The daemon, the UDS bridge and
+    /// [`crate::io::write_atomic`] are all Unix-only until DR-121 / AILAB-203,
+    /// so `dreamd mcp` refuses rather than serving a store it cannot durably
+    /// write. Declared unconditionally so this copy is testable on Linux.
+    #[error(
+        "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
+    )]
+    Unsupported,
 }
 
 // Tool parameter structs
@@ -469,6 +481,7 @@ impl Default for MemoryMcpServer {
 /// Priority:
 /// 1. `$DREAMD_SOCK` env var (override for testing / custom installs).
 /// 2. `DaemonHome::new(~/.agent).socket_path()`.
+#[cfg(unix)]
 fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
     crate::daemon_client::resolve_daemon_socket().map_err(|e| match e {
         crate::daemon_client::SockPathError::RelativeSockPath(p) => McpRunError::InvalidSockPath(p),
@@ -621,6 +634,7 @@ async fn send_remote(
 /// that would block EOF from completing it; the in-process branch relies on
 /// `waiting()` returning so `supervisor` drops. Both paths are regression-tested
 /// in `dreamd-cli/tests/mcp_stdin_eof.rs`.
+#[cfg(unix)]
 pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     // Emit privacy disclosure to stderr if no .agent/ store is found.
     // This is the "first run" signal for MCP harness users.
@@ -628,12 +642,11 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         eprintln!("{DR413_DISCLOSURE}");
     }
 
-    // Resolve daemon socket path (used on Unix; Windows daemon bridge is DR-121).
+    // Resolve daemon socket path.
     let sock_path = resolve_sock_path()?;
 
-    // Daemon proxy (Unix only): if reachable over UDS, serve MCP over stdio
-    // backed by Remote. Absent on Windows until DR-121 (TCP fallback).
-    #[cfg(unix)]
+    // Daemon proxy: if reachable over UDS, serve MCP over stdio backed by
+    // Remote.
     match tokio::net::UnixStream::connect(&sock_path).await {
         Ok(_) => {
             // The connect only probes reachability; each tool call opens its
@@ -672,11 +685,6 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         }
     }
 
-    // Suppress unused-variable warning on non-Unix targets where Remote is
-    // not compiled in.
-    #[cfg(not(unix))]
-    let _ = &sock_path;
-
     // In-process MCP server over stdio.
     // When an agent root is found, boot a MemoryCoordinator via Supervisor so
     // append_node dispatches durably. `supervisor` is bound here and must
@@ -686,7 +694,6 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
             // Mirror `run_watch`: one Tantivy handle for live append indexing
             // and search_nodes reuse (WEG-252). Without this hand-off, Phase-1
             // MCP would open a fresh 50 MB IndexWriter on every recall.
-            #[cfg(unix)]
             let (supervisor, server) = {
                 let handle = TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE)
                     .map_err(|e| McpRunError::Service(e.to_string()))?;
@@ -696,14 +703,6 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
                 let tx = supervisor.sender();
                 let server = MemoryMcpServer::with_coordinator_and_index(root, tx, handle)
                     .map_err(|e| McpRunError::Service(e.to_string()))?;
-                (supervisor, server)
-            };
-            #[cfg(not(unix))]
-            let (supervisor, server) = {
-                let supervisor = Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None)
-                    .map_err(|e| McpRunError::Service(e.to_string()))?;
-                let tx = supervisor.sender();
-                let server = MemoryMcpServer::with_coordinator(root, tx);
                 (supervisor, server)
             };
             let svc = server
@@ -727,6 +726,18 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         }
     }
     Ok(())
+}
+
+/// Non-Unix stub for [`run_mcp_server`] (AILAB-174).
+///
+/// Returns [`McpRunError::Unsupported`] unconditionally. There is deliberately
+/// no in-process fallback here: the daemon, the UDS bridge and
+/// [`crate::io::write_atomic`] are all Unix-only until DR-121 / AILAB-203, so
+/// booting a `MemoryCoordinator` on Windows would accept `append_node` calls it
+/// could never durably persist. `dreamd mcp` maps this to exit 2.
+#[cfg(not(unix))]
+pub async fn run_mcp_server(_cwd: &Path) -> Result<(), McpRunError> {
+    Err(McpRunError::Unsupported)
 }
 
 // Tests
@@ -842,6 +853,18 @@ mod tests {
         );
     }
 
+    /// AILAB-174: the Windows refusal copy is a product string shared by
+    /// `dreamd mcp` and `dreamd watch` (both exit 2). Pin it here so the two
+    /// call sites cannot drift and so `docs/windows.md` stays true.
+    #[test]
+    fn unsupported_display_points_at_wsl2() {
+        assert_eq!(
+            McpRunError::Unsupported.to_string(),
+            "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn resolve_sock_path_relative_env_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -851,6 +874,7 @@ mod tests {
         assert!(matches!(result, Err(McpRunError::InvalidSockPath(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_sock_path_absolute_env_passes() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1039,6 +1063,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn append_node_with_coordinator_returns_outcome() {
         use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
@@ -1097,6 +1122,7 @@ mod tests {
 
     /// MCP Phase 1 `append_node` must redact secrets before persist (via
     /// [`LearnIngress`] — same rules as HTTP `post_learn`).
+    #[cfg(unix)]
     #[tokio::test]
     async fn append_node_content_redacted() {
         use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
@@ -1137,6 +1163,7 @@ mod tests {
     /// WEG-275: the `Backend::Local` ingress rejects a dotted/slashed
     /// `skill_action` (tightened charset) and an out-of-range score via
     /// `invalid_request` — both validated before the coordinator is touched.
+    #[cfg(unix)]
     #[tokio::test]
     async fn append_node_rejects_invalid_skill_action_and_score() {
         use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};

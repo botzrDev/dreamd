@@ -94,7 +94,7 @@ Enforces license allowlist and advisory policy defined in `deny.toml`. CI pins `
 cargo test --all-features --workspace
 ```
 
-Windows is in the matrix for visibility but is non-gating until Windows daemon support lands (DR-121). The server/MCP modules are Unix-only today.
+Windows is in the matrix for visibility but is non-gating until Windows daemon support lands (DR-121). The crate **compiles** on Windows (AILAB-174), but the daemon itself does not run there: `server`, `client` and `daemon_client` are `#[cfg(unix)]` (UDS / `SO_PEERCRED`) and `io::write_atomic` returns `ErrorKind::Unsupported`. `dreamd watch` and `dreamd mcp` exit 2 with an unsupported message; the socket probes in `status` / `archive` / `uninstall` / `update` see no daemon. The port is DR-121 / AILAB-203.
 
 ### Reproduce a specific OS locally
 
@@ -219,7 +219,7 @@ Cold `setup`, floating npx pin, `doctor` on the scaffold, idempotent re-run, `up
 
 **macOS and Windows jobs** — informational only, do not block merge.
 
-Windows uses `continue-on-error: true` because the daemon does not yet compile on Windows.
+Windows uses `continue-on-error: true` because the Windows daemon is deferred to DR-121. NFR-2 (stripped `dreamd` ≤ 20 MB) is a Linux-only number; the Windows figure is never a gate.
 
 ---
 

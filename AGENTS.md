@@ -583,8 +583,15 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd service uninstall` removes the systemd user unit / LaunchAgent only. `dreamd uninstall` (AILAB-226) stops processes and clears caches. `--purge` deletes daemon home `~/.agent/` after `--yes` or typed `y` (`reset workspace` idiom), never per-project `.agent/`.
 - **Why:** Linear AILAB-202 AC named `--purge` + typed-Y and cited gone PRD/plan1.md. A merge into `Command::Uninstall` would pkill and cache-wipe. Store wipe of project `.agent/` is still the manual troubleshooting “Full fresh store”.
-- **How to apply:** Nested `ServiceCommand::Uninstall { purge, yes }`. Injected runners. Idempotent if the unit/plist is already gone. Confirm `--purge` before any mutation. Do not call `commands::uninstall::run` or `lifecycle_cleanup`.
+- **How to apply:** Nested `ServiceCommand::Uninstall { purge, yes }`. Injected runners. Idempotent if the unit/plist is already gone. Confirm `--purge` before any mutation. Do not call `commands::uninstall::run` or `lifecycle_cleanup`. Daemon home is `home.join(".agent")`, never `resolve_daemon_home()` — that helper's HOME-unset fallback is a relative `.agent` under cwd (a project store). Confirmation copy lives in `ServiceError` Display; `service_exit` prints it once — no local `eprintln!` in `confirm_purge`. Darwin `bootout` is a mutation: a `--purge` test must pass `purge: true` on `run_launchd_uninstall_with` or confirm-before-bootout is unpinned.
 - **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `service-restart-is-not-update-restart`, `npm-shim-must-list-new-subcommands`
+
+### windows-compile-is-not-the-port
+
+- **Rule:** AILAB-174 makes the crate compile on `windows-latest`. It does not ungate `pub mod server` / `client` / `daemon_client`, does not implement `write_atomic` on Windows, and does not drop `continue-on-error` on the Windows test job. DR-121 / AILAB-203 is the daemon port.
+- **Why:** Linear AILAB-174 AC offered Option A (compile) or Option B (intentional red). Option B already shipped (`continue-on-error` on `windows-latest`). The remaining holes are ungated `crate::server` / `daemon_client` imports in `mcp/mod.rs` plus CLI `watch` / `archive` / `cli.rs` `client::resolve_daemon_socket` sites — not “mcp only,” and not a reason to compile `Supervisor` on Windows. A half-written `#[cfg(not(unix))] Supervisor::start` branch never typechecks.
+- **How to apply:** `#[cfg(unix)]` those imports. Split `run_mcp_server`; Windows returns `McpRunError::Unsupported` (exit 2). Copy `run_doctor`'s socket idiom (`cli.rs` unix `resolve_daemon_socket` / not-unix `None`). If a test fails on Windows because it calls a unix-only API, `#[cfg(unix)]` the test. That advice is right for `tests/*.rs` (rustc synthesizes `main`) and **wrong** for `tests/bin/*.rs`: `cargo test --workspace` still builds every `[[bin]]`, and a crate-level `#![cfg(unix)]` strips `fn main` (`E0601`). Gate items individually and give `main` a `not(unix)` twin. Do not add `windows-sys`.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
 
 ### launchd-supervises-foreground-watch
 
