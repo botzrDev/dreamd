@@ -3,9 +3,10 @@
 `dreamd service install` registers `dreamd watch` with your login session's
 service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS — so
 the daemon starts at login and is restarted if it dies. `dreamd service start`
-starts it on demand; `dreamd service status` reports what the service manager
-thinks of it. All three verbs shell out to `systemctl --user` / `launchctl`
-as you; none needs `sudo`, and none should ever be run with it.
+starts it on demand; `dreamd service restart` bounces it; `dreamd service
+status` reports what the service manager thinks of it. All four verbs shell out
+to `systemctl --user` / `launchctl` as you; none needs `sudo`, and none should
+ever be run with it.
 
 This is **optional**. If you run one agent, the in-process MCP server that
 `npx -y dreamd-mcp` starts is enough — nothing on this page is required.
@@ -50,6 +51,12 @@ To start it later without reinstalling:
 dreamd service start          # systemctl --user start dreamd.service
 ```
 
+To bounce a running one — after upgrading the binary in place, for example:
+
+```bash
+dreamd service restart        # systemctl --user restart dreamd.service
+```
+
 To check on it:
 
 ```bash
@@ -66,7 +73,7 @@ systemd (or launchd) thinks of the unit; the two can disagree, e.g. a foreground
 `watch` live with no unit installed.
 
 Without a systemd user instance (probe: `/run/systemd/system` — most
-containers, WSL without systemd, non-systemd distros) all three verbs exit 2
+containers, WSL without systemd, non-systemd distros) all four verbs exit 2
 and tell you to run `dreamd watch` in the foreground instead. Nothing is
 written.
 
@@ -101,6 +108,16 @@ To (re)start the loaded agent:
 dreamd service start          # launchctl kickstart -k gui/$(id -u)/dev.dreamd.dreamd
 ```
 
+To bounce it:
+
+```bash
+dreamd service restart        # launchctl kickstart -k gui/$(id -u)/dev.dreamd.dreamd
+```
+
+On macOS that is the **same argv** as `start`: `kickstart -k` already kills the
+running instance before relaunching it, so start's command *is* the bounce.
+Only the line printed differs (`restarted …`).
+
 To inspect it:
 
 ```bash
@@ -118,6 +135,27 @@ file the daemon truncates at start) and no `EnvironmentVariables`.
 The `gui/<uid>` domain requires a GUI login session. Over headless SSH — no
 desktop session for your user — `bootstrap` and `kickstart` fail; run
 `dreamd watch` in the foreground there instead.
+
+## Restart is a bounce, not a reinstall
+
+`dreamd service restart` restarts the **supervised process** and nothing else.
+It never rewrites the unit or the plist, so `ExecStart` / `ProgramArguments`
+stays the binary path captured at `dreamd service install`. That is exactly
+what you want after upgrading a binary **in place** — `cargo install --path
+crates/dreamd-cli` over the same path, say: the path is unchanged, so a bounce
+picks up the new build. If the binary **moved** — an npx cache bump, a
+different install prefix — restart would just relaunch the old path, so rerun
+`dreamd service install` (`--force` on macOS) first.
+
+`dreamd update --restart` is a different verb. Every `dreamd update` stops local
+`mcp` / `watch` processes — `--restart` only says so out loud — and that includes
+the one the service supervises, which runs under your `HOME`. Nothing is brought
+back automatically: reload your MCP harness for the servers it spawns, and run
+`dreamd service restart` for the service.
+
+If no unit / LaunchAgent was ever installed, `restart` fails exactly the way
+`start` does: the supervisor's own error, exit 1. A host with no supervisor at
+all still exits 2 and points you at foreground `dreamd watch`.
 
 ## Which project the service serves
 
@@ -147,6 +185,7 @@ daemon boots in and pins at start.
 ```bash
 npx -y dreamd-mcp service install
 npx -y dreamd-mcp service start
+npx -y dreamd-mcp service restart
 ```
 
 The shim forwards `service` to the native binary. The `ExecStart` /
@@ -170,9 +209,10 @@ on Windows (native Windows is out of scope — see [windows.md](./windows.md)), 
 whenever you would rather see the daemon in a terminal. It binds the same
 socket, writes the same log, and is exactly what the service supervises.
 
-## Removing the service
+## Removing the service (no `uninstall` verb yet)
 
-Restart / uninstall verbs are not shipped yet. To remove the service today:
+A `dreamd service uninstall` verb is not shipped yet (AILAB-202). To remove the
+service today:
 
 ```bash
 # Linux

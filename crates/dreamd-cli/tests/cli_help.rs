@@ -154,6 +154,14 @@ fn snapshot_service_start_help() {
 }
 
 #[test]
+fn snapshot_service_restart_help() {
+    assert_snapshot!(
+        "service_restart_help",
+        nested_subcommand_help("service", "restart")
+    );
+}
+
+#[test]
 fn snapshot_service_status_help() {
     assert_snapshot!(
         "service_status_help",

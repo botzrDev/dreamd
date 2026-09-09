@@ -115,7 +115,7 @@ pub enum Command {
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent).
-    // Nested so status/restart/uninstall can land later without reshuffling
+    // Nested so uninstall can land later without reshuffling
     // top-level parsing (same shape as `reset`).
     Service(ServiceArgs),
     /// Front door: scaffold .agent/ (via init) and print the harness wiring next steps.
@@ -241,7 +241,7 @@ pub enum ResetCommand {
 }
 
 /// Args for `dreamd service`. Wraps the nested verb so later verbs
-/// (restart / uninstall — separate tickets) slot in without
+/// (uninstall — a separate ticket, AILAB-202) slot in without
 /// reshuffling top-level command parsing. Same shape as [`ResetArgs`].
 #[derive(Args)]
 pub struct ServiceArgs {
@@ -260,6 +260,8 @@ pub enum ServiceCommand {
     },
     /// Start the user-scope service (systemctl --user start / launchctl kickstart).
     Start,
+    /// Bounce the user-scope service (systemctl --user restart / launchctl kickstart -k).
+    Restart,
     /// Report whether the user-scope service is running (systemd / launchd).
     /// Daemon-level liveness (UDS) is `dreamd status`.
     Status,
@@ -1078,6 +1080,18 @@ fn run_service_start() -> ExitCode {
     service_exit(commands::service::run_start())
 }
 
+/// `dreamd service restart` (AILAB-185): `systemctl --user restart
+/// dreamd.service` on Linux, the same `launchctl kickstart -k` argv `start`
+/// uses on macOS. Bounce-only — it never rewrites the unit / plist, so an
+/// npx cache-path change still needs `dreamd service install` first. Not
+/// `dreamd update --restart`, which stops local `mcp` / `watch` processes —
+/// the supervised one included, since it runs under the same `HOME` — and
+/// never brings the unit back up; this is the verb that does. Same
+/// console-only, index-free contract as `run_service_start`.
+fn run_service_restart() -> ExitCode {
+    service_exit(commands::service::run_restart())
+}
+
 /// `dreamd service status` (AILAB-178): the OS supervisor's view of the unit /
 /// LaunchAgent (running / stopped / failed / not-installed, PID, active-since)
 /// plus the last `STATUS_LOG_TAIL_LINES` lines of `~/.agent/dreamd.log`, read
@@ -1199,6 +1213,7 @@ pub fn run() -> ExitCode {
         Command::Service(args) => match args.command {
             ServiceCommand::Install { force } => run_service_install(force),
             ServiceCommand::Start => run_service_start(),
+            ServiceCommand::Restart => run_service_restart(),
             ServiceCommand::Status => run_service_status(),
         },
         Command::Setup(args) => {
@@ -1460,6 +1475,19 @@ mod tests {
         ));
     }
 
+    /// AILAB-185 — the fourth nested verb. Takes no flags: it bounces the unit
+    /// `service install` already wrote and never rewrites it.
+    #[test]
+    fn parses_service_restart() {
+        let cli = Cli::try_parse_from(["dreamd", "service", "restart"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                command: ServiceCommand::Restart
+            }))
+        ));
+    }
+
     #[test]
     fn service_exit_maps_usage_refusals_to_2_and_runtime_failures_to_1() {
         use commands::service::ServiceError;
@@ -1631,6 +1659,7 @@ mod tests {
             vec!["dreamd", "service", "install"],
             vec!["dreamd", "service", "install", "--force"],
             vec!["dreamd", "service", "start"],
+            vec!["dreamd", "service", "restart"],
             vec!["dreamd", "service", "status"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();

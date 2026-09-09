@@ -1,15 +1,27 @@
-//! `dreamd service install` / `start` / `status` — the per-user service that
-//! supervises the daemon: a Linux systemd **user** unit (AILAB-190) or a
-//! macOS **LaunchAgent** (AILAB-169). One module, one backend picked at
-//! runtime by [`detect_backend`].
+//! `dreamd service install` / `start` / `restart` / `status` — the per-user
+//! service that supervises the daemon: a Linux systemd **user** unit
+//! (AILAB-190) or a macOS **LaunchAgent** (AILAB-169). One module, one backend
+//! picked at runtime by [`detect_backend`].
 //!
 //! Linux: `install` writes `~/.config/systemd/user/dreamd.service` and runs
 //! `systemctl --user daemon-reload` + `enable --now`; `start` runs
-//! `systemctl --user start dreamd.service`. macOS: `install` writes
+//! `systemctl --user start dreamd.service`; `restart` (AILAB-185) runs
+//! `systemctl --user restart dreamd.service`. macOS: `install` writes
 //! `~/Library/LaunchAgents/dev.dreamd.dreamd.plist` and runs
 //! `launchctl bootstrap gui/<uid> <plist>` (after a best-effort `bootout` when
 //! `--force` replaces an existing plist); `start` runs
-//! `launchctl kickstart -k gui/<uid>/dev.dreamd.dreamd`.
+//! `launchctl kickstart -k gui/<uid>/dev.dreamd.dreamd`, and `restart` issues
+//! that *same* argv — `-k` already kills the running instance first, so it is
+//! itself the bounce; only the printed verb differs (`restarted`).
+//!
+//! `restart` is **bounce-only**: it never rewrites the unit or the plist, so
+//! the `ExecStart` / `ProgramArguments` path stays the one captured at
+//! `service install`. Bouncing is enough after an in-place `cargo install` to
+//! the same path; a binary that *moved* (an npx cache bump) still needs
+//! `dreamd service install` (`--force` on macOS) first. It is also not
+//! `dreamd update --restart`, which stops local `mcp` / `watch` processes —
+//! the supervised one included, since the unit sets no `Environment=HOME=` and
+//! so shares the invoking user's — and never brings the unit back up.
 //!
 //! `status` (AILAB-178) is the supervisor's own view of that service —
 //! running / stopped / failed / not-installed, PID, active-since — plus the
@@ -53,7 +65,7 @@
 //!   tracing file layer, which truncates on open, so a second writer aimed at
 //!   the same file would clobber it. Likewise never `AbandonProcessGroup`:
 //!   launchd must keep tracking the PID it spawned.
-//! - **All three verbs are one-shots and stay console-only** (AILAB-184): the
+//! - **All four verbs are one-shots and stay console-only** (AILAB-184): the
 //!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
 //!   in `cli.rs` never grants it to `service`. The supervised `watch` still
 //!   gets the file layer, and its stderr additionally lands in the user
@@ -88,12 +100,13 @@ pub(crate) const LAUNCHD_LABEL: &str = "dev.dreamd.dreamd";
 /// (Linear AILAB-178). `dreamd status` keeps its own 5 (`status::LOG_TAIL_LINES`).
 pub(crate) const STATUS_LOG_TAIL_LINES: usize = 10;
 
-/// How `install` / `start` reach systemd. Production passes [`systemctl_user`];
-/// tests pass a recording closure, so no unit test can ever spawn `systemctl`
-/// (this dev box has a live user manager; GHA runners mostly do not).
+/// How `install` / `start` / `restart` reach systemd. Production passes
+/// [`systemctl_user`]; tests pass a recording closure, so no unit test can ever
+/// spawn `systemctl` (this dev box has a live user manager; GHA runners mostly
+/// do not).
 type Systemctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
-/// How `install` / `start` reach launchd. Same shape as [`Systemctl`]:
+/// How `install` / `start` / `restart` reach launchd. Same shape as [`Systemctl`]:
 /// production passes [`launchctl`]; tests pass a recording or panicking
 /// closure, so no unit test can ever bootstrap a real LaunchAgent (GHA
 /// `macos-latest` has a live `launchctl` under the runner user).
@@ -106,7 +119,8 @@ type Launchctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 /// unit test can ever query a live supervisor.
 type Query<'a> = &'a mut dyn FnMut(&[&str]) -> Result<String, ServiceError>;
 
-/// Which OS supervisor `install` / `start` / `status` talk to on this host.
+/// Which OS supervisor `install` / `start` / `restart` / `status` talk to on
+/// this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceBackend {
     /// Linux systemd `--user` unit (`systemctl --user`).
@@ -496,6 +510,21 @@ pub fn run_start() -> Result<(), ServiceError> {
     }
 }
 
+/// `dreamd service restart` (AILAB-185): pick the backend, then `systemctl
+/// --user restart dreamd.service` (Linux) or the same `launchctl kickstart -k
+/// gui/<uid>/<label>` argv `start` issues (macOS — `-k` already kills the
+/// running instance first, so it *is* the bounce). No backend →
+/// [`ServiceError::NoSystemd`]. Bounce-only: the unit / plist is never
+/// rewritten, so a binary that moved (an npx cache bump) still needs
+/// `dreamd service install` first.
+pub fn run_restart() -> Result<(), ServiceError> {
+    match detect_backend() {
+        None => Err(ServiceError::NoSystemd),
+        Some(ServiceBackend::Systemd) => run_restart_with(true, &mut systemctl_user),
+        Some(ServiceBackend::Launchd) => run_launchd_restart_with(current_uid()?, &mut launchctl),
+    }
+}
+
 /// macOS install with the uid, the exe resolver, and the `launchctl` runner
 /// injected. Tests pass `uid = 501`, a fake exe, and a recording or panicking
 /// runner, so they never reach a real `launchctl` — and they run on Linux CI.
@@ -554,6 +583,27 @@ pub(crate) fn run_launchd_start_with(
     Ok(())
 }
 
+/// macOS `dreamd service restart` (AILAB-185) with the uid and the `launchctl`
+/// runner injected, the twin of the `start` helper above — and issuing the
+/// **byte-identical** `kickstart -k gui/<uid>/<label>` argv, because `-k`
+/// already kills the running instance before relaunching it, so start's argv
+/// *is* the bounce; only the printed verb differs, which is why this is its own
+/// helper and never delegates to the `start` one (whose stdout would say
+/// `started`). Nothing is rewritten: the plist's `ProgramArguments` stays the
+/// path `service install` captured. A label that was never bootstrapped is a
+/// [`ServiceError::Launchctl`] (exit 1)
+/// — deliberately the same failure `start` gives, not a distinct
+/// `NotInstalled`. Tests pass a recording or panicking runner, so they never
+/// reach a real `launchctl`, and the Darwin path runs on Linux CI.
+pub(crate) fn run_launchd_restart_with(
+    uid: u32,
+    launchctl: Launchctl<'_>,
+) -> Result<(), ServiceError> {
+    launchctl(&["kickstart", "-k", &format!("gui/{uid}/{LAUNCHD_LABEL}")])?;
+    println!("restarted {LAUNCHD_LABEL} (launchctl kickstart gui/{uid})");
+    Ok(())
+}
+
 /// Same as [`run_start`] with the probe result and the `systemctl` runner
 /// injected (tests pass a recording or panicking runner and never spawn).
 pub(crate) fn run_start_with(
@@ -565,6 +615,26 @@ pub(crate) fn run_start_with(
     }
     systemctl(&["start", UNIT_NAME])?;
     println!("started {UNIT_NAME} (systemctl --user)");
+    Ok(())
+}
+
+/// Same as [`run_restart`] with the probe result and the `systemctl` runner
+/// injected (tests pass a recording or panicking runner and never spawn), the
+/// twin of [`run_start_with`]. The argv is `restart` — never `try-restart`,
+/// which would silently no-op on a stopped unit, and never the pager-bound
+/// `status` verb. Bounce-only: the unit file is not rewritten, so `ExecStart`
+/// stays whatever `service install` captured. A unit that was never installed
+/// is a [`ServiceError::Systemctl`] (exit 1) — deliberately the same failure
+/// `start` gives, not a distinct `NotInstalled`.
+pub(crate) fn run_restart_with(
+    systemd_available: bool,
+    systemctl: Systemctl<'_>,
+) -> Result<(), ServiceError> {
+    if !systemd_available {
+        return Err(ServiceError::NoSystemd);
+    }
+    systemctl(&["restart", UNIT_NAME])?;
+    println!("restarted {UNIT_NAME} (systemctl --user)");
     Ok(())
 }
 
@@ -1188,6 +1258,31 @@ WantedBy=default.target
         assert_eq!(calls, [["start".to_string(), UNIT_NAME.to_string()]]);
     }
 
+    /// AILAB-185 — same refusal as `start` on a host with no supervisor: exit 2
+    /// pointing at foreground `dreamd watch`, and the runner is never reached
+    /// (`never_systemctl` panics if it is).
+    #[test]
+    fn run_restart_without_systemd_refuses() {
+        assert!(matches!(
+            run_restart_with(false, &mut never_systemctl),
+            Err(ServiceError::NoSystemd)
+        ));
+    }
+
+    /// AILAB-185 — `restart`, never `try-restart` and never the pager `status`
+    /// verb. `--user` is prepended by production's [`systemctl_user`], exactly
+    /// as it is for `start`.
+    #[test]
+    fn run_restart_calls_systemctl_restart() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_restart_with(true, &mut |args: &[&str]| {
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            Ok(())
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls, [["restart".to_string(), UNIT_NAME.to_string()]]);
+    }
+
     #[test]
     fn no_systemd_message_points_at_watch() {
         let msg = ServiceError::NoSystemd.to_string();
@@ -1636,6 +1731,30 @@ WantedBy=default.target
     fn launchd_start_kickstarts() {
         let mut calls: Vec<Vec<String>> = Vec::new();
         let result = run_launchd_start_with(FAKE_UID, &mut |args: &[&str]| {
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            Ok(())
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            calls,
+            [[
+                "kickstart".to_string(),
+                "-k".to_string(),
+                "gui/501/dev.dreamd.dreamd".to_string()
+            ]]
+        );
+    }
+
+    /// AILAB-185 — the expected argv here is **byte-identical** to
+    /// `launchd_start_kickstarts` above, on purpose: `kickstart -k` already
+    /// kills the running instance before relaunching it, so start's argv is
+    /// itself the bounce and restart reuses it verbatim. Only the printed verb
+    /// differs (`restarted` vs `started`), which is why this goes through
+    /// `run_launchd_restart_with` instead of calling `run_launchd_start_with`.
+    #[test]
+    fn launchd_restart_kickstarts() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = run_launchd_restart_with(FAKE_UID, &mut |args: &[&str]| {
             calls.push(args.iter().map(|s| s.to_string()).collect());
             Ok(())
         });

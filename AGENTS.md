@@ -562,8 +562,8 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). Do not call `detach_double_fork`. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
 - **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
-- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; restart / uninstall remain later. Tests must not require a live `systemctl --user`.
-- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`
+- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start,Status}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; `service restart` is AILAB-185 (bounce-only); uninstall remains later (AILAB-202). Tests must not require a live `systemctl --user`.
+- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-linear-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `service-restart-is-not-update-restart`
 
 ### service-status-is-not-dreamd-status
 
@@ -571,6 +571,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** Linear AILAB-178 AC said `systemctl --user status` and “last 10 log lines” as if `dreamd status` did not exist. WEG-103 already tails 5 lines of `~/.agent/dreamd.log` without truncating it. The two commands can disagree (foreground `watch` live, no unit; unit running, socket dead).
 - **How to apply:** Nested `ServiceCommand::Status`. Log tail via `read_log_tail_n(path, 10)`; leave `LOG_TAIL_LINES = 5`. Four states: running / stopped / failed / not-installed. Exit 0 on a successful query including stopped. Inject a stdout-returning runner; never spawn live `systemctl` / `launchctl` in tests.
 - **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `plist-must-not-redirect-dreamd-log`
+
+### service-restart-is-not-update-restart
+
+- **Rule:** `dreamd service restart` bounces the OS-supervised unit (`systemctl --user restart` / Darwin `kickstart -k`). It does not rewrite `ExecStart`. It is not `dreamd update --restart` (AILAB-552). Every `dreamd update` already SIGTERMs same-HOME `mcp`/`watch` (`--restart` only announces that stop); `Restart=on-failure` / `KeepAlive.SuccessfulExit=false` do not bring a clean SIGTERM back. Darwin `service start` already is `kickstart -k`; restart reuses that argv and prints `restarted`.
+- **Why:** Linear AILAB-185 AC named the Darwin kickstart line as if it were new, and the upgrade story is easy to collapse into `update --restart`. A first draft of 185 docs claimed update “leaves the supervised unit alone”; false — the unit inherits `HOME` (AILAB-584 forbids `Environment=HOME=`), so the stop pass matches it. An npx cache-path change still needs `service install` first.
+- **How to apply:** Nested `ServiceCommand::Restart`. Injected runners like `start`. Missing unit = same as `start` (supervisor fail, exit 1). `NoSystemd` stays exit 2. Docs: README one-liner plus `docs/install.md`; `update` stops, `service restart` brings the unit back.
+- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `npm-shim-must-list-new-subcommands`
 
 ### launchd-supervises-foreground-watch
 

@@ -50,13 +50,14 @@ test('setup -> dreamd setup (AILAB-549: front door, not routed to mcp)', () => {
     ['setup', '--yes', '--harness', 'none'],
   );
 });
-test('service -> dreamd service (AILAB-169: install/start not routed to mcp)', () => {
+test('service -> dreamd service (AILAB-169/AILAB-185: install/start/restart not routed to mcp)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'install']), ['service', 'install']);
   assert.deepStrictEqual(
     resolveDreamdArgs(['service', 'install', '--force']),
     ['service', 'install', '--force'],
   );
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'start']), ['service', 'start']);
+  assert.deepStrictEqual(resolveDreamdArgs(['service', 'restart']), ['service', 'restart']);
 });
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
