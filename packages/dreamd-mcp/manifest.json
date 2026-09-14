@@ -2,13 +2,13 @@
     "version": "0.1.1",
     "binaries": {
         "linux-x86_64": {
-            "sha256": "bbc897e4aaf58dd4fc52f36cb28afd06dcd265ba4023ff419b21e7d4333ecff1"
+            "sha256": "PENDING_linux_x86_64"
         },
         "darwin-x86_64": {
-            "sha256": "2f4708b6db622b38cfdf36ef72999e6ef3f8cec670139c8dc7bb867d6c2c246c"
+            "sha256": "PENDING_darwin_x86_64"
         },
         "darwin-aarch64": {
-            "sha256": "da095bcf4a4f80a580fefbdbec30ac189ee7d8eaf33ce3eadc8bda3d38a8f0eb"
+            "sha256": "PENDING_darwin_aarch64"
         }
     }
 }
