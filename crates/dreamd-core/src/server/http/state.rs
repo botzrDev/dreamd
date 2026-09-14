@@ -49,6 +49,15 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 /// `POST /dream` for project B appends to B's JSONL instead of misfiling into
 /// the boot project's. Only engaged when `primary` is `Some` (the daemon);
 /// `None`/Phase-1/test states route everything to `supervisor`.
+///
+/// `auth_json` — path to `~/.agent/auth.json`, the AILAB-203 bearer token file
+/// that `bearer_auth_middleware` re-reads on every request (AILAB-192). `None`
+/// on Unix because the peer UID from `SO_PEERCRED` is the auth there and
+/// `build_router` mounts no bearer layer at all, so the field is never read.
+/// `None` off Unix is **fail-closed**: the bearer layer *is* mounted there, and
+/// with no path to read it 401s every request rather than serving a router
+/// whose only auth was never configured. Set by
+/// [`AppState::with_auth_json`], which only the loopback-TCP `run_watch` calls.
 #[derive(Clone)]
 pub struct AppState {
     /// Path to `~/.agent/registry.toml` (see struct docs).
@@ -65,6 +74,9 @@ pub struct AppState {
     pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
     /// Per-root coordinators for non-boot projects (WEG-272).
     pub supervisor_map: Arc<Mutex<SupervisorMap>>,
+    /// Path to `~/.agent/auth.json` for `bearer_auth_middleware` (AILAB-192).
+    /// `None` on Unix (peer UID is the auth) and fail-closed off Unix.
+    pub auth_json: Option<PathBuf>,
 }
 
 impl AppState {
@@ -83,6 +95,7 @@ impl AppState {
             daemon_uid,
             primary: None,
             supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+            auth_json: None,
         }
     }
 
@@ -91,6 +104,19 @@ impl AppState {
     /// only by `run_watch`.
     pub fn with_primary(mut self, root: PathBuf, handle: Arc<TantivyIndexHandle>) -> Self {
         self.primary = Some((root, handle));
+        self
+    }
+
+    /// Point `bearer_auth_middleware` at `path` — `DaemonHome::auth_json()`,
+    /// the AILAB-203 token file (AILAB-192).
+    ///
+    /// Additive on purpose: [`Self::new`] leaves `auth_json` as `None` so no
+    /// existing caller or test has to change, and the Unix daemon never calls
+    /// this at all — `peer_uid_middleware` is its auth and `build_router`
+    /// mounts no bearer layer on that target. Only the loopback-TCP
+    /// `run_watch` calls it, and it must, because `None` there is fail-closed.
+    pub fn with_auth_json(mut self, path: PathBuf) -> Self {
+        self.auth_json = Some(path);
         self
     }
 
@@ -194,6 +220,15 @@ impl AppState {
         // Wire the per-root coordinator to the per-root indexer (the same handle
         // recall/dream use) so its appends become searchable. Resolve + release
         // index_map's lock BEFORE locking supervisor_map.
+        //
+        // AILAB-192: off Unix there is no indexer to wire, and this line is not
+        // merely unnecessary there — it is actively harmful to run.
+        // `with_index_handle` opens `TantivyIndexHandle` on a miss, and `open`
+        // calls `write_manifest_if_absent` → `io::write_atomic`, which is
+        // `ErrorKind::Unsupported` off Unix. Keeping the call and discarding its
+        // result would turn every non-boot-project request into a 500 on a
+        // platform where JSONL appends themselves are fine.
+        #[cfg(unix)]
         let indexer_tx = self.with_index_handle(root, |h| h.sender())?;
 
         let mut map = self
@@ -204,6 +239,9 @@ impl AppState {
             Supervisor::start(
                 &agent_root,
                 crate::server::COORDINATOR_CHANNEL_CAPACITY,
+                // `Supervisor::start`'s third parameter is `#[cfg(unix)]`, so
+                // the argument list has to be gated to match its arity.
+                #[cfg(unix)]
                 Some(indexer_tx),
             )
         })

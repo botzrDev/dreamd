@@ -193,8 +193,8 @@ sequenceDiagram
 ### 5. Local API security
 
 - **Unix (v0.1):** HTTP binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request validates the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); mismatched UIDs are rejected.
-- **Windows:** bearer-token auth on `127.0.0.1` — deferred to v0.1.1.
-- TCP binding to non-localhost will be refused unless `--insecure` is passed — deferred to v0.1.1.
+- **Windows (v0.1.1, AILAB-192):** there is no `SO_PEERCRED` to check, so `dreamd watch` binds loopback TCP — `127.0.0.1` on an OS-chosen ephemeral port, published as `{"host":"127.0.0.1","port":<port>}` in `~/.agent/server.json` and unlinked on shutdown — and every request must carry `Authorization: Bearer <64 lowercase hex>` matching `~/.agent/auth.json` (minted by `dreamd service install`, AILAB-203; `watch` only reads it). The bearer layer sits outermost, in the slot `peer_uid_middleware` holds on Unix; `auth.json` is re-read per request and the decoded secrets compared in constant time, and the verdict is `401`, never the Unix peer-UID `403`. The two auth layers are mutually exclusive — neither target mounts both.
+- TCP binding to non-localhost will be refused unless `--insecure` is passed — deferred to v0.1.1 (AILAB-197). The Windows listener re-checks the address it bound and refuses to serve if it is not loopback, and no such flag exists yet on any platform.
 
 ### 6. MCP tool names
 

@@ -1,8 +1,8 @@
 # HTTP API reference
 
-dreamd exposes a small REST API over a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`). There is no TCP listener in v0.1.
+dreamd exposes a small REST API. The transport depends on the platform. On Unix it is a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`), and there is no TCP listener. On Windows there is no peer credential to read off a socket, so `dreamd watch` listens on **loopback TCP** instead — `127.0.0.1` on an OS-chosen ephemeral port, published in `~/.agent/server.json` (AILAB-192). Loopback only: there is no non-localhost bind on any platform.
 
-All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header. On Unix, the daemon also enforces **peer UID matching** via `SO_PEERCRED` / `getpeereid` — only the user who started the daemon may connect.
+All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header. Authentication is whatever the transport can prove: on Unix the daemon enforces **peer UID matching** via `SO_PEERCRED` / `getpeereid` — only the user who started the daemon may connect — and on Windows it enforces an `Authorization: Bearer` token read from `~/.agent/auth.json`. The two are mutually exclusive; neither platform mounts both.
 
 **Canonical source:** `crates/dreamd-core/src/server/http/` (`router.rs`, `handlers/`)
 
@@ -10,14 +10,34 @@ All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header
 
 ## Transport
 
+### Unix (Linux, macOS)
+
 | Property | Value |
 |---|---|
 | Socket path | `~/.agent/dreamd.sock` (or `$DREAMD_SOCK`) |
 | Permissions | `0600` (owner read/write only) |
 | Protocol | HTTP/1.1 over UDS |
 | Host header | Use `localhost` (required by HTTP clients; not used for routing) |
+| Authentication | Peer UID via `SO_PEERCRED` / `getpeereid`; mismatch is `403` |
 
-### curl example (socket smoke test)
+### Windows
+
+| Property | Value |
+|---|---|
+| Address | `127.0.0.1:<ephemeral>` — the port is picked by the OS at bind time |
+| Address file | `~/.agent/server.json`, written by `dreamd watch` as `{"host":"127.0.0.1","port":<port>}` and unlinked again on every shutdown path |
+| Protocol | HTTP/1.1 over TCP |
+| Host header | `127.0.0.1` or `localhost` (not used for routing) |
+| Authentication | `Authorization: Bearer <64 lowercase hex>` matching `~/.agent/auth.json`; missing or wrong is `401` |
+| Scope | Loopback only. The daemon re-checks the address it bound and refuses to serve if it is not loopback. |
+
+`~/.agent/server.json` is a discardable address hint, not memory state, so it is written with a plain `std::fs::write` rather than the atomic-replace path (which is still `ErrorKind::Unsupported` on Windows). A hard-killed daemon can therefore leave a stale file behind: liveness is "the file parses **and** `127.0.0.1:<port>` accepts a connection", never "the file exists". A `server.json` naming a non-loopback host is refused rather than connected to.
+
+`~/.agent/auth.json` is minted by `dreamd service install` and rotated by `dreamd service install --force` (AILAB-203). `dreamd watch` only ever reads it: a missing or malformed file makes the daemon exit 1 pointing at `dreamd service install`, and `watch` never writes or rotates the token itself.
+
+**What answers on Windows.** `dreamd watch` deliberately never opens the Tantivy index there — `TantivyIndexHandle::open` writes its first `index_manifest.json` through `io::write_atomic` — so the daemon boots with no index at all. `POST /api/v1/learn` works: the JSONL append is `OpenOptions` + `write_all` + `sync_data`, not an atomic replace. Everything index-backed does not. `POST /api/v1/dream` stays mounted and returns `500` (see [below](#post-apiv1dream)), and `GET /api/v1/recall` / `GET /api/v1/health` can fail the same way. A valid bearer token buys you past the auth layer; it is not a promise of a `200`.
+
+### curl example (Unix socket smoke test)
 
 ```bash
 # Replace with your project's absolute path (the directory containing .agent/, not .agent/ itself)
@@ -30,11 +50,23 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 The project path must be registered in `~/.agent/registry.toml` (done automatically by `dreamd init`). Paths are canonicalized before lookup — use the same absolute path the registry stores.
 
+### curl example (Windows loopback smoke test)
+
+```powershell
+# The port is ephemeral, so read it back out of server.json each time
+$srv  = Get-Content $env:USERPROFILE\.agent\server.json | ConvertFrom-Json
+$tok  = (Get-Content $env:USERPROFILE\.agent\auth.json | ConvertFrom-Json).token
+$proj = "C:\Users\you\your-project"
+
+curl.exe -H "X-Agent-Root: $proj" -H "Authorization: Bearer $tok" `
+  "http://$($srv.host):$($srv.port)/api/v1/recall?q=axum&k=5"
+```
+
 ---
 
 ## Middleware
 
-Requests pass through two middleware layers (outermost first):
+Requests pass through two middleware layers (outermost first). The outer one is the platform's authentication layer — `peer_uid_middleware` on Unix, `bearer_auth_middleware` on Windows — and the inner one, `agent_root_middleware`, is the same on both.
 
 ### `peer_uid_middleware` (Unix only)
 
@@ -45,6 +77,20 @@ Compares the connecting process UID (injected at accept time from `SO_PEERCRED`)
 | Peer UID matches daemon UID | Pass through | — |
 | Peer UID present but mismatched | `403 Forbidden` | `{"error":"forbidden: peer UID does not match daemon owner"}` |
 | No peer UID extension | `403 Forbidden` | `{"error":"forbidden: peer UID not available"}` |
+
+### `bearer_auth_middleware` (Windows only)
+
+Compares the `Authorization` header against the token in `~/.agent/auth.json`. The file is re-read on **every** request and the two decoded 32-byte secrets are compared in constant time, so a `dreamd service install --force` rotation mid-session `401`s the next request without restarting the daemon.
+
+| Condition | Status | Body |
+|---|---|---|
+| `Authorization: Bearer <token>` matches `auth.json` | Pass through | — |
+| Header missing, or not valid ASCII | `401 Unauthorized` | `{"error":"…"}` |
+| Header is not `Bearer <credential>` — wrong scheme, no credential, bare token | `401 Unauthorized` | `{"error":"…"}` |
+| Credential present but does not match | `401 Unauthorized` | `{"error":"…"}` |
+| `auth.json` missing, unreadable, or malformed | `401 Unauthorized` | `{"error":"…"}` |
+
+The verdict is always **401, never 403**: `403` is the Unix peer-UID answer and that layer is not mounted on Windows. Rejection happens outermost, before the tracing layer, so a rejected caller never reaches a handler; the daemon logs a reason category only (`missing_authorization`, `malformed_authorization`, `no_auth_file`, `token_mismatch`) and never the presented credential or the file's contents.
 
 ### `agent_root_middleware`
 
@@ -124,6 +170,8 @@ curl --unix-socket ~/.agent/dreamd.sock \
   }' \
   http://localhost/api/v1/learn
 ```
+
+**Windows:** available. The durable append is `OpenOptions` + `write_all` + `sync_data` on `AGENT_LEARNINGS.jsonl`, which needs no atomic rename, so `201` on Windows means the same durable line it means on Unix. What is missing is the index update behind it — see [Transport → Windows](#windows).
 
 #### Idempotency (`X-Client-Dedup-Key`)
 
@@ -257,6 +305,8 @@ curl --unix-socket ~/.agent/dreamd.sock \
 ### `POST /api/v1/dream`
 
 Run a full dream cycle for the resolved project: consolidate episodic learnings into `LESSONS.md`, apply decay/pruning, update recurrence sidecar.
+
+**Not available on Windows.** The route stays mounted rather than vanishing from the route table, and returns `500` with `{"error":"dream cycle is unavailable on this platform: atomic file replacement is unsupported (see docs/windows.md)"}`. Consolidation, decay, the `LESSONS.md` rewrite and the recurrence sidecar all *replace* files through `io::write_atomic`, which is still `ErrorKind::Unsupported` there.
 
 #### Request headers
 

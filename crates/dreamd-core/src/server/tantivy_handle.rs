@@ -1181,6 +1181,11 @@ fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryError) -> Inde
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AILAB-192: the four coordinator↔indexer tests below are the only readers,
+    // and each drives `MemoryCoordinator::open_at`'s `#[cfg(unix)]` `indexer_tx`
+    // parameter. Gated together with them so the import does not go unused
+    // off-target; the module's other 35 tests are portable and stay ungated.
+    #[cfg(unix)]
     use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
     use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
     use crate::test_support::{unique_tmpdir, DirGuard};
@@ -1636,6 +1641,9 @@ mod tests {
 
     // AC-23 — coordinator routes appends to indexer sender
 
+    // Unix-only: passes `Some(idx_tx)` to `MemoryCoordinator::open_at`, whose
+    // `indexer_tx` parameter is `#[cfg(unix)]` (AILAB-192).
+    #[cfg(unix)]
     #[tokio::test]
     async fn coordinator_routes_appends_to_indexer_sender() {
         let dir = unique_tmpdir("coord-routes");
@@ -1704,6 +1712,10 @@ mod tests {
     /// opening the gate must let both appends through, for three
     /// `IndexerMsg::Append`s total (the filler plus both appends). A
     /// drop-on-`Full` regression loses one or both and fails the count.
+    ///
+    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
+    /// `#[cfg(unix)]` (AILAB-192).
+    #[cfg(unix)]
     #[tokio::test]
     async fn coordinator_blocks_then_delivers_when_indexer_channel_full() {
         let dir = unique_tmpdir("coord-full");
@@ -1831,6 +1843,9 @@ mod tests {
         );
     }
 
+    // Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
+    // `#[cfg(unix)]` (AILAB-192).
+    #[cfg(unix)]
     #[tokio::test]
     async fn idempotency_hit_does_not_emit_indexer_append() {
         let dir = unique_tmpdir("coord-dedup");
@@ -2366,6 +2381,10 @@ mod tests {
     /// drop-on-`Full` regression the token never reaches the indexer and the
     /// recall assertion fails. Startup replay is deliberately not exercised —
     /// it only ever heals the tail after `last_indexed_id`.
+    ///
+    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
+    /// `#[cfg(unix)]` (AILAB-192).
+    #[cfg(unix)]
     #[tokio::test]
     async fn full_indexer_channel_still_reaches_recall_after_flush() {
         let dir = unique_tmpdir("chan-full-recall");

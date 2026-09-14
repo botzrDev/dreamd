@@ -19,9 +19,11 @@
 //! daemon holds an open fd on the JSONL and appends by offset. If we
 //! `rewrite_atomic` (temp + rename) underneath it, the daemon keeps writing to
 //! the old inode and the unpin is silently lost. So we refuse when the daemon
-//! socket probes live (`is_daemon_socket_live`) and tell the operator to stop it
-//! first — a persisted clear is the only correct implementation of "clears the
-//! pin flag".
+//! probes live and tell the operator to stop it first — a persisted clear is the
+//! only correct implementation of "clears the pin flag". The probe is a bounded
+//! connect on whichever transport this target uses: UDS
+//! (`is_daemon_socket_live`) on Unix, a loopback TCP connect to the address in
+//! `~/.agent/server.json` (`tcp_daemon_is_live`) off it (AILAB-192).
 
 use std::io::Write;
 use std::path::Path;
@@ -90,14 +92,21 @@ fn daemon_liveness(path: &Path) -> bool {
     dreamd_core::server::is_daemon_socket_live(path)
 }
 
-/// Non-Unix probe (AILAB-174): there is no UDS daemon to collide with until
-/// DR-121, so the coexistence guard never fires and `--force-unpin` stays
-/// available. Deliberately not `path.exists()` (the `status` stub's choice) —
-/// `status` reports, this refuses, and refusing an unpin on a stale path would
-/// leave the operator with no escape hatch at all.
+/// Non-Unix probe (AILAB-192): `path` is `~/.agent/server.json` and the daemon
+/// is a loopback TCP listener, so this reads the published address and attempts
+/// a bounded TCP connect to it. A live daemon off Unix holds the JSONL exactly
+/// the way a Unix one does, so the coexistence guard must fire there too — that
+/// is the point of the probe.
+///
+/// This used to return `false` unconditionally, on the reasoning that a stale
+/// path must not strand the operator with no escape hatch. A connect probe
+/// cannot be stale that way: a `server.json` a `SIGKILL`ed watch left behind
+/// still parses, but nothing is listening on the port it names, so the connect
+/// fails and `--force-unpin` proceeds. Only a daemon that actually answers
+/// blocks the rewrite.
 #[cfg(not(unix))]
-fn daemon_liveness(_path: &Path) -> bool {
-    false
+fn daemon_liveness(path: &Path) -> bool {
+    dreamd_core::daemon_client::tcp_daemon_is_live(path)
 }
 
 /// `dreamd archive --force-unpin <EVENT_ID | --all>` entry point.
@@ -108,8 +117,9 @@ fn daemon_liveness(_path: &Path) -> bool {
 /// `N entr{y,ies} unpinned` summary to `out`; `--all` with nothing pinned is a
 /// no-op success (`0 entries unpinned`, no rewrite).
 ///
-/// `socket` is the resolved daemon UDS path (`None` when the home directory
-/// cannot be resolved — treated as "no daemon", matching `dreamd status`).
+/// `socket` is the resolved daemon address path — the UDS path on Unix,
+/// `~/.agent/server.json` off it (`None` when the home directory cannot be
+/// resolved — treated as "no daemon", matching `dreamd status`).
 pub fn run(
     cwd: &Path,
     socket: Option<&Path>,

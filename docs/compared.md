@@ -1,35 +1,34 @@
 # dreamd compared
 
-Honest v0.1 comparison. Concede competitor strengths; name our gaps.
+Honest comparison as of v0.1.1. Concede competitor strengths; name our gaps.
 For the product story, see [marketing.md](./marketing.md). For install and usage, see the [README](../README.md).
 
 ---
 
 ## TL;DR
 
-| Dimension | dreamd v0.1 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
+| Dimension | dreamd v0.1.1 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
 |---|---|---|---|---|---|
 | Cross-harness portability | ✓ Claude Code / Cursor / Cline share one `.agent/` | ✓ MCP + broad framework integrations; hosted path common | — harness-native (stateful Letta agent) | ✓ any MCP-capable client | — Cline-native markdown ritual |
 | Salience-aware recall | ✓ BM25 × published formula ([SPEC.md](../SPEC.md)); `dreamd recall` / score explain | extraction + retrieval (managed / hosted options) | agent-managed memory / sleep-time reflection | string search over knowledge-graph nodes | LLM reads structured markdown; no ranking formula |
-| Vector embeddings | — at v0.1 (lexical only; embeddings deferred) | ✓ typically vector / hybrid in product surface | not claimed here | — (graph JSON, not embeddings) | — |
+| Vector embeddings | — lexical only (BM25 × salience, including the `LESSONS.md` document layer; embeddings later) | ✓ typically vector / hybrid in product surface | not claimed here | — (graph JSON, not embeddings) | — |
 | Schema versioning | ✓ `schema_version: "1.0.0"` on episodic records | product-specific (verify in their docs) | MemFS / context-repo layout (evolving) | tool/schema of the reference server | informal markdown file set |
 | File-system source of truth | ✓ JSONL + Markdown in-repo ([SPEC.md](../SPEC.md)) | often DB / service-backed; local options vary | ✓ git-backed MemFS / context repositories | local JSON knowledge graph file | ✓ markdown files in the project |
-| LLM consolidation | — deterministic dream cycle only at v0.1 | extraction / update pipelines (typically LLM-assisted) | ✓ sleep-time / dreaming subagents | — no dream-cycle contract | manual / prompt-driven “update memory bank” |
+| LLM consolidation | ✓ opt-in LLM dream cycle with deterministic fallback when no key / over cap / `--no-llm` | extraction / update pipelines (typically LLM-assisted) | ✓ sleep-time / dreaming subagents | — no dream-cycle contract | manual / prompt-driven “update memory bank” |
 | Maturity / stars | small OSS — **4★** on `botzrDev/dreamd` (2026-07-14) | ~60.8k★ `mem0ai/mem0` (2026-07-14) | ~2.8k★ `letta-ai/letta-code` (2026-07-14) | ref lives in `modelcontextprotocol/servers` (~88.5k★ monorepo, 2026-07-14; not memory-only) | pattern inside Cline (~64.7k★ `cline/cline`, 2026-07-14); not a separate star counter |
-| OS support | Linux + macOS only at v0.1 | cross-platform / cloud clients | verify current CLI/platform matrix | Node/`npx` (broad host support) | wherever Cline runs |
+| OS support | Linux + macOS (full); Windows watch+learn (no dream cycle / index) | cross-platform / cloud clients | verify current CLI/platform matrix | Node/`npx` (broad host support) | wherever Cline runs |
 
-Cell legend: ✓ = strength for that dimension; — = not offered (or not at v0.1 for dreamd); short prose = partial / different shape. Competitor cells lean cautious when unverified from this repo.
+Cell legend: ✓ = strength for that dimension; — = not offered (or not yet for dreamd); short prose = partial / different shape. Competitor cells lean cautious when unverified from this repo.
 
 ---
 
-## Weaknesses we own (v0.1)
+## Weaknesses we own (v0.1.1)
 
-Pulled from [AGENTS.md](../AGENTS.md) v0.1 scope — not a marketing softener:
+Pulled from [AGENTS.md](../AGENTS.md) scope — not a marketing softener:
 
-- **No vector embeddings at v0.1.** Recall is Tantivy BM25 × salience. Semantic / embedding recall is out of scope until later.
-- **Linux + macOS only at v0.1.** Windows is deferred.
-- **Deterministic-only consolidation at v0.1.** The dream cycle does not call an LLM; LLM-assisted consolidation is later.
-- **No auto dream cycle at v0.1.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
+- **No vector embeddings.** Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer. Embedding / hybrid recall is later.
+- **Windows is watch + learn only.** `io::write_atomic` is still `Unsupported`, so the dream cycle and Tantivy index do not run there. Full consolidate-and-search is Linux / macOS / WSL2. See [windows.md](./windows.md).
+- **No auto dream cycle.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
 
 Maturity is also a gap: dreamd is a small open-source project (star count date-stamped in the table). On dense-vector recall benchmarks today, we lose — that is intentional substrate work, not a denied shortfall. See [marketing.md](./marketing.md) on natural language vs embeddings.
 
@@ -41,7 +40,7 @@ Maturity is also a gap: dreamd is a small open-source project (star count date-s
 
 **What they own:** A mature memory product with extraction-based pipelines, MCP and framework integrations, and a managed / hosted path when you want memory without operating a local daemon.
 
-**What dreamd offers instead:** Local-first by default — no API key required for v0.1 — with memory as plain JSONL and Markdown under `.agent/` that you can `git diff` and hand-edit. If you want managed memory, use Mem0. If you want memory you own in the repo, use dreamd.
+**What dreamd offers instead:** Local-first by default — no API key required — with memory as plain JSONL and Markdown under `.agent/` that you can `git diff` and hand-edit. If you want managed memory, use Mem0. If you want memory you own in the repo, use dreamd.
 
 ### Letta Code
 

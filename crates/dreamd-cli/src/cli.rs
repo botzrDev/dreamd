@@ -115,7 +115,7 @@ pub enum Command {
     Score(ScoreArgs),
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
-    /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent).
+    /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task).
     // Nested so uninstall can land later without reshuffling
     // top-level parsing (same shape as `reset`).
     Service(ServiceArgs),
@@ -256,7 +256,7 @@ pub struct ServiceArgs {
 #[derive(Subcommand)]
 pub enum ServiceCommand {
     /// Write a user-scope service for `dreamd watch` and enable it now
-    /// (Linux systemd --user / macOS LaunchAgent).
+    /// (Linux systemd --user / macOS LaunchAgent / Windows scheduled task).
     Install {
         /// Overwrite an existing LaunchAgent plist (macOS) or scheduled-task XML (Windows). No effect on Linux.
         #[arg(long)]
@@ -539,8 +539,13 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     // a running daemon can't clobber the rewrite.
     #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    // Off Unix the daemon is loopback TCP, so the address the guard probes is
+    // `~/.agent/server.json` (AILAB-192), resolved off `$HOME` through the same
+    // one `home_dir()` helper the registry and log paths use.
+    // `archive::daemon_liveness` turns it into a real TCP connect.
     #[cfg(not(unix))]
-    let socket: Option<PathBuf> = None;
+    let socket: Option<PathBuf> =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).server_json());
     // lock-ok (AILAB-583): archive never opens a Tantivy index — it only reads
     // and rewrites the episodic JSONL. The liveness probe below does spawn a
     // thread and block on it, but that closure only connects to the socket —
@@ -988,8 +993,13 @@ fn run_status() -> ExitCode {
     // than pre-read in `run()` before `init_tracing` (the retired WEG-103 dance).
     #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
+    // Off Unix there is no socket to resolve: the daemon publishes a loopback
+    // TCP address to `~/.agent/server.json` (AILAB-192), so that is the path
+    // `status` reports and probes. Same `home_dir()` helper as the two paths
+    // below, so all three agree on which home this invocation is reading.
     #[cfg(not(unix))]
-    let socket: Option<PathBuf> = None;
+    let socket: Option<PathBuf> =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).server_json());
     let registry_path = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
         .unwrap_or_else(|| PathBuf::from("registry.toml"));

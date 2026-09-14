@@ -17,8 +17,10 @@ use super::state::AppState;
 pub struct PeerUid(pub u32);
 
 /// Build the `/api/v1` router with `X-Agent-Root` validation middleware, the
-/// AILAB-189 request-trace stack, and, on Unix, `peer_uid_middleware`
-/// (WEG-72 / DR-407) as the outermost layer.
+/// AILAB-189 request-trace stack, and exactly one auth layer as the outermost
+/// one: `peer_uid_middleware` (WEG-72 / DR-407) on Unix, or
+/// [`bearer_auth_middleware`] (AILAB-192) everywhere else. The two arms are
+/// mutually exclusive — no target mounts both, and none mounts neither.
 pub fn build_router(state: AppState) -> axum::Router {
     let router = axum::Router::new()
         .route("/api/v1/learn", axum::routing::post(post_learn))
@@ -65,6 +67,28 @@ pub fn build_router(state: AppState) -> axum::Router {
     let router = router.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         peer_uid_middleware,
+    ));
+
+    // Off Unix there is no `SO_PEERCRED`, so the loopback-TCP listener's auth is
+    // the AILAB-203 bearer token instead, and it takes the *exact* slot
+    // `peer_uid_middleware` holds above — outermost, so a caller with no
+    // credential never reaches `TraceLayer` (same trade: a rejected request
+    // earns no `http` span, only this layer's own reason-category `warn!`), and
+    // outside `SetRequestIdLayer` for the reason spelled out at the top of this
+    // fn — the generator has to stay outside `PropagateRequestId` and
+    // `http_make_span`, so nothing may be wedged between them.
+    //
+    // The two auth layers are mutually exclusive by construction: these are
+    // sibling `cfg` arms over the same binding, so a Unix build mounts peer-UID
+    // and no bearer, an off-Unix build mounts bearer and no peer-UID, and there
+    // is no target that mounts both or neither. `state.auth_json` — not
+    // `state` — is the layer's state: the middleware needs one path and nothing
+    // else, and narrowing it there keeps it from reaching for a supervisor, an
+    // index handle or a registry it has no business touching before auth.
+    #[cfg(not(unix))]
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        state.auth_json.clone(),
+        bearer_auth_middleware,
     ));
 
     router.with_state(state)
@@ -246,10 +270,173 @@ pub async fn peer_uid_middleware(
     }
 }
 
+/// The one body every bearer rejection returns, whatever went wrong.
+///
+/// Deliberately uninformative. A client must not be able to tell "no
+/// `auth.json` yet" from "the file is the wrong shape" from "your token is
+/// wrong" — three distinguishable answers turn the endpoint into a probe
+/// oracle that reports on the daemon's install state, and the last one
+/// confirms a guessed length or alphabet. The operator-facing detail lives in
+/// [`crate::daemon_client::AuthTokenError`]'s `Display`, which reaches the
+/// daemon's own log and `dreamd watch`'s start failure, never a response body.
+const BEARER_UNAUTHORIZED: &str = "unauthorized: a valid `Authorization: Bearer <token>` header is required (see `dreamd service install`)";
+
+/// Split `Bearer <credential>` and return the credential, or `None` if the
+/// header value is not that shape.
+///
+/// The scheme is matched ASCII-case-insensitively (RFC 7235 makes it so, and
+/// HTTP clients differ on the casing they send), followed by **exactly one**
+/// space and a non-empty credential. `split_once` consumes exactly one space,
+/// so a credential that still begins with one came from `Bearer  <token>` and
+/// is rejected rather than silently carrying whitespace into
+/// [`crate::daemon_client::AuthToken::matches_hex`].
+fn bearer_credential(raw: &str) -> Option<&str> {
+    let (scheme, credential) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    if credential.is_empty() || credential.starts_with(' ') {
+        return None;
+    }
+    Some(credential)
+}
+
+/// Enforce the AILAB-203 bearer token from `~/.agent/auth.json` (AILAB-192).
+///
+/// Mounted by [`build_router`] on the non-Unix target **only**, as the
+/// outermost layer, in the same slot Unix gives `peer_uid_middleware` and for
+/// the same reason: auth runs before `TraceLayer`, and outside
+/// `SetRequestIdLayer`'s generator so nothing is wedged between it and
+/// `PropagateRequestId`. The function itself is `cfg`-free so that Linux
+/// compiles and tests it — a `#[cfg(not(unix))]` body would be invisible to
+/// every check that guards main.
+///
+/// [`crate::daemon_client::read_auth_token`] runs on **every** request. There
+/// is no cache, no `OnceCell` and no memoized `AuthToken` anywhere on this
+/// path, and that absence is the whole proof that a
+/// `dreamd service install --force` which rotates `auth.json` mid-session
+/// invalidates the old credential on the very next request — the alternative
+/// is a daemon that keeps honouring a token the operator has already revoked
+/// until it is restarted. The cost is a synchronous read of a few dozen bytes
+/// from the daemon's own home inside an `async fn`, which is the same trade
+/// `agent_root_middleware` already makes with its synchronous
+/// `resolve_project` registry read one layer in.
+///
+/// # Errors
+/// * `401` — `Authorization` missing, not visible ASCII, or not
+///   `Bearer <non-empty credential>`; `auth_json` is `None` (fail closed —
+///   never serve unauthenticated); `auth.json` absent, unreadable, or not
+///   `{"token":"<64 hex>"}`; or the presented credential does not match.
+///
+/// **401, never 403.** Every branch above returns the same status and the same
+/// [`BEARER_UNAUTHORIZED`] body. `403` is the peer-UID verdict, stays
+/// `#[cfg(unix)]`, and means something this layer can never conclude.
+///
+/// The `warn!` on each rejection carries a *reason category* and nothing else
+/// — never the presented credential, never the file's contents, never the
+/// token. An [`AuthToken`](crate::daemon_client::AuthToken) is not `{:?}`-ed
+/// into a log either, redacting `Debug` or no: the rule is that the secret has
+/// no path to a log line at all, not that one particular formatter is
+/// currently safe.
+pub async fn bearer_auth_middleware(
+    axum::extract::State(auth_json): axum::extract::State<Option<std::path::PathBuf>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .map(|value| value.to_str());
+
+    // Owned, exactly as `agent_root_middleware` owns its `X-Agent-Root`: the
+    // borrow would otherwise be alive across `next.run(req)`, which consumes
+    // the request the header was read from. 64 bytes per authenticated request.
+    let credential = match header {
+        None => {
+            tracing::warn!(
+                reason = "missing_authorization",
+                "bearer auth rejected -- 401"
+            );
+            return error_401(BEARER_UNAUTHORIZED);
+        }
+        // `to_str` refuses anything outside visible ASCII, which is every
+        // non-UTF-8 byte sequence and every multi-byte character alike. A
+        // credential is 64 hex digits, so there is nothing legitimate to lose.
+        Some(Err(_)) => {
+            tracing::warn!(
+                reason = "malformed_authorization",
+                "bearer auth rejected -- 401"
+            );
+            return error_401(BEARER_UNAUTHORIZED);
+        }
+        Some(Ok(raw)) => match bearer_credential(raw) {
+            Some(credential) => credential.to_owned(),
+            None => {
+                tracing::warn!(
+                    reason = "malformed_authorization",
+                    "bearer auth rejected -- 401"
+                );
+                return error_401(BEARER_UNAUTHORIZED);
+            }
+        },
+    };
+
+    // Fail closed. A router built without a token path has no way to
+    // authenticate anyone, so it authenticates no one — the alternative
+    // reading, "no path configured means no auth required", would turn a
+    // missing `with_auth_json` call into an unauthenticated daemon on a port
+    // every local process can dial.
+    let Some(auth_json) = auth_json else {
+        tracing::warn!(reason = "no_auth_file", "bearer auth rejected -- 401");
+        return error_401(BEARER_UNAUTHORIZED);
+    };
+
+    let token = match crate::daemon_client::read_auth_token(&auth_json) {
+        Ok(token) => token,
+        Err(e) => {
+            // Three variants, two categories, one status. `Malformed` shares
+            // `unreadable_auth_file` rather than earning a third name: the
+            // reason vocabulary is closed on purpose, and "the file is there
+            // but yielded no token" is one operator problem
+            // (`dreamd service install --force`) whether the bytes were
+            // unreadable or the wrong shape. The error's own message is not
+            // logged — `Unreadable` carries an OS string and `Missing` a path,
+            // and the category is all this layer is allowed to say.
+            let reason = match e {
+                crate::daemon_client::AuthTokenError::Missing(_) => "no_auth_file",
+                crate::daemon_client::AuthTokenError::Unreadable(_)
+                | crate::daemon_client::AuthTokenError::Malformed(_) => "unreadable_auth_file",
+            };
+            tracing::warn!(reason, "bearer auth rejected -- 401");
+            return error_401(BEARER_UNAUTHORIZED);
+        }
+    };
+
+    // Constant-time XOR fold inside `matches_hex`; see its doc comment for why
+    // it must not be "simplified" to an array `==`.
+    if !token.matches_hex(&credential) {
+        tracing::warn!(reason = "token_mismatch", "bearer auth rejected -- 401");
+        return error_401(BEARER_UNAUTHORIZED);
+    }
+
+    next.run(req).await
+}
+
 #[cfg(unix)]
 pub(crate) fn error_403(msg: &str) -> axum::response::Response {
     (
         StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+/// The bearer verdict (AILAB-192). Unlike [`error_403`] this is **not**
+/// `#[cfg(unix)]`-gated in reverse: `bearer_auth_middleware` is `cfg`-free so
+/// Linux compiles and tests it, so its response helper has to be too.
+pub(crate) fn error_401(msg: &str) -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
         axum::Json(serde_json::json!({ "error": msg })),
     )
         .into_response()

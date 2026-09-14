@@ -40,10 +40,13 @@ At v0.1, the daemon enforces:
 - **`personal/` LLM exclusion.** `.agent/personal/` is never included in the dream-cycle composition prompt unless the operator passes `dreamd dream --share-personal` (or sends `x-dreamd-share-personal: 1` to `POST /api/v1/dream`). Consent is **per call**: there is no config key, no environment variable, and no sticky state — a cycle that was not asked, on that invocation, to share the personal layer does not read it. See [Personal-layer consent](#personal-layer-consent-v01) below.
 - **LLM cost cap** ($0.10/cycle by default, `cost_cap_usd`) enforced *before* the request, with deterministic fallback.
 
-**Planned for v0.1.1** (not in v0.1 binaries):
+**Shipped in v0.1.1:**
 
 - **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
-- **TCP binding to non-localhost** refused unless `--insecure` is passed (test environments only).
+
+**Still later:**
+
+- **TCP binding to non-localhost** refused unless `--insecure` is passed (test environments only; AILAB-197).
 
 ### Same-user-cross-project surface (accepted for v0.1)
 

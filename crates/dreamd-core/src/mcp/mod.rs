@@ -5,7 +5,7 @@
 //! MCP harnesses (Claude Code, Cursor, OpenCode) can treat dreamd as a drop-in
 //! memory provider.
 //!
-//! Start-up logic:
+//! Start-up logic on **Unix**:
 //!   1. If the dreamd daemon socket is reachable, serve the same MCP tool
 //!      surface over stdio but back each tool call with an HTTP-over-UDS client
 //!      to the daemon (`Backend::Remote`) so memory is shared across every
@@ -15,14 +15,28 @@
 //!
 //! Both paths expose identical tools: `search_nodes` performs recall (WEG-78)
 //! and `append_node` writes the learning durably (WEG-79).
+//!
+//! **Off Unix** (AILAB-192) there is step 1 and nothing else: if the daemon
+//! published a live loopback address to `~/.agent/server.json` and
+//! `~/.agent/auth.json` holds a readable bearer token, tool calls are proxied
+//! over loopback TCP (`Backend::RemoteTcp`); otherwise `run_mcp_server` returns
+//! [`McpRunError::Unsupported`]. There is no in-process fallback, because
+//! [`crate::io::write_atomic`] is `ErrorKind::Unsupported` there and an
+//! in-process `append_node` would accept writes it could not persist.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+// `Arc` is used on every target — by the `#[cfg(unix)]` `index_map` and by
+// `Backend::RemoteTcp`'s token off Unix. `Mutex` only guards `index_map`, so
+// leaving it ungated is a dead import that a `-D warnings` build on the other
+// target would reject.
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 
-// Remote-backend deps (Unix only) — HTTP-over-UDS client.
-#[cfg(unix)]
+// Remote-backend deps. Cfg-free: the request builders below are pure
+// `hyper::Request` construction shared by the UDS transport (Unix) and the
+// loopback-TCP transport (AILAB-192); only the send half is transport-specific.
 use bytes::Bytes;
-#[cfg(unix)]
 use http_body_util::Full;
 
 use dreamd_protocol::{AgentLearning, EventId};
@@ -49,6 +63,12 @@ use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 #[cfg(unix)]
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
+// Loopback-TCP remote backend (AILAB-192). Both types are cfg-free in
+// `daemon_client`; the import is gated because only `Backend::RemoteTcp` names
+// them and an unused import is a `-D warnings` failure on Unix.
+#[cfg(not(unix))]
+use crate::daemon_client::{AuthToken, DaemonEndpoint};
+
 // Error type
 
 /// Errors surfaced by [`run_mcp_server`].
@@ -66,10 +86,12 @@ pub enum McpRunError {
     /// `DREAMD_SOCK` was set to a relative path.
     #[error("DREAMD_SOCK is not an absolute path: {0}")]
     InvalidSockPath(PathBuf),
-    /// Non-Unix host (AILAB-174). The daemon, the UDS bridge and
-    /// [`crate::io::write_atomic`] are all Unix-only until AILAB-192,
-    /// so `dreamd mcp` refuses rather than serving a store it cannot durably
-    /// write. Declared unconditionally so this copy is testable on Linux.
+    /// Non-Unix host with no daemon to proxy to (AILAB-174, narrowed by
+    /// AILAB-192). Off Unix `dreamd mcp` is proxy-or-refuse: with a live
+    /// loopback daemon it serves `Backend::RemoteTcp`, and without one it
+    /// returns this rather than booting an in-process store, because
+    /// [`crate::io::write_atomic`] is still `ErrorKind::Unsupported` there.
+    /// Declared unconditionally so this copy is testable on Linux.
     #[error(
         "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
     )]
@@ -151,11 +173,29 @@ enum Backend {
         sock_path: PathBuf,
         agent_root_header: String,
     },
+    /// Daemon proxy off Unix: HTTP over loopback TCP with an
+    /// `Authorization: Bearer` credential (AILAB-192). The sibling of
+    /// `Backend::Remote` — same requests, same `X-Agent-Root` contract, same
+    /// per-call connect — differing only in the transport and in carrying the
+    /// token, because there is no `SO_PEERCRED` to authenticate the caller with.
+    /// `endpoint` is already known to be loopback: `DaemonEndpoint` can only be
+    /// constructed by `read_server_json`, which refuses a non-loopback host.
+    ///
+    /// The token is behind an [`Arc`] purely to satisfy this enum's `Clone`
+    /// (rmcp clones the handler per tool call): [`AuthToken`] deliberately
+    /// exposes no `Clone`, so the secret is shared rather than copied, and its
+    /// hand-written redacting [`Debug`] still covers every clone.
+    #[cfg(not(unix))]
+    RemoteTcp {
+        endpoint: DaemonEndpoint,
+        token: Arc<AuthToken>,
+        agent_root_header: String,
+    },
 }
 
 /// MCP server exposing the `search_nodes` / `append_node` tool pair over an
-/// in-process ([`Backend::Local`]) or daemon-backed ([`Backend::Remote`])
-/// store.
+/// in-process (`Backend::Local`) or daemon-backed store — `Backend::Remote`
+/// over UDS on Unix, `Backend::RemoteTcp` over loopback TCP off it.
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     // Used by the #[tool_router] macro-generated dispatch code; the Rust
@@ -254,6 +294,32 @@ impl MemoryMcpServer {
         }
     }
 
+    /// Create a daemon-backed server off Unix ([`Backend::RemoteTcp`]): tool
+    /// calls are proxied to the running daemon over loopback TCP, authenticated
+    /// with `token` (AILAB-192). Mirrors `Self::with_remote`;
+    /// `agent_root_header` must be the canonicalized project-root string (see
+    /// `run_mcp_server`).
+    ///
+    /// There is no `index_map` field on this target, so none is initialised: a
+    /// non-Unix `MemoryMcpServer` never reads a local Tantivy index, because
+    /// `TantivyIndexHandle::open` would go through
+    /// [`crate::io::write_atomic`], which is `ErrorKind::Unsupported` there.
+    #[cfg(not(unix))]
+    pub fn with_remote_tcp(
+        endpoint: DaemonEndpoint,
+        token: AuthToken,
+        agent_root_header: String,
+    ) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            backend: Backend::RemoteTcp {
+                endpoint,
+                token: Arc::new(token),
+                agent_root_header,
+            },
+        }
+    }
+
     /// Test-only: how many Tantivy handles the Phase-1 map currently holds.
     #[cfg(all(test, unix))]
     fn index_map_len(&self) -> usize {
@@ -333,7 +399,17 @@ impl MemoryMcpServer {
     }
 
     /// Search memory using BM25 × salience scoring, blending raw episodic
-    /// events and consolidated semantic lessons (non-Unix stub).
+    /// events and consolidated semantic lessons (non-Unix).
+    ///
+    /// [`Backend::RemoteTcp`] proxies to the running daemon over loopback TCP
+    /// (AILAB-192) — the same request `Backend::Remote` sends over UDS, so the
+    /// ranking, the `source` field and the `{"results":[...]}` envelope all come
+    /// from the one server-side implementation and are forwarded verbatim.
+    ///
+    /// Every other backend returns empty results. There is deliberately no local
+    /// read path here: `TantivyIndexHandle::open` writes its first manifest
+    /// through [`crate::io::write_atomic`], which is `ErrorKind::Unsupported` on
+    /// Windows, so an in-process index cannot even be opened.
     ///
     /// The description literal below must stay byte-identical to the unix copy
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
@@ -345,10 +421,31 @@ impl MemoryMcpServer {
         &self,
         Parameters(p): Parameters<SearchNodesParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _query = p.query;
-        Ok(CallToolResult::success(vec![Content::text(
-            r#"{"results":[]}"#,
-        )]))
+        let k = p.k.unwrap_or(DEFAULT_RECALL_K);
+        let query = p.query;
+
+        match &self.backend {
+            Backend::RemoteTcp {
+                endpoint,
+                token,
+                agent_root_header,
+            } => {
+                let req = build_recall_request(&query, k, agent_root_header)?;
+                let (status, body) = send_remote_tcp(endpoint, token, req).await?;
+                if status.is_success() {
+                    // The daemon already returns the canonical {"results":[...]}
+                    // shape; forward it verbatim.
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    Ok(CallToolResult::success(vec![Content::text(text)]))
+                } else {
+                    Err(map_remote_status_error(status, &body))
+                }
+            }
+            // Local / LocalReadOnly / Empty: no readable index on this target.
+            _ => Ok(CallToolResult::success(vec![Content::text(
+                r#"{"results":[]}"#,
+            )])),
+        }
     }
 
     /// Append a new learning node to episodic memory.
@@ -423,6 +520,25 @@ impl MemoryMcpServer {
                     Err(map_remote_status_error(status, &body))
                 }
             }
+            // Loopback-TCP sibling of the arm above (AILAB-192): byte-identical
+            // request, bearer credential supplied by the transport. The daemon
+            // owns the durable append, which is why this is the only backend
+            // that may accept a write off Unix.
+            #[cfg(not(unix))]
+            Backend::RemoteTcp {
+                endpoint,
+                token,
+                agent_root_header,
+            } => {
+                let req = build_learn_request(&p, agent_root_header)?;
+                let (status, body) = send_remote_tcp(endpoint, token, req).await?;
+                if status.is_success() {
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    Ok(CallToolResult::success(vec![Content::text(text)]))
+                } else {
+                    Err(map_remote_status_error(status, &body))
+                }
+            }
         }
     }
 }
@@ -474,7 +590,8 @@ impl Default for MemoryMcpServer {
     }
 }
 
-// Remote backend (Unix only — daemon socket is UDS)
+// Remote backends: request construction is shared, sending is per-transport
+// (UDS on Unix, loopback TCP + bearer off it).
 
 /// Resolve the path to the daemon Unix socket.
 ///
@@ -493,7 +610,8 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// through; everything else becomes `%XX`). Inlined rather than pulling a
 /// URL-encoding crate — WEG-259 deliberately adds only hyper / http-body-util
 /// / bytes as new deps.
-#[cfg(unix)]
+///
+/// Cfg-free: byte arithmetic on a string, shared by both remote transports.
 fn percent_encode_query(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for &b in value.as_bytes() {
@@ -508,8 +626,8 @@ fn percent_encode_query(value: &str) -> String {
 }
 
 /// Build `GET /api/v1/recall?q=<url-encoded>&k=<k>` with the `X-Agent-Root`
-/// header. Pure (no socket, no async) so it can be unit-tested directly.
-#[cfg(unix)]
+/// header. Pure (no socket, no async) so it can be unit-tested directly, and
+/// cfg-free so the UDS and loopback-TCP backends send byte-identical requests.
 fn build_recall_request(
     query: &str,
     k: u32,
@@ -529,8 +647,8 @@ fn build_recall_request(
 /// application/json`, an optional `X-Client-Dedup-Key`, and a JSON body that
 /// deserializes as [`AgentLearning`] (the shape `post_learn` expects). The
 /// daemon mints the real `id` and `timestamp` and re-normalises `skill_action`,
-/// so we send a placeholder id and the raw skill_action. Pure: unit-tested directly.
-#[cfg(unix)]
+/// so we send a placeholder id and the raw skill_action. Pure: unit-tested
+/// directly, and cfg-free — see [`build_recall_request`].
 fn build_learn_request(
     params: &AppendNodeParams,
     agent_root_header: &str,
@@ -565,8 +683,9 @@ fn build_learn_request(
 }
 
 /// Map a non-success daemon HTTP status to an [`McpError`] per the WEG-259
-/// error table. Never panics.
-#[cfg(unix)]
+/// error table. Never panics. Cfg-free: one status table for both remote
+/// transports, so a Windows client and a Unix client explain the same 404
+/// the same way.
 fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> McpError {
     let body_str = String::from_utf8_lossy(body);
     match status.as_u16() {
@@ -608,6 +727,40 @@ async fn send_remote(
     })
 }
 
+/// Loopback-TCP sibling of [`send_remote`] (AILAB-192): open a fresh HTTP/1
+/// connection to the daemon's published `127.0.0.1:<port>`, send one
+/// bearer-authenticated request, and collect the response into
+/// `(status, body)`. Per-call connect for the same reason as the UDS path.
+///
+/// The credential is inserted by the transport
+/// ([`crate::daemon_client::send_one_tcp`]), not here, so no request-building
+/// site can forget it — and this function never formats the token into a
+/// message: the error arms below carry only the failing stage.
+#[cfg(not(unix))]
+async fn send_remote_tcp(
+    endpoint: &DaemonEndpoint,
+    token: &AuthToken,
+    req: hyper::Request<Full<Bytes>>,
+) -> Result<(hyper::StatusCode, Bytes), McpError> {
+    use crate::daemon_client::{send_one_tcp, DaemonTransportError};
+    send_one_tcp(endpoint, token, req)
+        .await
+        .map_err(|e| match e {
+            DaemonTransportError::Unreachable | DaemonTransportError::Connect(_) => {
+                McpError::internal_error(format!("daemon connect failed: {e:?}"), None)
+            }
+            DaemonTransportError::Handshake(_) => {
+                McpError::internal_error(format!("daemon handshake failed: {e:?}"), None)
+            }
+            DaemonTransportError::Send(_) => {
+                McpError::internal_error(format!("daemon request failed: {e:?}"), None)
+            }
+            DaemonTransportError::ReadBody(_) => {
+                McpError::internal_error(format!("daemon response read failed: {e:?}"), None)
+            }
+        })
+}
+
 // Public entry point
 
 /// Start the MCP server process.
@@ -617,9 +770,10 @@ async fn send_remote(
 /// client to the daemon ([`MemoryMcpServer::with_remote`]) and return when the
 /// session ends.
 ///
-/// In-process fallback: if the daemon is not running (or on Windows where the
-/// UDS path is deferred to DR-121), serve MCP tool calls in-process using
-/// [`MemoryMcpServer`].
+/// In-process fallback: if the daemon is not running, serve MCP tool calls
+/// in-process using [`MemoryMcpServer`]. This fallback is Unix-only, and this is
+/// the Unix `run_mcp_server`: the `not(unix)` twin below is proxy-or-refuse,
+/// because it has no durable local write path (AILAB-192).
 ///
 /// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
 /// is the first invocation in a directory that has no `.agent/` store yet.
@@ -728,16 +882,78 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
     Ok(())
 }
 
-/// Non-Unix stub for [`run_mcp_server`] (AILAB-174).
+/// Non-Unix [`run_mcp_server`]: daemon proxy over loopback TCP, or refuse
+/// (AILAB-192).
 ///
-/// Returns [`McpRunError::Unsupported`] unconditionally. There is deliberately
-/// no in-process fallback here: the daemon, the UDS bridge and
-/// [`crate::io::write_atomic`] are all Unix-only until AILAB-192, so
-/// booting a `MemoryCoordinator` on Windows would accept `append_node` calls it
-/// could never durably persist. `dreamd mcp` maps this to exit 2.
+/// Three preconditions, all required, checked in this order:
+///
+/// 1. [`resolve_daemon_tcp`](crate::daemon_client::resolve_daemon_tcp) — the
+///    daemon published a loopback address to `~/.agent/server.json`. A forged
+///    non-loopback host never gets here: `read_server_json` refuses it.
+/// 2. [`read_auth_token`](crate::daemon_client::read_auth_token) on
+///    `~/.agent/auth.json` — the bearer credential the daemon's only auth layer
+///    wants. Minted by `dreamd service install` (AILAB-203); this never writes
+///    it.
+/// 3. [`tcp_endpoint_is_live`](crate::daemon_client::tcp_endpoint_is_live) — a
+///    bounded connect, because a `server.json` a killed watch left behind still
+///    parses.
+///
+/// All three pass → serve [`Backend::RemoteTcp`] over stdio, exactly as the Unix
+/// path serves [`Backend::Remote`]. Any one fails → [`McpRunError::Unsupported`],
+/// which `dreamd mcp` maps to exit 2.
+///
+/// There is deliberately **no in-process fallback**: this path never calls
+/// `Supervisor::start` and never constructs [`Backend::Local`]. AILAB-174
+/// deleted that branch because
+/// [`crate::io::write_atomic`] is `ErrorKind::Unsupported` off Unix, so an
+/// in-process server would accept `append_node` calls it could never durably
+/// persist: the dream cycle, the index sidecar and `LESSONS.md` all go through
+/// that one seam. Refusing is the honest answer; a silent lossy accept is not.
+/// The daemon is the only writer that can persist, hence "proxy or refuse".
 #[cfg(not(unix))]
-pub async fn run_mcp_server(_cwd: &Path) -> Result<(), McpRunError> {
-    Err(McpRunError::Unsupported)
+pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
+    use crate::daemon_client::{read_auth_token, resolve_daemon_tcp, tcp_endpoint_is_live};
+
+    let Ok(endpoint) = resolve_daemon_tcp() else {
+        return Err(McpRunError::Unsupported);
+    };
+    let auth_json = match dirs::home_dir() {
+        Some(home) => crate::layout::DaemonHome::new(home.join(".agent")).auth_json(),
+        None => return Err(McpRunError::Unsupported),
+    };
+    let Ok(token) = read_auth_token(&auth_json) else {
+        return Err(McpRunError::Unsupported);
+    };
+    if !tcp_endpoint_is_live(&endpoint) {
+        return Err(McpRunError::Unsupported);
+    }
+
+    // Derive the X-Agent-Root header exactly as the Unix path does: the
+    // discovered project root, canonicalized to match `resolve_project`'s
+    // server-side lookup (registry roots are stored canonicalized — see
+    // registry.rs). No `.agent/` in ancestry → send the cwd; remote calls then
+    // 404, which is the correct "not registered" signal.
+    let agent_root_header: String = match AgentRoot::discover(cwd) {
+        Ok(root) => std::fs::canonicalize(root.project_root())
+            .unwrap_or_else(|_| root.project_root().to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+        Err(_) => cwd.to_string_lossy().into_owned(),
+    };
+    // Address and project root only — never the token.
+    eprintln!(
+        "dreamd mcp: daemon reachable at {} — serving Remote (daemon proxy), agent root: {agent_root_header}",
+        endpoint.socket_addr()
+    );
+
+    let svc = MemoryMcpServer::with_remote_tcp(endpoint, token, agent_root_header)
+        .serve(rmcp::transport::stdio())
+        .await
+        .map_err(|e| McpRunError::Service(e.to_string()))?;
+    svc.waiting()
+        .await
+        .map_err(|e| McpRunError::Service(e.to_string()))?;
+    Ok(())
 }
 
 // Tests

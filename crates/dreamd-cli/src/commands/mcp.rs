@@ -32,9 +32,12 @@ pub fn run(cwd: &Path) -> ExitCode {
 /// Raw exit code for a failed MCP run. Split out of [`run`] so the mapping is
 /// unit-testable without spawning a runtime or a stdio transport.
 ///
-/// [`McpRunError::Unsupported`] is a usage refusal (AILAB-174: no Windows
-/// daemon until DR-121), so it exits **2** — the same code `dreamd watch` uses
-/// on that platform. Everything else is a runtime failure: 1.
+/// [`McpRunError::Unsupported`] is a usage refusal — off Unix it means no
+/// reachable daemon to proxy to, and `dreamd mcp` deliberately does not boot an
+/// in-process store it could not durably write (AILAB-174) — so it exits **2**.
+/// `dreamd watch` no longer refuses on that platform at all (AILAB-192: it
+/// binds loopback TCP), so this code is `mcp`'s own, not a shared one.
+/// Everything else is a runtime failure: 1.
 pub(crate) fn exit_code_for(e: &McpRunError) -> u8 {
     match e {
         McpRunError::Unsupported => 2,

@@ -56,6 +56,13 @@ pub enum CoordinatorSendError {
 /// Failure modes surfaced by the `server::run` entry point.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// Unix-only (AILAB-192): the variant carries
+    /// `uds::UdsBindError`, whose `AlreadyBound` arm owns a live
+    /// `std::os::unix::net::UnixStream`. `server::uds` does not exist off Unix,
+    /// so there is nothing for this variant to wrap there. Nothing matches
+    /// `ServerError` exhaustively, so dropping the arm off-target is source- and
+    /// behaviour-compatible.
+    #[cfg(unix)]
     #[error("UDS bind failed: {0}")]
     UdsBind(#[from] crate::server::uds::UdsBindError),
     #[error("coordinator open failed: {0}")]
@@ -134,10 +141,21 @@ impl Supervisor {
     /// binary's [`crate::index::SCHEMA_VERSION`]. A manifest newer than the
     /// binary aborts startup via [`ServerError::ManifestCheck`]; older or
     /// absent manifests log a `tracing::warn!` and proceed.
+    ///
+    /// `indexer_tx` is a `#[cfg(unix)]` **parameter**, not an `Option` that is
+    /// always `None` off Unix (AILAB-192). It has to be: the value is threaded
+    /// straight into `MemoryCoordinator::open`, whose own `indexer_tx` parameter
+    /// has been `#[cfg(unix)]` since AILAB-174 because `TantivyIndexHandle` has
+    /// no bootable Windows path (`open` → `write_manifest_if_absent` →
+    /// `io::write_atomic` → `Unsupported`). A portable two-argument shape here
+    /// would either force the coordinator's field open on every target or make
+    /// this signature accept a channel it cannot forward. Same pattern, same
+    /// reason, as
+    /// [`MemoryCoordinator::open`](crate::coordinator::MemoryCoordinator::open).
     pub fn start(
         agent_root: &AgentRoot,
         channel_capacity: usize,
-        indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
+        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
     ) -> Result<Self, ServerError> {
         let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
         match check_manifest_version(&manifest_path)? {
@@ -158,8 +176,15 @@ impl Supervisor {
         }
 
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(channel_capacity);
-        let coordinator = MemoryCoordinator::open(agent_root, rx, indexer_tx)
-            .map_err(ServerError::Coordinator)?;
+        let coordinator = MemoryCoordinator::open(
+            agent_root,
+            rx,
+            // Forwarded under the same gate the parameter carries, so the arity
+            // matches `MemoryCoordinator::open` on both targets (AILAB-192).
+            #[cfg(unix)]
+            indexer_tx,
+        )
+        .map_err(ServerError::Coordinator)?;
         let handle = tokio::spawn(coordinator.run());
         Ok(Self { tx, handle })
     }
@@ -347,7 +372,14 @@ pub fn detach_double_fork() -> Result<bool, ServerError> {
     }
 }
 
-#[cfg(test)]
+// Every `Supervisor::start` call below passes the third `indexer_tx` argument,
+// which AILAB-192 made a `#[cfg(unix)]` parameter — so the module's arity is
+// Unix's arity, and gating it to `all(test, unix)` is the honest expression of
+// that rather than sprinkling `#[cfg(unix)]` on each call's `None`. It also
+// preserves exactly today's behaviour: `server` was `#[cfg(unix)]` in `lib.rs`
+// before this ticket, so none of these ever compiled off-target. Linux is unix,
+// so the Linux count is unchanged.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::coordinator::MemoryCoordinatorMsg;

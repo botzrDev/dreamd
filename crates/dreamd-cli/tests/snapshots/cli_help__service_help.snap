@@ -2,12 +2,12 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"service\")"
 ---
-Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent)
+Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task)
 
 Usage: service <COMMAND>
 
 Commands:
-  install    Write a user-scope service for `dreamd watch` and enable it now (Linux systemd --user / macOS LaunchAgent)
+  install    Write a user-scope service for `dreamd watch` and enable it now (Linux systemd --user / macOS LaunchAgent / Windows scheduled task)
   start      Start the user-scope service (systemctl --user start / launchctl kickstart)
   restart    Bounce the user-scope service (systemctl --user restart / launchctl kickstart -k)
   status     Report whether the user-scope service is running (systemd / launchd). Daemon-level liveness (UDS) is `dreamd status`

@@ -1,11 +1,20 @@
 //! `POST /api/v1/dream` — run a full deterministic dream cycle.
 
 use axum::extract::{Extension, State};
-use axum::http::{header, HeaderMap, HeaderValue};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+
+// AILAB-192: everything below is reachable only from the Unix `post_dream`. The
+// `#[cfg(not(unix))]` arm refuses before it touches the coordinator, so leaving
+// these ungated would be an `unused_imports` warning on Windows.
+#[cfg(unix)]
+use axum::http::{header, HeaderValue};
+#[cfg(unix)]
 use tokio::sync::oneshot;
 
+#[cfg(unix)]
 use crate::coordinator::MemoryCoordinatorMsg;
+#[cfg(unix)]
 use crate::server::lifecycle::CoordinatorSendError;
 
 use super::super::router::error_500;
@@ -29,6 +38,13 @@ use super::super::state::AppState;
 /// * `404` — project not registered ([`agent_root_middleware`](crate::server::http::agent_root_middleware))
 /// * `503` — coordinator busy (`Retry-After: 1`)
 /// * `500` — coordinator, WAL, or indexer failure
+///
+/// Unix-only (AILAB-192). Three of the things this body needs are themselves
+/// `#[cfg(unix)]`: [`crate::dream_cycle::IndexBackend`],
+/// `PostPhaseOptions::index`, and the `crate::client` header constants the two
+/// header readers below use. See the `#[cfg(not(unix))]` twin for what Windows
+/// serves on this route instead.
+#[cfg(unix)]
 pub(crate) async fn post_dream(
     State(state): State<AppState>,
     Extension(entry): Extension<crate::registry::ProjectEntry>,
@@ -157,6 +173,40 @@ pub(crate) async fn post_dream(
         .into_response()
 }
 
+/// `POST /api/v1/dream` on a target without atomic file replacement — always
+/// `500`.
+///
+/// Every persistence step of a cycle goes through
+/// [`io::write_atomic`](crate::io::write_atomic), which is
+/// `ErrorKind::Unsupported` off Unix — the WAL guard (`wal::begin`/`commit`),
+/// the consolidation recurrence sidecar, the decay rewrite
+/// (`episodic::rewrite_atomic`), the `LESSONS.md` render, and the index progress
+/// + manifest sidecars. Implementing a portable `write_atomic` is an explicit
+/// non-goal of AILAB-192, so there is no partial version of this route worth
+/// serving — the Unix body would die on `wal::begin`, before it consolidated
+/// anything, and return this same `500` the long way round.
+///
+/// It stays *mounted* rather than being dropped from `build_router` on purpose:
+/// a `404` would read as "this daemon does not speak the dream API" and send a
+/// client hunting for the wrong version, whereas a `500` naming the reason keeps
+/// the route table identical across targets and puts the platform limitation in
+/// the response body. The same reasoning is why the extractors are unchanged —
+/// `X-Agent-Root` is still validated by `agent_root_middleware` ahead of this
+/// handler, so a bad root is still a `400`/`404`, not this refusal.
+///
+/// # Responses
+/// * `500` — `{"error":"dream cycle is unavailable on this platform: …"}`
+#[cfg(not(unix))]
+pub(crate) async fn post_dream(
+    State(_state): State<AppState>,
+    Extension(_entry): Extension<crate::registry::ProjectEntry>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    error_500(
+        "dream cycle is unavailable on this platform: atomic file replacement is unsupported (see docs/windows.md)",
+    )
+}
+
 /// Read `x-dreamd-no-llm` (AILAB-204).
 ///
 /// `dreamd dream --no-llm` proxies to the daemon rather than skipping it, so the
@@ -165,6 +215,12 @@ pub(crate) async fn post_dream(
 /// `"yes"`, `"0"` and non-UTF-8 bytes all read as absent, so a client that
 /// guesses the wire format gets the documented default rather than a silent
 /// behavior change.
+///
+/// Unix-only (AILAB-192): the header *name* lives in `crate::client`, which is
+/// the `#[cfg(unix)]` UDS dream proxy that sends it. Only the Unix `post_dream`
+/// calls this, so the gate costs nothing; duplicating the constant into a
+/// portable module would give the wire contract two definitions.
+#[cfg(unix)]
 fn read_no_llm_header(headers: &HeaderMap) -> bool {
     headers
         .get(crate::client::NO_LLM_HEADER)
@@ -180,6 +236,10 @@ fn read_no_llm_header(headers: &HeaderMap) -> bool {
 /// stays out of the prompt. The value match is exact and case-sensitive — a
 /// client that guesses the wire format gets no disclosure rather than one it did
 /// not mean to authorize, which is the only direction this default may fail in.
+///
+/// Unix-only for the same reason as [`read_no_llm_header`] — the constant it
+/// matches on belongs to the `#[cfg(unix)]` `crate::client` proxy (AILAB-192).
+#[cfg(unix)]
 fn read_share_personal_header(headers: &HeaderMap) -> bool {
     headers
         .get(crate::client::SHARE_PERSONAL_HEADER)
@@ -187,7 +247,12 @@ fn read_share_personal_header(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v == crate::client::SHARE_PERSONAL_HEADER_VALUE)
 }
 
-#[cfg(test)]
+// Both header readers under test are `#[cfg(unix)]`, and every fixture below
+// builds its `HeaderMap` from a `crate::client` constant — also `#[cfg(unix)]`.
+// `all(test, unix)` therefore gates the module rather than each test, which also
+// keeps `use super::*` from becoming an unused glob import off-target
+// (AILAB-192). Linux is unix, so the Linux count is unchanged.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use axum::http::HeaderValue;

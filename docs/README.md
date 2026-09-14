@@ -18,14 +18,14 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 
 | Document | Audience | Purpose |
 |---|---|---|
-| [http-api.md](./http-api.md) | MCP shim authors, integrators | HTTP API over Unix domain socket — endpoints, headers, status codes |
+| [http-api.md](./http-api.md) | MCP shim authors, integrators | HTTP API over a Unix domain socket (Windows: loopback TCP + bearer token) — endpoints, headers, status codes |
 | [configuration.md](./configuration.md) | Operators | TOML config keys, precedence, defaults, environment variables |
 | [ci.md](./ci.md) | Contributors | CI pipeline jobs, local reproduction, merge gates |
 | [troubleshooting.md](./troubleshooting.md) | Users | FAQ — symptom → cause → fix |
 | [operator-handbook.md](./operator-handbook.md) | Operators | Manual store-maintenance runbook (e.g. `archive --force-unpin`) |
 | [migrate.md](./migrate.md) | Operators | `dreamd migrate` — episodic schema migration (v0.1 no-op stub), `--from`/`--to` tokens, `.bak` behavior |
 | [install.md](./install.md) | Operators | Optional per-user daemon service — `dreamd service install` / `start` / `restart` / `status` / `uninstall` on Linux (systemd `--user` unit), macOS (LaunchAgent) and Windows (Task Scheduler logon task) |
-| [windows.md](./windows.md) | Operators | Native Windows status — what `service install` registers (logon task + `auth.json`), and why `watch` / `mcp` still refuse and `write_atomic` is still unsupported |
+| [windows.md](./windows.md) | Operators | Native Windows status — what `service install` registers (logon task + `auth.json`), how `watch` serves the API over loopback TCP + bearer, and what is still blocked by `write_atomic` |
 | [glossary.md](./glossary.md) | Everyone | Domain term definitions |
 
 ## Marketing & narrative

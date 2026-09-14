@@ -2,7 +2,7 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Round-trip works both in-process and via the daemon proxy as of v0.1.0. Native Windows is out of scope for v0.1 — use WSL2 or a Linux/macOS host. The Windows settings path below is for Cline-on-Windows only; dreamd itself does not run natively there yet.
+> **Status:** Round-trip works both in-process and via the daemon proxy. Native Windows in v0.1.1 is watch + learn only; the dream cycle and Tantivy index stay Unix-only. For consolidate-and-search, use WSL2 or a Linux/macOS host. The Windows settings path below is for Cline-on-Windows; see [docs/windows.md](../../docs/windows.md).
 
 ## 1. Init the project store
 

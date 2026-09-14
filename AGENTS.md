@@ -92,13 +92,15 @@ register a real transform in `dreamd-core::migrate` (WEG-133 shipped the stub:
 
 ---
 
-## v0.1 scope
+## Scope (through v0.1.1)
 
-In scope: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
-Out of scope until v0.1.1: Windows, semantic/embedding recall, LLM-assisted dream cycle,
-Homebrew install, animated GIF.
+Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
 
-Do not implement or document v0.1.1 features in v0.1 code.
+Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
+
+Still out of scope: vector/embedding recall, Windows `write_atomic` (dream cycle and index), Homebrew install, animated GIF, auto dream cycle.
+
+Do not implement or document v0.2 features (vectors, hybrid RRF, forget-cascade, memory branches) as if they shipped.
 
 ---
 
@@ -616,7 +618,14 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### windows-service-is-schtasks-foreground-watch
 
-- **Rule:** Windows `dreamd service install` writes a logon-triggered scheduled task whose action is foreground `dreamd watch` (`WorkingDirectory` = install-time `AgentRoot`) and mints `~/.agent/auth.json` (256-bit token, owner-only ACL via `icacls`). It does not `CreateProcess` detach, does not call `detach_double_fork`, does not write a PID file, and does not ungate `pub mod server`. Token rotation on `--force` / reinstall; start-time rotation is AILAB-192. `watch` still exits 2 until 192.
+- **Rule:** Windows `dreamd service install` writes a logon-triggered scheduled task whose action is foreground `dreamd watch` (`WorkingDirectory` = install-time `AgentRoot`) and mints `~/.agent/auth.json` (256-bit token, owner-only ACL via `icacls`). It does not `CreateProcess` detach, does not call `detach_double_fork`, does not write a PID file, and does not ungate `pub mod server`. Token rotation on `--force` / reinstall; AILAB-192 re-reads the file per request and never rotates at watch start. `watch` boots on Windows as of AILAB-192 (loopback TCP + bearer) and exits 1 when `auth.json` is missing.
 - **Why:** Linear AILAB-203 AC named `DETACHED_PROCESS`, heartbeat/refcount (AILAB-210’s model), PID stale-lock, CI-gating, 15 MB / 30 MB Windows gates. Live Unix is systemd/launchd supervising foreground `watch`. `write_atomic` is still `Unsupported` on Windows, so the daemon cannot run.
 - **How to apply:** `ServiceBackend::Schtasks`; XML + `schtasks /Create /XML`; inject `schtasks` / `icacls` / SID like `launchctl` / `id -u`. Tests on Linux via `run_schtasks_*_with`. Do not add `windows-sys`. Do not `/Run` at install. Do not implement TCP/bearer here (AILAB-192).
 - **Cross-refs:** `windows-compile-is-not-the-port`, `launchd-supervises-foreground-watch`, `systemd-user-unit-is-foreground-watch`, `ailab-210-ac-is-pre-watch-architecture`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
+
+### windows-api-is-tcp-localhost-bearer
+
+- **Rule:** Windows `dreamd watch` binds `127.0.0.1:0`, writes `~/.agent/server.json`, and authenticates with `Authorization: Bearer` from `~/.agent/auth.json`. Unix stays UDS + `SO_PEERCRED`. No `--insecure` (AILAB-197). `write_atomic` stays `Unsupported`.
+- **Why:** Linear AILAB-192 folded DR-409 and a gating Windows smoke, and assumed a writer-process 174/203 still refused. Token mint is AILAB-203 install, not watch start.
+- **How to apply:** Bearer outermost on the Windows router only. Skip `TantivyIndexHandle::open` on Windows. MCP Remote over TCP when `server.json` is live; no in-process Local. Tests bind `127.0.0.1` on Linux. Do not add `windows-sys` / `subtle`.
+- **Cross-refs:** `windows-compile-is-not-the-port`, `windows-service-is-schtasks-foreground-watch`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`

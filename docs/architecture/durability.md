@@ -126,4 +126,4 @@ scheduled with the API endpoint ticket.
 - Durable replay protection across restart.
 - Sidecar storage for oversized payloads (deferred to v0.1.1).
 - Windows-specific durability semantics (`FlushFileBuffers`, ReFS) —
-  Windows lifecycle lands in v0.1.1; see `docs/windows.md`.
+  not in v0.1.1; watch+learn only. See `docs/windows.md`.

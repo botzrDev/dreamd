@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use super::handlers::PREFERENCES_SIZE_CAP;
-use super::router::request_trace_fields;
+use super::router::{bearer_auth_middleware, request_trace_fields};
 use super::{build_router, AppState, PeerUid};
 use crate::config::Config;
 use crate::coordinator::MemoryCoordinatorMsg;
@@ -33,6 +33,9 @@ fn make_test_state(registry_path: PathBuf) -> AppState {
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
         supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
+        // bearer layer and this path is never read here.
+        auth_json: None,
     }
 }
 
@@ -51,6 +54,9 @@ fn make_real_state(project_dir: &std::path::Path, registry_path: PathBuf) -> App
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
         supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
+        // bearer layer and this path is never read here.
+        auth_json: None,
     }
 }
 
@@ -456,6 +462,9 @@ async fn learn_channel_full_returns_503() {
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
         supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
+        // bearer layer and this path is never read here.
+        auth_json: None,
     };
     let router = build_router(state);
 
@@ -1150,6 +1159,9 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
         daemon_uid: wrong_uid,
         primary: None,
         supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
+        // bearer layer and this path is never read here.
+        auth_json: None,
     };
     let router = build_router(state);
 
@@ -1998,5 +2010,329 @@ async fn dedup_key_does_not_collide_across_projects() {
     assert_eq!(
         b2["deduplicated"], true,
         "second B append is flagged deduplicated"
+    );
+}
+
+// ── AILAB-192: bearer_auth_middleware — the off-Unix auth layer ───────────────
+
+/// The token `auth.json` holds for most of these tests.
+const BEARER_TOKEN_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A *different* valid token, for the rotation proof. Differs from
+/// `BEARER_TOKEN_A` in every nibble, so nothing about the comparison can pass
+/// it by accident.
+const BEARER_TOKEN_B: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// Write the AILAB-203 `~/.agent/auth.json` wire shape: `{"token":"<64 hex>"}`.
+/// `std::fs::write`, not `io::write_atomic` — that is `Unsupported` on the very
+/// target this layer exists for, and these fixtures live in a tempdir.
+fn write_auth_json(path: &std::path::Path, token_hex: &str) {
+    std::fs::write(path, format!("{{\"token\":\"{token_hex}\"}}\n")).unwrap();
+}
+
+/// `Authorization: Bearer <hex>`.
+fn bearer_header(scheme_and_credential: &str) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(scheme_and_credential).unwrap()
+}
+
+/// A one-route router behind `bearer_auth_middleware`, mounted exactly the way
+/// `build_router` mounts it off Unix: outermost, stated with the `auth.json`
+/// path alone rather than the whole `AppState`.
+///
+/// Deliberately **not** `build_router`. Linux is a unix target — which is where
+/// every AILAB-192 proof runs — so `build_router` here mounts
+/// `peer_uid_middleware` and no bearer layer at all;
+/// `unix_router_has_no_bearer_layer` below pins precisely that. The middleware
+/// is `cfg`-free so it can be driven on its own from a unix test, which is the
+/// whole reason it was written `cfg`-free.
+fn bearer_router(auth_json: Option<PathBuf>) -> axum::Router {
+    axum::Router::new()
+        .route("/ping", axum::routing::get(|| async { StatusCode::OK }))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_json,
+            bearer_auth_middleware,
+        ))
+}
+
+/// `GET /ping` through `router`, with `authorization` set if given. Returns the
+/// status and the parsed body so the "every rejection looks identical" property
+/// is assertable, not just the status.
+async fn bearer_ping(
+    router: &axum::Router,
+    authorization: Option<axum::http::HeaderValue>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method("GET").uri("/ping");
+    if let Some(value) = authorization {
+        builder = builder.header(axum::http::header::AUTHORIZATION, value);
+    }
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    // A 200 from the `/ping` handler has an empty body; only the 401s carry
+    // JSON, and only they are ever inspected.
+    if status == StatusCode::OK {
+        return (status, serde_json::Value::Null);
+    }
+    (status, body_json(resp).await)
+}
+
+/// AC (AILAB-192): no `Authorization` header → 401. Not 403 — 403 is the
+/// peer-UID verdict and this layer can never reach it.
+#[tokio::test]
+async fn bearer_missing_authorization_is_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json));
+
+    let (status, _) = bearer_ping(&router, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "403 is peer-UID's verdict; the bearer layer must never issue it"
+    );
+}
+
+/// AC (AILAB-192): a well-formed `Bearer` header carrying the wrong 64-hex
+/// token → 401.
+#[tokio::test]
+async fn bearer_wrong_token_is_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json));
+
+    let (status, _) = bearer_ping(
+        &router,
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_B}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// AC (AILAB-192): the right token reaches the handler. This is the "200 on
+/// right token" row of the spec's §4 table — the auth layer letting a request
+/// through, deliberately on a bare `/ping` and not on `GET /api/v1/health`,
+/// which is behind `agent_root_middleware` and `assess_index_freshness` (spec
+/// §1.5).
+#[tokio::test]
+async fn bearer_right_token_is_200() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json));
+
+    let (status, _) = bearer_ping(
+        &router,
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_A}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// AC (AILAB-192): the per-request re-read proof, and the reason
+/// `read_auth_token` is called in the middleware body with no cache, no
+/// `OnceCell` and no memoized `AuthToken` anywhere on the path.
+///
+/// One router instance, one middleware layer, one state — only the file on disk
+/// changes between the two requests. A token resolved once at mount time (or
+/// memoized on first use) would keep honouring `BEARER_TOKEN_A` here and the
+/// second request would still be 200, which is exactly the bug: a
+/// `dreamd service install --force` rotation would not take effect until the
+/// daemon restarted, leaving a revoked credential working.
+#[tokio::test]
+async fn bearer_rewritten_auth_json_401s_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json.clone()));
+    let header = bearer_header(&format!("Bearer {BEARER_TOKEN_A}"));
+
+    let (before, _) = bearer_ping(&router, Some(header.clone())).await;
+    assert_eq!(
+        before,
+        StatusCode::OK,
+        "token A is live before the rotation"
+    );
+
+    // The `--force` rotation, as far as the running daemon can observe it.
+    write_auth_json(&auth_json, BEARER_TOKEN_B);
+
+    let (after, _) = bearer_ping(&router, Some(header)).await;
+    assert_eq!(
+        after,
+        StatusCode::UNAUTHORIZED,
+        "the same router instance must re-read auth.json and reject the rotated-out token"
+    );
+
+    // And the new token works through that same instance, so the rejection
+    // above is a re-read and not the layer having simply broken.
+    let (rotated, _) = bearer_ping(
+        &router,
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_B}"))),
+    )
+    .await;
+    assert_eq!(rotated, StatusCode::OK, "the rotated-in token is accepted");
+}
+
+/// AC (AILAB-192): `auth.json` does not exist yet (nothing has run
+/// `dreamd service install`) → 401, with a body byte-identical to the
+/// wrong-token 401. Distinguishable answers here would be a probe oracle
+/// reporting the daemon's install state to an unauthenticated caller.
+#[tokio::test]
+async fn bearer_absent_auth_file_is_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let absent = dir.path().join("auth.json");
+    assert!(!absent.exists(), "fixture must start with no token file");
+    let no_file_router = bearer_router(Some(absent));
+
+    let (status, no_file_body) = bearer_ping(
+        &no_file_router,
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_A}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Same request shape against a router whose file exists and holds a
+    // *different* token.
+    let present = dir.path().join("present.json");
+    write_auth_json(&present, BEARER_TOKEN_B);
+    let (mismatch_status, mismatch_body) = bearer_ping(
+        &bearer_router(Some(present)),
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_A}"))),
+    )
+    .await;
+
+    assert_eq!(mismatch_status, status, "same status for both failures");
+    assert_eq!(
+        no_file_body, mismatch_body,
+        "\"no token file yet\" and \"wrong token\" must be indistinguishable"
+    );
+}
+
+/// AC (AILAB-192): `auth_json` is `None` → 401 on every request, fail-closed.
+/// A router built without a token path has no way to authenticate anyone, so it
+/// authenticates no one; reading `None` as "no auth required" would turn a
+/// forgotten `with_auth_json` call into an open daemon.
+#[tokio::test]
+async fn bearer_none_auth_path_is_401() {
+    let router = bearer_router(None);
+
+    for authorization in [
+        None,
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_A}"))),
+        Some(bearer_header(&format!("Bearer {BEARER_TOKEN_B}"))),
+    ] {
+        let (status, _) = bearer_ping(&router, authorization).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a router with no auth.json path must never serve a request"
+        );
+    }
+}
+
+/// AC (AILAB-192): the scheme grammar. Only `bearer <non-empty credential>`,
+/// ASCII-case-insensitively and with exactly one space, is even considered — a
+/// correct credential presented under any other shape is still 401.
+#[tokio::test]
+async fn bearer_malformed_scheme_is_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json));
+
+    // Every one of these carries the *correct* token, so a 200 could only come
+    // from the header parser being too permissive.
+    for raw in [
+        format!("Basic {BEARER_TOKEN_A}"),
+        BEARER_TOKEN_A.to_string(),
+        "Bearer".to_string(),
+        "Bearer ".to_string(),
+        format!("Bearer  {BEARER_TOKEN_A}"),
+        format!("Bearer\t{BEARER_TOKEN_A}"),
+    ] {
+        let (status, _) = bearer_ping(&router, Some(bearer_header(&raw))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "malformed Authorization {raw:?} must be 401"
+        );
+    }
+
+    // A non-ASCII header value. `HeaderValue::from_bytes` accepts obs-text
+    // (0x80..=0xFF), so this is a value a real client can put on the wire;
+    // `HeaderValue::to_str` refuses it, and that refusal must be a 401 rather
+    // than a panic or a 500.
+    let non_ascii = axum::http::HeaderValue::from_bytes(b"Bearer \xff\xfe").unwrap();
+    let (status, _) = bearer_ping(&router, Some(non_ascii)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a non-ASCII Authorization value must be 401"
+    );
+}
+
+/// AC (AILAB-192): the scheme match is ASCII-case-insensitive, so a client that
+/// sends `bearer` (RFC 7235 makes the scheme token case-insensitive, and HTTP
+/// clients differ) is accepted with the right credential.
+#[tokio::test]
+async fn bearer_lowercase_scheme_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_json = dir.path().join("auth.json");
+    write_auth_json(&auth_json, BEARER_TOKEN_A);
+    let router = bearer_router(Some(auth_json));
+
+    for scheme in ["bearer", "Bearer", "BEARER", "BeArEr"] {
+        let (status, _) = bearer_ping(
+            &router,
+            Some(bearer_header(&format!("{scheme} {BEARER_TOKEN_A}"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "scheme {scheme:?} must be accepted");
+    }
+}
+
+/// AC (AILAB-192): the Unix router's outermost layer is still the peer-UID one
+/// and **no** bearer layer leaked onto this target.
+///
+/// A real `build_router(state)` request with neither an `Authorization` header
+/// nor a `PeerUid` extension is the one probe that separates the two: the
+/// bearer layer would answer 401 (it sees no credential), the peer-UID layer
+/// answers 403 (it sees no extension). 403 therefore pins both facts at once —
+/// peer-UID is outermost, and the `#[cfg(not(unix))]` bearer arm is genuinely
+/// absent here rather than merely mounted further in.
+#[tokio::test]
+async fn unix_router_has_no_bearer_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_test_state(dir.path().join("registry.toml"));
+    let router = build_router(state);
+
+    let resp = router
+        .into_service()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/recall?q=test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the Unix router's outermost layer must be peer_uid_middleware"
+    );
+    assert_ne!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "a 401 here would mean the bearer layer is mounted on Unix"
     );
 }

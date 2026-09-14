@@ -200,15 +200,21 @@ npx -y dreamd-mcp service install
 npx -y dreamd-mcp service start
 ```
 
-**`dreamd watch` still refuses to start on Windows.** It exits 2 with
-`Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see
-docs/windows.md)`, and so does `dreamd mcp`, until AILAB-192 lands TCP on
-localhost with a bearer token read from that `auth.json`. So the verbs above
-report what Task Scheduler thinks, not what the daemon did: a successful
-`start` can still leave `status` at `stopped`, because the task ran `watch` and
-`watch` exited. Registering the logon task and minting the token now is what
-makes the first useful run possible later. For a working daemon today, use
-WSL2 — see [windows.md](./windows.md).
+**`dreamd watch` boots on Windows as of AILAB-192**, and the token this
+`install` just minted is what it needs. `watch` binds `127.0.0.1` on an
+ephemeral port, publishes the address to `%USERPROFILE%\.agent\server.json`, and
+requires `Authorization: Bearer <token>` from that `auth.json` on every request
+— re-read per request, so a `--force` reinstall's rotation takes effect without
+a restart. It only ever *reads* the file: a missing or malformed `auth.json`
+makes `watch` exit **1** pointing back at `dreamd service install`. `dreamd mcp`
+serves its Remote backend over that same loopback TCP when the daemon is up, and
+still exits 2 when it is not. The verbs above still report what Task Scheduler
+thinks, not what the daemon did: a `start` whose `watch` exited can leave
+`status` at `stopped`, and a task Task Scheduler calls `Running` is not proof
+the API is answering — `dreamd status` is the daemon-liveness question. The
+dream cycle and the Tantivy index remain unavailable on Windows because
+`io::write_atomic` is still unsupported there, so for a store you can
+consolidate and search, use WSL2 — see [windows.md](./windows.md).
 
 ## Restart is a bounce, not a reinstall
 
@@ -279,10 +285,12 @@ dreamd watch                  # or: npx -y dreamd-mcp watch
 ```
 
 Use this when there is no systemd user instance, on a headless macOS session,
-or whenever you would rather see the daemon in a terminal. It binds the same
-socket, writes the same log, and is exactly what the service supervises. It is
-**not** a Windows fallback: `dreamd watch` exits 2 there until AILAB-192,
-whether you run it yourself or the scheduled task runs it for you — see
+or whenever you would rather see the daemon in a terminal. On Unix it binds the
+same socket, writes the same log, and is exactly what the service supervises.
+On Windows it is the same fallback and the same log, with a different transport
+and one precondition: `dreamd watch` binds loopback TCP instead of a Unix socket, and
+needs the `auth.json` that `dreamd service install` mints — without it, it exits
+1 whether you run it yourself or the scheduled task runs it for you. See
 [windows.md](./windows.md).
 
 ## Removing the service

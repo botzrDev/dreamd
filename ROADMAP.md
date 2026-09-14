@@ -5,7 +5,7 @@ dreamd is portable, cross-harness memory for coding agents: a natural-language
 **direction, not dated commitments** — priorities move with what design partners
 hit first. The day-to-day view lives in the issue tracker; this is the shape.
 
-## Shipped — v0.1
+## Shipped — v0.1.0
 
 - The open **`.agent/` standard** — folder layout, JSONL node schema, and
   dream-cycle semantics, specified to RFC-2119 in
@@ -21,13 +21,22 @@ hit first. The day-to-day view lives in the issue tracker; this is the shape.
 - Every single-repo feature is **free and Apache-2.0**. If you only ever run out
   of one repo, you never pay.
 
-## Next — v0.1.1
+## Shipped — v0.1.1
 
-- **Windows lifecycle** — service install and crash-safe atomic writes (see
+- **LLM-assisted dream cycle** as an opt-in alternative to the deterministic
+  default (falls back when there is no key, the cost cap trips, or `--no-llm`).
+- **Semantic indexing** of `LESSONS.md` as a Tantivy document layer — still
+  BM25 × salience, not embeddings.
+- **Windows watch + learn** — loopback TCP + bearer token from `auth.json`.
+  Dream cycle and index stay Unix-only until atomic writes land (see
   [`docs/windows.md`](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+- **`dreamd service`** on Linux (systemd `--user`), macOS (LaunchAgent), and
+  Windows (logon scheduled task): install / start / status / restart / uninstall.
+
+## Next
+
+- **Windows atomic writes** — dream cycle and Tantivy index on native Windows.
 - **More harness adapters**, including OpenCode.
-- **Semantic indexing** alongside lexical recall — the `LESSONS.md` document layer in the Tantivy index (still BM25 × salience, not embeddings).
-- **LLM-assisted dream cycle** as an opt-in alternative to the deterministic default.
 - Hardening and hot-fixes from launch feedback.
 
 ## On the roadmap — v0.2

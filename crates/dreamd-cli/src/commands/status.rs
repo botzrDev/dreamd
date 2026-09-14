@@ -1,11 +1,18 @@
 //! `dreamd status` — one-shot daemon + project status snapshot (WEG-103).
 //!
-//! Prints a structured plain-text block: daemon liveness, the socket path, the
-//! project resolved from `$CWD` and whether it is registered with the daemon,
-//! the last dream cycle recorded in per-project state, and the tail of the
-//! daemon log. Liveness is a bounded UDS connect probe (see
-//! [`dreamd_core::server::is_daemon_socket_live`]) so orphan socket files left
-//! after `SIGKILL` report `not running` without hanging on a wedged listener.
+//! Prints a structured plain-text block: daemon liveness, the daemon's address,
+//! the project resolved from `$CWD` and whether it is registered with the
+//! daemon, the last dream cycle recorded in per-project state, and the tail of
+//! the daemon log.
+//!
+//! Liveness is always a bounded *connect* probe, never file presence, so a stale
+//! address file left behind by a `SIGKILL`ed daemon reports `not running`
+//! without hanging on a wedged listener. On Unix that is a UDS connect to
+//! `~/.agent/dreamd.sock` (see
+//! [`dreamd_core::server::is_daemon_socket_live`]); off Unix it is a TCP connect
+//! to the loopback address published in `~/.agent/server.json` (see
+//! [`dreamd_core::daemon_client::tcp_daemon_is_live`], AILAB-192), and the
+//! report labels that line `server_json` rather than `socket`.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -44,11 +51,13 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 
 /// Run `dreamd status` and write the report to `out`.
 ///
-/// `socket` is the resolved daemon UDS path (`None` when the home directory
-/// can't be resolved); `registry_path` is a daemon-home path; `log_tail` holds
-/// the daemon log's last lines, pre-read by the caller (see [`read_log_tail`]).
-/// Returns `Ok(true)` when the daemon appears live — a bounded UDS connect
-/// probe succeeds — so the caller exits 0 — and `Ok(false)` otherwise (exit 1).
+/// `socket` is the resolved daemon address path — the UDS path on Unix,
+/// `~/.agent/server.json` off it (`None` when the home directory can't be
+/// resolved); `registry_path` is a daemon-home path; `log_tail` holds the daemon
+/// log's last lines, pre-read by the caller (see [`read_log_tail`]).
+/// Returns `Ok(true)` when the daemon appears live — a bounded connect probe on
+/// that address succeeds — so the caller exits 0 — and `Ok(false)` otherwise
+/// (exit 1).
 /// Reads that fail on malformed on-disk state degrade to a fallback string rather than aborting the
 /// report, so `status` always prints a clean block.
 pub fn run(
@@ -64,9 +73,18 @@ pub fn run(
         "daemon: {}",
         if live { "running" } else { "not running" }
     )?;
+    // Label the address line for the transport that is actually in use. On Unix
+    // the daemon's address *is* a filesystem socket. Off Unix it is
+    // `~/.agent/server.json` — the file a loopback-TCP daemon publishes its
+    // host/port into (AILAB-192) — and calling that a socket would be a lie the
+    // operator then greps for. The Unix line is unchanged, byte for byte.
+    #[cfg(unix)]
+    const ADDRESS_LABEL: &str = "socket";
+    #[cfg(not(unix))]
+    const ADDRESS_LABEL: &str = "server_json";
     match socket {
-        Some(p) => writeln!(out, "socket: {}", p.display())?,
-        None => writeln!(out, "socket: (unresolved — no home directory)")?,
+        Some(p) => writeln!(out, "{ADDRESS_LABEL}: {}", p.display())?,
+        None => writeln!(out, "{ADDRESS_LABEL}: (unresolved — no home directory)")?,
     }
 
     // Project resolved from CWD, plus its registration with the daemon.
@@ -121,10 +139,16 @@ fn daemon_liveness(path: &Path) -> bool {
     dreamd_core::server::is_daemon_socket_live(path)
 }
 
-/// Windows has no UDS in v0.1; fall back to path presence so the command compiles.
+/// Daemon liveness probe off Unix, where `path` is `~/.agent/server.json` and
+/// the daemon is a loopback TCP listener (AILAB-192).
+///
+/// Reads the published address and attempts a bounded TCP connect to it, which
+/// is the exact analogue of the Unix bounded UDS connect: a `server.json` a
+/// `SIGKILL`ed watch left behind still parses, so presence proves nothing and
+/// only the connect can tell "running" from "stale address file".
 #[cfg(not(unix))]
 fn daemon_liveness(path: &Path) -> bool {
-    path.exists()
+    dreamd_core::daemon_client::tcp_daemon_is_live(path)
 }
 
 #[cfg(test)]

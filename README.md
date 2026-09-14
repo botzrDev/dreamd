@@ -2,8 +2,8 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
-[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/v0.1.0-released-brightgreen.svg)](#status)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
+[![Status](https://img.shields.io/badge/v0.1.1-released-brightgreen.svg)](#status)
 
 **The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
@@ -111,7 +111,7 @@ Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters
 
 Agents talk to dreamd over MCP (`search_nodes`, `append_node`). The MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence). Each hit carries `source_harness` and `skill_action`, so recall is attributable across harnesses. The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
 
-v0.1 recall is deliberately lexical (BM25 + salience). That is a scope choice, not a scoreboard claim. Semantic / embedding recall is out of scope until after v0.1.
+Recall is deliberately lexical (BM25 + salience), including the `LESSONS.md` document layer indexed alongside episodic events. That is a scope choice, not a scoreboard claim. Vector / embedding recall is later.
 
 Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md)
 
@@ -127,7 +127,7 @@ Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/h
 
 **What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. To uninstall dreamd itself, run `dreamd uninstall` — details: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset). That stops running processes and clears caches; removing the per-user *service* entry (the systemd unit, the LaunchAgent, or — new in v0.1.1 — the Windows Task Scheduler logon task) is the separate `dreamd service uninstall`, whose optional `--purge` deletes the daemon home `~/.agent/` and never a per-project `.agent/` store ([docs/install.md](./docs/install.md)).
 
-**Windows?** Not in v0.1. Linux and macOS only. Windows lifecycle is planned for v0.1.1.
+**Windows?** Partial in v0.1.1. `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`; `POST /api/v1/learn` works. The dream cycle and Tantivy index do not — `io::write_atomic` is still `Unsupported` there. For consolidate-and-search, use WSL2 or a Linux/macOS host. Details: [docs/windows.md](./docs/windows.md).
 
 **Is everything free forever?** Apache-2.0 core is open. Premium may come later. Self-hosted only in v0.1 (no hosted SaaS).
 
@@ -140,10 +140,8 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | When | What |
 |---|---|
 | **v0.1.0** (2026-08-05) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
-| **v0.1.1** | Windows lifecycle, semantic / embedding recall, LLM-assisted dream cycle (not claimed in v0.1) |
-| **Oct 2026** | WasTrue benchmark publish (dreamd is one row; conflict of interest disclosed) |
-
-v0.1.1 features are intentionally not implemented or documented as shipped in v0.1 code.
+| **v0.1.1** (2026-09-14) | LLM dream cycle, `LESSONS.md` semantic layer (still BM25 × salience, not embeddings), Windows watch+learn, `dreamd service` on Linux / macOS / Windows |
+| **Next** | Windows atomic writes (dream cycle + index), vector recall, WasTrue benchmark publish |
 
 ---
 
@@ -153,7 +151,7 @@ v0.1.1 features are intentionally not implemented or documented as shipped in v0
 |---|---|
 | [GUIDE.md](./GUIDE.md) | 20-minute tutorial walkthrough |
 | [docs/README.md](./docs/README.md) | Full documentation index |
-| [docs/http-api.md](./docs/http-api.md) | REST API over Unix socket |
+| [docs/http-api.md](./docs/http-api.md) | REST API (Unix socket / Windows loopback TCP) |
 | [docs/configuration.md](./docs/configuration.md) | TOML config and env vars |
 | [docs/troubleshooting.md](./docs/troubleshooting.md) | Common failures |
 | [docs/glossary.md](./docs/glossary.md) | Domain terms |
@@ -169,7 +167,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v0.1.0 is out.** npm package `dreamd-mcp` has held the `latest` dist-tag since 2026-08-06. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). Linux and macOS. If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
+**v0.1.1 is out.** npm package `dreamd-mcp` has held the `latest` dist-tag since 2026-08-06. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `score`, `archive`, `migrate`, `reset workspace`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). Linux, macOS, and partial Windows (watch + learn; no dream cycle or index). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
@@ -189,7 +187,7 @@ A separate, reproducible eval measuring whether memory systems correctly update 
 
 ## Platforms
 
-v0.1: Linux and macOS. Windows in v0.1.1.
+Linux and macOS (full). Windows in v0.1.1 is watch + learn over loopback TCP; the dream cycle and Tantivy index stay Unix-only until atomic writes land. See [docs/windows.md](./docs/windows.md).
 
 ---
 

@@ -94,7 +94,7 @@ Enforces license allowlist and advisory policy defined in `deny.toml`. CI pins `
 cargo test --all-features --workspace
 ```
 
-Windows is in the matrix for visibility but is non-gating until Windows daemon support lands (DR-121). The crate **compiles** on Windows (AILAB-174), but the daemon itself does not run there: `server`, `client` and `daemon_client` are `#[cfg(unix)]` (UDS / `SO_PEERCRED`) and `io::write_atomic` returns `ErrorKind::Unsupported`. `dreamd watch` and `dreamd mcp` exit 2 with an unsupported message; the socket probes in `status` / `archive` / `uninstall` / `update` see no daemon. The port is DR-121 / AILAB-203.
+Windows is in the matrix for visibility but is non-gating (`continue-on-error`). The crate **compiles** on Windows (AILAB-174). `dreamd watch` boots there over loopback TCP with a bearer token (AILAB-192) and `POST /api/v1/learn` works; the dream cycle and Tantivy index do not, because `io::write_atomic` is still `ErrorKind::Unsupported`. `uds` / `uds_server` / `client` stay Unix-only. Windows CI jobs remain informational and gate nothing.
 
 ### Reproduce a specific OS locally
 

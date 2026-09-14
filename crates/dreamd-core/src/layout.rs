@@ -7,8 +7,8 @@
 //! * [`AgentRoot`] — `<project>/.agent/`. Owned by the project, committed to
 //!   git (except `.dreamd/`). Multiple instances coexist across projects.
 //! * [`DaemonHome`] — `~/.agent/`. Owned by the user's daemon process. Holds
-//!   the unix socket, registry, auth token, and log. Never lives inside a
-//!   project store.
+//!   the unix socket, registry, auth token, the published loopback address
+//!   (AILAB-192), and log. Never lives inside a project store.
 //!
 //! See `context/planning/PRD.md` Part III §1 + Part IV §1.
 
@@ -197,9 +197,9 @@ impl std::fmt::Display for AgentRoot {
 }
 
 /// Global daemon home at `~/.agent/`. Holds the unix socket, project registry,
-/// auth token, and log file. MUST be a separate directory from any project's
-/// `.agent/` store — co-locating them would let a project's git history leak
-/// the auth token.
+/// auth token, the published loopback address (AILAB-192), and log file. MUST be
+/// a separate directory from any project's `.agent/` store — co-locating them
+/// would let a project's git history leak the auth token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DaemonHome {
     home: PathBuf,
@@ -241,6 +241,23 @@ impl DaemonHome {
     /// `~/.agent/auth.json` — bearer token for the Windows TCP fallback.
     pub fn auth_json(&self) -> PathBuf {
         self.home.join("auth.json")
+    }
+
+    /// `~/.agent/server.json` — the loopback TCP address the Windows daemon
+    /// publishes so clients can find it (AILAB-192).
+    ///
+    /// Sits next to [`Self::auth_json`] for the same reason: the daemon home is
+    /// never inside a project store (see
+    /// `daemon_home_is_never_inside_a_project_store`), so neither the token nor
+    /// the port can leak into a project's git history.
+    ///
+    /// Written with `std::fs::write`, **not**
+    /// [`io::write_atomic`](crate::io::write_atomic) — that is still
+    /// `ErrorKind::Unsupported` off Unix, and this file is a discardable address
+    /// hint the daemon rewrites on every bind, not memory state whose torn write
+    /// would lose data.
+    pub fn server_json(&self) -> PathBuf {
+        self.home.join("server.json")
     }
 
     /// `~/.agent/dreamd.log` — daemon log.
@@ -364,6 +381,9 @@ mod tests {
             PathBuf::from("/home/u/.agent/registry.toml"),
         );
         assert_eq!(h.auth_json(), PathBuf::from("/home/u/.agent/auth.json"));
+        // AILAB-192: the published loopback address lives beside the token, in
+        // the daemon home — never in a project store.
+        assert_eq!(h.server_json(), PathBuf::from("/home/u/.agent/server.json"));
         assert_eq!(h.log_file(), PathBuf::from("/home/u/.agent/dreamd.log"));
     }
 
