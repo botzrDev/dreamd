@@ -23,7 +23,8 @@ read and write via MCP, without any of them needing to know the others exist.
 
 - Not a vector database. v0.1 uses BM25 lexical recall (Tantivy). Semantic/embedding
   recall is v0.2.
-- Not a hosted SaaS. v0.1 makes zero network calls. Everything stays on your machine.
+- Not a hosted SaaS. Memory stays local by default. The only opt-in network path is
+  an LLM-assisted dream cycle (API key required; `--no-llm` stays offline).
 - Not a replacement for AGENTS.md or SKILL.md. Those are human-authored project rules;
   `.agent/` is machine-written runtime memory. They complement each other.
 - Not a Python SDK. No Python required. Distribution is npm (`npx`) and Rust (`cargo`).
@@ -33,13 +34,14 @@ read and write via MCP, without any of them needing to know the others exist.
 
 ## Install
 
-### No Rust required (v0.1 path)
+### No Rust required (npx path)
 
-  npx dreamd-mcp init   # scaffold .agent/ in your project
-  npx dreamd-mcp        # start the MCP server (stdio)
+  npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
+  npx -y dreamd-mcp         # start the MCP server (stdio)
 
-Supported: Linux x86_64/aarch64, macOS x86_64/aarch64. Node >= 18 required.
-Windows arrives in v0.1.1.
+Supported: Linux x86_64, macOS x86_64/aarch64. Windows in v0.1.1 is watch + learn
+only (loopback TCP + bearer); dream cycle and Tantivy index need Unix atomic writes.
+Node >= 18 required.
 
 ### From source (requires Rust stable)
 
@@ -152,15 +154,19 @@ Read-after-write visibility: up to commit_cadence_seconds (default 5s).
 
 ## Privacy
 
-v0.1 makes zero network calls. `personal/PREFERENCES.md` is never sent to any LLM.
-When LLM-assisted dream cycle lands in v0.1.1, episodic content above the salience
-threshold may be sent to the configured provider — opt-in, `personal/` excluded by
-default unless you explicitly pass `--share-personal`.
+Memory stays local by default. The daemon makes no network calls unless you opt
+into an LLM-assisted dream cycle (API key in the environment or
+`~/.config/dreamd/secrets.toml`; `--no-llm` keeps the cycle offline).
+`.agent/personal/` is excluded from that request unless you pass
+`--share-personal` on that call.
 
-## v0.1 scope (do not promise beyond this)
+## Current scope (v0.1.1)
 
-IN v0.1: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
-v0.1.1: semantic/embedding recall, Windows, LLM-assisted dream cycle, Homebrew/cargo install.
+IN: BM25 lexical recall (including `LESSONS.md` as a Tantivy document layer —
+not embeddings), Linux + macOS full daemon, Windows watch+learn, opt-in LLM
+dream cycle, `dreamd service`, npm `dreamd-mcp`.
+NOT: vector/embedding recall, Windows atomic writes (dream cycle + index),
+Homebrew, auto dream cycle.
 
 ## Key links
 

@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **First-run privacy disclosure no longer claims LLM cycles are still planned.** `DR413_DISCLOSURE` (and the byte-locked `tests/fixtures/init.golden.txt`) said v0.1 made no network calls and that LLM-assisted dream cycles were planned for v0.1.1. That banner shipped inside the v0.1.1 tag; `init` / first MCP spawn now match the released behavior — local by default, network only for an opted-in LLM cycle. (`crates/dreamd-core/src/privacy.rs`, `tests/fixtures/init.golden.txt`)
+
 ## [0.1.1] - 2026-09-14
 
 ### Highlights

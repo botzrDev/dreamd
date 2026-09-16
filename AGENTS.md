@@ -112,7 +112,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-08-27
+**Last updated:** 2026-09-16
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -129,6 +129,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 ---
 
 ## Paired-dev-loop drift catalog
+
+### privacy-disclosure-tracks-the-shipped-network-story
+
+- **Rule:** `DR413_DISCLOSURE` in `privacy.rs` is the first-run banner printed by `dreamd init` and first MCP spawn. `tests/fixtures/init.golden.txt` is byte-locked to it. When whether the daemon can make network calls changes, rewrite **both** in the same commit. Never leave "planned for v0.X.Y" in the banner after that version is tagged.
+- **Why:** The v0.1.1 honesty pass updated README / ROADMAP / SECURITY but missed this string. Users who `npx dreamd-mcp@0.1.1 init` still saw "LLM-assisted dream cycles … planned for v0.1.1" after that release had shipped the LLM path.
+- **How to apply:** Edit the const and the golden together; `cargo test -p dreamd --test init_golden` is the gate. Do not rewrite historical CHANGELOG `[0.1.0]` bullets that also said `--dry` was planned (`changelog-historical-entries-stay-put`).
+- **Cross-refs:** `changelog-historical-entries-stay-put`
 
 ### coordinator-not-mutex-file
 

@@ -6,8 +6,8 @@ initialized .agent/.dreamd/state.json
 appended .gitignore (1 entry: .agent/.dreamd/)
 registered .agent/ in ~/.agent/registry.toml
 
-dreamd: first run — v0.1 makes no network calls. All memory
-operations are local-only on your machine. LLM-assisted dream
-cycles and cloud providers are planned for v0.1.1.
+dreamd: first run — memory stays local. No network calls
+unless you opt into an LLM-assisted dream cycle (API key
+present; --no-llm stays offline).
 See https://github.com/botzrDev/dreamd/blob/main/SECURITY.md
 for details.

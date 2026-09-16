@@ -2,7 +2,7 @@
 //!
 //! Three scenarios via subprocess:
 //!   1. **First run** -- stdout must match `tests/fixtures/init.golden.txt`
-//!      verbatim (16 lines / 651 bytes). Validates directory scaffold, state.json
+//!      verbatim (13 lines / 454 bytes). Validates directory scaffold, state.json
 //!      schema, gitignore append, WORKSPACE.md, and privacy disclosure.
 //!   2. **Re-run** -- stdout must match `tests/fixtures/init.rerun.golden.txt`
 //!      (1 line / 63 bytes). Validates the idempotency guard.

@@ -162,7 +162,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 
 - Not a replacement for `AGENTS.md` or `SKILL.md`. Those are human-authored project rules; `.agent/` is machine-written runtime memory. They work together.
 - Not a vector database. v0.1 uses BM25 lexical recall. Semantic/embedding recall is on the roadmap.
-- Not a hosted service. The daemon makes zero network calls in v0.1. (`npx` downloads the prebuilt binary from GitHub on first run.) Everything in `.agent/` stays on your machine.
+- Not a hosted service. Memory stays local by default; an LLM-assisted dream cycle is the only opt-in network path (API key required; `--no-llm` stays offline). `npx` downloads the prebuilt binary from GitHub on first run. Everything in `.agent/` stays on your machine.
 
 ---
 

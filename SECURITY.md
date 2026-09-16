@@ -21,7 +21,7 @@ Security fixes land on `main` and the latest `0.1.x` release.
 
 | Version | Supported |
 |---|---|
-| `0.1.0` | Yes |
+| `0.1.1` | Yes |
 | `main` | Yes |
 | Anything else | No |
 
@@ -60,9 +60,9 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 - Users should treat `.agent/` like shell rc files: review with `git diff` if the repo is committed.
 - The redaction scrubber (below) targets **secret leakage**, not prompt injection.
 
-## Privacy and redaction (v0.1)
+## Privacy and redaction (through v0.1.1)
 
-**v0.1 makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `~/.config/dreamd/secrets.toml` (mode `0600`) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
+**As of v0.1.1, dreamd makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `~/.config/dreamd/secrets.toml` (mode `0600`) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
 
 ### Personal-layer consent (v0.1)
 

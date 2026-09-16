@@ -42,7 +42,7 @@ No re-explaining. No re-pasting. No "as I mentioned before."
 |---|---|
 | A portable memory format (`.agent/`) checked into your repo | A vector database |
 | A reference MCP server for reading and writing it | A knowledge graph engine |
-| Local-first by default — zero network calls in v0.1 | A hosted SaaS |
+| Local-first by default — no network unless you opt into an LLM dream cycle | A hosted SaaS |
 | One source of truth across every coding agent you use | A replacement for `AGENTS.md` or `SKILL.md` |
 
 If you need graph multi-hop reasoning, use [Cognee](https://github.com/topoteretes/cognee). If you need a single-file portable memory capsule, use [Memvid](https://github.com/Olow304/memvid). dreamd does the one thing they don't: makes your memory follow you between coding agents.

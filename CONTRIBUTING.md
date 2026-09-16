@@ -1,6 +1,6 @@
 # Contributing to dreamd
 
-Thanks for your interest. `dreamd` is at v0.1.0. The spec ([`SPEC.md`](./SPEC.md)) is the frozen on-disk contract; the implementation still churns within that contract.
+Thanks for your interest. `dreamd` is at v0.1.1. The spec ([`SPEC.md`](./SPEC.md)) is the frozen on-disk contract; the implementation still churns within that contract.
 
 ## Code of Conduct
 

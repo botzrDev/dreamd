@@ -3,13 +3,15 @@
 //! Hoisted from `dreamd-cli::commands::init` in WEG-17 so future surfaces
 //! (README, MCP tool descriptions, error messages) can reuse the locked
 //! disclosure text. Stdout output of `dreamd init` is byte-locked against
-//! `tests/fixtures/init.golden.txt`; do not modify the text.
+//! `tests/fixtures/init.golden.txt`. Keep both in lockstep — a release that
+//! changes whether the daemon can make network calls must rewrite this text.
 
-/// PRD §5 privacy disclosure, ASCII-rendered, 60-col wrapped (locked verbatim).
+/// Privacy disclosure, ASCII-rendered, 60-col wrapped (locked against
+/// `tests/fixtures/init.golden.txt`).
 pub const DR413_DISCLOSURE: &str = "\
-dreamd: first run — v0.1 makes no network calls. All memory
-operations are local-only on your machine. LLM-assisted dream
-cycles and cloud providers are planned for v0.1.1.
+dreamd: first run — memory stays local. No network calls
+unless you opt into an LLM-assisted dream cycle (API key
+present; --no-llm stays offline).
 See https://github.com/botzrDev/dreamd/blob/main/SECURITY.md
 for details.";
 
