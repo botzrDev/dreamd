@@ -19,6 +19,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | Document | Audience | Purpose |
 |---|---|---|
 | [http-api.md](./http-api.md) | MCP shim authors, integrators | HTTP API over a Unix domain socket (Windows: loopback TCP + bearer token) — endpoints, headers, status codes |
+| [mcp-transports.md](./mcp-transports.md) | MCP client authors, operators | `dreamd mcp` transports — stdio (default) vs opt-in Streamable HTTP at `/mcp` via `--bind` / `--insecure` (source builds with the `mcp-http` feature); unauthenticated; not the `/api/v1` REST API |
 | [configuration.md](./configuration.md) | Operators | TOML config keys, precedence, defaults, environment variables |
 | [ci.md](./ci.md) | Contributors | CI pipeline jobs, local reproduction, merge gates |
 | [troubleshooting.md](./troubleshooting.md) | Users | FAQ — symptom → cause → fix |

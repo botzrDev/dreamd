@@ -18,6 +18,17 @@ authors.workspace = true
 [lints.rust]
 unsafe_code = "deny"
 
+[features]
+default = []
+# AILAB-206 — Streamable HTTP MCP transport for `dreamd mcp --bind`
+# (`mcp::http`). rmcp's server half only: no streamable-HTTP client feature.
+# OFF by default: it adds ~1.5 MB to the stripped binary, and the default
+# release build must stay under NFR-2 (20 MB, `ci.yml` MAX_BYTES). A build
+# without it still parses `--bind` and refuses it (exit 2) naming this feature.
+# CI clippy and tests run `--all-features`, so this code is still linted and
+# tested there.
+mcp-http = ["rmcp/transport-streamable-http-server"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 # `sync` for mpsc/oneshot (coordinator actor channel), `rt` + `macros` for

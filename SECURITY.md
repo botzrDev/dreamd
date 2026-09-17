@@ -44,9 +44,10 @@ At v0.1, the daemon enforces:
 
 - **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
 
-**Unreleased (AILAB-197):**
+**Unreleased (AILAB-197, AILAB-206):**
 
-- **TCP binding to non-localhost** is refused unless `dreamd watch --insecure` is passed (test environments only). `--bind <IP[:port]>` picks the TCP address; a non-loopback one without `--insecure` is refused before anything binds, and every start with `--insecure` logs a warning. Unix still has no TCP listener: `--bind` / `--insecure` exit 2 there. `--insecure` does not skip the bearer token or the `auth.json` requirement, and `~/.agent/server.json` still names a loopback host, so local clients (`dreamd status`, MCP) only ever dial loopback.
+- **TCP binding to non-localhost** is refused unless `dreamd watch --insecure` is passed (test environments only). `--bind <IP[:port]>` picks the TCP address; a non-loopback one without `--insecure` is refused before anything binds, and every start with `--insecure` logs a warning. Unix `dreamd watch` still has no TCP listener: `watch --bind` / `watch --insecure` exit 2 there. `--insecure` does not skip the bearer token or the `auth.json` requirement, and `~/.agent/server.json` still names a loopback host, so local clients (`dreamd status`, MCP) only ever dial loopback.
+- **`dreamd mcp --bind` (AILAB-206)** is the one TCP listener on Unix. It is compiled only into builds with the non-default `mcp-http` cargo feature, so prebuilt release binaries have no TCP listener on Unix at all. It serves opt-in Streamable HTTP MCP at `/mcp`, loopback by default through the same bind gate (non-loopback needs `--insecure`). It has **no bearer token** and no `auth.json` — any local process can reach a loopback bind, which is weaker than stdio or the `0600` + `SO_PEERCRED` socket — and it does not write `server.json`. Default `dreamd mcp` stays stdio. See [docs/mcp-transports.md](docs/mcp-transports.md).
 
 ### Same-user-cross-project surface (accepted for v0.1)
 

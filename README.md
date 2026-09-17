@@ -51,6 +51,8 @@ npx -y dreamd-mcp setup   # scaffold .agent/ + write the harness MCP config
 npx -y dreamd-mcp         # MCP server (stdio) — your harness spawns this
 ```
 
+stdio stays the default transport. `dreamd mcp --bind 127.0.0.1:<port>` is the opt-in Streamable HTTP server at `/mcp`. It is unauthenticated, and it is only in source builds with `--features mcp-http` — see [docs/mcp-transports.md](./docs/mcp-transports.md).
+
 Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
 
 `setup` prompts when it has a TTY. In scripts and non-interactive shells, pass `--yes --harness claude|cursor|both` (`--harness none` or `--no-write-mcp` scaffolds without touching any MCP config).

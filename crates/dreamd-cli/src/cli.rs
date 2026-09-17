@@ -189,6 +189,17 @@ pub struct McpArgs {
     /// the directory that contains `.agent/`.
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
+    /// Serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio: an IP
+    /// or IP:port, e.g. 127.0.0.1:8080 or [::1]:0. Port defaults to 0
+    /// (OS-chosen). Hostnames are not resolved. No auth: any local process can
+    /// reach a loopback bind. Needs a build with the `mcp-http` cargo feature
+    /// (prebuilt release binaries are stdio-only).
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<String>,
+    /// Allow a non-loopback --bind. Logs a warning on every start and accepts
+    /// any Host header. Requires --bind.
+    #[arg(long)]
+    pub insecure: bool,
 }
 
 /// Arguments for the `dreamd migrate` subcommand (WEG-133 / DR-108).
@@ -780,7 +791,7 @@ fn run_mcp(args: McpArgs) -> ExitCode {
     };
     // --project-root overrides CWD-based agent-root discovery. Required when
     // an IDE launches the MCP server from a non-project CWD.
-    let effective_root = match args.project_root {
+    let effective_root = match args.project_root.clone() {
         Some(p) => p,
         None => cwd,
     };
@@ -799,7 +810,7 @@ fn run_mcp(args: McpArgs) -> ExitCode {
         eprintln!("dreamd: error — {msg}");
         std::process::exit(1);
     }
-    commands::mcp::run(&effective_root)
+    commands::mcp::run(&effective_root, &args)
 }
 
 fn run_migrate(args: MigrateArgs) -> ExitCode {
@@ -1574,6 +1585,21 @@ mod tests {
                     args.project_root.as_deref(),
                     Some(PathBuf::from("/tmp/proj").as_path())
                 );
+                assert!(args.bind.is_none(), "stdio stays the default");
+                assert!(!args.insecure);
+            }
+            _ => panic!("expected Mcp"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_bind_and_insecure() {
+        let cli =
+            Cli::try_parse_from(["dreamd", "mcp", "--bind", "0.0.0.0:8080", "--insecure"]).unwrap();
+        match cli.command {
+            Some(Command::Mcp(args)) => {
+                assert_eq!(args.bind.as_deref(), Some("0.0.0.0:8080"));
+                assert!(args.insecure);
             }
             _ => panic!("expected Mcp"),
         }

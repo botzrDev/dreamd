@@ -23,6 +23,17 @@
 //! [`McpRunError::Unsupported`]. There is no in-process fallback, because
 //! [`crate::io::write_atomic`] is `ErrorKind::Unsupported` there and an
 //! in-process `append_node` would accept writes it could not persist.
+//!
+//! **Transport** (AILAB-206): stdio by default. `dreamd mcp --bind <ADDR>`
+//! serves the same server, chosen by the same steps above, over Streamable HTTP
+//! at `/mcp` instead (see `docs/mcp-transports.md`). That transport is compiled
+//! only with the non-default `mcp-http` cargo feature (NFR-2: it adds ~1.5 MB to
+//! the stripped binary); without it `--bind` is
+//! [`McpRunError::HttpTransportNotBuilt`] before anything binds. With it, the
+//! listener is bound first, through the AILAB-197 gate
+//! [`bind_listen`](crate::server::bind_listen), so a refused address fails
+//! before any backend is chosen. `--bind` is not a way around "proxy or
+//! refuse": off Unix it still needs a live daemon.
 
 use std::path::{Path, PathBuf};
 // `Arc` is used on every target — by the `#[cfg(unix)]` `index_map` and by
@@ -56,6 +67,12 @@ use crate::ingress::{LearnIngress, RecallIngress, RecallResponse, DEFAULT_RECALL
 use crate::privacy::DR413_DISCLOSURE;
 #[cfg(unix)]
 use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+// AILAB-206: `dreamd mcp --bind` options, and the gate they bind through.
+// Target-free — `server::watch` compiles on every target — but the gate itself
+// is only reachable when the `mcp-http` transport is compiled in.
+use crate::server::WatchListen;
+#[cfg(feature = "mcp-http")]
+use crate::server::{bind_listen, WatchError};
 use crate::AgentRoot;
 
 #[cfg(unix)]
@@ -68,6 +85,9 @@ use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 // them and an unused import is a `-D warnings` failure on Unix.
 #[cfg(not(unix))]
 use crate::daemon_client::{AuthToken, DaemonEndpoint};
+
+#[cfg(feature = "mcp-http")]
+pub(crate) mod http;
 
 // Error type
 
@@ -96,6 +116,38 @@ pub enum McpRunError {
         "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
     )]
     Unsupported,
+    /// `dreamd mcp --bind` was refused by
+    /// [`bind_listen`](crate::server::bind_listen) (AILAB-206): a non-loopback
+    /// address without `--insecure`, or a listener that came up non-loopback.
+    /// The payload is the gate's own sentence, which names `--insecure`, and is
+    /// the whole `Display`. A start failure, exit 1.
+    #[error("{0}")]
+    Bind(String),
+    /// `dreamd mcp --bind` on a build without the `mcp-http` cargo feature
+    /// (AILAB-206). Streamable HTTP is off by default so the release binary
+    /// stays under NFR-2; the flag still parses, and is refused here — before
+    /// anything binds — rather than silently serving stdio. Declared
+    /// unconditionally so the copy is testable in every build. A usage refusal,
+    /// exit 2.
+    #[error(
+        "--bind needs the Streamable HTTP transport, which this dreamd was built without; \
+         rebuild with `--features mcp-http` (see docs/mcp-transports.md)"
+    )]
+    HttpTransportNotBuilt,
+}
+
+#[cfg(feature = "mcp-http")]
+impl McpRunError {
+    /// Map a [`bind_listen`] failure. `Bind` and `Io` are the only variants it
+    /// returns; anything else is carried as a service error rather than
+    /// dropped.
+    fn from_bind(err: WatchError) -> Self {
+        match err {
+            WatchError::Bind(msg) => McpRunError::Bind(msg),
+            WatchError::Io(io) => McpRunError::Io(io),
+            other => McpRunError::Service(other.to_string()),
+        }
+    }
 }
 
 // Tool parameter structs
@@ -788,8 +840,19 @@ async fn send_remote_tcp(
 /// that would block EOF from completing it; the in-process branch relies on
 /// `waiting()` returning so `supervisor` drops. Both paths are regression-tested
 /// in `dreamd-cli/tests/mcp_stdin_eof.rs`.
+///
+/// `listen` is `dreamd mcp --bind` / `--insecure` (AILAB-206). `None` is the
+/// stdio transport described above. `Some` binds through `bind_listen`
+/// *before* anything else — no disclosure, no socket probe, no Tantivy — so a
+/// refused address is [`McpRunError::Bind`] with nothing opened; then the same
+/// Remote / Local / Empty decision is served over Streamable HTTP
+/// (`http::serve_streamable_http`) until Ctrl-C or SIGTERM, not stdin EOF. In a
+/// build without the `mcp-http` feature `Some` is
+/// [`McpRunError::HttpTransportNotBuilt`], equally before anything opens.
 #[cfg(unix)]
-pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
+pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(), McpRunError> {
+    let transport = Transport::bind(listen).await?;
+
     // Emit privacy disclosure to stderr if no .agent/ store is found.
     // This is the "first run" signal for MCP harness users.
     if AgentRoot::discover(cwd).is_err() {
@@ -821,14 +884,9 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
                 "dreamd mcp: daemon reachable at {} — serving Remote (daemon proxy), agent root: {agent_root_header}",
                 sock_path.display()
             );
-            let svc = MemoryMcpServer::with_remote(sock_path, agent_root_header)
-                .serve(rmcp::transport::stdio())
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            svc.waiting()
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            return Ok(());
+            return transport
+                .serve(MemoryMcpServer::with_remote(sock_path, agent_root_header))
+                .await;
         }
         Err(_) => {
             // Daemon not running — fall through to in-process server.
@@ -839,10 +897,11 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         }
     }
 
-    // In-process MCP server over stdio.
+    // In-process MCP server over the chosen transport.
     // When an agent root is found, boot a MemoryCoordinator via Supervisor so
     // append_node dispatches durably. `supervisor` is bound here and must
-    // outlive the serve call; it drops after svc.waiting() returns.
+    // outlive the serve call; it drops after the transport returns (stdio:
+    // svc.waiting(); HTTP: the shutdown signal).
     match AgentRoot::discover(cwd) {
         Ok(root) => {
             // Mirror `run_watch`: one Tantivy handle for live append indexing
@@ -859,24 +918,12 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
                     .map_err(|e| McpRunError::Service(e.to_string()))?;
                 (supervisor, server)
             };
-            let svc = server
-                .serve(rmcp::transport::stdio())
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            svc.waiting()
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            transport.serve(server).await?;
             // supervisor drops here, after serve completes
             drop(supervisor);
         }
         Err(_) => {
-            let svc = MemoryMcpServer::new()
-                .serve(rmcp::transport::stdio())
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            svc.waiting()
-                .await
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            transport.serve(MemoryMcpServer::new()).await?;
         }
     }
     Ok(())
@@ -910,9 +957,16 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
 /// persist: the dream cycle, the index sidecar and `LESSONS.md` all go through
 /// that one seam. Refusing is the honest answer; a silent lossy accept is not.
 /// The daemon is the only writer that can persist, hence "proxy or refuse".
+///
+/// `listen` (AILAB-206) changes the transport and nothing above: the listener
+/// is bound first, as on Unix, and the three preconditions still decide
+/// between [`Backend::RemoteTcp`] and [`McpRunError::Unsupported`]. `--bind` is
+/// not a back door to an in-process store.
 #[cfg(not(unix))]
-pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
+pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(), McpRunError> {
     use crate::daemon_client::{read_auth_token, resolve_daemon_tcp, tcp_endpoint_is_live};
+
+    let transport = Transport::bind(listen).await?;
 
     let Ok(endpoint) = resolve_daemon_tcp() else {
         return Err(McpRunError::Unsupported);
@@ -946,14 +1000,74 @@ pub async fn run_mcp_server(cwd: &Path) -> Result<(), McpRunError> {
         endpoint.socket_addr()
     );
 
-    let svc = MemoryMcpServer::with_remote_tcp(endpoint, token, agent_root_header)
-        .serve(rmcp::transport::stdio())
+    transport
+        .serve(MemoryMcpServer::with_remote_tcp(
+            endpoint,
+            token,
+            agent_root_header,
+        ))
         .await
-        .map_err(|e| McpRunError::Service(e.to_string()))?;
-    svc.waiting()
-        .await
-        .map_err(|e| McpRunError::Service(e.to_string()))?;
-    Ok(())
+}
+
+/// Which transport a [`run_mcp_server`] call serves its [`MemoryMcpServer`]
+/// over, decided (and, for HTTP, bound) before the backend is chosen.
+enum Transport {
+    /// Default: JSON-RPC over stdin/stdout, ending on stdin EOF.
+    Stdio,
+    /// `--bind` (AILAB-206): Streamable HTTP at `/mcp` on an already-bound
+    /// listener, ending on Ctrl-C / SIGTERM.
+    #[cfg(feature = "mcp-http")]
+    Http {
+        listener: tokio::net::TcpListener,
+        insecure: bool,
+    },
+}
+
+impl Transport {
+    /// `None` is stdio. `Some` binds through `bind_listen` — the one bind
+    /// policy `dreamd watch` also uses — so the refusal happens here, before
+    /// the caller opens anything. Without the `mcp-http` feature `Some` is
+    /// [`McpRunError::HttpTransportNotBuilt`], also before anything binds.
+    async fn bind(listen: Option<WatchListen>) -> Result<Self, McpRunError> {
+        let Some(listen) = listen else {
+            return Ok(Transport::Stdio);
+        };
+        #[cfg(feature = "mcp-http")]
+        {
+            Ok(Transport::Http {
+                listener: bind_listen(listen).await.map_err(McpRunError::from_bind)?,
+                insecure: listen.insecure,
+            })
+        }
+        #[cfg(not(feature = "mcp-http"))]
+        {
+            let _ = listen;
+            Err(McpRunError::HttpTransportNotBuilt)
+        }
+    }
+
+    /// Serve `server` until the session (stdio) or the process (HTTP) ends.
+    ///
+    /// The stdio arm is the pre-AILAB-206 body verbatim: `svc.waiting()` must
+    /// resolve on stdin EOF (`mcp_stdin_eof.rs`), so nothing wraps it.
+    async fn serve(self, server: MemoryMcpServer) -> Result<(), McpRunError> {
+        match self {
+            Transport::Stdio => {
+                let svc = server
+                    .serve(rmcp::transport::stdio())
+                    .await
+                    .map_err(|e| McpRunError::Service(e.to_string()))?;
+                svc.waiting()
+                    .await
+                    .map_err(|e| McpRunError::Service(e.to_string()))?;
+                Ok(())
+            }
+            #[cfg(feature = "mcp-http")]
+            Transport::Http { listener, insecure } => {
+                http::serve_streamable_http(server, listener, insecure).await
+            }
+        }
+    }
 }
 
 // Tests
@@ -1078,6 +1192,38 @@ mod tests {
             McpRunError::Unsupported.to_string(),
             "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
         );
+    }
+
+    /// AILAB-206: without the `mcp-http` feature, `--bind` is refused before
+    /// anything binds or opens. The requested loopback port is held, so a bind
+    /// *attempt* would come back as `Io(AddrInUse)` instead.
+    #[cfg(not(feature = "mcp-http"))]
+    #[tokio::test]
+    async fn bind_without_the_mcp_http_feature_is_refused_before_binding() {
+        let held =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("hold a port");
+        let requested = held.local_addr().expect("held addr");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = run_mcp_server(
+            dir.path(),
+            Some(WatchListen {
+                bind: Some(requested),
+                insecure: false,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(McpRunError::HttpTransportNotBuilt)),
+            "expected HttpTransportNotBuilt, got {result:?}"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn http_transport_not_built_names_the_feature() {
+        let line = McpRunError::HttpTransportNotBuilt.to_string();
+        assert!(line.contains("--bind"), "{line}");
+        assert!(line.contains("--features mcp-http"), "{line}");
     }
 
     #[cfg(unix)]

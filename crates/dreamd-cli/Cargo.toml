@@ -20,6 +20,13 @@ doc = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# AILAB-206 — `dreamd mcp --bind` Streamable HTTP. Off by default for NFR-2;
+# see `dreamd-core`'s `mcp-http`. Build: `cargo build --release -p dreamd
+# --features mcp-http`.
+mcp-http = ["dreamd-core/mcp-http"]
+
 [dependencies]
 dreamd-core = { path = "../dreamd-core", version = "0.1.0-rc.2" }
 # AILAB-223 — `dreamd doctor` compares stored records against

@@ -69,6 +69,15 @@ test('service uninstall -> dreamd service uninstall (AILAB-202: not routed to mc
     ['service', 'uninstall', '--purge', '--yes'],
   );
 });
+// AILAB-206: `--bind` is a flag, not a subcommand, so it takes the default
+// `mcp` route — no `bind` / `insecure` entry in DREAMD_SUBCOMMANDS. Routing
+// only: the prebuilt binary has no `mcp-http` feature and refuses it (exit 2).
+test('--bind -> dreamd mcp --bind (AILAB-206: Streamable HTTP opt-in)', () => {
+  assert.deepStrictEqual(
+    resolveDreamdArgs(['--bind', '127.0.0.1:8080']),
+    ['mcp', '--bind', '127.0.0.1:8080'],
+  );
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

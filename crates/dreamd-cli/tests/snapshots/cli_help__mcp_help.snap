@@ -13,5 +13,11 @@ Options:
       --project-root <PATH>
           Override the project root used for agent-root discovery. Required when the IDE launches the MCP server from a non-project CWD (e.g. Cursor's global ~/.cursor/mcp.json). Must be an absolute path to the directory that contains `.agent/`
 
+      --bind <ADDR>
+          Serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio: an IP or IP:port, e.g. 127.0.0.1:8080 or [::1]:0. Port defaults to 0 (OS-chosen). Hostnames are not resolved. No auth: any local process can reach a loopback bind. Needs a build with the `mcp-http` cargo feature (prebuilt release binaries are stdio-only)
+
+      --insecure
+          Allow a non-loopback --bind. Logs a warning on every start and accepts any Host header. Requires --bind
+
   -h, --help
           Print help

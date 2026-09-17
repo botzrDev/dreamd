@@ -488,9 +488,13 @@ pub async fn bind_loopback() -> Result<tokio::net::TcpListener, WatchError> {
     bind_listen(WatchListen::default()).await
 }
 
-/// Bind the API's TCP listener as `listen` asks — `127.0.0.1:0` when `bind` is
+/// Bind a TCP listener as `listen` asks — `127.0.0.1:0` when `bind` is
 /// `None` — refusing a non-loopback address unless `insecure` is set
 /// (AILAB-197).
+///
+/// Two consumers share this one bind policy: the off-Unix `dreamd watch` API
+/// listener, and `dreamd mcp --bind` on every target (AILAB-206). The copy it
+/// logs and returns therefore says "TCP", not "the API" or "dreamd watch".
 ///
 /// Cfg-free on purpose (AILAB-192): a `#[cfg(not(unix))]` body would never be
 /// compiled by any check that guards this repo's `main`, so the bind that
@@ -517,7 +521,7 @@ pub async fn bind_listen(listen: WatchListen) -> Result<tokio::net::TcpListener,
     if !listen.insecure && !requested.ip().is_loopback() {
         return Err(WatchError::Bind(format!(
             "refusing to bind non-loopback address {requested}; \
-             pass --insecure to serve the API beyond localhost"
+             pass --insecure to serve TCP beyond localhost"
         )));
     }
 
@@ -527,11 +531,11 @@ pub async fn bind_listen(listen: WatchListen) -> Result<tokio::net::TcpListener,
         tracing::warn!(
             %bound,
             insecure = true,
-            "dreamd watch: --insecure; serving TCP on a non-default bind"
+            "dreamd: --insecure; serving TCP on a non-default bind"
         );
     } else if !bound.ip().is_loopback() {
         return Err(WatchError::Bind(format!(
-            "refusing to serve the API on non-loopback address {bound}"
+            "refusing to serve TCP on non-loopback address {bound}"
         )));
     }
     Ok(listener)

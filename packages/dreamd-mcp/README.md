@@ -17,6 +17,8 @@ npx -y dreamd-mcp watch
 npx -y dreamd-mcp
 ```
 
+The prebuilt binaries this shim downloads serve MCP over stdio only. The opt-in Streamable HTTP transport (`dreamd mcp --bind`, unauthenticated) needs a source build with `--features mcp-http`; see [docs/mcp-transports.md](https://github.com/botzrDev/dreamd/blob/main/docs/mcp-transports.md).
+
 `setup` prompts when it has a TTY; in scripts pass `--yes` with `--harness claude|cursor|both|none`. It writes each MCP config as 2-space pretty-printed JSON with a trailing newline and does **not** preserve your original formatting, so an existing `.mcp.json` / `.cursor/mcp.json` can come back reformatted — other MCP servers in the file are kept. `npx -y dreamd-mcp init` remains the scaffold-only primitive (store, no harness config), same as `setup --no-write-mcp`.
 
 > **Leave `npx dreamd-mcp` floating — don't pin.** On a fresh spawn, npx

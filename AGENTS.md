@@ -641,5 +641,12 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** `dreamd watch --insecure` only lifts the non-loopback **bind** refuse. Unix UDS is unchanged (those flags exit 2). `read_server_json` still requires a loopback host. Bearer / `auth.json` still required. No DNS.
 - **Why:** Linear AILAB-197 AC named `--bind` including UDS paths, DNS “resolves”, and `docs/security.md`. Live 192 is Windows `127.0.0.1:0` + a client that must not dial a forged routable `server.json`.
-- **How to apply:** Gate on the requested `SocketAddr` before bind. Publish loopback in `server.json` even when listening on `0.0.0.0`. Do not implement AILAB-206 here.
-- **Cross-refs:** `windows-api-is-tcp-localhost-bearer`, `v2-beats-linear-ac`, `changelog-historical-entries-stay-put`
+- **How to apply:** Gate on the requested `SocketAddr` before bind. Publish loopback in `server.json` even when listening on `0.0.0.0`. Streamable HTTP MCP (AILAB-206) is `dreamd mcp --bind`, not `watch`; see `mcp-streamable-http-is-not-watch-rest`.
+- **Cross-refs:** `windows-api-is-tcp-localhost-bearer`, `v2-beats-linear-ac`, `changelog-historical-entries-stay-put`, `mcp-streamable-http-is-not-watch-rest`
+
+### mcp-streamable-http-is-not-watch-rest
+
+- **Rule:** Streamable HTTP MCP lives on `dreamd mcp --bind`, path `/mcp`. `dreamd watch` REST (`/api/v1`) stays a different server. Unix `watch --bind` still exits 2. No bearer on `/mcp`. No `server.json` for the MCP port. Default `dreamd mcp` is still stdio. The transport is behind the non-default `mcp-http` cargo feature (NFR-2: +~1.5 MB stripped); without it `--bind` exits 2 naming the feature.
+- **Why:** Linear AILAB-206 read as a watch `--insecure` transport and a HITL harness smoke. Live MCP is stdio; live `--insecure` is the 197 TCP bind gate.
+- **How to apply:** Reuse `bind_listen`. `--insecure` without `--bind` on mcp is exit 2. STOP if stripped binary > 20 MB. Do not add `mcp-http` to `default` features or to a release build without an explicit NFR-2 decision. Test HTTP with `--features mcp-http` (CI runs `--all-features`); a default-feature `mcp::http::` filter runs 0 tests.
+- **Cross-refs:** `watch-insecure-is-bind-only`, `nfr-2-stripped-binary-is-20mb`, `windows-api-is-tcp-localhost-bearer`, `v2-beats-linear-ac`

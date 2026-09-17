@@ -80,7 +80,10 @@ fn listen_from_args(args: &WatchArgs) -> Result<WatchListen, String> {
     })
 }
 
-fn parse_bind(raw: &str) -> Option<SocketAddr> {
+/// Parse a `--bind` value: `IP:port`, `[IPv6]:port`, or a bare `IP` / `[IPv6]`
+/// meaning port 0. `None` for anything else; nothing is resolved. Shared with
+/// `dreamd mcp --bind` (AILAB-206) so both commands accept the same addresses.
+pub(crate) fn parse_bind(raw: &str) -> Option<SocketAddr> {
     if let Ok(addr) = raw.parse::<SocketAddr>() {
         return Some(addr);
     }
