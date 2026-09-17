@@ -650,3 +650,24 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** Linear AILAB-206 read as a watch `--insecure` transport and a HITL harness smoke. Live MCP is stdio; live `--insecure` is the 197 TCP bind gate.
 - **How to apply:** Reuse `bind_listen`. `--insecure` without `--bind` on mcp is exit 2. STOP if stripped binary > 20 MB. Do not add `mcp-http` to `default` features or to a release build without an explicit NFR-2 decision. Test HTTP with `--features mcp-http` (CI runs `--all-features`); a default-feature `mcp::http::` filter runs 0 tests.
 - **Cross-refs:** `watch-insecure-is-bind-only`, `nfr-2-stripped-binary-is-20mb`, `windows-api-is-tcp-localhost-bearer`, `v2-beats-linear-ac`
+
+### episodic-1-0-is-not-state-1-0
+
+- **Rule:** Linear “no `schema_version` `1.0` anywhere” is a **won't-do**. Only episodic `AgentLearning` / JSONL events use `RECORD_SCHEMA_VERSION` `"1.0.0"`. Daemon `STATE_SCHEMA_VERSION`, WAL, and the recurrence sidecar stay `"1.0"`. `render_lessons_file` already matches live SPEC.md (YAML frontmatter + HTML-comment blocks); do not add `TODO(WEG-61)` or revert to `## <skill_action>` / `*Sources:*`.
+- **Why:** AILAB-209 Linear AC (May 2026) treated `"1.0"` as a misspelled episodic token and assumed the dream-cycle LESSONS.md writer had not shipped. WEG-61 / AILAB-201 / AILAB-200 shipped. 209 stamped leftover episodic literals (`http/tests.rs` AgentLearning + raw JSONL seed + `dream-cycle-snapshot`) and added a rustdoc pointer.
+- **How to apply:** Gate AgentLearning **and** raw JSONL seeds (`"schema_version":"1.0"` in `b"…"` / `r#"` fixtures) — an `AgentLearning {` grep misses `fs::write` of a JSONL line (`raw-jsonl-seed-is-not-agentlearning-struct`). Keep the `SkillAction` “legacy dotted keys serde” sentence. Do not register a migrate `"1.0"`→`"1.0.0"`. Skip 210. 208 is the website follow-on.
+- **Cross-refs:** `migrate-from-to-is-record-schema`, `v2-beats-linear-ac`, `linear-todo-can-already-be-on-main`, `raw-jsonl-seed-is-not-agentlearning-struct`
+
+### raw-jsonl-seed-is-not-agentlearning-struct
+
+- **Rule:** An `AgentLearning {` grep does not see `fs::write` of a JSONL byte string. Search `"schema_version":"1.0"` in `b"…"` / `r#"` / `.jsonl` fixtures too.
+- **Why:** AILAB-209 §1.2 listed two episodic `"1.0"` sites. A third was `http/tests.rs:1397` (`dream_happy_path_returns_200`). Grep 1 stayed green with that seed still on `"1.0"`.
+- **How to apply:** Pair the struct grep with `rg '"schema_version":"1.0"' --glob '*.rs' --glob '*.jsonl'` and classify each hit as episodic vs state/WAL/sidecar before changing it.
+- **Cross-refs:** `episodic-1-0-is-not-state-1-0`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`
+
+### spec-grep-rg-e-is-encoding
+
+- **Rule:** ripgrep’s `-E` is `--encoding`, not grep’s extended-regex. `rg -viE "$FILT"` exits 2; a leading `!` turns that into a pass.
+- **Why:** AILAB-209 §5 grep 7. The same line also matches `/` in `///` markers and `crates/…` paths, so even `grep -viE` over full `rg -n` lines is not a skill_action check.
+- **How to apply:** Use `grep -viE` or `rg -vi`. For rustdoc, strip the `///` prefix and path before looking for `/`. Never `|| true` on an anti-pattern grep (`! cmd || true` cannot fail).
+- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`

@@ -57,6 +57,12 @@ const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 /// `cluster_key`, `citations`) followed by HTML-comment-delimited lesson
 /// blocks. Round-trips cleanly through [`read_lessons_file`].
 ///
+/// This is the `semantic/LESSONS.md` output format in `SPEC.md` §Dream cycle.
+/// `citations` is the AILAB-200 extra on top of the frontmatter keys shown
+/// there; [`read_lessons_file`] round-trips it and reads a file without it as
+/// empty. The format has no per-cluster Markdown heading and no sources footer:
+/// lesson boundaries are the HTML comments, provenance is `citations`.
+///
 /// Split out from the writer (AILAB-341) so `dreamd dream --dry` can print the
 /// file a cycle *would* write without touching disk. The preview is the same
 /// function call the write path makes, so the two cannot drift into printing
@@ -96,7 +102,8 @@ pub fn render_lessons_file(file: &LessonsFile) -> String {
 /// [`crate::io::write_atomic`]).
 ///
 /// The bytes are exactly [`render_lessons_file`]'s output — the dry-run preview
-/// and this writer share one serializer by construction.
+/// and this writer share one serializer by construction. That format is
+/// `SPEC.md` §Dream cycle's `LESSONS.md` output.
 pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     write_atomic(path, render_lessons_file(file).as_bytes())
 }

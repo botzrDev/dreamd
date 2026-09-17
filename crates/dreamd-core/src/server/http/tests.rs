@@ -1394,7 +1394,7 @@ async fn dream_happy_path_returns_200() {
     std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
     std::fs::write(
             &jsonl_path,
-            b"{\"schema_version\":\"1.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"pain\":5.0,\"importance\":5.0,\"pinned\":false,\"skill_action\":\"rust.test\",\"source_harness\":\"test\",\"content\":\"test content\",\"recurrence\":0}\n",
+            b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"pain\":5.0,\"importance\":5.0,\"pinned\":false,\"skill_action\":\"rust.test\",\"source_harness\":\"test\",\"content\":\"test content\",\"recurrence\":0}\n",
         )
         .unwrap();
 
@@ -1649,7 +1649,7 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
 
     // Append a learning through the coordinator (durable JSONL + indexer).
     let learning = AgentLearning {
-        schema_version: "1.0".to_string(),
+        schema_version: "1.0.0".to_string(),
         id: EventId::parse(&format!("evt_{SAMPLE_ULID}")).unwrap(),
         timestamp: DateTime::parse_from_rfc3339("2026-06-04T12:00:00Z")
             .unwrap()

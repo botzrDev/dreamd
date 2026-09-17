@@ -14,6 +14,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Changed
 
 - **First-run privacy disclosure no longer claims LLM cycles are still planned.** `DR413_DISCLOSURE` (and the byte-locked `tests/fixtures/init.golden.txt`) said v0.1 made no network calls and that LLM-assisted dream cycles were planned for v0.1.1. That banner shipped inside the v0.1.1 tag; `init` / first MCP spawn now match the released behavior — local by default, network only for an opted-in LLM cycle. (`crates/dreamd-core/src/privacy.rs`, `tests/fixtures/init.golden.txt`)
+- **Episodic test data now uses `schema_version` `"1.0.0"` (AILAB-209).** The dream-cycle snapshot corpus and two HTTP test learnings still said `"1.0"`, the daemon-state / WAL / sidecar token. Snapshot outputs are unchanged, and the `LESSONS.md` writer's rustdoc now points at SPEC.md §Dream cycle. No runtime change. (`tests/fixtures/dream-cycle-snapshot/AGENT_LEARNINGS.jsonl`, `crates/dreamd-core/src/server/http/tests.rs`, `crates/dreamd-core/src/lessons.rs`)
 
 ## [0.1.1] - 2026-09-14
 
