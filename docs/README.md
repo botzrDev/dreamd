@@ -9,7 +9,8 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [../GUIDE.md](../GUIDE.md) | New users | 20-minute linear tutorial (install → crash recovery) |
 | [../STORY_IDS.md](../STORY_IDS.md) | Contributors | DR-/WEG- story ID legend |
 | [./dreamd.1](./dreamd.1) | Power users | Man page |
-| [../SPEC.md](../SPEC.md) | Implementers, contributors | On-disk layout, JSON schema, scoring formula, dream-cycle contract |
+| [../SPEC.md](../SPEC.md) | Implementers, contributors | On-disk layout, JSON schema, scoring formula, dream-cycle contract — **canonical**; MUST/SHOULD language lives here |
+| [spec/README.md](./spec/README.md) | Adapter authors, new implementers | Two-page digest of that contract — [layout](./spec/layout.md) and [schemas](./spec/schemas.md) |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Contributors | Load-bearing engineering decisions and crate boundaries |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Dev setup, commit conventions, DCO, RFC process |
 | [../SECURITY.md](../SECURITY.md) | Operators, security reviewers | Threat model, socket auth, disclosure policy |

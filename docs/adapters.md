@@ -7,6 +7,8 @@ explains the two patterns those READMEs follow.
 
 The on-disk contract every adapter targets is root [`SPEC.md`](../SPEC.md) — the
 `.agent/` layout, the `AgentLearning` JSON shape, and the dream-cycle output.
+For a shorter read first, [`spec/`](./spec/README.md) is a two-page digest of it:
+[layout](./spec/layout.md) and [schemas](./spec/schemas.md).
 
 > **Versions.** Use the floating form `npx -y dreamd-mcp` everywhere — npx
 > re-resolves the `latest` dist-tag on each fresh spawn, so a config never goes

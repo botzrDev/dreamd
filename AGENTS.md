@@ -655,7 +655,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** Linear “no `schema_version` `1.0` anywhere” is a **won't-do**. Only episodic `AgentLearning` / JSONL events use `RECORD_SCHEMA_VERSION` `"1.0.0"`. Daemon `STATE_SCHEMA_VERSION`, WAL, and the recurrence sidecar stay `"1.0"`. `render_lessons_file` already matches live SPEC.md (YAML frontmatter + HTML-comment blocks); do not add `TODO(WEG-61)` or revert to `## <skill_action>` / `*Sources:*`.
 - **Why:** AILAB-209 Linear AC (May 2026) treated `"1.0"` as a misspelled episodic token and assumed the dream-cycle LESSONS.md writer had not shipped. WEG-61 / AILAB-201 / AILAB-200 shipped. 209 stamped leftover episodic literals (`http/tests.rs` AgentLearning + raw JSONL seed + `dream-cycle-snapshot`) and added a rustdoc pointer.
-- **How to apply:** Gate AgentLearning **and** raw JSONL seeds (`"schema_version":"1.0"` in `b"…"` / `r#"` fixtures) — an `AgentLearning {` grep misses `fs::write` of a JSONL line (`raw-jsonl-seed-is-not-agentlearning-struct`). Keep the `SkillAction` “legacy dotted keys serde” sentence. Do not register a migrate `"1.0"`→`"1.0.0"`. Skip 210. 208 is the website follow-on.
+- **How to apply:** Gate AgentLearning **and** raw JSONL seeds (`"schema_version":"1.0"` in `b"…"` / `r#"` fixtures) — an `AgentLearning {` grep misses `fs::write` of a JSONL line (`raw-jsonl-seed-is-not-agentlearning-struct`). Keep the `SkillAction` “legacy dotted keys serde” sentence. Do not register a migrate `"1.0"`→`"1.0.0"`. Skip 210. 208 is in-repo `docs/spec/` (`spec-page-is-in-repo-not-dreamd-dev`), not a `dreamd.dev` deploy.
 - **Cross-refs:** `migrate-from-to-is-record-schema`, `v2-beats-linear-ac`, `linear-todo-can-already-be-on-main`, `raw-jsonl-seed-is-not-agentlearning-struct`
 
 ### raw-jsonl-seed-is-not-agentlearning-struct
@@ -671,3 +671,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **Why:** AILAB-209 §5 grep 7. The same line also matches `/` in `///` markers and `crates/…` paths, so even `grep -viE` over full `rg -n` lines is not a skill_action check.
 - **How to apply:** Use `grep -viE` or `rg -vi`. For rustdoc, strip the `///` prefix and path before looking for `/`. Never `|| true` on an anti-pattern grep (`! cmd || true` cannot fail).
 - **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`
+
+### spec-page-is-in-repo-not-dreamd-dev
+
+- **Rule:** AILAB-208 publishes two digest pages under `docs/spec/`. Root `SPEC.md` stays the canonical on-disk contract. Do not register `dreamd.dev` (AILAB-272 is Canceled). Do not wait on ANTH-143 (the issue id is gone). Do not move `SPEC.md`.
+- **Why:** Linear AC named `dreamd.dev/spec` and a best-citizen spike blocker. The 2026-07-20 status on the same issue already offered in-repo `docs/spec/` + a README link as the v0.1 cheap signal. Remaining-50 still queued it as Q17.
+- **How to apply:** Implement `assignments/AILAB-208.v2.md`. Page 1 = folder layout + per-project `.agent/` vs per-user `~/.agent/` daemon home. Page 2 = JSONL / LESSONS.md frontmatter (MAY `citations`) / promotion / redaction. `skills/` and `protocols/` are dreamd extras, not SPEC-required. Skip 210. Q18 is AILAB-180.
+- **Cross-refs:** `v2-beats-linear-ac`, `doc-first-append-via-uds-learn`, `episodic-1-0-is-not-state-1-0`, `npm-dreamd-mcp-unscoped`

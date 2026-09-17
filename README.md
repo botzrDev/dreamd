@@ -158,6 +158,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | [docs/troubleshooting.md](./docs/troubleshooting.md) | Common failures |
 | [docs/glossary.md](./docs/glossary.md) | Domain terms |
 | [SPEC.md](./SPEC.md) | On-disk contract |
+| [docs/spec/](./docs/spec/README.md) | Two-page `.agent/` digest of that contract |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Engineering decisions |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup and RFC process |
 | [SECURITY.md](./SECURITY.md) | Threat model |

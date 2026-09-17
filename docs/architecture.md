@@ -593,6 +593,8 @@ and returns `None` rather than failing. `try_init` makes the call idempotent.
   the index-cache contract, §7 the durable schema-version streams.
 - [`../SPEC.md`](../SPEC.md) — the on-disk `.agent/` contract: folder layout,
   episodic node schema, salience formula, dream-cycle output shape.
+- [`spec/README.md`](spec/README.md) — two-page digest of that contract for
+  adapter authors (layout; record and `LESSONS.md` schemas).
 - [`../SECURITY.md`](../SECURITY.md) — canonical threat model, socket auth,
   disclosure policy.
 - [`architecture/durability.md`](architecture/durability.md) — WAL + JSONL
