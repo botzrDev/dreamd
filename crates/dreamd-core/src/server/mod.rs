@@ -35,7 +35,8 @@
 //!     and the Unix double-fork helper.
 //!   * [`watch`] — the `dreamd watch` foreground daemon, on every target. One
 //!     public [`run_watch`] over two whole sequences: Unix binds the UDS and
-//!     waits SIGINT/SIGTERM; off Unix [`bind_loopback`] takes `127.0.0.1:0`,
+//!     waits SIGINT/SIGTERM; off Unix [`bind_listen`] takes `127.0.0.1:0` (or
+//!     the `--bind` address; non-loopback only with `--insecure`, AILAB-197),
 //!     the port is published in `~/.agent/server.json`, [`serve_tcp`] serves the
 //!     same router behind the AILAB-203 bearer token, and the wait is `ctrl_c`
 //!     alone. That arm opens no Tantivy index — `io::write_atomic` is
@@ -86,11 +87,11 @@ pub use uds::{
 // `#![cfg(unix)]`: `dreamd watch` is now a real command on every target, so the
 // CLI imports one `run_watch` and one `WatchError` and does no cfg of its own.
 // The transport split lives inside the module, not in this re-export.
-pub use watch::{run_watch, WatchError};
+pub use watch::{run_watch, WatchError, WatchListen};
 // The loopback-TCP transport primitives, exported for the same reason the UDS
 // bind helpers above are: they are the pair a caller needs to stand the API up
 // on a listener it owns. Cfg-free — both are compiled and
 // tested on Linux even though only the off-Unix `run_watch` arm ships them
 // (AILAB-192), because a `#[cfg(not(unix))]` body no check on this machine can
 // reach is how the last round of Windows drift got in.
-pub use watch::{bind_loopback, serve_tcp};
+pub use watch::{bind_listen, bind_loopback, serve_tcp};

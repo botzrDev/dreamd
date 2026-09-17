@@ -44,9 +44,9 @@ At v0.1, the daemon enforces:
 
 - **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
 
-**Still later:**
+**Unreleased (AILAB-197):**
 
-- **TCP binding to non-localhost** refused unless `--insecure` is passed (test environments only; AILAB-197).
+- **TCP binding to non-localhost** is refused unless `dreamd watch --insecure` is passed (test environments only). `--bind <IP[:port]>` picks the TCP address; a non-loopback one without `--insecure` is refused before anything binds, and every start with `--insecure` logs a warning. Unix still has no TCP listener: `--bind` / `--insecure` exit 2 there. `--insecure` does not skip the bearer token or the `auth.json` requirement, and `~/.agent/server.json` still names a loopback host, so local clients (`dreamd status`, MCP) only ever dial loopback.
 
 ### Same-user-cross-project surface (accepted for v0.1)
 
@@ -102,5 +102,5 @@ Do not set these in shared shells, CI secrets, or harness configs you did not au
 Issues we do **not** consider security vulnerabilities:
 
 - Denial-of-service from a local user with the same UID as the daemon (they can already do anything the daemon can).
-- Any issue requiring the planned v0.1.1 `--insecure` test mode on a trusted network.
+- Any issue requiring the `dreamd watch --insecure` test mode (a non-loopback bind) on a trusted network.
 - Bugs in third-party AI agents or MCP clients that consume the API.

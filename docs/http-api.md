@@ -1,6 +1,6 @@
 # HTTP API reference
 
-dreamd exposes a small REST API. The transport depends on the platform. On Unix it is a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`), and there is no TCP listener. On Windows there is no peer credential to read off a socket, so `dreamd watch` listens on **loopback TCP** instead — `127.0.0.1` on an OS-chosen ephemeral port, published in `~/.agent/server.json` (AILAB-192). Loopback only: there is no non-localhost bind on any platform.
+dreamd exposes a small REST API. The transport depends on the platform. On Unix it is a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`), and there is no TCP listener. On Windows there is no peer credential to read off a socket, so `dreamd watch` listens on **loopback TCP** instead — `127.0.0.1` on an OS-chosen ephemeral port, published in `~/.agent/server.json` (AILAB-192). Loopback by default: `dreamd watch --insecure` (with `--bind`) is the only way to listen beyond localhost, it exists only on the TCP listener, and `server.json` still names a loopback host (AILAB-197).
 
 All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header. Authentication is whatever the transport can prove: on Unix the daemon enforces **peer UID matching** via `SO_PEERCRED` / `getpeereid` — only the user who started the daemon may connect — and on Windows it enforces an `Authorization: Bearer` token read from `~/.agent/auth.json`. The two are mutually exclusive; neither platform mounts both.
 
@@ -24,12 +24,12 @@ All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header
 
 | Property | Value |
 |---|---|
-| Address | `127.0.0.1:<ephemeral>` — the port is picked by the OS at bind time |
-| Address file | `~/.agent/server.json`, written by `dreamd watch` as `{"host":"127.0.0.1","port":<port>}` and unlinked again on every shutdown path |
+| Address | `127.0.0.1:<ephemeral>` by default — the port is picked by the OS at bind time. `dreamd watch --bind <IP[:port]>` picks another |
+| Address file | `~/.agent/server.json`, written by `dreamd watch` as `{"host":"127.0.0.1","port":<port>}` and unlinked again on every shutdown path. The host is always loopback — `127.0.0.1`, or `::1` for an IPv6 bind — even when `--insecure` listens on `0.0.0.0` |
 | Protocol | HTTP/1.1 over TCP |
 | Host header | `127.0.0.1` or `localhost` (not used for routing) |
 | Authentication | `Authorization: Bearer <64 lowercase hex>` matching `~/.agent/auth.json`; missing or wrong is `401` |
-| Scope | Loopback only. The daemon re-checks the address it bound and refuses to serve if it is not loopback. |
+| Scope | Loopback unless `--insecure`. Without it a non-loopback `--bind` is refused before binding, and the daemon re-checks the address it bound. With it the daemon logs a warning on every start; the bearer token is still required. |
 
 `~/.agent/server.json` is a discardable address hint, not memory state, so it is written with a plain `std::fs::write` rather than the atomic-replace path (which is still `ErrorKind::Unsupported` on Windows). A hard-killed daemon can therefore leave a stale file behind: liveness is "the file parses **and** `127.0.0.1:<port>` accepts a connection", never "the file exists". A `server.json` naming a non-loopback host is refused rather than connected to.
 

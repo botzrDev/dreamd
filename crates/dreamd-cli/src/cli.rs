@@ -73,9 +73,23 @@ impl DreamArgs {
 
 /// Arguments for the `dreamd watch` subcommand.
 ///
-/// Empty for v0.1. Reserved for future flags (`--manual-only`, etc.).
-#[derive(Args, Debug)]
-pub struct WatchArgs {}
+/// Both flags configure the TCP listener, which only the off-Unix `watch` has
+/// (AILAB-197). On Unix `watch` serves `~/.agent/dreamd.sock` and either flag is
+/// a usage error (exit 2). `bind` stays a `String` here and is parsed in
+/// `commands::watch`, so a hostname is refused there rather than resolved.
+#[derive(Args, Debug, Default)]
+pub struct WatchArgs {
+    /// TCP listen address (not Unix): an IP or IP:port, e.g. 127.0.0.1:8080 or
+    /// [::1]:0. Port defaults to 0 (OS-chosen). Hostnames are not resolved.
+    /// Default: 127.0.0.1:0.
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<String>,
+    /// Allow a non-loopback --bind (not Unix). Logs a warning on every start.
+    /// Does not disable the bearer token, and ~/.agent/server.json still names
+    /// a loopback address.
+    #[arg(long)]
+    pub insecure: bool,
+}
 
 /// Arguments for the `dreamd doctor` subcommand.
 #[derive(Args, Debug, Default)]
@@ -1153,12 +1167,12 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     }
 }
 
-fn run_watch() -> ExitCode {
+fn run_watch(args: WatchArgs) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
     };
-    commands::watch::run(&cwd)
+    commands::watch::run(&cwd, &args)
 }
 
 /// `dreamd service install` (AILAB-190 / AILAB-169). Writes the per-user
@@ -1363,7 +1377,7 @@ pub fn run() -> ExitCode {
         Command::Status => run_status(),
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
-        Command::Watch(_args) => run_watch(),
+        Command::Watch(args) => run_watch(args),
         Command::Version => run_version(),
     }
 }

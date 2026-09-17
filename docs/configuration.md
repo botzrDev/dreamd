@@ -166,7 +166,7 @@ See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [..
 |---|---|---|
 | Index commit cadence | 5 seconds | Fixed; not user-configurable |
 | Socket permissions | `0600` | Fixed |
-| HTTP bind address | Unix: the socket only. Windows: `127.0.0.1` on an ephemeral port | Fixed either way. Unix never binds TCP; on Windows `dreamd watch` binds loopback TCP and publishes the OS-chosen port in `~/.agent/server.json` (AILAB-192) — you cannot pick the address or the port. There is still no non-localhost bind and no `--insecure` flag; that is AILAB-197. |
+| HTTP bind address | Unix: the socket only. Windows: `127.0.0.1:0` by default | Not a config key. Unix never binds TCP, and `dreamd watch --bind` / `--insecure` exit 2 there. On Windows `dreamd watch` binds loopback TCP and publishes the bound port in `~/.agent/server.json` (AILAB-192); `--bind <IP[:port]>` picks the address (port defaults to 0; hostnames are not resolved), and a non-loopback address is refused unless `--insecure` is also passed, which logs a warning on every start (AILAB-197). Neither flag skips the bearer token, and `server.json` always names a loopback host. |
 
 ---
 

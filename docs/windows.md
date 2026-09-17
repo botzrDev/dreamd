@@ -35,10 +35,13 @@ AILAB-192 gives `dreamd watch` a Windows topology. It:
    token is minted by `dreamd service install` and rotated by
    `dreamd service install --force`, never at watch start.
 2. **Binds `127.0.0.1:0`** — loopback, OS-chosen ephemeral port — and refuses
-   to serve if the address it gets back is not loopback. There is no
-   non-localhost bind and no flag to ask for one; that is AILAB-197.
+   to serve if the address it gets back is not loopback. `--bind <IP[:port]>`
+   picks another address (AILAB-197); a non-loopback one is refused before it
+   binds unless `--insecure` is also passed, which logs a warning on every
+   start and still requires the bearer token below.
 3. **Publishes the bound address** to `%USERPROFILE%\.agent\server.json` as
-   `{"host":"127.0.0.1","port":<port>}`, using a plain `std::fs::write` rather
+   `{"host":"127.0.0.1","port":<port>}` (a loopback host even for an
+   `--insecure` wildcard bind), using a plain `std::fs::write` rather
    than the atomic-replace path — the file is a discardable address hint, not
    memory state — and unlinks it again on every shutdown path, the way the Unix
    bind unlinks its socket.
@@ -126,4 +129,4 @@ daemon-liveness question; `dreamd service status` is the supervisor one.
 `io::write_atomic` is still `ErrorKind::Unsupported` on Windows, and that is the
 one blocker left for parity: it is why the dream cycle, `LESSONS.md`, the
 recurrence sidecar and the Tantivy index are unavailable there. It remains open
-v0.1.1 work. Non-localhost bind and `--insecure` are AILAB-197.
+v0.1.1 work.

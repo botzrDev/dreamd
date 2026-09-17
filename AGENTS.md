@@ -632,7 +632,14 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ### windows-api-is-tcp-localhost-bearer
 
-- **Rule:** Windows `dreamd watch` binds `127.0.0.1:0`, writes `~/.agent/server.json`, and authenticates with `Authorization: Bearer` from `~/.agent/auth.json`. Unix stays UDS + `SO_PEERCRED`. No `--insecure` (AILAB-197). `write_atomic` stays `Unsupported`.
+- **Rule:** Windows `dreamd watch` binds `127.0.0.1:0`, writes `~/.agent/server.json`, and authenticates with `Authorization: Bearer` from `~/.agent/auth.json`. Unix stays UDS + `SO_PEERCRED`. `--bind` / `--insecure` (AILAB-197) gate this listener only; see `watch-insecure-is-bind-only`. `write_atomic` stays `Unsupported`.
 - **Why:** Linear AILAB-192 folded DR-409 and a gating Windows smoke, and assumed a writer-process 174/203 still refused. Token mint is AILAB-203 install, not watch start.
 - **How to apply:** Bearer outermost on the Windows router only. Skip `TantivyIndexHandle::open` on Windows. MCP Remote over TCP when `server.json` is live; no in-process Local. Tests bind `127.0.0.1` on Linux. Do not add `windows-sys` / `subtle`.
 - **Cross-refs:** `windows-compile-is-not-the-port`, `windows-service-is-schtasks-foreground-watch`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-linear-ac`
+
+### watch-insecure-is-bind-only
+
+- **Rule:** `dreamd watch --insecure` only lifts the non-loopback **bind** refuse. Unix UDS is unchanged (those flags exit 2). `read_server_json` still requires a loopback host. Bearer / `auth.json` still required. No DNS.
+- **Why:** Linear AILAB-197 AC named `--bind` including UDS paths, DNS “resolves”, and `docs/security.md`. Live 192 is Windows `127.0.0.1:0` + a client that must not dial a forged routable `server.json`.
+- **How to apply:** Gate on the requested `SocketAddr` before bind. Publish loopback in `server.json` even when listening on `0.0.0.0`. Do not implement AILAB-206 here.
+- **Cross-refs:** `windows-api-is-tcp-localhost-bearer`, `v2-beats-linear-ac`, `changelog-historical-entries-stay-put`

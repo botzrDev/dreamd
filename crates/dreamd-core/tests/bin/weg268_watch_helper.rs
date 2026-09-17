@@ -42,7 +42,10 @@ fn main() -> ExitCode {
         }
     };
 
-    match rt.block_on(dreamd_core::server::run_watch(&project_root)) {
+    match rt.block_on(dreamd_core::server::run_watch(
+        &project_root,
+        dreamd_core::server::WatchListen::default(),
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("helper: run_watch error: {e}");

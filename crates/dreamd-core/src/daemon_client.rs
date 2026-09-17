@@ -406,8 +406,9 @@ struct ServerJson {
 /// carrying the bearer token with it. So: `host` must parse as an [`IpAddr`]
 /// (a name — `localhost` included — is refused, because resolving names here
 /// would hand the same decision to whatever the resolver returns) and it must
-/// be loopback. AILAB-197 owns non-localhost binds; until then there is no
-/// configuration that makes a routable host legitimate.
+/// be loopback. AILAB-197's `dreamd watch --insecure` widens only what the
+/// daemon *binds*: `watch` still publishes a loopback host here, so there is no
+/// configuration that makes a routable host legitimate for this client to dial.
 ///
 /// # Errors
 ///

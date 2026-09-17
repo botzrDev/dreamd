@@ -4,8 +4,14 @@ expression: "subcommand_help(\"watch\")"
 ---
 Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
 
-Usage: watch
+Usage: watch [OPTIONS]
 
 Options:
+      --bind <ADDR>
+          TCP listen address (not Unix): an IP or IP:port, e.g. 127.0.0.1:8080 or [::1]:0. Port defaults to 0 (OS-chosen). Hostnames are not resolved. Default: 127.0.0.1:0
+
+      --insecure
+          Allow a non-loopback --bind (not Unix). Logs a warning on every start. Does not disable the bearer token, and ~/.agent/server.json still names a loopback address
+
   -h, --help
           Print help

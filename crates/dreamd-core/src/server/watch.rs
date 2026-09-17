@@ -26,6 +26,18 @@
 //!      └─ serve_tcp ──► HTTP router (bearer + X-Agent-Root middleware)
 //! ```
 //!
+//! ## Listen options (AILAB-197)
+//!
+//! [`WatchListen`] carries `dreamd watch --bind <ADDR>` / `--insecure`, and both
+//! configure the TCP listener only. The default is `127.0.0.1:0`. A requested
+//! address that is not loopback is refused before anything binds unless
+//! `insecure` is set, and every start with `insecure` set logs a `WARN`. The flag
+//! lifts that one refusal and nothing else: the bearer token and `auth.json` are
+//! still required, and `server.json` still publishes a loopback host (see
+//! [`server_json_body`]) because `daemon_client::read_server_json` will not dial
+//! anything else. Unix has no TCP listener, so either option there is a usage
+//! error ([`WatchError::TcpFlagsOnUnix`]), not a silent no-op.
+//!
 //! The **primary handle** is handed off at boot so the coordinator's live appends
 //! and recall/dream read the same Tantivy index (one `IndexWriter` per dir). The
 //! loopback arm has no primary and no index at all: [`TantivyIndexHandle::open`] is never
@@ -46,7 +58,7 @@
 //! per-project coordinators and index handles are not touched on either path;
 //! eviction reaps them on drop (AILAB-306).
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,12 +110,39 @@ pub enum WatchError {
     /// the file — and never echoes the file's contents.
     #[error("auth token: {0}")]
     AuthToken(String),
-    /// The listener came up on an address that is not loopback. AILAB-192 is
-    /// localhost-only by construction and there is deliberately no flag, env var
-    /// or config key that asks for anything else; a non-localhost bind is
-    /// AILAB-197.
+    /// A non-loopback TCP bind was refused. Either the requested address is not
+    /// loopback and `--insecure` was not passed (refused before binding; the
+    /// message names `--insecure`), or the listener came up on a non-loopback
+    /// address it was not asked for (the AILAB-192 post-bind check). A runtime
+    /// start failure, exit 1.
     #[error("bind: {0}")]
     Bind(String),
+    /// `--bind` or `--insecure` was passed to a Unix `dreamd watch`. Those options
+    /// configure the TCP listener, and Unix has none — it serves
+    /// `~/.agent/dreamd.sock` with peer-UID auth. A usage error (the CLI exits 2),
+    /// deliberately distinct from [`WatchError::Bind`]: ignoring the flags would
+    /// let an operator believe they had opened a port that does not exist.
+    #[error(
+        "--bind / --insecure configure the TCP listener; Unix `dreamd watch` \
+         binds ~/.agent/dreamd.sock and has no TCP listener"
+    )]
+    TcpFlagsOnUnix,
+}
+
+/// Listener options for [`run_watch`]: `dreamd watch --bind <ADDR>` and
+/// `--insecure` (AILAB-197).
+///
+/// Both apply to the TCP listener only ([`bind_listen`]). `Default` is no
+/// `--bind` (so `127.0.0.1:0`) and no `--insecure` — exactly the AILAB-192
+/// listener. The CLI parses `--bind` into a [`SocketAddr`]; nothing here takes a
+/// hostname, so nothing here resolves one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WatchListen {
+    /// The address to bind. `None` is `127.0.0.1:0`.
+    pub bind: Option<SocketAddr>,
+    /// Allow a non-loopback `bind`. Does not skip the bearer token or
+    /// `auth.json`, and does not change what `server.json` publishes.
+    pub insecure: bool,
 }
 
 /// Boot a per-project daemon in the foreground and block until a shutdown
@@ -114,14 +153,22 @@ pub enum WatchError {
 /// function with cfg branches sprinkled through it would be less honest than two
 /// whole sequences. Unix runs [`run_watch_uds`] and off Unix runs
 /// `run_watch_loopback` — see the module docs for the two topologies.
-pub async fn run_watch(cwd: &Path) -> Result<(), WatchError> {
+///
+/// `listen` configures the TCP listener only. On Unix any `--bind` or
+/// `--insecure` is refused with [`WatchError::TcpFlagsOnUnix`] before project
+/// discovery, so a misdirected flag is reported as such rather than masked by a
+/// missing `.agent/`; with the default `listen`, the UDS path is unchanged.
+pub async fn run_watch(cwd: &Path, listen: WatchListen) -> Result<(), WatchError> {
     #[cfg(unix)]
     {
+        if listen.bind.is_some() || listen.insecure {
+            return Err(WatchError::TcpFlagsOnUnix);
+        }
         run_watch_uds(cwd).await
     }
     #[cfg(not(unix))]
     {
-        run_watch_loopback(cwd).await
+        run_watch_loopback(cwd, listen).await
     }
 }
 
@@ -243,14 +290,15 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     outcome.map_err(WatchError::from)
 }
 
-/// Boot a per-project daemon in the foreground on a loopback TCP listener,
-/// publish the port at `~/.agent/server.json`, and block until Ctrl-C. The
-/// off-Unix half of [`run_watch`] (AILAB-192).
+/// Boot a per-project daemon in the foreground on a TCP listener, publish the
+/// port at `~/.agent/server.json`, and block until Ctrl-C. The off-Unix half of
+/// [`run_watch`] (AILAB-192).
 ///
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard → WAL
 /// recovery → resolve the daemon home → require `~/.agent/auth.json` → boot
-/// Supervisor (no indexer) → compose AppState → bind `127.0.0.1:0` → publish
-/// `server.json` → serve until Ctrl-C → unlink `server.json` → drain.
+/// Supervisor (no indexer) → compose AppState → [`bind_listen`] (`127.0.0.1:0`
+/// unless `listen` says otherwise, AILAB-197) → publish `server.json` → serve
+/// until Ctrl-C → unlink `server.json` → drain.
 ///
 /// Two departures from [`run_watch_uds`] are load-bearing, not incidental:
 ///
@@ -285,7 +333,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 /// dead code rather than inventing a caller for it.
 #[cfg(any(test, not(unix)))]
 #[cfg_attr(all(unix, test), allow(dead_code))]
-async fn run_watch_loopback(cwd: &Path) -> Result<(), WatchError> {
+async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), WatchError> {
     // Function-local: in a Unix release build this fn does not exist, and a
     // top-level import only it uses would be an `unused_imports` warning there.
     use crate::daemon_client::read_auth_token;
@@ -327,8 +375,9 @@ async fn run_watch_loopback(cwd: &Path) -> Result<(), WatchError> {
     })?;
     let daemon_home = DaemonHome::new(home.join(".agent"));
 
-    // 4. Require the bearer credential BEFORE binding anything. This listener
-    //    has no `SO_PEERCRED` to fall back on, so a missing or malformed
+    // 4. Require the bearer credential BEFORE binding anything — with or without
+    //    `--insecure`, which lifts only the non-loopback bind refusal. This
+    //    listener has no `SO_PEERCRED` to fall back on, so a missing or malformed
     //    `auth.json` is a start failure (the CLI maps it to exit 1 — an operator
     //    setup error, not a usage error). The token is read and dropped on
     //    purpose: `bearer_auth_middleware` re-reads the file on every request so
@@ -371,17 +420,18 @@ async fn run_watch_loopback(cwd: &Path) -> Result<(), WatchError> {
     let drain_supervisor = Arc::clone(&state.supervisor);
     let router = build_router(state);
 
-    // 7. Bind loopback, then publish the port the kernel actually gave us.
-    //    Order matters: publishing first would advertise a port nothing is
-    //    listening on, and a client that read the file in that window would get
-    //    a refused connect and conclude the daemon is down. Once the bind has
-    //    returned the address is real — a connect that arrives before
-    //    `serve_tcp` reaches its accept loop waits in the kernel's backlog
-    //    instead of failing.
-    let listener = bind_loopback().await?;
+    // 7. Bind (loopback unless `--insecure` allowed otherwise), then publish
+    //    the port the kernel actually gave us. Order matters: publishing first
+    //    would advertise a port nothing is listening on, and a client that read
+    //    the file in that window would get a refused connect and conclude the
+    //    daemon is down. Once the bind has returned the address is real — a
+    //    connect that arrives before `serve_tcp` reaches its accept loop waits in
+    //    the kernel's backlog instead of failing. `write_server_json` publishes a
+    //    loopback host whatever the bind was (see `server_json_body`).
+    let listener = bind_listen(listen).await?;
     let addr = listener.local_addr()?;
     let server_json = daemon_home.server_json();
-    write_server_json(&server_json, addr.port())?;
+    write_server_json(&server_json, addr)?;
 
     // The bound address and the project root, never the token.
     tracing::info!(
@@ -428,30 +478,60 @@ async fn run_watch_loopback(cwd: &Path) -> Result<(), WatchError> {
 }
 
 /// Bind the API listener on the loopback interface, ephemeral port — the
-/// address `run_watch_loopback` serves and publishes in `~/.agent/server.json`.
+/// default address `run_watch_loopback` serves (AILAB-192). Exactly
+/// [`bind_listen`] with [`WatchListen::default`].
+///
+/// # Errors
+///
+/// As [`bind_listen`].
+pub async fn bind_loopback() -> Result<tokio::net::TcpListener, WatchError> {
+    bind_listen(WatchListen::default()).await
+}
+
+/// Bind the API's TCP listener as `listen` asks — `127.0.0.1:0` when `bind` is
+/// `None` — refusing a non-loopback address unless `insecure` is set
+/// (AILAB-197).
 ///
 /// Cfg-free on purpose (AILAB-192): a `#[cfg(not(unix))]` body would never be
 /// compiled by any check that guards this repo's `main`, so the bind that
 /// Windows runs is written once here and exercised on Linux by the tests below.
 ///
-/// The bound address is read back off the listener and refused unless it is
-/// loopback. `Ipv4Addr::LOCALHOST` cannot resolve to anything else today, so the
-/// check guards against a future edit widening the requested address rather than
-/// against the kernel — it fails the start instead of quietly exposing the API on
-/// a routable interface. Serving a non-loopback address is AILAB-197; there is no
-/// flag, env var or config key here that asks for it.
+/// Without `insecure` there are two checks. The **requested** IP is checked
+/// before binding, so a refused address is never bound even briefly; then the
+/// **bound** address is read back off the listener and refused unless it is
+/// loopback — the AILAB-192 belt, which guards against a future edit rather
+/// than against the kernel. With `insecure` both refusals are lifted and a
+/// `WARN` naming the bound address is logged on every call, loopback included,
+/// so a service that carries the flag says so on every start. Nothing here ever
+/// reads or logs the bearer token, and `insecure` never changes auth.
 ///
 /// # Errors
 ///
-/// [`WatchError::Io`] if the bind or the `local_addr` lookup fails;
-/// [`WatchError::Bind`] if the bound address is not loopback.
-pub async fn bind_loopback() -> Result<tokio::net::TcpListener, WatchError> {
-    let listener =
-        tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
-    let addr = listener.local_addr()?;
-    if !addr.ip().is_loopback() {
+/// [`WatchError::Bind`] if the address is not loopback and `insecure` is unset
+/// (the message names `--insecure`); [`WatchError::Io`] if the bind or the
+/// `local_addr` lookup fails.
+pub async fn bind_listen(listen: WatchListen) -> Result<tokio::net::TcpListener, WatchError> {
+    let requested = listen
+        .bind
+        .unwrap_or(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    if !listen.insecure && !requested.ip().is_loopback() {
         return Err(WatchError::Bind(format!(
-            "refusing to serve the API on non-loopback address {addr}"
+            "refusing to bind non-loopback address {requested}; \
+             pass --insecure to serve the API beyond localhost"
+        )));
+    }
+
+    let listener = tokio::net::TcpListener::bind(requested).await?;
+    let bound = listener.local_addr()?;
+    if listen.insecure {
+        tracing::warn!(
+            %bound,
+            insecure = true,
+            "dreamd watch: --insecure; serving TCP on a non-default bind"
+        );
+    } else if !bound.ip().is_loopback() {
+        return Err(WatchError::Bind(format!(
+            "refusing to serve the API on non-loopback address {bound}"
         )));
     }
     Ok(listener)
@@ -476,21 +556,49 @@ pub async fn serve_tcp(
 // `run_watch_loopback` is absent there — hence the narrow `dead_code` allowance
 // rather than a `cfg` that would take them out of the Linux type-check too.
 
-/// The exact bytes of `~/.agent/server.json`: one JSON object, one trailing
-/// newline.
+/// The exact bytes of `~/.agent/server.json` for a listener bound at `bound`:
+/// one JSON object, one trailing newline.
 ///
 /// A wire contract, not a formatting preference — `daemon_client::read_server_json`
 /// parses this and the CLI's `status` / `archive` liveness probes dial the port it
 /// names — so it is hand-written and pinned by a byte-exact test instead of left
-/// to a serializer's field order. `host` is the literal `127.0.0.1` the daemon
-/// binds; the reader re-checks `is_loopback()` anyway and refuses anything else.
+/// to a serializer's field order. For the default bind that is
+/// `{"host":"127.0.0.1","port":<port>}`. `host` is always the
+/// [`published_host`] of the bound IP, which is loopback by construction; the
+/// reader re-checks and refuses anything else.
 #[cfg_attr(all(unix, not(test)), allow(dead_code))]
-pub(crate) fn server_json_body(port: u16) -> String {
-    format!("{{\"host\":\"127.0.0.1\",\"port\":{port}}}\n")
+pub(crate) fn server_json_body(bound: SocketAddr) -> String {
+    format!(
+        "{{\"host\":\"{}\",\"port\":{}}}\n",
+        published_host(bound.ip()),
+        bound.port()
+    )
 }
 
-/// Publish the bound port at `path` (`DaemonHome::server_json()`), creating
-/// `~/.agent/` if this is the first start.
+/// The host `server.json` names for a listener bound on `bound` — always
+/// loopback, whatever `--insecure` let the daemon bind (AILAB-197).
+///
+/// A loopback bind publishes itself. An unspecified bind publishes its family's
+/// loopback (`0.0.0.0` → `127.0.0.1`, `::` → `::1`), which reaches the same
+/// listener. A unicast interface address is never published: `server.json` is
+/// how local clients find the daemon, and `read_server_json` refuses a routable
+/// host so that a rewritten file cannot send the bearer token off the machine.
+/// The family's loopback is written instead; peers on the network dial the
+/// machine's own address themselves.
+#[cfg_attr(all(unix, not(test)), allow(dead_code))]
+pub(crate) fn published_host(bound: IpAddr) -> IpAddr {
+    if bound.is_loopback() {
+        return bound;
+    }
+    match bound {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    }
+}
+
+/// Publish the listener bound at `bound` at `path` (`DaemonHome::server_json()`)
+/// — a loopback host plus the kernel-assigned port, see [`server_json_body`] —
+/// creating `~/.agent/` if this is the first start.
 ///
 /// `std::fs::create_dir_all` + `std::fs::write`, deliberately **not**
 /// [`io::write_atomic`](crate::io::write_atomic): that helper is
@@ -504,11 +612,11 @@ pub(crate) fn server_json_body(port: u16) -> String {
 /// and `PermissionsExt` does not exist off Unix. The port is not a secret; the
 /// token beside it is, and this function never touches `auth.json`.
 #[cfg_attr(all(unix, not(test)), allow(dead_code))]
-pub(crate) fn write_server_json(path: &Path, port: u16) -> std::io::Result<()> {
+pub(crate) fn write_server_json(path: &Path, bound: SocketAddr) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, server_json_body(port))
+    std::fs::write(path, server_json_body(bound))
 }
 
 /// Best-effort unlink of `~/.agent/server.json`. Never fails: it runs on every
@@ -712,7 +820,7 @@ mod tests {
         // these bytes and the CLI liveness probes dial the port they name, so the
         // trailing newline and the field order are part of the contract.
         assert_eq!(
-            server_json_body(54321),
+            server_json_body(SocketAddr::from((Ipv4Addr::LOCALHOST, 54321))),
             "{\"host\":\"127.0.0.1\",\"port\":54321}\n"
         );
     }
@@ -728,10 +836,11 @@ mod tests {
             .join("does-not-exist-yet")
             .join("nor-this")
             .join("server.json");
-        write_server_json(&path, 4242).expect("write server.json");
+        let bound = SocketAddr::from((Ipv4Addr::LOCALHOST, 4242));
+        write_server_json(&path, bound).expect("write server.json");
 
         let raw = std::fs::read(&path).expect("read server.json");
-        assert_eq!(raw, server_json_body(4242).into_bytes());
+        assert_eq!(raw, server_json_body(bound).into_bytes());
         assert_eq!(
             String::from_utf8(raw).expect("utf8"),
             "{\"host\":\"127.0.0.1\",\"port\":4242}\n"
@@ -745,7 +854,8 @@ mod tests {
         // not an error.
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("server.json");
-        write_server_json(&path, 1234).expect("write server.json");
+        write_server_json(&path, SocketAddr::from((Ipv4Addr::LOCALHOST, 1234)))
+            .expect("write server.json");
         assert!(path.exists());
 
         remove_server_json(&path);
@@ -766,10 +876,314 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_listen_default_is_the_ailab_192_listener() {
+        // AC (AILAB-197): no `--bind` is still `127.0.0.1:0`.
+        let listener = bind_listen(WatchListen::default())
+            .await
+            .expect("default bind");
+        let addr = listener.local_addr().expect("local_addr");
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(addr.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn bind_listen_accepts_explicit_ipv4_loopback_without_insecure() {
+        // AC (AILAB-197): a loopback `--bind` needs no `--insecure`.
+        let listen = WatchListen {
+            bind: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+            insecure: false,
+        };
+        let listener = bind_listen(listen).await.expect("loopback bind");
+        let addr = listener.local_addr().expect("local_addr");
+        assert!(addr.ip().is_loopback());
+        assert_ne!(addr.port(), 0);
+    }
+
+    /// True if `err` means "this host has no IPv6 loopback", which some CI
+    /// runners and containers do not. The test skips rather than fails there.
+    fn ipv6_unavailable(err: &std::io::Error) -> bool {
+        #[cfg(unix)]
+        if err.raw_os_error() == Some(nix::errno::Errno::EAFNOSUPPORT as i32) {
+            return true;
+        }
+        err.kind() == std::io::ErrorKind::AddrNotAvailable
+    }
+
+    #[tokio::test]
+    async fn bind_listen_accepts_ipv6_loopback_without_insecure() {
+        // AC (AILAB-197): `[::1]:0` is loopback (`IpAddr::is_loopback`), so it
+        // needs no `--insecure`. Skipped, not failed, on a host without IPv6.
+        let listen = WatchListen {
+            bind: Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))),
+            insecure: false,
+        };
+        match bind_listen(listen).await {
+            Ok(listener) => {
+                let addr = listener.local_addr().expect("local_addr");
+                assert_eq!(addr.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+                assert_ne!(addr.port(), 0);
+            }
+            Err(WatchError::Io(e)) if ipv6_unavailable(&e) => {
+                eprintln!("skipping: no IPv6 loopback on this host ({e})");
+            }
+            Err(e) => panic!("[::1]:0 must bind without --insecure; got {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_listen_refuses_unspecified_without_insecure_before_binding() {
+        // AC (AILAB-197): `0.0.0.0` is not loopback, so without `--insecure` it
+        // is refused, the message names the flag, and nothing is bound. The
+        // port is held on 127.0.0.1 so that on Linux a bind *attempt* at
+        // 0.0.0.0:<port> would fail `AddrInUse` and surface as
+        // `WatchError::Io`; only a refusal that runs before the bind can come
+        // back as `WatchError::Bind`.
+        let held = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("hold a port");
+        let port = held.local_addr().expect("held addr").port();
+        let requested = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+
+        let result = bind_listen(WatchListen {
+            bind: Some(requested),
+            insecure: false,
+        })
+        .await;
+        match result {
+            Err(WatchError::Bind(msg)) => {
+                assert!(msg.contains("--insecure"), "must name --insecure: {msg}");
+                assert!(
+                    msg.contains(&requested.to_string()),
+                    "must name {requested}: {msg}"
+                );
+            }
+            other => panic!("expected a pre-bind WatchError::Bind, got {other:?}"),
+        }
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn bind_listen_refuses_a_unicast_address_without_insecure_before_binding() {
+        // AC (AILAB-197): an interface address is refused the same way. 192.0.2.1
+        // is TEST-NET-1 (RFC 5737) and never assigned to a local interface, so an
+        // attempted bind would fail `AddrNotAvailable` as `WatchError::Io` on
+        // every platform — `Bind` proves the gate ran first.
+        let requested = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 0));
+        let result = bind_listen(WatchListen {
+            bind: Some(requested),
+            insecure: false,
+        })
+        .await;
+        match result {
+            Err(WatchError::Bind(msg)) => assert!(msg.contains("--insecure"), "{msg}"),
+            other => panic!("expected a pre-bind WatchError::Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_listen_insecure_binds_unspecified_and_server_json_stays_loopback() {
+        // AC (AILAB-197): with `--insecure` the wildcard bind is allowed, and the
+        // address local clients are told to dial is still loopback on the real
+        // port — `read_server_json` accepts it rather than being widened.
+        let (log, _guard) = capture_warnings();
+        let listener = bind_listen(WatchListen {
+            bind: Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))),
+            insecure: true,
+        })
+        .await
+        .expect("--insecure allows 0.0.0.0");
+        let bound = listener.local_addr().expect("local_addr");
+        drop(listener);
+        assert!(!bound.ip().is_loopback(), "bound {bound}");
+        assert_ne!(bound.port(), 0);
+        let warns = log.warn_lines();
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].contains(&bound.to_string()), "{warns:?}");
+
+        assert_eq!(
+            server_json_body(bound),
+            format!("{{\"host\":\"127.0.0.1\",\"port\":{}}}\n", bound.port())
+        );
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("server.json");
+        write_server_json(&path, bound).expect("write server.json");
+        let endpoint = crate::daemon_client::read_server_json(&path)
+            .expect("a published insecure bind must still read as loopback");
+        assert_eq!(endpoint.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(endpoint.port, bound.port());
+    }
+
+    #[test]
+    fn published_host_is_always_loopback() {
+        // AC (AILAB-197): `server.json` never names a routable host. Loopback
+        // publishes itself; unspecified and unicast publish their family's
+        // loopback.
+        let cases: [(IpAddr, IpAddr); 7] = [
+            (Ipv4Addr::LOCALHOST.into(), Ipv4Addr::LOCALHOST.into()),
+            (
+                Ipv4Addr::new(127, 0, 0, 2).into(),
+                Ipv4Addr::new(127, 0, 0, 2).into(),
+            ),
+            (Ipv6Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()),
+            (Ipv4Addr::UNSPECIFIED.into(), Ipv4Addr::LOCALHOST.into()),
+            (Ipv6Addr::UNSPECIFIED.into(), Ipv6Addr::LOCALHOST.into()),
+            (
+                Ipv4Addr::new(192, 0, 2, 7).into(),
+                Ipv4Addr::LOCALHOST.into(),
+            ),
+            (
+                "2001:db8::1".parse::<Ipv6Addr>().unwrap().into(),
+                Ipv6Addr::LOCALHOST.into(),
+            ),
+        ];
+        for (bound, want) in cases {
+            let got = published_host(bound);
+            assert_eq!(got, want, "bound {bound}");
+            assert!(got.is_loopback(), "bound {bound} published {got}");
+        }
+    }
+
+    #[test]
+    fn server_json_for_an_ipv6_wildcard_bind_reads_back_as_ipv6_loopback() {
+        // AC (AILAB-197): `[::]` publishes `::1`, which `read_server_json`
+        // accepts. Pure file round trip; no socket.
+        let bound = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4243));
+        assert_eq!(
+            server_json_body(bound),
+            "{\"host\":\"::1\",\"port\":4243}\n"
+        );
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("server.json");
+        write_server_json(&path, bound).expect("write server.json");
+        let endpoint = crate::daemon_client::read_server_json(&path).expect("reads back");
+        assert_eq!(endpoint.host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(endpoint.port, 4243);
+    }
+
+    /// `MakeWriter` over a shared buffer, so a test can read back what
+    /// `bind_listen` logged.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Route this thread's `WARN` events into a fresh [`CapturedLog`] until the
+    /// guard drops.
+    ///
+    /// Every test that drives `bind_listen` with `insecure` set must hold one.
+    /// With a single live dispatcher, tracing computes a callsite's interest
+    /// from the default of whichever thread fires it first and caches that
+    /// globally, so a parallel test with no subscriber reaching the `--insecure`
+    /// `warn!` first would cache "never" and blind the capturing test. The
+    /// rebuild re-derives any interest cached before this subscriber existed.
+    fn capture_warnings() -> (CapturedLog, tracing::subscriber::DefaultGuard) {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        (log, guard)
+    }
+
+    impl CapturedLog {
+        fn warn_lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .expect("utf8 log")
+                .lines()
+                .filter(|l| l.contains("WARN"))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_listen_warns_on_every_insecure_start_and_only_then() {
+        // AC (AILAB-197): the WARN follows the flag, not the address — an
+        // `--insecure` start on the default loopback bind still warns, every
+        // time, naming the bound address; a start without the flag does not.
+        // `#[tokio::test]` is a current-thread runtime, so the thread-scoped
+        // subscriber sees every event `bind_listen` emits.
+        let (log, _guard) = capture_warnings();
+
+        let quiet = bind_listen(WatchListen::default()).await.expect("default");
+        drop(quiet);
+        assert!(log.warn_lines().is_empty(), "no --insecure, no WARN");
+
+        let insecure = WatchListen {
+            bind: None,
+            insecure: true,
+        };
+        let first = bind_listen(insecure).await.expect("insecure start 1");
+        let first_addr = first.local_addr().expect("addr 1");
+        assert!(first_addr.ip().is_loopback());
+        drop(first);
+        let second = bind_listen(insecure).await.expect("insecure start 2");
+        let second_addr = second.local_addr().expect("addr 2");
+        drop(second);
+
+        let warns = log.warn_lines();
+        assert_eq!(warns.len(), 2, "one WARN per insecure start: {warns:?}");
+        for (line, addr) in warns.iter().zip([first_addr, second_addr]) {
+            assert!(line.contains("--insecure"), "{line}");
+            assert!(line.contains(&addr.to_string()), "must name {addr}: {line}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_watch_refuses_tcp_flags_on_unix() {
+        // AC (AILAB-197): Unix has no TCP listener, so `--bind` or `--insecure`
+        // is a usage error — its own variant, not `Bind` — and it is reported
+        // before project discovery (this tempdir has no `.agent/`).
+        let dir = tempdir().expect("tempdir");
+        for listen in [
+            WatchListen {
+                bind: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+                insecure: false,
+            },
+            WatchListen {
+                bind: None,
+                insecure: true,
+            },
+        ] {
+            let result = run_watch(dir.path(), listen).await;
+            assert!(
+                matches!(result, Err(WatchError::TcpFlagsOnUnix)),
+                "{listen:?}: expected TcpFlagsOnUnix, got {result:?}"
+            );
+        }
+        let line = WatchError::TcpFlagsOnUnix.to_string();
+        assert!(
+            line.contains("--bind") && line.contains("--insecure"),
+            "{line}"
+        );
+        assert!(line.contains("dreamd.sock"), "{line}");
+    }
+
+    #[tokio::test]
     async fn run_watch_rejects_missing_project_root() {
         let dir = tempdir().expect("tempdir");
         // No .agent/ directory — AgentRoot::discover returns Err
-        let result = run_watch(dir.path()).await;
+        let result = run_watch(dir.path(), WatchListen::default()).await;
         assert!(
             matches!(result, Err(WatchError::NoProjectRoot(_))),
             "expected NoProjectRoot, got: {result:?}",
@@ -956,7 +1370,7 @@ mod tests {
             r#"dream_cycle_mode = "auto""#,
         )
         .expect("write config");
-        let result = run_watch(dir.path()).await;
+        let result = run_watch(dir.path(), WatchListen::default()).await;
         assert!(
             matches!(result, Err(WatchError::DreamMode(_))),
             "expected DreamMode error, got: {result:?}",
