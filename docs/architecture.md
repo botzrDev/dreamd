@@ -222,6 +222,8 @@ locally / 1024 via `PROPTEST_CASES`). Valid ranges: `age_days` ∈ \[0, 10000\],
 `pain` / `importance` ∈ \[0, 10\], `recurrence` ∈ \[0, `u64::MAX`/2\]. Edge
 cases: `pain=0` or `importance=0` → score 0; `recurrence=0` → ln factor 1.
 
+Full derivation and lineage: [`salience.md`](salience.md).
+
 ### Read-after-write visibility (commit-cadence window)
 
 The indexer commits to Tantivy on a wall-clock cadence
@@ -601,6 +603,7 @@ and returns `None` rather than failing. `try_init` makes the call idempotent.
   durability deep-dive.
 - [`architecture/tantivy-migration.md`](architecture/tantivy-migration.md) —
   what a maintainer must re-verify before a Tantivy major bump.
+- [`salience.md`](salience.md) — the salience ranking formula, factor by factor.
 - [`http-api.md`](http-api.md) — `/api/v1/*` endpoints, headers, status codes.
 - [`compared.md`](compared.md) — honest v0.1 comparison vs Mem0 / Letta Code /
   MCP-ref / Cline Memory Bank.

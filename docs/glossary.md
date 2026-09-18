@@ -5,7 +5,7 @@ Domain terms used across SPEC, ARCHITECTURE, CLI help, and agent skills.
 | Term | Definition |
 |---|---|
 | **dream cycle** | Consolidation pass that turns `episodic/` into `semantic/`. Clusters by `skill_action`, promotes recurring clusters to `LESSONS.md`, prunes stale unpinned events. |
-| **salience** | Query-time ranking score: `BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`. Not stored in the index. |
+| **salience** | Query-time ranking score: `BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`. Not stored in the index. See [docs/salience.md](./salience.md). |
 | **WAL** | Write-ahead log at `.agent/.dreamd/dream_in_progress.wal`. Records destructive intents before they run; recovery runs on startup if interrupted. |
 | **episodic** | Append-only layer: `episodic/AGENT_LEARNINGS.jsonl` — raw timestamped learnings. |
 | **semantic** | Distilled layer: `semantic/LESSONS.md` — promoted cluster lessons from the dream cycle. |

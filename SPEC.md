@@ -98,6 +98,8 @@ salience    = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 
 final_score = bm25 * salience
 ```
 
+The factor-by-factor derivation and lineage of this formula live in [`docs/salience.md`](docs/salience.md).
+
 `bm25` is the standard full-text relevance score for the query against `content`. `age_days` is derived from `timestamp` at query time; salience MUST NOT be pre-computed and stored, because the decay term changes continuously. `recurrence` is the count of events sharing the candidate's `skill_action` over a window the implementation defines.¹
 
 ## Dream cycle

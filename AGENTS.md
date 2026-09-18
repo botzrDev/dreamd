@@ -676,5 +676,25 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 - **Rule:** AILAB-208 publishes two digest pages under `docs/spec/`. Root `SPEC.md` stays the canonical on-disk contract. Do not register `dreamd.dev` (AILAB-272 is Canceled). Do not wait on ANTH-143 (the issue id is gone). Do not move `SPEC.md`.
 - **Why:** Linear AC named `dreamd.dev/spec` and a best-citizen spike blocker. The 2026-07-20 status on the same issue already offered in-repo `docs/spec/` + a README link as the v0.1 cheap signal. Remaining-50 still queued it as Q17.
-- **How to apply:** Implement `assignments/AILAB-208.v2.md`. Page 1 = folder layout + per-project `.agent/` vs per-user `~/.agent/` daemon home. Page 2 = JSONL / LESSONS.md frontmatter (MAY `citations`) / promotion / redaction. `skills/` and `protocols/` are dreamd extras, not SPEC-required. Skip 210. Q18 is AILAB-180.
-- **Cross-refs:** `v2-beats-linear-ac`, `doc-first-append-via-uds-learn`, `episodic-1-0-is-not-state-1-0`, `npm-dreamd-mcp-unscoped`
+- **How to apply:** Implement `assignments/AILAB-208.v2.md`. Page 1 = folder layout + per-project `.agent/` vs per-user `~/.agent/` daemon home. Page 2 = JSONL / LESSONS.md frontmatter (MAY `citations`) / promotion / redaction. `skills/` and `protocols/` are dreamd extras, not SPEC-required. Skip 210. Q18 is AILAB-180. 208 shipped on `main` at `7cc9418` while Linear is still Backlog — do not re-queue it.
+- **Cross-refs:** `v2-beats-linear-ac`, `doc-first-append-via-uds-learn`, `episodic-1-0-is-not-state-1-0`, `npm-dreamd-mcp-unscoped`, `linear-todo-can-already-be-on-main`
+
+### salience-14-is-efolding-not-half-life
+
+- **Rule:** The recency term is `exp(-age_days / 14)`, a 14-day **e-folding** time constant (`1/e` at 14 days). It is not a half-life. The half-life of that curve is `14 * ln(2) ≈ 9.7` days.
+- **Why:** AILAB-180 Linear AC (May 2026) asked for “exponential decay over 14-day half-life.” `docs/architecture.md` Decay already names this a factual error. Teaching “half-life” in `docs/salience.md` would contradict the architecture notes and `--explain` (`exp(-age_days/14)`).
+- **How to apply:**
+  - Restate the formula from `salience.rs:87-93` / ARCHITECTURE.md decision #2.
+  - Say “e-folding” (or “time constant”) and explicitly “not a half-life.”
+  - Do not change the `14.0` literal; it is a product lock, not a fitted parameter and not Anderson’s `d`.
+- **Cross-refs:** `actr-park-are-lineage-not-the-formula`, `v2-beats-linear-ac`
+
+### actr-park-are-lineage-not-the-formula
+
+- **Rule:** Anderson 2007 (ACT-R) and Park et al. 2023 (Generative Agents) are **lineage** for the salience *shape*. They are not the formula. ACT-R base-level activation is a power law (`t^{-d}`); Park retrieval is a weighted **sum** of recency + importance + relevance. dreamd is a **product** `BM25 × exp(-age/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`.
+- **Why:** SPEC.md footnote ¹ already cites both. AILAB-180’s “defensible answer for engineers reading critically” fails if the page claims isomorphism. Linear also wrote `ln(1+recurrence)` without the leading `1 +`, which would zero a first occurrence.
+- **How to apply:**
+  - Cite Anderson, *How Can the Human Mind Occur in the Physical Universe?* (2007) and Park et al., arXiv `2304.03442`.
+  - Contrast the arithmetic in the same sections that cite them.
+  - Keep `1 + ln(1 + recurrence)` so recurrence `0` → factor `1.0`.
+- **Cross-refs:** `salience-14-is-efolding-not-half-life`, `layer-semantic-is-not-embeddings`

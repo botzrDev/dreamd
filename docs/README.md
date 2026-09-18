@@ -42,6 +42,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | Document | Audience | Purpose |
 |---|---|---|
 | [architecture.md](./architecture.md) | Contributors | Extended architecture notes — crate split, IPC/coordinator, Tantivy indexing + salience, dream cycle, WAL/crash recovery, API stability |
+| [salience.md](./salience.md) | Contributors | Salience ranking formula deep-dive — factor-by-factor derivation, lineage, and calibration |
 | [architecture/durability.md](./architecture/durability.md) | Contributors | Durability guarantees and WAL semantics |
 
 ## Agent harness adapters
