@@ -135,7 +135,7 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 **Do not start a ticket until every ticket above it in this list has landed**, except the two spec-only drafts called out under parallel work.
 
 1. **BZR-187** — `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Document in `docs/http-api.md`. Do not call `MigrationRegistry` and do not `.bak` the store.
-2. **BZR-173** — one memory-store interface, in-process and daemon adapters. Fold the learn/recall half of **BZR-147** into this ticket (one response constructor, one `k`, one `schema_version`). MCP tool names stay byte-identical.
+2. **BZR-173** — landed (uncommitted). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine.
 3. **BZR-172** — single dream-cycle owner. Fold the rest of **BZR-147** here.
 4. **BZR-168** — one environment module. Fold the still-true **BZR-207** leftovers here (`init` takes `DaemonHome`; partial-init sentinel is `state_json()`). Leave `init`'s create-only `State` separate from the cycle writer.
 5. **BZR-170** — split the Tantivy module. Start only after 173 stops opening a fresh index on every `search_nodes`.
@@ -151,8 +151,8 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 15. **BZR-156** — `memory diff`.
 16. **BZR-153** — `memory bisect`.
 17. **BZR-146** — branching demo.
-18. **BZR-154** — Merkle ledger spec.
-19. **BZR-155** — provenance recording.
+18. **BZR-154** — Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
+19. **BZR-155** — provenance recording. Inherit the BZR-154 locks: a leaf hash is SHA-256 of the event id's UTF-8 bytes; signing bytes are compact JSON with no trailing newline; a promoted odd node adds no path entry; an unknown `kind` is skipped.
 20. **BZR-148** — `doctor --provenance`, before any delete path.
 21. **BZR-158** — forget cascade.
 22. **BZR-151** — `forget --proof`.

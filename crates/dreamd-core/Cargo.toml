@@ -143,6 +143,12 @@ genai = "0.6"
 # no `dhat-heap`; `default = []`, so the bare dep is already the minimal set.
 # MIT, already in the global allow list — `deny.toml` needs no exception.
 tiktoken-rs = "0.12"
+# BZR-173 — `memory_store::MemoryStore` is an async trait held as
+# `Arc<dyn MemoryStore>` by the MCP server; native `async fn` in traits is not
+# dyn-compatible. Already resolved transitively via rmcp and tantivy-common
+# (0.1.89 in Cargo.lock), so this adds no new crate to the graph. MIT OR
+# Apache-2.0.
+async-trait = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

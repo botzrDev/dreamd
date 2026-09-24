@@ -35,6 +35,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | Document | Audience | Purpose |
 |---|---|---|
 | [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) — **not implemented**; dreamd does not read or write this tree |
+| [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) — edge records, Merkle root, signed proof — **not implemented**; dreamd does not read or write this tree |
 
 ## Marketing & narrative
 

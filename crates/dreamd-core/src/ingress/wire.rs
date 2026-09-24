@@ -7,7 +7,10 @@
 use crate::coordinator::AppendOutcome;
 
 /// Response body for a successful `POST /api/v1/learn` (and MCP `append_node`).
-#[derive(serde::Serialize)]
+///
+/// `Deserialize` lets the daemon-proxy store (`memory_store::DaemonStore`)
+/// read back the body the daemon serialized with this same type.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct LearnResponse {
     /// Daemon-minted `evt_…` EventId (clients never supply this).
     pub id: String,

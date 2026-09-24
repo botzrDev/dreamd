@@ -93,7 +93,32 @@ impl LearnIngress {
         Self::validate_optional_pain(pain)?;
         Self::validate_optional_importance(importance)?;
 
-        Ok(AgentLearning {
+        Ok(Self::placeholder_learning(
+            &redact(content, redaction_enabled),
+            source_harness,
+            skill_action.as_str(),
+            pain,
+            importance,
+        ))
+    }
+
+    /// The one placeholder [`AgentLearning`] constructor: `schema_version` is
+    /// [`RECORD_SCHEMA_VERSION`], `id` is the static placeholder [`EventId`],
+    /// `timestamp` is now, omitted scores default to `5.0`, `pinned` is
+    /// `false`. The coordinator overwrites `id`, `timestamp`, and
+    /// `schema_version` on durable write.
+    ///
+    /// Performs no validation or redaction. [`Self::build_agent_learning`]
+    /// validates first; the daemon proxy (`memory_store::build_learn_request`)
+    /// forwards raw fields because the daemon's own ingress re-checks them.
+    pub fn placeholder_learning(
+        content: &str,
+        source_harness: &str,
+        skill_action: &str,
+        pain: Option<f64>,
+        importance: Option<f64>,
+    ) -> AgentLearning {
+        AgentLearning {
             schema_version: RECORD_SCHEMA_VERSION.to_string(),
             id: EventId::parse("evt_00000000000000000000000000")
                 .expect("static placeholder EventId is valid"),
@@ -101,10 +126,10 @@ impl LearnIngress {
             pain: pain.unwrap_or(5.0) as f32,
             importance: importance.unwrap_or(5.0) as f32,
             pinned: false,
-            skill_action: skill_action.into_string(),
+            skill_action: skill_action.to_owned(),
             source_harness: source_harness.to_owned(),
-            content: redact(content, redaction_enabled),
-        })
+            content: content.to_owned(),
+        }
     }
 }
 

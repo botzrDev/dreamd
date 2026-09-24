@@ -7,8 +7,6 @@ use crate::registry::ProjectEntry;
 
 use super::super::router::error_500;
 use super::super::state::AppState;
-use crate::ingress::RecallIngress;
-
 use super::super::types::RecallParams;
 
 /// `GET /api/v1/recall` — BM25 × salience search over the project index.
@@ -41,19 +39,16 @@ pub(crate) async fn get_recall(
             Err(e) => return error_500(&format!("index open failed: {e}")),
         };
 
-    let (_, schema_fields) = crate::index::build_schema();
-
-    match crate::recall(
-        &reader,
-        &schema_fields,
-        &params.q,
-        k as usize,
-        None,
-        now_sec,
-    ) {
-        Ok(results) => (
+    // Same recall body as the in-process MCP store (BZR-173); only the reader
+    // differs. Content-Type matches what `axum::Json` set before.
+    match crate::memory_store::recall_to_json(&reader, &params.q, k, now_sec) {
+        Ok(json) => (
             axum::http::StatusCode::OK,
-            axum::Json(RecallIngress::map_results(results)),
+            [(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            )],
+            json,
         )
             .into_response(),
         Err(e) => error_500(&format!("recall failed: {e}")),

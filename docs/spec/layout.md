@@ -35,7 +35,9 @@ WAL, the Tantivy index, `snapshots/`, and a per-project log. `dreamd init` write
 the ignore rule for you.
 Decay archives are `<YYYY-MM-DD>.jsonl` files in `snapshots/`. The unimplemented
 branch format in [`docs/branching.md`](../branching.md) uses `branches/`, not
-`snapshots/`.
+`snapshots/`. The unimplemented provenance ledger in
+[`docs/provenance.md`](../provenance.md) uses `provenance/`, not `snapshots/` or
+`branches/`.
 
 Treat `.dreamd/` as a cache belonging to another process. It is rebuildable, it
 is not the memory, and an adapter should never read it to answer a recall.
