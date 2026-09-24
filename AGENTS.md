@@ -698,3 +698,14 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
   - Contrast the arithmetic in the same sections that cite them.
   - Keep `1 + ln(1 + recurrence)` so recurrence `0` → factor `1.0`.
 - **Cross-refs:** `salience-14-is-efolding-not-half-life`, `layer-semantic-is-not-embeddings`
+
+### releasing-npm-is-human-passkey
+
+- **Rule:** `npm publish` for `dreamd-mcp` is human-only (`dataprime1` passkey / `npm login --auth-type=web`). CI must not publish, hold `NPM_TOKEN`, request `id-token`, or run `--provenance` / `dist-tag`. AILAB-179 is the **manifest write-back PR** only.
+- **Why:** Linear AILAB-179 asked to automate npm publish. `RELEASING.md` (post-0.1.1) forbids it: passkey 2FA cannot run in Actions. MCP Registry publish is the same posture. Founder remap 2026-09-18: keep step 6 human; have `release.yml` open a `chore/mcp-manifest-v*` PR after regenerating `manifest.json`.
+- **How to apply:**
+  - Generator stays `scripts/update-mcp-manifest.sh` (extracted-binary sha, three Unix shim platforms).
+  - Write-back is `gh pr create` to `main` with `GITHUB_TOKEN`; never `git push origin main`.
+  - Bot commit DCO trailer must be column 0 (`ci.yml` `^Signed-off-by:`). YAML-indented heredocs fail that. Prefer `git commit -m "subject" -m "Signed-off-by: …"`.
+  - `GITHUB_TOKEN` PRs do not trigger workflows. Do not invent `RELEASE_PR_TOKEN` without a founder ask.
+- **Cross-refs:** `npm-dreamd-mcp-unscoped`, `v2-beats-linear-ac`, `changelog-historical-entries-stay-put`

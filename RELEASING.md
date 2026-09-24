@@ -10,9 +10,8 @@ as `X.Y.Z` (e.g. `0.1.0-rc.5`); substitute throughout.
 ## 0. Prerequisites
 
 - Push access to `botzrDev/dreamd` and permission to publish GitHub Releases.
-- **npm publish requires the `dataprime1` account's passkey 2FA** — it CANNOT run in
-  CI and CANNOT be done by an automated agent. A human with the passkey performs
-  step 6.
+- **npm publish requires the `dataprime1` account's passkey 2FA** — it CANNOT run in CI
+  and CANNOT be done by an automated agent. A human with the passkey performs step 6.
 - A clean, green `main` (`gh run list --branch main --limit 1` → success). CI's
   `test` job is gated `needs: lint`, so a red `lint` **hides all test failures** —
   never cut a release off a `main` whose lint is red.
@@ -75,27 +74,27 @@ Watch it: `gh run watch $(gh run list --workflow release.yml --limit 1 --json da
 
 When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 6 assets.
 
-## 4. Fill the bundled manifest FROM the release build
+## 4. Fill the bundled manifest FROM the release build (CI PR)
 
-The `manifest.json` attached to the release was generated from the exact binaries in
-the release, so its shas are guaranteed to match what users download. **Take it from
-the release — do not regenerate separately** (local rebuilds are not byte-reproducible
-and would mismatch):
+The `release.yml` run already regenerated `manifest.json` from the exact release
+binaries, attached it to the draft release, and opened a PR
+`chore/mcp-manifest-vX.Y.Z` with that fill. Review the PR: the shas in the diff must
+match the `manifest.json` attached to the draft release (they are the same build —
+**take them from the release, do not regenerate separately**; local rebuilds are not
+byte-reproducible and would mismatch). Merge it.
+
+A PR opened by `GITHUB_TOKEN` may not run CI (GitHub's recursion guard); `node --test`
+in `packages/dreamd-mcp` still runs on the merge to `main` (step 5 watch). If branch
+protection refuses the merge because checks never started, that is a founder
+PAT/GitHub-App follow-up — do not invent a secret here.
+
+## 5. Publish the GitHub Release
+
+The merged PR already landed the fill on `main`, so the ff-only merge of a local
+`release/vX.Y.Z` is no longer the fill path. Confirm `main` CI is green (real shas →
+`node --test` passes):
 
 ```sh
-gh release download vX.Y.Z --repo botzrDev/dreamd --pattern manifest.json \
-  --output packages/dreamd-mcp/manifest.json --clobber
-git commit -am "chore: fill vX.Y.Z manifest shas from release build"
-```
-
-Now the npm package's bundled manifest matches the published binaries.
-
-## 5. Merge to main + publish the GitHub Release
-
-```sh
-git checkout main && git merge --ff-only release/vX.Y.Z && git push origin main
-git branch -d release/vX.Y.Z
-# main CI must be green (real shas → node --test passes):
 gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
 
 gh release edit vX.Y.Z --repo botzrDev/dreamd --draft=false   # publish; download URLs now resolve
@@ -159,9 +158,9 @@ automated in CI — no workflow holds registry credentials.
   `require('../package.json').version`; a guard test (`test/version-consistency.test.js`)
   and the CI `mcp-shim` job keep it honest.
 - **Manifest sha drift:** `release.yml` regenerates `packages/dreamd-mcp/manifest.json`
-  on the runner and uploads it as a release asset, **but never commits it back**. The
-  checked-in copy that ships in the npm package is hand-synced — step 4 is the sync.
-  A future hardening is to have `release.yml` open a PR with the regenerated manifest;
-  until then, step 4 is mandatory.
+  on the runner and uploads it as a release asset, then opens a `chore/mcp-manifest-v*`
+  PR that writes it back to `main`. Step 4 is now "review and merge that PR" rather
+  than a hand-sync, so the checked-in copy that ships in the npm package always matches
+  the published binaries.
 - **Masked CI:** the `test` job's `needs: lint` means a fmt error skips every test.
   Always confirm `main` lint is green (step 0) and re-run the full suite locally.

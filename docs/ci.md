@@ -253,7 +253,7 @@ Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, ta
 
 ## Release workflow (tags only)
 
-Triggered by `v*.*.*` tags. Builds cross-platform release binaries, packages tarballs for the `dreamd-mcp` npm shim, and publishes to GitHub Releases. Not a PR gate.
+Triggered by `v*.*.*` tags. Builds cross-platform release binaries, packages tarballs for the `dreamd-mcp` npm shim, and publishes to GitHub Releases. The same job then opens a `chore/mcp-manifest-v*` PR with the regenerated shim manifest. Not a PR gate for ordinary contributor PRs.
 
 See [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 

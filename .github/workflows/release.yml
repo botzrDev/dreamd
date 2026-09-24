@@ -121,6 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # elevated only for this job
+      pull-requests: write  # open the manifest fill PR
     steps:
       - uses: actions/checkout@v4
 
@@ -186,3 +187,33 @@ jobs:
             packages/dreamd-mcp/manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open PR with regenerated manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="chore/mcp-manifest-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add packages/dreamd-mcp/manifest.json
+          if git diff --staged --quiet; then
+            echo "manifest unchanged; skip PR"
+            exit 0
+          fi
+          # Two -m flags so Signed-off-by is column 0 (ci.yml DCO is ^Signed-off-by:).
+          # A YAML-indented heredoc would indent the trailer and fail DCO.
+          git commit -m "chore: fill v${VERSION} manifest shas from release build" \
+            -m "Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          git push -u origin "HEAD:refs/heads/${BRANCH}" --force
+          if [ "$(gh pr list --base main --head "$BRANCH" --json number --jq 'length')" = "0" ]; then
+            gh pr create --base main --head "$BRANCH" --title "chore: fill v${VERSION} dreamd-mcp manifest shas" --body "$(cat <<EOF
+          Fills \`packages/dreamd-mcp/manifest.json\` from the binaries attached to draft release \`${GITHUB_REF_NAME}\`.
+
+          Merge this before \`gh release edit ${GITHUB_REF_NAME} --draft=false\` and before human \`npm publish\`. Do not publish npm from CI.
+
+          EOF
+          )"
+          fi
