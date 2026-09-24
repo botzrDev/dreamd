@@ -17,15 +17,13 @@
 //! callers see 503 + `Retry-After` rather than a lost write.
 //!
 //! Entry points (`dreamd dream`, `POST /api/v1/dream`) are thin adapters over
-//! this module. The coordinator actor calls [`run_filesystem_phases`] only so it
+//! [`run_guarded_cycle`], the one sequencer (BZR-172). The coordinator actor calls [`run_filesystem_phases`] only so it
 //! can reopen its long-lived append fd after atomic renames (WEG-271).
 
 use std::path::{Path, PathBuf};
 
 use crate::autobiography::{self, AutobiographyOutcome};
-use crate::consolidation::{
-    self, DreamCycleError as ConsolidationError, LessonBodySource, SelectedLesson,
-};
+use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLesson};
 use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
@@ -35,7 +33,7 @@ use crate::wal::{self, WalError};
 #[derive(Debug, thiserror::Error)]
 pub enum DreamCycleError {
     #[error("consolidation: {0}")]
-    Consolidation(#[from] ConsolidationError),
+    Consolidation(#[from] LessonPhaseError),
     #[error("decay: {0}")]
     Decay(#[from] DecayError),
     #[error("WAL: {0}")]
@@ -45,6 +43,13 @@ pub enum DreamCycleError {
     Index(#[from] crate::server::index_map::IndexError),
     #[error("dream cycle already in progress")]
     InProgress,
+    /// The coordinator's inbox was full when the cycle was dispatched (HTTP 503).
+    #[error("coordinator busy, retry")]
+    CoordinatorBusy,
+    /// The coordinator could not run the filesystem phases (closed inbox,
+    /// dropped reply, or an error from the actor). The string is the message.
+    #[error("{0}")]
+    Coordinator(String),
 }
 
 /// Outcome of a full dream cycle (filesystem + post phases).
@@ -415,6 +420,76 @@ pub async fn run_post_phases(opts: PostPhaseOptions<'_>) -> Result<Option<()>, D
     Ok(None)
 }
 
+/// Inputs to [`run_guarded_cycle`] that do not vary by entry point.
+pub struct GuardedCycleOptions<'a> {
+    pub agent_root: &'a AgentRoot,
+    pub project_root: &'a Path,
+    /// Caller-supplied clock; `cycle_date` is derived from it here.
+    pub now_sec: i64,
+    /// `false` on `--no-commit`: skips the dirty-tree walk and the autobiography
+    /// commit.
+    pub commit_autobiography: bool,
+    #[cfg(unix)]
+    pub index: IndexBackend,
+}
+
+/// The one dream-cycle sequencer (BZR-172). Every real cycle — `POST
+/// /api/v1/dream` and the CLI in-process path — runs through here:
+///
+///   1. 409 guard ([`ensure_not_in_progress`]);
+///   2. `cycle_date` from [`cycle_date_from_now_sec`];
+///   3. dirty-path capture, only when the autobiography will commit (WEG-63);
+///   4. `dispatch(now_sec, cycle_date)` — the filesystem phases;
+///   5. [`run_post_phases`] with the decay result.
+///
+/// `dispatch` is the adapter. The daemon's callback sends `RunDreamCycle` to the
+/// coordinator actor, which runs [`run_filesystem_phases`] and reopens its append
+/// fd (WEG-271); a full inbox maps to [`DreamCycleError::CoordinatorBusy`]. The
+/// CLI's callback calls [`run_filesystem_phases`] directly. This function never
+/// opens the WAL itself — the single envelope stays inside the filesystem phases.
+///
+/// Queue property: appends wait only while the actor is inside
+/// `handle_run_dream_cycle` (consolidation, decay, and any model call). Index and
+/// autobiography run here, after the actor has replied, so they never hold the
+/// coordinator's inbox.
+pub async fn run_guarded_cycle<F, Fut>(
+    opts: GuardedCycleOptions<'_>,
+    dispatch: F,
+) -> Result<DreamCycleResult, DreamCycleError>
+where
+    F: FnOnce(i64, String) -> Fut,
+    Fut: std::future::Future<Output = Result<DecayResult, DreamCycleError>>,
+{
+    ensure_not_in_progress(opts.agent_root)?;
+    let cycle_date = cycle_date_from_now_sec(opts.now_sec);
+
+    // WEG-63 — capture dirty state BEFORE the cycle runs.
+    let dirty_at_cycle_start = if opts.commit_autobiography {
+        autobiography::check_dirty_at_cycle_start(opts.project_root).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let decay = dispatch(opts.now_sec, cycle_date.clone()).await?;
+
+    let autobiography = run_post_phases(PostPhaseOptions {
+        agent_root: opts.agent_root,
+        project_root: opts.project_root,
+        cycle_date: &cycle_date,
+        decay_result: &decay,
+        dirty_at_cycle_start: &dirty_at_cycle_start,
+        commit_autobiography: opts.commit_autobiography,
+        #[cfg(unix)]
+        index: opts.index,
+    })
+    .await?;
+
+    Ok(DreamCycleResult {
+        decay,
+        autobiography,
+    })
+}
+
 /// Full in-process cycle for the CLI (`--no-commit` or no daemon).
 ///
 /// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
@@ -427,49 +502,28 @@ pub fn run_in_process(
     no_commit: bool,
     no_llm: bool,
     share_personal: bool,
-    dirty_at_cycle_start: Vec<PathBuf>,
 ) -> Result<DreamCycleResult, DreamCycleError> {
     let agent_root = AgentRoot::new(project_root);
-    let cycle_date = cycle_date_from_now_sec(now_sec);
+    let root = &agent_root;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime for dream cycle");
 
-    runtime.block_on(async {
-        let decay =
-            run_filesystem_phases(&agent_root, now_sec, &cycle_date, no_llm, share_personal)
-                .await?;
-
-        #[cfg(unix)]
-        {
-            let autobiography = run_post_phases(PostPhaseOptions {
-                agent_root: &agent_root,
-                project_root,
-                cycle_date: &cycle_date,
-                decay_result: &decay,
-                dirty_at_cycle_start: &dirty_at_cycle_start,
-                commit_autobiography: !no_commit,
-                index: IndexBackend::FreshHandle,
-            })
-            .await?;
-
-            Ok(DreamCycleResult {
-                decay,
-                autobiography,
-            })
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = (no_commit, &dirty_at_cycle_start, project_root);
-            Ok(DreamCycleResult {
-                decay,
-                autobiography: None,
-            })
-        }
-    })
+    runtime.block_on(run_guarded_cycle(
+        GuardedCycleOptions {
+            agent_root: root,
+            project_root,
+            now_sec,
+            commit_autobiography: !no_commit,
+            #[cfg(unix)]
+            index: IndexBackend::FreshHandle,
+        },
+        |now_sec, cycle_date| async move {
+            run_filesystem_phases(root, now_sec, &cycle_date, no_llm, share_personal).await
+        },
+    ))
 }
 
 /// What `dreamd dream --dry` would have persisted, built without *writing*
@@ -764,11 +818,75 @@ mod tests {
         let (_dir, root) = scaffold_fixture();
         let project_root = root.project_root().to_path_buf();
 
-        let result = run_in_process(&project_root, NOW_SEC, true, true, false, Vec::new())
+        let result = run_in_process(&project_root, NOW_SEC, true, true, false)
             .expect("full in-process cycle");
 
         assert!(root.lessons_md().exists());
         assert!(!result.decay.decayed_ids.is_empty() || result.decay.kept_count > 0);
+    }
+
+    #[test]
+    fn cycle_date_from_now_sec_is_utc_yyyy_mm_dd() {
+        assert_eq!(cycle_date_from_now_sec(0), "1970-01-01");
+        // 2025-05-13T12:00:00Z — the fixture clock used throughout this module.
+        assert_eq!(cycle_date_from_now_sec(NOW_SEC), "2025-05-13");
+    }
+
+    /// BZR-172 seam: the sequencer guards, dispatches exactly once, and runs
+    /// the post phases — with no daemon, no index, and no autobiography.
+    #[tokio::test]
+    async fn guarded_cycle_dispatches_once_through_the_callback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = AgentRoot::new(dir.path());
+        fs::create_dir_all(root.agent_dir()).unwrap();
+
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = run_guarded_cycle(
+            GuardedCycleOptions {
+                agent_root: &root,
+                project_root: dir.path(),
+                now_sec: NOW_SEC,
+                commit_autobiography: false,
+                #[cfg(unix)]
+                index: IndexBackend::Skip,
+            },
+            |now_sec, cycle_date| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(now_sec, NOW_SEC);
+                assert_eq!(cycle_date, "2025-05-13");
+                async { Ok(DecayResult::default()) }
+            },
+        )
+        .await;
+
+        let result = result.expect("guarded cycle");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(result.decay.decayed_ids.is_empty());
+        assert!(result.autobiography.is_none());
+    }
+
+    #[test]
+    fn guarded_cycle_rejects_an_active_cycle_before_dispatch() {
+        let (_dir, root) = scaffold_fixture();
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let err = runtime
+            .block_on(run_guarded_cycle(
+                GuardedCycleOptions {
+                    agent_root: &root,
+                    project_root: root.project_root(),
+                    now_sec: NOW_SEC,
+                    commit_autobiography: false,
+                    #[cfg(unix)]
+                    index: IndexBackend::Skip,
+                },
+                |_, _| async { panic!("dispatch must not run while a cycle is in progress") },
+            ))
+            .unwrap_err();
+        assert!(matches!(err, DreamCycleError::InProgress));
     }
 
     #[tokio::test]
@@ -816,7 +934,7 @@ mod tests {
             "a dry run must not rewrite the episodic log"
         );
 
-        run_in_process(&project_root, NOW_SEC, true, true, false, Vec::new()).expect("real cycle");
+        run_in_process(&project_root, NOW_SEC, true, true, false).expect("real cycle");
 
         assert_eq!(
             markdown,

@@ -273,7 +273,7 @@ pub fn run(
     } else {
         // Reuse init verbatim (non-quiet): the scaffold lines and the DR-413
         // privacy disclosure are exactly what a first-run user needs to see.
-        init::run(req.cwd, req.daemon_home, false, out, err)?;
+        init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
         let wired = wire_mcp(req, &project_root, out, err)?;
         let daemon_live = start_watch_and_probe(req, &project_root, err)?;
         report_doctor(req.cwd, out)?;

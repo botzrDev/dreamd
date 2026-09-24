@@ -12,6 +12,7 @@
 //!
 //! See `context/planning/PRD.md` Part III §1 + Part IV §1.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -46,6 +47,11 @@ impl AgentRoot {
 
     /// Walk ancestors of `start` looking for a directory that contains
     /// `.agent/`, and bind to the first one found.
+    ///
+    /// This finds an **existing store**. [`find_project_root`] is the other
+    /// walk: it finds a repo sentinel (`.git/`, `Cargo.toml`, …) for
+    /// `dreamd init`, before any store exists. The two answer different
+    /// questions and stay separate.
     ///
     /// Used by post-init commands (e.g. `dreamd reset workspace`, DR-113) that
     /// must operate against the *existing* store rather than the project-root
@@ -194,6 +200,92 @@ impl std::fmt::Display for AgentRoot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.project_root.display())
     }
+}
+
+/// Repo sentinels [`find_project_root`] looks for.
+const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
+
+/// Walk up from `start` looking for a project-root sentinel (`.git/`,
+/// `Cargo.toml`, `package.json`, `pyproject.toml`).
+///
+/// This finds a **repo sentinel** for `dreamd init` (and `setup` /
+/// `uninstall`, which must agree with init on where the project is). It does
+/// not look for `.agent/`; [`AgentRoot::discover`] is the walk that finds an
+/// existing store. Do not merge the two.
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let mut cur: Option<&Path> = Some(start);
+    while let Some(dir) = cur {
+        for sentinel in ROOT_SENTINELS {
+            if dir.join(sentinel).exists() {
+                return Some(dir.to_path_buf());
+            }
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// This process's home directory, or `None` — the one place dreamd reads
+/// `HOME` (and, on Windows, `USERPROFILE`). The environment reads live here;
+/// the decision lives in [`resolve_home_from_vars`], which is what makes the
+/// decision testable on any host.
+pub fn home_dir() -> Option<PathBuf> {
+    resolve_home_from_vars(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    )
+}
+
+/// `$HOME`, falling back on Windows **only** to `%USERPROFILE%` when `$HOME`
+/// is unset or empty. Native `cmd.exe` and PowerShell set `USERPROFILE` and
+/// no `HOME` at all, so without this `dreamd service install` (AILAB-203)
+/// would never find `~/.agent` on the one OS whose service path depends on
+/// it; Git-Bash and WSL do set `HOME`, and it keeps winning there. Unix
+/// behaviour is byte-for-byte what it has always been: `USERPROFILE` is never
+/// consulted.
+///
+/// Driven by a `windows` **argument** rather than a `#[cfg(windows)]` branch
+/// on purpose. A cfg-gated fallback would never be compiled, let alone
+/// executed, by the Linux checks that gate every merge — a Windows-only path
+/// nobody can run is how a Windows-only bug ships. As a parameter, both
+/// answers are ordinary unit tests on any host.
+///
+/// `HOME` set but *empty* is a real, ordinary environment: `env -i`, a
+/// systemd unit with `Environment=HOME=`, a Docker `ENV HOME=`, several CI
+/// runners. `var_os` returns `Some("")` for it, and every derived path then
+/// silently becomes **relative** — `.agent`, `.cache/dreamd-mcp`,
+/// `.npm/_npx` — which resolves against whatever directory the command happens
+/// to be run from.
+///
+/// For the AILAB-584 stop scope that is not a cosmetic bug: a relative
+/// `cache_dir` is canonicalized against this process's cwd, so a process whose
+/// executable sits under `$PWD/.cache/dreamd-mcp` attributes to us and gets
+/// SIGTERMed no matter whose `$HOME` it serves — the cross-home kill, re-opened
+/// by a blank variable (reproduced under `env HOME= dreamd update`). For
+/// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
+/// clear `./.npm/_npx`, and it *deletes* what it finds there.
+///
+/// Empty is therefore treated exactly like unset everywhere, and — since a
+/// blank `%USERPROFILE%` derails a path in precisely the same way — that rule
+/// applies to both variables here, not just to `HOME`. Callers already have a
+/// defined "no home directory" behaviour (skip with a note, refuse, or exit 2),
+/// which is the correct answer for a process that genuinely has no home.
+pub fn resolve_home_from_vars(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    fn non_empty(value: Option<OsString>) -> Option<PathBuf> {
+        value.filter(|v| !v.is_empty()).map(PathBuf::from)
+    }
+    non_empty(home).or_else(|| {
+        if windows {
+            non_empty(userprofile)
+        } else {
+            None
+        }
+    })
 }
 
 /// Global daemon home at `~/.agent/`. Holds the unix socket, project registry,
@@ -424,6 +516,33 @@ mod tests {
             AgentRoot::discover(&nested),
             Err(LayoutError::NotFound)
         ));
+    }
+
+    #[test]
+    fn empty_home_is_unset_and_userprofile_only_counts_on_windows() {
+        // Unix never consults USERPROFILE, so an empty HOME is no home at all.
+        assert_eq!(
+            resolve_home_from_vars(
+                Some(OsString::new()),
+                Some(OsString::from("/tmp/up")),
+                false
+            ),
+            None
+        );
+        // Windows falls back to USERPROFILE because HOME is empty…
+        assert_eq!(
+            resolve_home_from_vars(Some(OsString::new()), Some(OsString::from("/tmp/up")), true),
+            Some(PathBuf::from("/tmp/up"))
+        );
+        // …and only then: a non-empty HOME still wins.
+        assert_eq!(
+            resolve_home_from_vars(
+                Some(OsString::from("/tmp/home")),
+                Some(OsString::from("/tmp/up")),
+                true
+            ),
+            Some(PathBuf::from("/tmp/home"))
+        );
     }
 
     #[test]

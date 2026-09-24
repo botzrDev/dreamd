@@ -266,10 +266,13 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     Ok(())
 }
 
-/// Error type for the deterministic dream cycle orchestrator.
+/// Error type for the consolidation (lesson) phase of a dream cycle.
+///
+/// Named apart from [`crate::dream_cycle::DreamCycleError`], which wraps it as
+/// `Consolidation(..)` (BZR-147 / BZR-172).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub enum DreamCycleError {
+pub enum LessonPhaseError {
     #[error("cluster engine: {0}")]
     Cluster(#[from] ConsolidationError),
     #[error("WAL: {0}")]
@@ -334,7 +337,7 @@ pub struct SelectedLesson {
 pub fn select_lesson_or_retire(
     agent_root: &AgentRoot,
     now_sec: i64,
-) -> Result<Option<SelectedLesson>, DreamCycleError> {
+) -> Result<Option<SelectedLesson>, LessonPhaseError> {
     let cluster_output = run_cluster_engine(agent_root, now_sec)?;
 
     if cluster_output.promoted.is_empty() {
@@ -401,7 +404,7 @@ pub fn select_lesson_or_retire(
 pub fn preview_select_lesson(
     agent_root: &AgentRoot,
     now_sec: i64,
-) -> Result<Option<SelectedLesson>, DreamCycleError> {
+) -> Result<Option<SelectedLesson>, LessonPhaseError> {
     let events =
         episodic::read_all(&agent_root.episodic_jsonl()).map_err(ConsolidationError::from)?;
     let promoted = compute_promoted_clusters(&events, now_sec);
@@ -493,7 +496,7 @@ pub fn write_selected_lesson(
     now_sec: i64,
     selected: &SelectedLesson,
     body: LessonBodySource,
-) -> Result<(), DreamCycleError> {
+) -> Result<(), LessonPhaseError> {
     let lessons_file = lessons_file_from_selected(now_sec, selected, body);
 
     let lessons_path = agent_root.lessons_md();
@@ -529,7 +532,7 @@ pub fn write_selected_lesson(
 pub fn run_deterministic_dream_cycle(
     agent_root: &AgentRoot,
     now_sec: i64,
-) -> Result<(), DreamCycleError> {
+) -> Result<(), LessonPhaseError> {
     let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
 
     let Some(selected) = select_lesson_or_retire(agent_root, now_sec)? else {

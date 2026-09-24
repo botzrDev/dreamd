@@ -59,7 +59,14 @@ fn fixture() -> Fixture {
     // Register the project via the normal init path.
     let mut out = Cursor::new(Vec::new());
     let mut err = Cursor::new(Vec::new());
-    init::run(project.path(), daemon_home.path(), true, &mut out, &mut err).unwrap();
+    init::run(
+        project.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
+        true,
+        &mut out,
+        &mut err,
+    )
+    .unwrap();
 
     // Fake daemon socket file.
     std::fs::write(daemon_home.path().join("dreamd.sock"), b"").unwrap();

@@ -6,7 +6,6 @@
 //!   - `1` -- runtime / I/O error
 //!   - `2` -- usage error (missing subcommand, no project root)
 
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -450,83 +449,23 @@ fn current_dir_or_exit() -> Result<std::path::PathBuf, ExitCode> {
     })
 }
 
-/// This invocation's home directory, or `None` — **the single place this
-/// binary reads `HOME`** (and, on Windows, `USERPROFILE`), so the rules in
-/// [`resolve_home_from_vars`] are stated once. The environment reads live
-/// here and the decision lives there, which is what makes the decision
-/// testable at all.
+/// This invocation's home directory, or `None`. Delegates to
+/// [`dreamd_core::layout::home_dir`], the one place dreamd reads `HOME` (and,
+/// on Windows, `USERPROFILE`); the rules — empty is unset, `USERPROFILE` only
+/// on Windows — live on [`dreamd_core::layout::resolve_home_from_vars`].
 fn home_dir() -> Option<PathBuf> {
-    resolve_home_from_vars(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
-        cfg!(windows),
-    )
-}
-
-/// `$HOME`, falling back on Windows **only** to `%USERPROFILE%` when `$HOME`
-/// is unset or empty. Native `cmd.exe` and PowerShell set `USERPROFILE` and
-/// no `HOME` at all, so without this `dreamd service install` (AILAB-203)
-/// would never find `~/.agent` on the one OS whose service path depends on
-/// it; Git-Bash and WSL do set `HOME`, and it keeps winning there. Unix
-/// behaviour is byte-for-byte what it has always been: `USERPROFILE` is never
-/// consulted.
-///
-/// Named for the two *variables* it arbitrates, because the plain
-/// `resolve_home` in this module is already taken by the AILAB-584
-/// attribution scope — a wrapper over [`home_dir`], i.e. a consumer of this
-/// function rather than a sibling of it.
-///
-/// Split out of [`home_dir`] and driven by a `windows` **argument** rather
-/// than a `#[cfg(windows)]` branch on purpose. A cfg-gated fallback would
-/// never be compiled, let alone executed, by the Linux checks that gate every
-/// merge — a Windows-only path nobody can run is how a Windows-only bug
-/// ships. As a parameter, both answers are ordinary unit tests on any host.
-///
-/// `HOME` set but *empty* is a real, ordinary environment: `env -i`, a
-/// systemd unit with `Environment=HOME=`, a Docker `ENV HOME=`, several CI
-/// runners. `var_os` returns `Some("")` for it, and every derived path then
-/// silently becomes **relative** — `.agent`, `.cache/dreamd-mcp`,
-/// `.npm/_npx` — which resolves against whatever directory the command happens
-/// to be run from.
-///
-/// For the AILAB-584 stop scope that is not a cosmetic bug: a relative
-/// `cache_dir` is canonicalized against this process's cwd, so a process whose
-/// executable sits under `$PWD/.cache/dreamd-mcp` attributes to us and gets
-/// SIGTERMed no matter whose `$HOME` it serves — the cross-home kill, re-opened
-/// by a blank variable (reproduced under `env HOME= dreamd update`). For
-/// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
-/// clear `./.npm/_npx`, and it *deletes* what it finds there.
-///
-/// Empty is therefore treated exactly like unset everywhere, and — since a
-/// blank `%USERPROFILE%` derails a path in precisely the same way — that rule
-/// applies to both variables here, not just to `HOME`. Callers already have a
-/// defined "no home directory" behaviour (skip with a note, or in
-/// `lifecycle_cleanup` refuse to attribute anything), which is the correct
-/// answer for a process that genuinely has no home.
-fn resolve_home_from_vars(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    windows: bool,
-) -> Option<PathBuf> {
-    fn non_empty(value: Option<OsString>) -> Option<PathBuf> {
-        value.filter(|v| !v.is_empty()).map(PathBuf::from)
-    }
-    non_empty(home).or_else(|| {
-        if windows {
-            non_empty(userprofile)
-        } else {
-            None
-        }
-    })
+    dreamd_core::layout::home_dir()
 }
 
 /// The `dreamd service` refusal copy for a host with no usable home
 /// directory. Windows names both variables because
-/// [`resolve_home_from_vars`] consults both there; Unix keeps the wording it
+/// [`dreamd_core::layout::resolve_home_from_vars`] consults both there; Unix keeps the wording it
 /// has always had, since `USERPROFILE` is never read on that side and naming
 /// it would only send the reader after a variable that could not have helped.
-/// Only the three `service` verbs use this: every other `home_dir` caller has
-/// its own "skip with a note" behaviour and its own wording.
+/// The three `service` verbs use this, and so do `init`, `setup`, and
+/// `uninstall`, which exit 2 without a daemon home rather than fall back to a
+/// relative `.agent` (BZR-168). Every other `home_dir` caller has its own
+/// "skip with a note" behaviour and its own wording.
 fn no_home_message() -> &'static str {
     if cfg!(windows) {
         "neither HOME nor USERPROFILE is set; cannot locate the per-user service path"
@@ -548,10 +487,11 @@ fn wants_daemon_log(command: Option<&Command>) -> bool {
     matches!(command, Some(Command::Watch(_)))
 }
 
-fn resolve_daemon_home() -> PathBuf {
-    home_dir()
-        .map(|h| h.join(".agent"))
-        .unwrap_or_else(|| PathBuf::from(".agent"))
+/// `~/.agent`, or `None` when there is no home directory. There is no
+/// relative fallback: a bare `.agent` is the *project* store under cwd, not
+/// the daemon home (BZR-168).
+fn resolve_daemon_home() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".agent"))
 }
 
 fn run_archive(args: ArchiveArgs) -> ExitCode {
@@ -761,7 +701,11 @@ fn run_init(args: InitArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let daemon_home = resolve_daemon_home();
+    let Some(daemon_home) = resolve_daemon_home() else {
+        eprintln!("dreamd: error — {}", no_home_message());
+        return ExitCode::from(2);
+    };
+    let daemon_home = dreamd_core::layout::DaemonHome::new(daemon_home);
     // lock-ok (AILAB-583): init never opens a Tantivy index — it scaffolds or
     // removes `.agent/` files and the registry entry.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
@@ -971,7 +915,10 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
         Ok(p) => p,
         Err(code) => return code,
     };
-    let daemon_home = resolve_daemon_home();
+    let Some(daemon_home) = resolve_daemon_home() else {
+        eprintln!("dreamd: error — {}", no_home_message());
+        return ExitCode::from(2);
+    };
     // Unlocked handles (AILAB-583): the success-path doctor beat calls into
     // `doctor::run` (`setup::report_doctor`), which is writer-free only while
     // `repair: false`. Doctor buffers its own output, but `StderrLock` is
@@ -1025,9 +972,8 @@ fn run_status() -> ExitCode {
     #[cfg(not(unix))]
     let socket: Option<PathBuf> =
         home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).server_json());
-    let registry_path = home_dir()
-        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml())
-        .unwrap_or_else(|| PathBuf::from("registry.toml"));
+    let registry_path =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml());
     let log_tail = home_dir()
         .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
         .map(|p| commands::status::read_log_tail(&p))
@@ -1037,7 +983,13 @@ fn run_status() -> ExitCode {
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match commands::status::run(&cwd, socket.as_deref(), &registry_path, &log_tail, &mut out) {
+    match commands::status::run(
+        &cwd,
+        socket.as_deref(),
+        registry_path.as_deref(),
+        &log_tail,
+        &mut out,
+    ) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -1093,7 +1045,10 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let daemon_home = resolve_daemon_home();
+    let Some(daemon_home) = resolve_daemon_home() else {
+        eprintln!("dreamd: error — {}", no_home_message());
+        return ExitCode::from(2);
+    };
     // Socket via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock),
     // same as the status arm — never a hardcoded path.
     #[cfg(unix)]
@@ -1397,6 +1352,8 @@ pub fn run() -> ExitCode {
 mod tests {
     use super::*;
     use clap::Parser;
+    use dreamd_core::layout::resolve_home_from_vars;
+    use std::ffi::OsString;
 
     #[test]
     fn auto_mode_rejected() {

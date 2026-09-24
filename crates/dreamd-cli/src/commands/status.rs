@@ -53,7 +53,9 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 ///
 /// `socket` is the resolved daemon address path — the UDS path on Unix,
 /// `~/.agent/server.json` off it (`None` when the home directory can't be
-/// resolved); `registry_path` is a daemon-home path; `log_tail` holds the daemon
+/// resolved); `registry_path` is the daemon-home `registry.toml` (`None` when
+/// the home directory can't be resolved — the project then reports
+/// `not registered` without reading anything); `log_tail` holds the daemon
 /// log's last lines, pre-read by the caller (see [`read_log_tail`]).
 /// Returns `Ok(true)` when the daemon appears live — a bounded connect probe on
 /// that address succeeds — so the caller exits 0 — and `Ok(false)` otherwise
@@ -63,7 +65,7 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 pub fn run(
     cwd: &Path,
     socket: Option<&Path>,
-    registry_path: &Path,
+    registry_path: Option<&Path>,
     log_tail: &[String],
     out: &mut impl Write,
 ) -> io::Result<bool> {
@@ -90,8 +92,8 @@ pub fn run(
     // Project resolved from CWD, plus its registration with the daemon.
     match AgentRoot::discover(cwd) {
         Ok(root) => {
-            let registered = registry::resolve_project(registry_path, root.project_root())
-                .ok()
+            let registered = registry_path
+                .and_then(|path| registry::resolve_project(path, root.project_root()).ok())
                 .flatten()
                 .is_some();
             writeln!(
@@ -166,7 +168,7 @@ mod tests {
         let live = run(
             dir.path(),
             Some(&sock),
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -189,7 +191,7 @@ mod tests {
         let live = run(
             dir.path(),
             Some(&sock),
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -207,7 +209,7 @@ mod tests {
         let live = run(
             dir.path(),
             Some(&missing),
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -224,7 +226,7 @@ mod tests {
         run(
             dir.path(),
             None,
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -246,7 +248,7 @@ mod tests {
         writeln!(reg, "root = \"{}\"", canonical.display()).unwrap();
 
         let mut buf = Vec::new();
-        run(&project, None, reg.path(), &[], &mut buf).unwrap();
+        run(&project, None, Some(reg.path()), &[], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("(registered)"), "got: {out}");
     }
@@ -262,7 +264,7 @@ mod tests {
         run(
             &project,
             None,
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -286,7 +288,7 @@ mod tests {
         run(
             &project,
             None,
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )
@@ -311,7 +313,7 @@ mod tests {
         run(
             dir.path(),
             None,
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &tail,
             &mut buf,
         )
@@ -329,7 +331,7 @@ mod tests {
         run(
             dir.path(),
             None,
-            Path::new("/no/registry.toml"),
+            Some(Path::new("/no/registry.toml")),
             &[],
             &mut buf,
         )

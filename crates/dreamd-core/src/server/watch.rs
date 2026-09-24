@@ -214,7 +214,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 
     // 4. Compose AppState. daemon_uid is this process's UID — peer_uid_middleware
     //    (WEG-72 / DR-407) rejects any connection whose peer UID differs.
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = crate::layout::home_dir().ok_or_else(|| {
         WatchError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "could not determine home directory",
@@ -363,11 +363,12 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //      store as if it were intact.
     crate::wal::recover_on_startup(&agent_root)?;
 
-    // 3. Resolve the daemon home. `dirs::home_dir()`, exactly as the Unix arm
-    //    does — the `USERPROFILE` fallback belongs to the CLI's `service` verbs,
-    //    which have to resolve a home for a scheduled task's environment; a
-    //    foreground watch inherits the user's own.
-    let home = dirs::home_dir().ok_or_else(|| {
+    // 3. Resolve the daemon home through `layout::home_dir()`, exactly as the
+    //    Unix arm and the CLI do (BZR-168): `HOME`, else `USERPROFILE`, empty
+    //    counts as unset. That is the same rule `service install` used to mint
+    //    `auth.json`, so the scheduled task and a foreground watch agree on
+    //    which `~/.agent` they mean.
+    let home = crate::layout::home_dir().ok_or_else(|| {
         WatchError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "could not determine home directory",

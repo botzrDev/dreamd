@@ -7,19 +7,19 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use dreamd_core::config::CONFIG_TEMPLATE;
-use dreamd_core::io::{lock_exclusive, write_atomic};
+// Re-exported for `setup` / `uninstall`, which must agree with init on where
+// the project is. The walk itself lives in `layout` next to `discover`.
+pub(crate) use dreamd_core::layout::find_project_root;
 use dreamd_core::privacy::DR413_DISCLOSURE;
-use dreamd_core::registry::{ProjectEntry, Registry};
+use dreamd_core::registry::{update_registry, ProjectEntry};
 use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
 use serde::Serialize;
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
 const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
-
-const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
 
 /// Failure modes for init scaffolding and registry operations.
 #[derive(Debug)]
@@ -64,7 +64,7 @@ struct State {
 /// `Cargo.toml`, etc.) is found walking up from `cwd`.
 pub fn run(
     cwd: &Path,
-    daemon_home: &Path,
+    daemon_home: &DaemonHome,
     quiet: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -133,7 +133,7 @@ pub fn run(
 /// registered or the registry file is absent.
 pub fn uninstall_project(
     cwd: &Path,
-    daemon_home: &Path,
+    daemon_home: &DaemonHome,
     quiet: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -149,8 +149,7 @@ pub fn uninstall_project(
         }
     };
 
-    let daemon = DaemonHome::new(daemon_home);
-    let registry_path = daemon.registry_toml();
+    let registry_path = daemon_home.registry_toml();
 
     // Fast no-op when nothing has ever been registered. Do **not** create
     // `daemon_home` just to take the flock — uninstall must not scaffold
@@ -159,110 +158,45 @@ pub fn uninstall_project(
     // first `dreamd init` that creates the home between the check and the RMW
     // (AILAB-161 report-back). A false-negative here (init wins the race) is
     // fine — the user re-runs uninstall.
-    if !registry_path.exists() {
-        if !quiet {
-            writeln!(
-                out,
-                "dreamd: project not registered \u{2014} nothing to do."
-            )?;
-        }
-        return Ok(());
-    }
-
-    // Registry present ⇒ its parent exists. Serialize the whole RMW against
-    // concurrent `dreamd init` / uninstall. `write_atomic` is durability, not
-    // exclusion (AILAB-161). Re-check existence under the lock: a racer may
-    // have removed the file between the probe above and `flock`.
-    let _guard = lock_exclusive(&daemon.registry_lock())?;
-    if !registry_path.exists() {
-        if !quiet {
-            writeln!(
-                out,
-                "dreamd: project not registered \u{2014} nothing to do."
-            )?;
-        }
-        return Ok(());
-    }
-
-    let raw = fs::read_to_string(&registry_path)?;
-    let mut registry: Registry =
-        toml::from_str(&raw).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
-
-    let canonical = fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-
-    let before = registry.projects.len();
-    registry.projects.retain(|p| p.root != canonical_str);
-
-    if registry.projects.len() == before {
-        if !quiet {
-            writeln!(
-                out,
-                "dreamd: project not registered \u{2014} nothing to do."
-            )?;
-        }
-        return Ok(());
-    }
-
-    let serialized =
-        toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
-    write_atomic(&registry_path, serialized.as_bytes())?;
-    // Defense-in-depth: registry.toml lists every registered project root.
-    // 0600 even though ~/.agent/ is already 0700. Unix-only; Windows perms are
-    // deferred to v0.1.1 / DR-121.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&registry_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    //
+    // Registry present ⇒ its parent exists, so `update_registry` can take the
+    // flock. It re-reads under the lock: a racer that removed the file between
+    // this probe and `flock` reads as an empty registry, the retain below
+    // changes nothing, and nothing is written.
+    let removed = registry_path.exists()
+        && update_registry(daemon_home, &project_root, |registry, root| {
+            let before = registry.projects.len();
+            registry.projects.retain(|p| p.root != root);
+            registry.projects.len() != before
+        })?;
 
     if !quiet {
-        writeln!(out, "unregistered .agent/ from ~/.agent/registry.toml")?;
+        if removed {
+            writeln!(out, "unregistered .agent/ from ~/.agent/registry.toml")?;
+        } else {
+            writeln!(
+                out,
+                "dreamd: project not registered \u{2014} nothing to do."
+            )?;
+        }
     }
     Ok(())
 }
 
-fn register_project(daemon_home: &Path, project_root: &Path) -> Result<(), InitError> {
-    fs::create_dir_all(daemon_home)?;
-    let daemon = DaemonHome::new(daemon_home);
-    // Serialize the whole read → parse → push → write_atomic → chmod cycle
-    // against a concurrent `dreamd init` or `dreamd ... uninstall`, the other
-    // writer of this file. Two unlocked cycles read the same snapshot and the
-    // later rename silently drops the earlier writer's project root
-    // (AILAB-161). `create_dir_all` stays outside the lock — it is the
-    // precondition for creating the lockfile at all. Silent: no stdout line,
+fn register_project(daemon_home: &DaemonHome, project_root: &Path) -> Result<(), InitError> {
+    // `create_dir_all` stays outside the lock — it is the precondition for
+    // creating the lockfile at all. Silent: no stdout line,
     // `tests/fixtures/init.golden.txt` is byte-locked.
-    let _guard = lock_exclusive(&daemon.registry_lock())?;
-    let registry_path = daemon.registry_toml();
-
-    let mut registry: Registry = if registry_path.exists() {
-        let raw = fs::read_to_string(&registry_path)?;
-        toml::from_str(&raw).map_err(|e| InitError::Io(std::io::Error::other(e)))?
-    } else {
-        Registry::default()
-    };
-
-    let canonical = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-
-    if registry.projects.iter().any(|p| p.root == canonical_str) {
-        return Ok(());
-    }
-
-    registry.projects.push(ProjectEntry {
-        root: canonical_str,
-    });
-    let serialized =
-        toml::to_string(&registry).map_err(|e| InitError::Io(std::io::Error::other(e)))?;
-    write_atomic(&registry_path, serialized.as_bytes())?;
-    // Defense-in-depth: registry.toml lists every registered project root.
-    // 0600 even though ~/.agent/ is already 0700. Unix-only; Windows perms are
-    // deferred to v0.1.1 / DR-121.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&registry_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    fs::create_dir_all(daemon_home.root())?;
+    update_registry(daemon_home, project_root, |registry, root| {
+        if registry.projects.iter().any(|p| p.root == root) {
+            return false;
+        }
+        registry.projects.push(ProjectEntry {
+            root: root.to_owned(),
+        });
+        true
+    })?;
     Ok(())
 }
 
@@ -300,23 +234,6 @@ fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), Ini
     Ok(())
 }
 
-/// Walk up from `start` looking for a project-root sentinel (`.git/`,
-/// `Cargo.toml`, `package.json`, `pyproject.toml`). Shared with
-/// `commands::uninstall`, which uses it to decide whether the registry
-/// unregister step applies or is a benign skip.
-pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut cur: Option<&Path> = Some(start);
-    while let Some(dir) = cur {
-        for sentinel in ROOT_SENTINELS {
-            if dir.join(sentinel).exists() {
-                return Some(dir.to_path_buf());
-            }
-        }
-        cur = dir.parent();
-    }
-    None
-}
-
 fn append_gitignore(path: &Path) -> std::io::Result<()> {
     let needs_leading_newline = if path.exists() {
         let mut existing = String::new();
@@ -340,7 +257,34 @@ fn append_gitignore(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dreamd_core::registry::Registry;
     use std::sync::{Arc, Barrier};
+
+    /// `init::run` resolves nothing from the environment: the daemon home is
+    /// whatever `&DaemonHome` the caller hands it. No `HOME` is set here.
+    #[cfg(unix)]
+    #[test]
+    fn run_registers_into_the_daemon_home_it_is_given() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        fs::write(project.path().join("Cargo.toml"), b"[package]\n").expect("sentinel");
+        let home = tempfile::tempdir().expect("daemon home tempdir");
+        let daemon_home = DaemonHome::new(home.path().join("agent-home"));
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(project.path(), &daemon_home, true, &mut out, &mut err).expect("init ok");
+
+        assert!(project.path().join(".agent").is_dir(), "store scaffolded");
+        let raw = fs::read_to_string(daemon_home.registry_toml()).expect("registry written");
+        let registry: Registry = toml::from_str(&raw).expect("registry parses");
+        let canonical = fs::canonicalize(project.path()).expect("canonicalize project");
+        assert_eq!(
+            registry.projects,
+            vec![ProjectEntry {
+                root: canonical.to_string_lossy().into_owned()
+            }]
+        );
+    }
 
     /// Two concurrent `register_project` calls against one daemon home must
     /// both survive. Unlocked, both threads read the same empty snapshot and
@@ -350,7 +294,7 @@ mod tests {
     #[test]
     fn concurrent_register_project_keeps_both_roots() {
         let home = tempfile::tempdir().expect("daemon home tempdir");
-        let daemon_home = home.path().to_path_buf();
+        let daemon_home = DaemonHome::new(home.path());
 
         let projects = tempfile::tempdir().expect("project roots tempdir");
         let root_a = projects.path().join("alpha");
@@ -375,7 +319,7 @@ mod tests {
             h.join().expect("register thread joined");
         }
 
-        let registry_path = DaemonHome::new(&daemon_home).registry_toml();
+        let registry_path = daemon_home.registry_toml();
         let raw = fs::read_to_string(&registry_path).expect("registry.toml written");
         let registry: Registry = toml::from_str(&raw).expect("registry.toml parses");
         let roots: Vec<&str> = registry.projects.iter().map(|p| p.root.as_str()).collect();
@@ -396,7 +340,7 @@ mod tests {
 
         // The flock target is a plain neighbour file that is never unlinked.
         assert!(
-            DaemonHome::new(&daemon_home).registry_lock().exists(),
+            daemon_home.registry_lock().exists(),
             "lockfile must remain on disk after both writers finish"
         );
     }
@@ -412,9 +356,9 @@ mod tests {
     fn concurrent_first_init_and_uninstall_keeps_registered_root() {
         let parent = tempfile::tempdir().expect("parent tempdir");
         // Path must not exist yet — that was the TOCTOU precondition.
-        let daemon_home = parent.path().join("agent-home");
+        let daemon_home = DaemonHome::new(parent.path().join("agent-home"));
         assert!(
-            !daemon_home.exists(),
+            !daemon_home.root().exists(),
             "precondition: daemon home must be absent before the race"
         );
 
@@ -449,7 +393,7 @@ mod tests {
         reg.join().expect("register thread joined");
         un.join().expect("uninstall thread joined");
 
-        let registry_path = DaemonHome::new(&daemon_home).registry_toml();
+        let registry_path = daemon_home.registry_toml();
         assert!(
             registry_path.exists(),
             "register must have created registry.toml"

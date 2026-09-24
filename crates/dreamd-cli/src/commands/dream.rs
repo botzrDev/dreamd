@@ -5,7 +5,8 @@
 //! 1. **Daemon proxy** (default on Unix when `dreamd watch` owns the project):
 //!    `POST /api/v1/dream` over the UDS. Returns early on HTTP 409 (cycle in progress).
 //! 2. **In-process** (no daemon, or `--no-commit`): runs the full cycle via
-//!    [`dreamd_core::dream_cycle::run_in_process`].
+//!    [`dreamd_core::dream_cycle::run_in_process`], the in-process caller of
+//!    [`dreamd_core::dream_cycle::run_guarded_cycle`].
 //!
 //! `--no-commit` is the ONLY flag that skips the proxy. `--no-llm` (AILAB-204)
 //! travels *through* it as the `x-dreamd-no-llm: 1` header — skipping the daemon
@@ -107,22 +108,11 @@ pub fn run(
 
     let now_sec = resolve_now_sec()?;
 
-    // WEG-63 — capture dirty state BEFORE the cycle runs.
-    let dirty_at_cycle_start = if no_commit {
-        Vec::new()
-    } else {
-        dreamd_core::autobiography::check_dirty_at_cycle_start(project_root).unwrap_or_default()
-    };
-
-    let result = dream_cycle::run_in_process(
-        project_root,
-        now_sec,
-        no_commit,
-        no_llm,
-        share_personal,
-        dirty_at_cycle_start,
-    )
-    .map_err(DreamCliError::DreamCycle)?;
+    // The sequencer owns the 409 guard and the WEG-63 dirty capture; under
+    // `--no-commit` it skips the dirty-tree walk.
+    let result =
+        dream_cycle::run_in_process(project_root, now_sec, no_commit, no_llm, share_personal)
+            .map_err(DreamCliError::DreamCycle)?;
 
     let decayed_count = result.decay.decayed_ids.len();
     let kept_count = result.decay.kept_count;

@@ -136,8 +136,8 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 
 1. **BZR-187** — `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Document in `docs/http-api.md`. Do not call `MigrationRegistry` and do not `.bak` the store.
 2. **BZR-173** — landed (uncommitted). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine.
-3. **BZR-172** — single dream-cycle owner. Fold the rest of **BZR-147** here.
-4. **BZR-168** — one environment module. Fold the still-true **BZR-207** leftovers here (`init` takes `DaemonHome`; partial-init sentinel is `state_json()`). Leave `init`'s create-only `State` separate from the cycle writer.
+3. **BZR-172** — landed (uncommitted). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). HTTP opens the index sender before dispatch.
+4. **BZR-168** — landed (uncommitted). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
 5. **BZR-170** — split the Tantivy module. Start only after 173 stops opening a fresh index on every `search_nodes`.
 6. **BZR-183** — Letta adapter, as an implementor of the 173 trait.
 7. **BZR-827** — region-shaped context prototype on that same seam. MCP contract stays stable. Do not claim momo `MemoryRegion` objects.
@@ -175,7 +175,7 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 - Claim one ticket and its file list before editing. One writer per file.
 - The code spine is serial: 187, then 173, then 172, then 170, then 183, then 827. Those tickets share `mcp/mod.rs`, the HTTP handlers, the coordinator, and the index.
 - While that spine is on 187–170, a second agent may draft **BZR-159** and a third may draft **BZR-154**. Those two are spec-only. They add docs and do not change Rust. They still wait for their code tickets (160 and 155) before any implementation.
-- **BZR-168** may run beside **BZR-173** only if the 168 agent stays in layout, init, and daemon-home files and does not edit `mcp/mod.rs`, the HTTP handlers, or `lib.rs` module declarations.
+- **BZR-172** and **BZR-168** are landed, uncommitted. Do not reopen them. Next on the spine is **BZR-170**, after `mcp/mod.rs` and `memory_store.rs` from BZR-173 are committed.
 - Do not start 183, 827, or 198–195 until 173 has landed. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
@@ -770,3 +770,17 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
 - **How to apply:** Claim one ticket from that section. One writer per file. The code spine (187 → 173 → 172 → 170 → 183 → 827) is serial. Spec-only drafts of 159 and 154 may proceed beside it. 147 folds into 173 and 172. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
+
+### in-process-dream-now-honors-the-409-guard
+
+- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. A `state.json` left at `in_progress` refuses the CLI cycle. `dreamd watch` clears that only when `dream_in_progress.wal` is still on disk (`recover_if_needed` returns `Clean` when the WAL is absent and does not rewrite the status).
+- **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. The sequencer made the HTTP 409 rule apply to the CLI too.
+- **How to apply:** Do not remove the guard from `run_in_process` to "restore" the overwrite. A stuck status with no WAL is an operator cleanup (`state.json`), not a watch boot.
+- **Cross-refs:** `remaining-build-order-2026-09-24`
+
+### home-dir-does-not-consult-the-password-database
+
+- **Rule:** Daemon home comes from `layout::home_dir` / `resolve_home_from_vars`. Empty `HOME` is unset. Unix does not read `USERPROFILE`. There is no `dirs::home_dir()` fallback in `daemon_client.rs` or `server/watch.rs`. The Windows MCP arm in `mcp/mod.rs` still calls `dirs::home_dir()`.
+- **Why:** BZR-168 unified on the CLI rule. `dirs::home_dir()` on Unix falls through to the passwd entry when `HOME` is unset, so watch and MCP can disagree under Git-Bash.
+- **How to apply:** Do not put `dirs::home_dir()` back on the watch or daemon-client path. Switching the MCP arm waits until `mcp/mod.rs` is free.
+- **Cross-refs:** `remaining-build-order-2026-09-24`

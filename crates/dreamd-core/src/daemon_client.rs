@@ -39,7 +39,7 @@
 //
 // - `Path` is the argument type of `read_auth_token`, `read_server_json` and
 //   `tcp_daemon_is_live`; `PathBuf` is `AuthTokenError::Missing`'s payload and
-//   what `resolve_daemon_tcp` builds from `dirs::home_dir()`.
+//   what `resolve_daemon_tcp` builds from `layout::home_dir()`.
 // - `Bytes` + `Full` are `send_one_tcp`'s request/response body types and
 //   `BodyExt` is what gives the response its `.collect()`.
 // - `DaemonHome` resolves `~/.agent/server.json` in `resolve_daemon_tcp`.
@@ -106,7 +106,7 @@ pub fn resolve_daemon_socket() -> Result<PathBuf, SockPathError> {
         }
         return Ok(path);
     }
-    let home = dirs::home_dir().ok_or(SockPathError::NoHome)?;
+    let home = crate::layout::home_dir().ok_or(SockPathError::NoHome)?;
     Ok(DaemonHome::new(home.join(".agent")).socket_path())
 }
 
@@ -446,7 +446,7 @@ pub fn read_server_json(path: &Path) -> Result<DaemonEndpoint, DaemonTransportEr
 /// the OS at bind time, so the daemon publishes it and clients read it), and
 /// the failure set is "no address to dial" rather than "bad address".
 ///
-/// Uses `dirs::home_dir()`, the same resolver `run_watch` uses to decide where
+/// Uses [`crate::layout::home_dir`], the same resolver `run_watch` uses to decide where
 /// to *write* the file, so the writer and the reader cannot disagree about
 /// which home directory `~/.agent` means.
 ///
@@ -455,7 +455,7 @@ pub fn read_server_json(path: &Path) -> Result<DaemonEndpoint, DaemonTransportEr
 /// [`DaemonTransportError::Unreachable`] if the home directory cannot be
 /// resolved, or for any of the [`read_server_json`] failures.
 pub fn resolve_daemon_tcp() -> Result<DaemonEndpoint, DaemonTransportError> {
-    let home = dirs::home_dir().ok_or(DaemonTransportError::Unreachable)?;
+    let home = crate::layout::home_dir().ok_or(DaemonTransportError::Unreachable)?;
     read_server_json(&DaemonHome::new(home.join(".agent")).server_json())
 }
 

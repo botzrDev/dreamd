@@ -157,7 +157,8 @@ pub fn run(
     // implementation. A cwd outside any project root is a benign skip, not a
     // failure: uninstall must succeed from anywhere.
     if init::find_project_root(req.cwd).is_some() {
-        match init::uninstall_project(req.cwd, req.daemon_home, req.quiet, out, err) {
+        let daemon_home = dreamd_core::DaemonHome::new(req.daemon_home);
+        match init::uninstall_project(req.cwd, &daemon_home, req.quiet, out, err) {
             Ok(()) => {}
             // Unreachable — the root was just checked — but treat as the skip.
             Err(init::InitError::NoProjectRoot) => {}

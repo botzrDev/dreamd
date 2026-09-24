@@ -33,7 +33,7 @@ fn register_project() -> (tempfile::TempDir, tempfile::TempDir) {
     let mut err = Cursor::new(Vec::new());
     init::run(
         project.path(),
-        daemon_home.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
         true, // quiet — don't need the full scaffold output
         &mut out,
         &mut err,
@@ -57,7 +57,7 @@ fn uninstall_removes_registry_entry() {
     let mut err = Cursor::new(Vec::new());
     init::uninstall_project(
         project.path(),
-        daemon_home.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
         false,
         &mut out,
         &mut err,
@@ -87,7 +87,7 @@ fn uninstall_when_not_registered_exits_ok() {
     let mut err = Cursor::new(Vec::new());
     let result = init::uninstall_project(
         project.path(),
-        daemon_home.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
         false,
         &mut out,
         &mut err,
@@ -109,14 +109,21 @@ fn uninstall_is_idempotent() {
     // First uninstall
     let mut out = Cursor::new(Vec::new());
     let mut err = Cursor::new(Vec::new());
-    init::uninstall_project(project.path(), daemon_home.path(), true, &mut out, &mut err).unwrap();
+    init::uninstall_project(
+        project.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
+        true,
+        &mut out,
+        &mut err,
+    )
+    .unwrap();
 
     // Second uninstall — should still be Ok
     let mut out2 = Cursor::new(Vec::new());
     let mut err2 = Cursor::new(Vec::new());
     let result = init::uninstall_project(
         project.path(),
-        daemon_home.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
         false,
         &mut out2,
         &mut err2,
@@ -138,7 +145,14 @@ fn quiet_uninstall_produces_no_output() {
 
     let mut out = Cursor::new(Vec::new());
     let mut err = Cursor::new(Vec::new());
-    init::uninstall_project(project.path(), daemon_home.path(), true, &mut out, &mut err).unwrap();
+    init::uninstall_project(
+        project.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
+        true,
+        &mut out,
+        &mut err,
+    )
+    .unwrap();
 
     let stdout = String::from_utf8(out.into_inner()).unwrap();
     assert!(
@@ -171,8 +185,14 @@ fn uninstall_project_registry_file_keeps_0600_perms() {
     let registry = dreamd_core::DaemonHome::new(daemon_home.path()).registry_toml();
     let mut out = Cursor::new(Vec::new());
     let mut err = Cursor::new(Vec::new());
-    init::uninstall_project(project.path(), daemon_home.path(), true, &mut out, &mut err)
-        .expect("uninstall ok");
+    init::uninstall_project(
+        project.path(),
+        &dreamd_core::DaemonHome::new(daemon_home.path()),
+        true,
+        &mut out,
+        &mut err,
+    )
+    .expect("uninstall ok");
     let mode = std::fs::metadata(&registry).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o600,
