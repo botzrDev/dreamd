@@ -2336,3 +2336,82 @@ async fn unix_router_has_no_bearer_layer() {
         "a 401 here would mean the bearer layer is mounted on Unix"
     );
 }
+
+// ── BZR-187: POST /api/v1/migrate stub ────────────────────────────────────
+
+#[tokio::test]
+async fn migrate_without_peer_uid_is_403() {
+    let (_dir, root_str, router) = mock_router_with_dir();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/migrate")
+        .header("x-agent-root", &root_str)
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    let error = json["error"].as_str().expect("error field");
+    assert!(
+        !error.contains("no schema migration available"),
+        "auth must reject before the stub handler runs: {error}"
+    );
+}
+
+#[tokio::test]
+async fn migrate_missing_agent_root_is_400() {
+    let (_dir, router) = test_router();
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/migrate")
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn migrate_unregistered_root_is_404() {
+    let (dir, router) = test_router();
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/migrate")
+            .header("x-agent-root", dir.path().to_str().unwrap())
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn migrate_registered_root_is_501() {
+    let (_dir, root_str, router) = mock_router_with_dir();
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/migrate")
+            .header("x-agent-root", &root_str)
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "no schema migration available");
+    assert_eq!(
+        json["current_schema_version"],
+        dreamd_protocol::RECORD_SCHEMA_VERSION
+    );
+}

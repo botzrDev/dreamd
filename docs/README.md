@@ -30,6 +30,12 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [windows.md](./windows.md) | Operators | Native Windows status — what `service install` registers (logon task + `auth.json`), how `watch` serves the API over loopback TCP + bearer, and what is still blocked by `write_atomic` |
 | [glossary.md](./glossary.md) | Everyone | Domain term definitions |
 
+## Unshipped
+
+| Document | Audience | Purpose |
+|---|---|---|
+| [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) — **not implemented**; dreamd does not read or write this tree |
+
 ## Marketing & narrative
 
 | Document | Audience | Purpose |

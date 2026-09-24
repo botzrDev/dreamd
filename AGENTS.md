@@ -112,7 +112,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-09-16
+**Last updated:** 2026-09-24
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -121,10 +121,64 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Test command:** `cargo test --workspace` / `cargo test --all-features --workspace` (CI)
 **Test convention:** unit tests in `src/**`; integration tests in `crates/*/tests/` (often `wegNN_*.rs`); unix-only suites use `#![cfg(unix)]`; helper bins under `crates/dreamd-core/tests/bin/`
 **Migration dir:** n/a (JSONL + `schema_version: "1.0.0"`; `dreamd migrate` stub via `dreamd-core::migrate` / WEG-133)
-**Spec dir:** `assignments/`, naming `AILAB-<n>.v2.md` for Botzr-AI-Labs / dreamd-eng tickets (legacy `WEG-<n>.v2.md` still valid if present; v1 often Linear-only)
+**Spec dir:** `assignments/`, naming `BZR-<n>.v2.md` for Botzr-Research / dreamd-eng tickets (legacy `AILAB-<n>.v2.md` and `WEG-<n>.v2.md` still valid if present; v1 often Linear-only)
 **Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
-**Memory location:** `AGENTS.md` (this file) — drift catalog section below
+**Memory location:** `AGENTS.md` (this file) — drift catalog section below, plus the build-order section
 **Main branch:** `main`
+
+---
+
+## Remaining build order — 2026-09-24
+
+Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow this section. The August 27 "remaining 50" queue numbers are not the order: Q09–Q19 are already on `main` while Linear still says Backlog. Live issue ids are `BZR-<n>` on team **Botzr-Research**, project **dreamd-eng** (same numbers as the old `AILAB-<n>` ids). One ticket at a time per agent. The user runs commits.
+
+**Do not start a ticket until every ticket above it in this list has landed**, except the two spec-only drafts called out under parallel work.
+
+1. **BZR-187** — `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Document in `docs/http-api.md`. Do not call `MigrationRegistry` and do not `.bak` the store.
+2. **BZR-173** — one memory-store interface, in-process and daemon adapters. Fold the learn/recall half of **BZR-147** into this ticket (one response constructor, one `k`, one `schema_version`). MCP tool names stay byte-identical.
+3. **BZR-172** — single dream-cycle owner. Fold the rest of **BZR-147** here.
+4. **BZR-168** — one environment module. Fold the still-true **BZR-207** leftovers here (`init` takes `DaemonHome`; partial-init sentinel is `state_json()`). Leave `init`'s create-only `State` separate from the cycle writer.
+5. **BZR-170** — split the Tantivy module. Start only after 173 stops opening a fresh index on every `search_nodes`.
+6. **BZR-183** — Letta adapter, as an implementor of the 173 trait.
+7. **BZR-827** — region-shaped context prototype on that same seam. MCP contract stays stable. Do not claim momo `MemoryRegion` objects.
+8. **BZR-198** — per-response citation graph.
+9. **BZR-193** — `dreamd blame`.
+10. **BZR-194** — counterfactual `--without`.
+11. **BZR-195** — salience observability endpoint.
+12. **BZR-159** — branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
+13. **BZR-160** — snapshot model.
+14. **BZR-150** — branch and checkout.
+15. **BZR-156** — `memory diff`.
+16. **BZR-153** — `memory bisect`.
+17. **BZR-146** — branching demo.
+18. **BZR-154** — Merkle ledger spec.
+19. **BZR-155** — provenance recording.
+20. **BZR-148** — `doctor --provenance`, before any delete path.
+21. **BZR-158** — forget cascade.
+22. **BZR-151** — `forget --proof`.
+23. **BZR-188** — vector backend stub. Measure stripped `target/release/dreamd` first. Keep the dependency off the default build; the 20 MB size gate has rejected this crate before.
+24. **BZR-181** — vector opt-in, zero cost when off.
+25. **BZR-182** — RRF hybrid.
+26. **BZR-177** — public benchmark harness.
+27. **BZR-157** — v0.2.0-alpha tag.
+
+**Not claimable**
+
+- **BZR-147** folds into 173 and 172.
+- **BZR-171** is the parent epic. Close it when its children land. Do not implement it as its own change.
+- **BZR-207** is not a gate. `rust-toolchain.toml` and `daemon_state::DaemonState` already exist. Its remaining leftovers fold into 168.
+- **BZR-210** stays held until a `watch` remap exists. Do not implement the Linear AC.
+- **BZR-149** and **BZR-152** are research. Do not schedule them. The CRDT ticket fights the single-writer log.
+
+**Parallel agents**
+
+- Claim one ticket and its file list before editing. One writer per file.
+- The code spine is serial: 187, then 173, then 172, then 170, then 183, then 827. Those tickets share `mcp/mod.rs`, the HTTP handlers, the coordinator, and the index.
+- While that spine is on 187–170, a second agent may draft **BZR-159** and a third may draft **BZR-154**. Those two are spec-only. They add docs and do not change Rust. They still wait for their code tickets (160 and 155) before any implementation.
+- **BZR-168** may run beside **BZR-173** only if the 168 agent stays in layout, init, and daemon-home files and does not edit `mcp/mod.rs`, the HTTP handlers, or `lib.rs` module declarations.
+- Do not start 183, 827, or 198–195 until 173 has landed. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+
+Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
 ---
 
@@ -511,12 +565,12 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 - **How to apply:** `newest_event_ts + WINDOW_30_DAYS_SEC + 1`. See `preview_without_promotion_reports_none_and_leaves_lessons_md` in `dream_cycle.rs`.
 - **Cross-refs:** `select-lesson-or-retire-unlinks`
 
-### linear-project-is-dreamd-eng-on-botzr-ai-labs
+### linear-project-is-dreamd-eng-on-botzr-research
 
-- **Rule:** dreamd engineering tickets live on Linear **project** `dreamd-eng` under team **Botzr-AI-Labs**. There is no Linear team named `dreamd-eng`. `list_issues(team: "dreamd-eng")` returns empty; `list_issues(team: "DREAMD-SVS")` is the services board.
-- **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while AILAB-199 had just moved to Done on project `dreamd-eng`.
-- **How to apply:** Filter `project: dreamd-eng` (or team `Botzr-AI-Labs` plus the project). Do not treat an empty team query as an empty backlog.
-- **Cross-refs:** `linear-todo-can-already-be-on-main`
+- **Rule:** dreamd engineering tickets live on Linear **project** `dreamd-eng` (`P-BZR-1`) under team **Botzr-Research**. Issue ids are `BZR-<n>` (same numbers as the retired `AILAB-<n>` ids). There is no team named `Botzr-AI-Labs` or `dreamd-eng`. `list_issues(team: "dreamd-eng")` and `list_issues(team: "Botzr-AI-Labs")` return empty.
+- **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while the project still held them. 2026-09-24: the team list no longer contains `Botzr-AI-Labs`; the project moved to `Botzr-Research`, and filtering that old team name returned an empty board.
+- **How to apply:** Filter `project: dreamd-eng` (or team `Botzr-Research` plus the project). Read `BZR-<n>` as the live id. Do not treat an empty team query as an empty backlog. Build order is `remaining-build-order-2026-09-24`, not the August queue numbers.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `remaining-build-order-2026-09-24`
 
 ### ailab-210-ac-is-pre-watch-architecture
 
@@ -709,3 +763,10 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
   - Bot commit DCO trailer must be column 0 (`ci.yml` `^Signed-off-by:`). YAML-indented heredocs fail that. Prefer `git commit -m "subject" -m "Signed-off-by: …"`.
   - `GITHUB_TOKEN` PRs do not trigger workflows. Do not invent `RELEASE_PR_TOKEN` without a founder ask.
 - **Cross-refs:** `npm-dreamd-mcp-unscoped`, `v2-beats-linear-ac`, `changelog-historical-entries-stay-put`
+
+### remaining-build-order-2026-09-24
+
+- **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
+- **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
+- **How to apply:** Claim one ticket from that section. One writer per file. The code spine (187 → 173 → 172 → 170 → 183 → 827) is serial. Spec-only drafts of 159 and 154 may proceed beside it. 147 folds into 173 and 172. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
+- **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`

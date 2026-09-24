@@ -33,6 +33,9 @@ hidden subfolder named for itself — `.<impl>/` — and that state MUST be
 gitignored. dreamd uses `<project>/.agent/.dreamd/`: `state.json`, the dream-cycle
 WAL, the Tantivy index, `snapshots/`, and a per-project log. `dreamd init` writes
 the ignore rule for you.
+Decay archives are `<YYYY-MM-DD>.jsonl` files in `snapshots/`. The unimplemented
+branch format in [`docs/branching.md`](../branching.md) uses `branches/`, not
+`snapshots/`.
 
 Treat `.dreamd/` as a cache belonging to another process. It is rebuildable, it
 is not the memory, and an adapter should never read it to answer a recall.

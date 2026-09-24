@@ -3,12 +3,14 @@
 mod dream;
 mod health;
 mod learn;
+mod migrate;
 mod preferences;
 mod recall;
 
 pub(crate) use dream::post_dream;
 pub(crate) use health::get_health;
 pub(crate) use learn::post_learn;
+pub(crate) use migrate::post_migrate;
 pub(crate) use preferences::get_preferences;
 pub(crate) use recall::get_recall;
 

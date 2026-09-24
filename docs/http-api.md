@@ -385,6 +385,41 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ---
 
+## Reserved endpoints
+
+### `POST /api/v1/migrate`
+
+A stub. No schema migration is available over HTTP yet. The route sits behind the same middleware as every other `/api/v1` route: `peer_uid_middleware` on Unix (403 on missing or mismatched peer UID), `bearer_auth_middleware` on Windows (401), then `agent_root_middleware` (400 without `X-Agent-Root`, 404 for an unregistered root). Only a request that passes all of them reaches the stub. The request body is ignored, so no `Content-Type` is required.
+
+The handler does not run a migration, call the CLI migrator, or write `.bak` files.
+
+#### Request headers
+
+| Header | Required |
+|---|---|
+| `X-Agent-Root` | Yes |
+
+#### Response (`501 Not Implemented`)
+
+```json
+{"error":"no schema migration available","current_schema_version":"1.0.0"}
+```
+
+`current_schema_version` is the episodic `RECORD_SCHEMA_VERSION` (`dreamd_protocol::RECORD_SCHEMA_VERSION`, `"1.0.0"`), the same token `dreamd migrate --from` / `--to` take. It is not the daemon state token `"1.0"`. This is the only error body that carries a field besides `error`.
+
+Operators who need a migration use `dreamd migrate`; see [migrate.md](./migrate.md).
+
+#### curl example
+
+```bash
+curl --unix-socket ~/.agent/dreamd.sock \
+  -X POST \
+  -H "X-Agent-Root: $PROJECT" \
+  http://localhost/api/v1/migrate
+```
+
+---
+
 ## Recurrence sidecar
 
 `metadata.recurrence` in recall results comes from the Tantivy index fast field, not from the JSONL line at query time.
