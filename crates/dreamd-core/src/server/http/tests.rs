@@ -1611,25 +1611,27 @@ async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
 /// The daemon wires the coordinator's `indexer_tx` to the *same*
 /// `TantivyIndexHandle` that recall reads (the pinned primary). A learning
 /// appended through the coordinator therefore becomes visible to recall
-/// within the commit-cadence window (WEG-201 C13) — no second handle, no
-/// stale empty reader. Before WEG-264 Defect 2, `run_watch` booted the
+/// once that handle commits — no second handle, no stale empty reader. Before WEG-264 Defect 2, `run_watch` booted the
 /// coordinator with `indexer_tx = None` and recall opened a *separate*
 /// handle via `index_map`, so live appends never reached the recall reader.
+///
+/// BZR-170: the commit is driven by `flush().await` plus one reader reload,
+/// not by polling the cadence ticker. The cadence is set far past the test's
+/// lifetime so the only commit is the one this test asks for.
 #[tokio::test]
 async fn daemon_primary_handle_shares_index_between_append_and_recall() {
     use crate::server::tantivy_handle::TantivyIndexHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let dir = tempfile::tempdir().unwrap();
     let agent_root = AgentRoot::new(dir.path());
     std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
     let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
 
-    // Short cadence so the cadence commit fires well inside the poll window
-    // (production uses 5 s; the read-after-write window is a feature, not a
-    // bug — WEG-201 C13).
+    // Cadence far past the test's lifetime: the ticker never commits, so the
+    // explicit `flush` below is the only commit.
     let primary = Arc::new(
-        TantivyIndexHandle::open(&agent_root, Duration::from_millis(100))
+        TantivyIndexHandle::open(&agent_root, Duration::from_secs(3600))
             .expect("open primary handle"),
     );
     // Coordinator is wired to the SAME handle's indexer.
@@ -1645,7 +1647,7 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
         ProjectIndexMap::new(ProjectIndexMapConfig::default()),
         nix::unistd::Uid::current().as_raw(),
     )
-    .with_primary(canonical_root.clone(), primary);
+    .with_primary(canonical_root.clone(), Arc::clone(&primary));
 
     // Append a learning through the coordinator (durable JSONL + indexer).
     let learning = AgentLearning {
@@ -1673,37 +1675,33 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
         .expect("send append");
     rx.await.expect("recv append").expect("append ok");
 
-    // Recall via the pinned primary handle must surface the row within the
-    // cadence window. Poll — do NOT assert instantaneously (WEG-201 C13).
+    // The coordinator awaited its `IndexerMsg::Append` send before replying,
+    // and the indexer channel is FIFO, so this flush commits that append.
+    primary.flush().await.expect("flush primary index");
+
     let (_, schema_fields) = crate::index::build_schema();
     let now_sec = chrono::Utc::now().timestamp();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let reader = state
-            .with_index_handle(&canonical_root, |h| h.reader().clone())
-            .expect("resolve primary handle");
-        let results = crate::recall(
-            &reader,
-            &schema_fields,
-            "zlorp aarch64 ring-prebuilt",
-            5,
-            None,
-            now_sec,
-        )
-        .expect("recall");
-        if let Some(top) = results.first() {
-            assert!(
-                top.content.contains("ring-prebuilt"),
-                "recall returned a row but not the expected content: {:?}",
-                top.content
-            );
-            return; // success
-        }
-        if Instant::now() >= deadline {
-            panic!("recall did not surface the appended row within the cadence window");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let reader = state
+        .with_index_handle(&canonical_root, |h| h.reader().clone())
+        .expect("resolve primary handle");
+    reader.reload().expect("reload reader after flush");
+    let results = crate::recall(
+        &reader,
+        &schema_fields,
+        "zlorp aarch64 ring-prebuilt",
+        5,
+        None,
+        now_sec,
+    )
+    .expect("recall");
+    let top = results
+        .first()
+        .expect("recall must surface the appended row after flush + reload");
+    assert!(
+        top.content.contains("ring-prebuilt"),
+        "recall returned a row but not the expected content: {:?}",
+        top.content
+    );
 }
 
 // -----------------------------------------------------------------------

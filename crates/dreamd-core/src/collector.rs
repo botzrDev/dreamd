@@ -663,4 +663,38 @@ mod tests {
             assert!(!r.event_id.is_empty(), "event_id must be hydrated");
         }
     }
+
+    fn scored(score: f64, doc_id: u32) -> ScoredDoc {
+        ScoredDoc {
+            score: OrderedFloat(score),
+            doc_address: DocAddress::new(0, doc_id),
+            timestamp_sec: 0,
+            pain: 0.0,
+            importance: 0.0,
+            recurrence: 0,
+            bm25: score,
+            salience: 1.0,
+        }
+    }
+
+    /// `merge_fruits` re-applies a global top-`k` across per-segment fruit.
+    /// Asserts length and the kept score set only: the result is the min-heap's
+    /// iteration order, which is not score order.
+    #[test]
+    fn merge_fruits_keeps_global_top_k_across_segments() {
+        let collector = SalienceCollector::new(3, NOW_SEC);
+        let seg_a = vec![scored(0.9, 0), scored(0.2, 1), scored(0.5, 2)];
+        let seg_b = vec![scored(0.7, 3), scored(0.1, 4), scored(0.8, 5)];
+
+        let merged = collector.merge_fruits(vec![seg_a, seg_b]).expect("merge");
+
+        assert_eq!(merged.len(), 3, "merge must cap at k");
+        let mut kept: Vec<f64> = merged.iter().map(|d| d.score.into_inner()).collect();
+        kept.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_eq!(
+            kept,
+            vec![0.9, 0.8, 0.7],
+            "merge must keep the highest scores"
+        );
+    }
 }

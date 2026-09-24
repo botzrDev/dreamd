@@ -45,10 +45,16 @@ pub enum IndexError {
     /// Filesystem failure.
     #[error("index error: io: {0}")]
     Io(String),
-    /// A `tantivy` operation failed. The payload is tantivy's own rendering;
-    /// `is_schema_incompatible` matches `"schema error:"` inside it.
+    /// A `tantivy` operation failed. The payload is tantivy's own rendering.
+    /// Never a schema mismatch — that is [`IndexError::SchemaIncompatible`].
     #[error("index error: tantivy: {0}")]
     Tantivy(String),
+    /// The on-disk index was written under a different schema
+    /// (`tantivy::TantivyError::SchemaError`). The only variant the
+    /// open-time wipe-and-rebuild gate in [`crate::server::tantivy_handle`]
+    /// acts on (BZR-170). The payload is tantivy's rendering, kept for logs.
+    #[error("index error: tantivy schema incompatible: {0}")]
+    SchemaIncompatible(String),
     /// Opening the tantivy `MmapDirectory` failed. Distinct from
     /// [`IndexError::Tantivy`] because its payload embeds the directory
     /// *path*, which must never be searched for schema keywords.
@@ -67,6 +73,27 @@ impl IndexError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::ChannelClosed | Self::TaskDropped)
     }
+}
+
+/// Map a `std::io` failure from the index paths.
+pub(crate) fn io_to_index(e: std::io::Error) -> IndexError {
+    IndexError::Io(format!("{e}"))
+}
+
+/// Map a tantivy failure. `SchemaError` becomes
+/// [`IndexError::SchemaIncompatible`]; every other variant stays
+/// [`IndexError::Tantivy`] (BZR-170).
+pub(crate) fn tantivy_to_index(e: tantivy::TantivyError) -> IndexError {
+    match e {
+        tantivy::TantivyError::SchemaError(_) => IndexError::SchemaIncompatible(format!("{e}")),
+        other => IndexError::Tantivy(format!("{other}")),
+    }
+}
+
+/// Map a `MmapDirectory::open` failure. Its payload embeds the directory path,
+/// which is why it is a separate variant that never triggers a wipe.
+pub(crate) fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryError) -> IndexError {
+    IndexError::TantivyDirectory(format!("{e}"))
 }
 
 /// Per-project search-index handle managed by [`ProjectIndexMap`].
@@ -570,7 +597,8 @@ mod tests {
         );
 
         for terminal in [
-            IndexError::Tantivy("Schema error: 'x' not found".to_string()),
+            IndexError::SchemaIncompatible("Schema error: 'x' not found".to_string()),
+            IndexError::Tantivy("An IO error occurred".to_string()),
             IndexError::Io("permission denied".to_string()),
             IndexError::Other("parse index_progress.json: eof".to_string()),
         ] {

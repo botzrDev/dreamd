@@ -134,24 +134,24 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 
 **Do not start a ticket until every ticket above it in this list has landed**, except the two spec-only drafts called out under parallel work.
 
-1. **BZR-187** — `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Document in `docs/http-api.md`. Do not call `MigrationRegistry` and do not `.bak` the store.
-2. **BZR-173** — landed (uncommitted). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine.
-3. **BZR-172** — landed (uncommitted). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). HTTP opens the index sender before dispatch.
-4. **BZR-168** — landed (uncommitted). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
-5. **BZR-170** — split the Tantivy module. Start only after 173 stops opening a fresh index on every `search_nodes`.
-6. **BZR-183** — Letta adapter, as an implementor of the 173 trait.
+1. **BZR-187** — on `main` (`fe331bd`). `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Documented in `docs/http-api.md`. Does not call `MigrationRegistry` and does not `.bak` the store.
+2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
+3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). HTTP opens the index sender before dispatch.
+4. **BZR-168** — on `main` (`979ddc3`, with BZR-172). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs:649`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
+5. **BZR-170** — landed (uncommitted). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
+6. **BZR-183** — landed (uncommitted). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
 7. **BZR-827** — region-shaped context prototype on that same seam. MCP contract stays stable. Do not claim momo `MemoryRegion` objects.
 8. **BZR-198** — per-response citation graph.
 9. **BZR-193** — `dreamd blame`.
 10. **BZR-194** — counterfactual `--without`.
 11. **BZR-195** — salience observability endpoint.
-12. **BZR-159** — branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
+12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
 13. **BZR-160** — snapshot model.
 14. **BZR-150** — branch and checkout.
 15. **BZR-156** — `memory diff`.
 16. **BZR-153** — `memory bisect`.
 17. **BZR-146** — branching demo.
-18. **BZR-154** — Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
+18. **BZR-154** — on `main` (`adb7a40`, same commit as BZR-173). Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
 19. **BZR-155** — provenance recording. Inherit the BZR-154 locks: a leaf hash is SHA-256 of the event id's UTF-8 bytes; signing bytes are compact JSON with no trailing newline; a promoted odd node adds no path entry; an unknown `kind` is skipped.
 20. **BZR-148** — `doctor --provenance`, before any delete path.
 21. **BZR-158** — forget cascade.
@@ -164,19 +164,18 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 
 **Not claimable**
 
-- **BZR-147** folds into 173 and 172.
+- **BZR-147** is absorbed. The error rename landed in BZR-172 (`LessonPhaseError`) and the learn/recall seam landed in BZR-173. Still open, and not a claimable ticket: deleting `server/http/types.rs`, merging `client.rs` with `daemon_client.rs`, and collapsing the HTTP status mappers. Open a new ticket if those are still wanted.
 - **BZR-171** is the parent epic. Close it when its children land. Do not implement it as its own change.
-- **BZR-207** is not a gate. `rust-toolchain.toml` and `daemon_state::DaemonState` already exist. Its remaining leftovers fold into 168.
+- **BZR-207** is not a gate. `rust-toolchain.toml` and `daemon_state::DaemonState` already exist. BZR-168 took `init(&DaemonHome)`. The `state_json()` rerun sentinel was left as-is: scaffold is one atomic rename. Do not reopen 207 to chase that sentinel.
 - **BZR-210** stays held until a `watch` remap exists. Do not implement the Linear AC.
 - **BZR-149** and **BZR-152** are research. Do not schedule them. The CRDT ticket fights the single-writer log.
 
 **Parallel agents**
 
 - Claim one ticket and its file list before editing. One writer per file.
-- The code spine is serial: 187, then 173, then 172, then 170, then 183, then 827. Those tickets share `mcp/mod.rs`, the HTTP handlers, the coordinator, and the index.
-- While that spine is on 187–170, a second agent may draft **BZR-159** and a third may draft **BZR-154**. Those two are spec-only. They add docs and do not change Rust. They still wait for their code tickets (160 and 155) before any implementation.
-- **BZR-172** and **BZR-168** are landed, uncommitted. Do not reopen them. Next on the spine is **BZR-170**, after `mcp/mod.rs` and `memory_store.rs` from BZR-173 are committed.
-- Do not start 183, 827, or 198–195 until 173 has landed. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
+- **BZR-170** and **BZR-183** are landed, uncommitted. Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
+- **BZR-827** is next on the spine, after those two are committed. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -768,7 +767,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. The code spine (187 → 173 → 172 → 170 → 183 → 827) is serial. Spec-only drafts of 159 and 154 may proceed beside it. 147 folds into 173 and 172. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are signed off in the working tree and not committed. 827 is next after that commit. 147's leftovers (types.rs, client merge, status mappers) are not a claimable ticket. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard
@@ -782,5 +781,5 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** Daemon home comes from `layout::home_dir` / `resolve_home_from_vars`. Empty `HOME` is unset. Unix does not read `USERPROFILE`. There is no `dirs::home_dir()` fallback in `daemon_client.rs` or `server/watch.rs`. The Windows MCP arm in `mcp/mod.rs` still calls `dirs::home_dir()`.
 - **Why:** BZR-168 unified on the CLI rule. `dirs::home_dir()` on Unix falls through to the passwd entry when `HOME` is unset, so watch and MCP can disagree under Git-Bash.
-- **How to apply:** Do not put `dirs::home_dir()` back on the watch or daemon-client path. Switching the MCP arm waits until `mcp/mod.rs` is free.
+- **How to apply:** Do not put `dirs::home_dir()` back on the watch or daemon-client path. The Windows MCP call is still `mcp/mod.rs:649`. BZR-170 and BZR-183 left that file alone. A later ticket may switch it once `mcp/mod.rs` has a single writer.
 - **Cross-refs:** `remaining-build-order-2026-09-24`
