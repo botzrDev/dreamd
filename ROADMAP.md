@@ -51,6 +51,23 @@ hit first. The day-to-day view lives in the issue tracker; this is the shape.
 - **Cross-repo memory consolidation and governance** — delivered self-hosted
   (never multi-tenant SaaS); the first features in the paid, self-hosted tier.
 
+## Direction — provenance and trust
+
+Direction, not a dated commitment. The provenance ledger
+([`docs/provenance.md`](docs/provenance.md), format only) is the spine of a
+chain of tickets: recording (BZR-155), `doctor --provenance` (BZR-148), the
+forget cascade (BZR-158) and `forget --proof` (BZR-151). Beyond that chain, the
+ledger is the substrate a **trust label** would live on: a scalar on every
+fragment saying where it came from and how far it may be trusted, joined on
+derivation, so that whatever releases an effect can refuse one built on data
+below its label. That rule — *every effect traceable to the data that caused
+it; no datum causes an effect above its own trust label* — is recorded as a
+design in the dreamOS charter in the momo kernel repository (RFC-011,
+accepted 2026-09-26), where dreamd is the Linux-hosted proof of memory a
+person owns — *the Memory*. It needs its own
+spec before any code and is not on the v0.2 list above. Today `source_harness`
+is caller-asserted and nothing verifies it.
+
 ## Principles that won't change
 
 - The `.agent/` store is an **open standard**; the canonical record is

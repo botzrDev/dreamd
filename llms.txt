@@ -12,6 +12,10 @@
 > agent reads and writes the same memory — checked into git alongside your code.
 >
 > AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+>
+> Where it fits: dreamd is the Linux-hosted proof, in the dreamOS charter (momo
+> RFC-011, accepted 2026-09-26), of memory as plain files a person owns, with
+> provenance. No trust label ships today; see ROADMAP.md, "Direction".
 
 ## Documentation
 

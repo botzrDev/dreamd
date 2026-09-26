@@ -4,6 +4,8 @@
 
 This page specifies how a future implementation records which derived artifacts each episodic event feeds, commits to that set with a Merkle root, and proves one event's membership with a signed proof. It is the format only. Recording, the proof command, and the verifier program are separate, later work that builds on this page.
 
+**Why this format also matters beyond forgetting (future).** The ledger records which derived artifacts each event feeds. The same edges are the substrate a trust label would ride on: a scalar per event saying where it came from and how far to trust it, joined along these edges on derivation, so that whatever releases an effect can refuse one built on data below its label. That rule is recorded as direction in the dreamOS charter in the momo kernel repository (RFC-011, accepted 2026-09-26; see `ROADMAP.md`, "Direction — provenance and trust"). This page specifies no label, no join rule, and no consumer of one; a trust label MUST NOT be inferred from any field defined here.
+
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), same as [`SPEC.md`](../SPEC.md).
 
 ## Where it lives

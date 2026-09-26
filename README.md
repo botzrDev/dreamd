@@ -11,6 +11,8 @@ Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MC
 
 This is not "another memory product." It is a storage-model wedge: the filesystem is the source of truth, and the MCP tools (`search_nodes` / `append_node`) are a thin interface over those files.
 
+**Where dreamd fits.** dreamd is one of three sibling repositories that make one product: **dreamOS**, *the first computer you can hand your keys to* — it acts on your behalf, it is structurally incapable of doing what you did not allow, and it can prove what it did. The kernel under it is **momo**; the sandbox beside it is `aegis`. momo's charter (its RFC-009, amended by RFC-011, accepted 2026-09-26) records dreamd as the **Linux-hosted proof** of one of the product's pillars: memory as plain files a person owns, with provenance — in the product's words, *the Memory*. The same amendment names the rule the provenance ledger grows toward — *every effect can be traced to the data that caused it, and no datum can cause an effect above its own trust label* — as a design with its own spec first. Nothing in v0.1 implements a trust label: `source_harness` is asserted by the caller, the ledger ([`docs/provenance.md`](docs/provenance.md)) is a format only, and [`SECURITY.md`](SECURITY.md) says plainly that injected lessons are not filtered. The momo repository is private until the kernel's first public release, and the product is not announced, previewed or marketed before its v1; this paragraph is a pointer, not a launch.
+
 **Open core:** Apache-2.0 core today, self-hosted only. Premium features may ship later. Do not read this as free-forever for everything.
 
 ```bash

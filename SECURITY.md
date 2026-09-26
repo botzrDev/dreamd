@@ -60,6 +60,7 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 - dreamd does not filter "malicious" lesson content (unsolved problem; false confidence).
 - Users should treat `.agent/` like shell rc files: review with `git diff` if the repo is committed.
 - The redaction scrubber (below) targets **secret leakage**, not prompt injection.
+- The structural answer is a trust label on every fragment, joined on derivation and read by whatever releases an effect, so a lesson from an untrusted source cannot cause a privileged action. That is direction (`ROADMAP.md`, "Direction — provenance and trust"), recorded in the momo kernel's charter as a design needing its own spec. Nothing in dreamd implements it today.
 
 ## Privacy and redaction (through v0.1.1)
 

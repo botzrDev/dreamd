@@ -16,6 +16,21 @@ of truth — plain JSONL and Markdown you can cat, grep, git diff, and hand-edit
 **The one job dreamd is hired for:** memory continuity across tools. Not a second brain,
 not an ambient capture product, not a Python framework SDK.
 
+**Where it fits (2026-09-26).** dreamd is the Linux-hosted proof of one pillar of **dreamOS**,
+*the first computer you can hand your keys to*, whose kernel is momo (charter: momo
+`docs/rfc/RFC-009`, amended by RFC-011, **accepted** 2026-09-26, Linear BZR-1075; local docs
+issue BZR-1077): memory as plain files a person owns, with provenance — *the Memory*, in the
+product's words. RFC-011 also names the rule the ledger grows toward — every effect traceable
+to the data that caused it; no datum causes an effect above its own trust label — as a
+design that needs its own spec before any code. It changes nothing shipped: no trust label
+exists, `source_harness` is caller-asserted, `docs/provenance.md` is format only (BZR-154)
+and records derivation, not trust. **Constraints that stand:** do not claim momo
+`MemoryRegion` objects (the BZR-827 rule below); do not document a trust label, taint, or
+"the Memory" as if it shipped; the momo repo is private, and while the product name
+dreamOS and its one-sentence destination may appear in this repository's docs as a pointer
+(ruled 2026-09-26 on BZR-1075, RFC-011 A0), announcing, previewing or marketing the product
+before its v1 stays forbidden — a pointer, never a launch.
+
 ---
 
 ## Repository layout
@@ -138,8 +153,8 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
 3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). HTTP opens the index sender before dispatch.
 4. **BZR-168** — on `main` (`979ddc3`, with BZR-172). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs:649`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
-5. **BZR-170** — landed (uncommitted). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
-6. **BZR-183** — landed (uncommitted). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
+5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
+6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
 7. **BZR-827** — region-shaped context prototype on that same seam. MCP contract stays stable. Do not claim momo `MemoryRegion` objects.
 8. **BZR-198** — per-response citation graph.
 9. **BZR-193** — `dreamd blame`.
@@ -174,8 +189,8 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 
 - Claim one ticket and its file list before editing. One writer per file.
 - Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
-- **BZR-170** and **BZR-183** are landed, uncommitted. Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is next on the spine, after those two are committed. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
+- **BZR-827** is next on the spine. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -767,7 +782,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are signed off in the working tree and not committed. 827 is next after that commit. 147's leftovers (types.rs, client merge, status mappers) are not a claimable ticket. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`, 2026-09-24). 827 is next. 147's leftovers (types.rs, client merge, status mappers) are not a claimable ticket. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard
