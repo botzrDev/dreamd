@@ -127,7 +127,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-09-24
+**Last updated:** 2026-09-27
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -140,14 +140,17 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
 **Memory location:** `AGENTS.md` (this file) — drift catalog section below, plus the build-order section
 **Main branch:** `main`
+**Linear:** team **Botzr-Research**. Shipped board is project **dreamd-eng** (`P-BZR-1`); it has no open issues. The unfinished spine is **Backlog** on project **R&D** (`P-BZR-79`). Order is the section below.
 
 ---
 
 ## Remaining build order — 2026-09-24
 
-Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow this section. The August 27 "remaining 50" queue numbers are not the order: Q09–Q19 are already on `main` while Linear still says Backlog. Live issue ids are `BZR-<n>` on team **Botzr-Research**, project **dreamd-eng** (same numbers as the old `AILAB-<n>` ids). One ticket at a time per agent. The user runs commits.
+Locked 2026-09-24 for the finish race. Re-checked against Linear on 2026-09-27: the sequence is unchanged. Claude, Cursor, and DeepSeek all follow this section. The August 27 "remaining 50" queue numbers are not the order. Live issue ids are `BZR-<n>` on team **Botzr-Research** (same numbers as the old `AILAB-<n>` ids). Shipped tickets remain on project **dreamd-eng** (`P-BZR-1`). That project has no open issues, and its five milestones all read 100% because the unfinished issues left the project on 2026-09-26. The open spine is **Backlog** on project **R&D** (`P-BZR-79`, created 2026-09-26). One ticket at a time per agent. The user runs commits.
 
 **Do not start a ticket until every ticket above it in this list has landed**, except the two spec-only drafts called out under parallel work.
+
+An empty backlog query on `dreamd-eng` is that move. Milestone progress there is not evidence a v0.2 ticket shipped. The dreamd-eng description body still says RFC-011 is proposed; the project summary, BZR-1075, and the "Where it fits" section above record it **accepted** (2026-09-26). BZR-1077 (the local docs pointer) is Done, commit `312983b`.
 
 1. **BZR-187** — on `main` (`fe331bd`). `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Documented in `docs/http-api.md`. Does not call `MigrationRegistry` and does not `.bak` the store.
 2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
@@ -179,8 +182,8 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 
 **Not claimable**
 
-- **BZR-147** is absorbed. The error rename landed in BZR-172 (`LessonPhaseError`) and the learn/recall seam landed in BZR-173. Still open, and not a claimable ticket: deleting `server/http/types.rs`, merging `client.rs` with `daemon_client.rs`, and collapsing the HTTP status mappers. Open a new ticket if those are still wanted.
-- **BZR-171** is the parent epic. Close it when its children land. Do not implement it as its own change.
+- **BZR-147** is Done (2026-09-24). The error rename landed in BZR-172 (`LessonPhaseError`) and the learn/recall seam landed in BZR-173. The leftovers — deleting `server/http/types.rs`, merging `client.rs` with `daemon_client.rs`, collapsing the HTTP status mappers — were not done. Do not reopen 147 for them. Open a new ticket if those are still wanted.
+- **BZR-171** is Done (2026-09-24). It was the parent epic. Do not implement it as its own change.
 - **BZR-207** is not a gate. `rust-toolchain.toml` and `daemon_state::DaemonState` already exist. BZR-168 took `init(&DaemonHome)`. The `state_json()` rerun sentinel was left as-is: scaffold is one atomic rename. Do not reopen 207 to chase that sentinel.
 - **BZR-210** stays held until a `watch` remap exists. Do not implement the Linear AC.
 - **BZR-149** and **BZR-152** are research. Do not schedule them. The CRDT ticket fights the single-writer log.
@@ -190,7 +193,7 @@ Locked 2026-09-24 for the finish race. Claude, Cursor, and DeepSeek all follow t
 - Claim one ticket and its file list before editing. One writer per file.
 - Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
 - **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is next on the spine. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- **BZR-827** is next on the spine. It is Backlog on project **R&D**, along with 198, 193, 194, 195, 160, 150, 156, 153, 146, 155, 148, 158, 151, 188, 181, 182, 177, and 157. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -581,9 +584,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### linear-project-is-dreamd-eng-on-botzr-research
 
-- **Rule:** dreamd engineering tickets live on Linear **project** `dreamd-eng` (`P-BZR-1`) under team **Botzr-Research**. Issue ids are `BZR-<n>` (same numbers as the retired `AILAB-<n>` ids). There is no team named `Botzr-AI-Labs` or `dreamd-eng`. `list_issues(team: "dreamd-eng")` and `list_issues(team: "Botzr-AI-Labs")` return empty.
-- **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while the project still held them. 2026-09-24: the team list no longer contains `Botzr-AI-Labs`; the project moved to `Botzr-Research`, and filtering that old team name returned an empty board.
-- **How to apply:** Filter `project: dreamd-eng` (or team `Botzr-Research` plus the project). Read `BZR-<n>` as the live id. Do not treat an empty team query as an empty backlog. Build order is `remaining-build-order-2026-09-24`, not the August queue numbers.
+- **Rule:** dreamd issue ids are `BZR-<n>` on team **Botzr-Research** (same numbers as the retired `AILAB-<n>` ids). Shipped work stays on project **dreamd-eng** (`P-BZR-1`). The unfinished spine is project **R&D** (`P-BZR-79`). There is no team named `Botzr-AI-Labs` or `dreamd-eng`. `list_issues(team: "dreamd-eng")`, `list_issues(team: "Botzr-AI-Labs")`, and `list_issues(project: "dreamd-eng", state: "backlog")` return empty.
+- **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while the project still held them. 2026-09-24: the team list no longer contains `Botzr-AI-Labs`; the project moved to `Botzr-Research`. 2026-09-26: R&D was created and the open spine (827 through 157, plus 207, 210, 149, 152) was moved onto it. dreamd-eng then has only Done, Canceled, and Duplicate, and its milestone bars read 100% because those issues left. The project description body still says RFC-011 is proposed; BZR-1075 accepted it the same day.
+- **How to apply:** For the next ticket, filter `project: R&D` (id `362958e6-8f75-4493-830a-21f3f8a1ba79` — the name `R&D` matches more than one project). For history, filter `project: dreamd-eng`. Read `BZR-<n>` as the live id. An empty dreamd-eng backlog is the move, not a finished product. Build order is `remaining-build-order-2026-09-24`, not the August queue numbers, and not dreamd-eng milestone progress.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `remaining-build-order-2026-09-24`
 
 ### ailab-210-ac-is-pre-watch-architecture
@@ -782,7 +785,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`, 2026-09-24). 827 is next. 147's leftovers (types.rs, client merge, status mappers) are not a claimable ticket. 171, 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`). 147 and 171 are Done on Linear (2026-09-24); 147's leftovers (types.rs, client merge, status mappers) still need a new ticket if wanted. 827 is next, Backlog on project R&D. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard
