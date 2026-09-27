@@ -38,6 +38,10 @@ pub struct RecallParams {
     pub q: String,
     /// Max hits to return; omit for [`DEFAULT_RECALL_K`].
     pub k: Option<u32>,
+    /// `explain=1` adds a `citations` array to the response; any other value,
+    /// including absent, omits it. HTTP-only — MCP `search_nodes` has no
+    /// equivalent parameter.
+    pub explain: Option<String>,
 }
 
 /// Default max results for recall when `k` is omitted (HTTP and MCP).
@@ -48,12 +52,22 @@ impl RecallParams {
     pub fn k_or_default(&self) -> u32 {
         self.k.unwrap_or(DEFAULT_RECALL_K)
     }
+
+    /// `true` only when `explain` is the exact string `"1"`.
+    pub fn explain_requested(&self) -> bool {
+        self.explain.as_deref() == Some("1")
+    }
 }
 
 /// Canonical recall response body shared by HTTP and MCP.
 #[derive(serde::Serialize)]
 pub struct RecallResponse {
     pub results: Vec<RecallResultJson>,
+    /// Per-result salience factor breakdown. `None` serializes with no
+    /// `citations` key (default HTTP recall, and MCP `search_nodes`); `Some`
+    /// only on `GET /api/v1/recall?explain=1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub citations: Option<Vec<CitationJson>>,
 }
 
 /// One salience-ranked hit on the wire.
@@ -87,4 +101,32 @@ pub struct RecallMeta {
     pub skill_action: String,
     /// Harness that authored the learning (e.g. `"claude-code"`, `"cursor"`).
     pub source_harness: String,
+}
+
+/// One result's salience-factor breakdown, only present on
+/// `GET /api/v1/recall?explain=1`. See `crate::salience::salience` for the
+/// formula these components feed.
+#[derive(serde::Serialize)]
+pub struct CitationJson {
+    /// Event id (`RecallResult::event_id`); may be empty for pre-WEG-45 docs.
+    pub id: String,
+    /// Final ranking score: BM25 × salience.
+    pub score: f64,
+    /// Raw Tantivy BM25 component before salience multiply.
+    pub bm25_component: f64,
+    /// Query-time salience multiplier.
+    pub salience_component: f64,
+    /// Memory layer name: `"episodic"` or `"semantic"` ([`crate::index::Layer::as_str`]) —
+    /// the same token as the paired `results[].source`.
+    pub layer: String,
+    /// Full stored learning text, no truncation.
+    pub snippet: String,
+    /// `(now_sec - timestamp_sec) / 86_400.0`, the same expression `salience` uses.
+    pub age_days: f64,
+    /// Stored 0.0..=10.0 subjective friction score (not divided by 10).
+    pub pain: f64,
+    /// Stored 0.0..=10.0 long-term relevance score (not divided by 10).
+    pub importance: f64,
+    /// Cluster occurrence count (bounded-staleness sidecar).
+    pub recurrence: u64,
 }

@@ -151,7 +151,7 @@ impl McpRunError {
 /// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
 /// generated `Tool.description` equals this const so the copies cannot drift.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument.";
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain.";
 
 /// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
 /// the real write target: `append_node` appends an episodic event to
@@ -346,7 +346,7 @@ impl MemoryMcpServer {
     /// never opens an index per call (WEG-252).
     #[cfg(unix)]
     #[tool(
-        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument."
+        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain."
     )]
     async fn search_nodes(
         &self,
@@ -377,7 +377,7 @@ impl MemoryMcpServer {
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument."
+        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain."
     )]
     async fn search_nodes(
         &self,

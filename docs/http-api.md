@@ -195,6 +195,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 |---|---|---|---|
 | `q` | Yes | — | Search query string |
 | `k` | No | [`DEFAULT_RECALL_K`] (`5`) | Maximum results to return |
+| `explain` | No | omitted | Exact value `1` adds a `citations` array (see below). Any other value, including absent, omits it. HTTP-only — MCP `search_nodes` has no equivalent parameter. |
 
 #### Response (`200 OK`)
 
@@ -235,6 +236,30 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 
 ```
 BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + recurrence))
+```
+
+#### `explain=1` response (`200 OK`)
+
+`GET /api/v1/recall?q=axum&k=5&explain=1` adds a `citations` array, one entry per `results[]` hit in the same order, with the ungrouped salience factors behind that hit's score. See [`docs/observability.md`](observability.md) for the field reference.
+
+```json
+{
+  "results": [ { "...": "as above" } ],
+  "citations": [
+    {
+      "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "score": 0.42,
+      "bm25_component": 1.8,
+      "salience_component": 0.42,
+      "layer": "episodic",
+      "snippet": "Route handlers must return impl IntoResponse…",
+      "age_days": 12.4,
+      "pain": 7.0,
+      "importance": 8.0,
+      "recurrence": 3
+    }
+  ]
+}
 ```
 
 #### Error responses
