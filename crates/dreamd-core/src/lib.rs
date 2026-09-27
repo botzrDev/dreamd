@@ -12,6 +12,7 @@ pub mod client;
 pub mod collector;
 pub mod config;
 pub mod consolidation;
+pub mod context_grant;
 pub mod coordinator;
 /// Shared outbound transport to the dreamd daemon.
 ///
