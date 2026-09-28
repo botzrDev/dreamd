@@ -78,6 +78,9 @@ test('--bind -> dreamd mcp --bind (AILAB-206: Streamable HTTP opt-in)', () => {
     ['mcp', '--bind', '127.0.0.1:8080'],
   );
 });
+test('blame -> dreamd blame (BZR-193: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['blame', 'q']), ['blame', 'q']);
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

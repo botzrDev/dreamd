@@ -53,3 +53,36 @@ the `/ 10` the formula applies.
 `dreamd recall --explain` already prints this same factor block from the CLI
 (`crates/dreamd-cli/src/commands/recall.rs`); this endpoint gives HTTP
 callers the same breakdown as structured JSON instead of formatted text.
+
+## `dreamd blame <query>` (BZR-193)
+
+`dreamd blame <query>` is a second, read-only CLI view over the same
+salience-scored recall used by `dreamd recall` — same discover / index-open /
+`dreamd_core::recall` sequence, different table shape and a smaller default
+`-k` (5, vs recall's 10). It does not proxy through a live daemon.
+
+The markdown table columns, in order, are:
+
+`| id | timestamp | skill_action | content | bm25 | salience | total | layer |`
+
+- `id` — `RecallResult::event_id`
+- `timestamp` — `timestamp_sec` as a decimal integer
+- `content` — the stored learning text, truncated to 80 characters
+- `total` — `RecallResult::score` (BM25 × salience)
+- `layer` — `episodic` or `semantic`
+
+Empty results still print the header and `(0 hits)`, exiting 0.
+
+`--explain` appends the same per-hit DR-204 factor block `dreamd recall
+--explain` prints, using the shared `explain_factors` helper — no separate
+arithmetic.
+
+`--json` prints one compact JSON array (plus a trailing newline) instead of
+the markdown table. Each object carries `id`, `timestamp`, `skill_action`,
+`content` (same 80-character truncation), `bm25`, `salience`, `total`, and
+`layer`. With `--explain`, each object also gains `age_days`, `pain`,
+`importance`, `recurrence`, `decay`, `pain_factor`, `importance_factor`,
+`recurrence_factor`, and `salience_product`.
+
+`dreamd blame` does not change the `dreamd recall` columns or its default
+`-k` of 10.

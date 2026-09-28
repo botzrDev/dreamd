@@ -5,6 +5,7 @@
 //! workspace without rewriting golden files.
 
 pub mod archive;
+pub mod blame;
 pub mod doctor;
 pub mod dream;
 pub mod init;

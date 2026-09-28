@@ -64,7 +64,7 @@ function validateRedirect(location, currentUrl) {
 // here silently routes `npx dreamd-mcp <newcmd>` to `dreamd mcp <newcmd>`.
 const DREAMD_SUBCOMMANDS = new Set([
   'init', 'setup', 'watch', 'doctor', 'dream', 'reset', 'service', 'uninstall', 'update',
-  'version', 'mcp',
+  'version', 'mcp', 'blame',
 ]);
 
 // A recognized first token is forwarded to `dreamd` verbatim; a bare invocation

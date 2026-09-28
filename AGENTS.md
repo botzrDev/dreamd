@@ -159,8 +159,8 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
 6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
 7. **BZR-827** — on `main` (`187cc50`). `GrantedStore` / `ContextGrant` in `context_grant.rs` filter recall by `source` (`episodic` / `semantic`) and refuse an append when episodic is not granted. `ContextGrant::both()` returns the inner recall string unchanged. MCP is not wired. Spec: `assignments/BZR-827.v2.md`. Doc: `docs/context-grant.md`. Do not claim momo `MemoryRegion` objects. Do not reopen it.
-8. **BZR-198** — in the working tree, not on `main` yet. `explain=1` on `GET /api/v1/recall` adds a `citations` array; every other caller, including MCP `search_nodes`, keeps the body with no `citations` key. Spec: `assignments/BZR-198.v2.md`. Doc: `docs/observability.md`. Do not start a second copy.
-9. **BZR-193** — `dreamd blame`.
+8. **BZR-198** — on `main` (`f400d82`). `explain=1` on `GET /api/v1/recall` adds a `citations` array; every other caller, including MCP `search_nodes`, keeps the body with no `citations` key. Spec: `assignments/BZR-198.v2.md`. Doc: `docs/observability.md`. Do not reopen it.
+9. **BZR-193** — in the working tree, not on `main` yet. `dreamd blame <query>` prints id, timestamp, skill_action, content, bm25, salience, total, layer. Default `-k` is 5. `--explain` reuses `explain_factors`. `--json` is one compact array. `dreamd recall` stays `-k` 10. Spec: `assignments/BZR-193.v2.md`. Do not start a second copy.
 10. **BZR-194** — counterfactual `--without`.
 11. **BZR-195** — salience observability endpoint.
 12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
@@ -193,7 +193,7 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 - Claim one ticket and its file list before editing. One writer per file.
 - Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
 - **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is implemented in the working tree and waiting on the user's commit. Do not reopen it. **BZR-193** is next only after that commit is on `main`. 194, 195, 160, 150, 156, 153, 146, 155, 148, 158, 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is implemented in the working tree and waiting on the user's commit. Do not reopen it. **BZR-194** is next only after that commit is on `main`. 195, 160, 150, 156, 153, 146, 155, 148, 158, 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -544,14 +544,14 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `cargo test -p dreamd-core --lib llm` is a **substring** filter on test names, not “the `llm` module.” It also runs `dream_cycle` / HTTP tests whose names contain `llm`.
 - **Why:** AILAB-200 report-back: `--lib llm` printed 35 passed (311 filtered) because `llm_success_writes_model_text…` and friends matched. That extra coverage is real; it is not proof the command was scoped to `llm.rs` alone.
-- **How to apply:** For a module-only gate use `cargo test -p dreamd-core --lib -- llm::`. Read the “filtered” count. Do not treat a 35-pass `--lib llm` paste as “35 tests in llm.rs.”
+- **How to apply:** For a module-only gate use `cargo test -p dreamd-core --lib -- llm::`. Read the “filtered” count. Do not treat a 35-pass `--lib llm` paste as “35 tests in llm.rs.” The filter is a contiguous substring of the full path, so `cli::parses_blame` matches nothing: those tests are `cli::tests::parses_blame_*` (BZR-193). Use `cli::tests::parses_blame`.
 - **Cross-refs:** `cargo-run-dreamd-needs-bin`
 
 ### linear-search-nodes-layer-filter-does-not-exist
 
 - **Rule:** MCP `search_nodes` takes `query` + `k` only (`SearchNodesParams`). HTTP `GET /api/v1/recall` takes `q` + `k`. Both call `recall(..., None)`. Hits already carry `source` (`"episodic"` | `"semantic"` via `Layer::as_str`). There is no `layer` / `layer=` argument on either surface.
 - **Why:** AILAB-191 Linear AC says “`layer=` filter narrows.” Documenting that would teach agents to pass a param rmcp will reject. Adding the param is a new feature, not “just better descriptions.”
-- **How to apply:** Rewrite descriptions to tell agents to read `source`. Do not add `SearchNodesParams.layer`. Do not unify MCP `query` with HTTP `q`. `index.rs` rustdoc still says every v0.1 doc is `Layer::Episodic` — stale after AILAB-205; do not “fix” it on a copy ticket.
+- **How to apply:** Rewrite descriptions to tell agents to read `source`. Do not add `SearchNodesParams.layer`. Do not unify MCP `query` with HTTP `q`. `explain=1` on `GET /api/v1/recall` is the BZR-198 citation gate; it is not a layer filter, and `search_nodes` still does not take it. `index.rs` rustdoc still says every v0.1 doc is `Layer::Episodic` — stale after AILAB-205; do not “fix” it on a copy ticket.
 - **Cross-refs:** `v2-beats-linear-ac`, `layer-semantic-is-not-embeddings`
 
 ### rmcp-tool-description-requires-string-literal
@@ -785,7 +785,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`). 147 and 171 are Done on Linear (2026-09-24); 147's leftovers (types.rs, client merge, status mappers) still need a new ticket if wanted. 827 is on `main` (`187cc50`). 198 is in the working tree awaiting commit; 193 is next after that lands. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`). 147 and 171 are Done on Linear (2026-09-24); 147's leftovers (types.rs, client merge, status mappers) still need a new ticket if wanted. 827 is on `main` (`187cc50`). 198 is on `main` (`f400d82`). 193 is in the working tree awaiting commit; 194 is next after that lands. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard

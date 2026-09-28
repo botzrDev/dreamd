@@ -108,6 +108,8 @@ pub struct DoctorArgs {
 pub enum Command {
     /// Maintain the on-disk memory log. Today: unpin entries with --force-unpin.
     Archive(ArchiveArgs),
+    /// Show which stored memories drove a query's recall ranking (BZR-193).
+    Blame(BlameArgs),
     /// Run health checks and print status (dream-cycle mode, etc.).
     Doctor(DoctorArgs),
     /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
@@ -162,6 +164,26 @@ pub struct ArchiveArgs {
     /// Unpin every entry. Refused unless explicitly set.
     #[arg(long)]
     pub all: bool,
+}
+
+/// Arguments for the `dreamd blame` subcommand (BZR-193).
+///
+/// A separate table from `dreamd recall` (`id`, `timestamp`, `skill_action`,
+/// `content`, `bm25`, `salience`, `total`, `layer`) at a smaller default `-k`
+/// (5, vs recall's 10). `--json` prints one compact JSON array instead.
+#[derive(Args)]
+pub struct BlameArgs {
+    /// Free-text query (BM25 over episodic content).
+    pub query: String,
+    /// Max results (default 5 — recall stays at 10).
+    #[arg(short = 'k', long, default_value_t = 5)]
+    pub k: usize,
+    /// Print per-hit salience factor breakdown (DR-204).
+    #[arg(long)]
+    pub explain: bool,
+    /// Print one compact JSON array instead of the markdown table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for the `dreamd init` subcommand.
@@ -544,6 +566,44 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
             ExitCode::from(1)
         }
         Err(commands::archive::ArchiveError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_blame(args: BlameArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Query instant: wall clock, same caveat as `dreamd recall` (not byte-stable,
+    // no SOURCE_DATE_EPOCH override).
+    let now_sec = chrono::Utc::now().timestamp();
+    // Unlocked handles (AILAB-583): blame opens the Tantivy index the same way
+    // recall does; see the comment on `run_recall`.
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    match commands::blame::run(
+        &cwd,
+        &args.query,
+        args.k,
+        args.explain,
+        args.json,
+        now_sec,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage / precondition — the user must fix the invocation or init first.
+        Err(commands::recall::RecallError::NotFound) => ExitCode::from(2),
+        // Runtime — the index is not ready, or a search/IO failure.
+        Err(commands::recall::RecallError::IndexUnavailable(_)) => ExitCode::from(1),
+        Err(commands::recall::RecallError::Search(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::recall::RecallError::Io(e)) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)
         }
@@ -1320,6 +1380,7 @@ pub fn run() -> ExitCode {
 
     match command {
         Command::Archive(args) => run_archive(args),
+        Command::Blame(args) => run_blame(args),
         Command::Doctor(args) => run_doctor(args),
         Command::Dream(args) => run_dream(args),
         Command::Init(args) => run_init(args),
@@ -1844,6 +1905,36 @@ mod tests {
                 assert_eq!(args.to, "1.0.0");
             }
             _ => panic!("expected Migrate"),
+        }
+    }
+
+    #[test]
+    fn parses_blame_defaults_k_to_five() {
+        let cli = Cli::try_parse_from(["dreamd", "blame", "axum error"]).unwrap();
+        match cli.command {
+            Some(Command::Blame(args)) => {
+                assert_eq!(args.query, "axum error");
+                assert_eq!(args.k, 5, "blame default -k is 5 (recall stays 10)");
+                assert!(!args.explain);
+                assert!(!args.json);
+            }
+            _ => panic!("expected Blame"),
+        }
+    }
+
+    #[test]
+    fn parses_blame_k_explain_and_json() {
+        let cli =
+            Cli::try_parse_from(["dreamd", "blame", "tokio", "-k", "3", "--explain", "--json"])
+                .unwrap();
+        match cli.command {
+            Some(Command::Blame(args)) => {
+                assert_eq!(args.query, "tokio");
+                assert_eq!(args.k, 3);
+                assert!(args.explain);
+                assert!(args.json);
+            }
+            _ => panic!("expected Blame"),
         }
     }
 
