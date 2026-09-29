@@ -1,0 +1,22 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested2_subcommand_help(\"memory\", \"bisect\", \"start\")"
+---
+Start a bisect between a good and a bad ref, and check out the midpoint.
+
+Endpoints are ref names or object ids a ref names. The good ref's timestamp must be strictly earlier than the bad ref's. Adjacent endpoints print the bad ref and start nothing.
+
+Usage: start [OPTIONS] --good <GOOD> --bad <BAD>
+
+Options:
+      --good <GOOD>
+          Last known good ref (name or 64-hex object id)
+
+      --bad <BAD>
+          First known bad ref (name or 64-hex object id)
+
+      --auto-test <SCRIPT>
+          Run SCRIPT with `sh -c` after each checkout and mark by its exit status (0 = good) until the first bad ref is found
+
+  -h, --help
+          Print help (see a summary with '-h')

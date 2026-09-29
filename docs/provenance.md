@@ -1,6 +1,6 @@
 # Provenance ledger format (`provenance/1.0`)
 
-**Status: recording is implemented; proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). Proofs, signatures, and `embedding` edges are not implemented. This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (unimplemented branch objects).
+**Status: recording and a library check are implemented; proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). `provenance::verify` in `dreamd-core` (BZR-148) recomputes the Merkle root from the well-formed lines and lists orphan edges, missing lesson and recurrence edges, and corrupt line numbers; it only reads, and it does not rewrite the file. There is no `dreamd doctor --provenance` flag and no repair. Proofs, signatures, and `embedding` edges are not implemented. This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (branch objects and refs; see [`branching.md`](./branching.md)).
 
 This page specifies how dreamd records which derived artifacts each episodic event feeds, how that set is committed to with a Merkle root, and how one event's membership is proved with a signed proof. It is the format. The proof command and the verifier program are separate, later work that builds on this page.
 
@@ -12,7 +12,7 @@ Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https
 
 The ledger lives under `<project>/.agent/.dreamd/provenance/`. `.dreamd/` is already gitignored ([`SPEC.md` §Folder layout](../SPEC.md#folder-layout); `dreamd init` writes the rule), so this tree is gitignored too.
 
-The ledger MUST NOT live under `.agent/.dreamd/snapshots/`, which is the decay archive (`<YYYY-MM-DD>.jsonl`). It MUST NOT live under `.agent/.dreamd/branches/`, which is the unimplemented branch format in [`branching.md`](./branching.md).
+The ledger MUST NOT live under `.agent/.dreamd/snapshots/`, which is the decay archive (`<YYYY-MM-DD>.jsonl`). It MUST NOT live under `.agent/.dreamd/branches/`, which holds the branch objects and refs in [`branching.md`](./branching.md).
 
 ```
 <project>/.agent/.dreamd/provenance/

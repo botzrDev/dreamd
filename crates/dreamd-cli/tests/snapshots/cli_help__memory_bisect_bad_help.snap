@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested2_subcommand_help(\"memory\", \"bisect\", \"bad\")"
+---
+Mark the checked-out snapshot bad and check out the next midpoint
+
+Usage: bad
+
+Options:
+  -h, --help
+          Print help

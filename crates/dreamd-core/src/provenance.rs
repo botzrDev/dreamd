@@ -18,14 +18,21 @@
 //! The learn path never opens the ledger. The reserved vector kind in the
 //! format has no variant here: a writer MUST NOT emit it. There is no proof,
 //! signature, or key in this module (proofs are BZR-151).
+//!
+//! [`verify`] (BZR-148) is read-only: it recomputes the Merkle root from the
+//! good lines and reports orphans, missing edges, and corrupt lines. It does
+//! not rewrite the ledger; the format forbids that.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use dreamd_protocol::EventId;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::episodic::{self, EpisodicError};
 use crate::index::RecurrenceSidecar;
 use crate::layout::AgentRoot;
 use crate::lessons;
@@ -62,6 +69,8 @@ pub enum ProvenanceError {
     Io(#[from] io::Error),
     #[error("provenance ledger encode: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("provenance verify: episodic log: {0}")]
+    Episodic(#[from] EpisodicError),
 }
 
 /// Wire shape of one line. Field order is the key order on the wire.
@@ -188,6 +197,207 @@ pub fn record_cycle(agent_root: &AgentRoot) -> Result<(), ProvenanceError> {
     }
 
     append_edges(&agent_root.provenance_ledger(), &edges)
+}
+
+/// Result of [`verify`]. `root` is the Merkle root recomputed from the good
+/// lines; nothing on disk stores a root to compare it against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceReport {
+    pub root: String,
+    pub orphans: Vec<EdgeFault>,
+    pub missing: Vec<EdgeFault>,
+    pub corrupt_lines: Vec<u64>,
+    pub skipped_unknown_kind: u64,
+}
+
+/// One edge [`verify`] flagged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeFault {
+    /// 1-based ledger line; 0 when the edge was expected and is absent.
+    pub line: u64,
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Full wire shape for the checker: all four fields must be strings.
+#[derive(Deserialize)]
+struct VerifyLine {
+    schema_version: String,
+    kind: String,
+    from: String,
+    to: String,
+}
+
+enum LineClass {
+    Good,
+    Corrupt,
+    UnknownKind,
+}
+
+fn is_event_id(s: &str) -> bool {
+    EventId::parse(s).is_ok()
+}
+
+fn classify(line: &VerifyLine) -> LineClass {
+    if line.schema_version != PROVENANCE_SCHEMA_VERSION {
+        return LineClass::Corrupt;
+    }
+    let ok = match line.kind.as_str() {
+        "lesson_citation" => {
+            is_event_id(&line.from) && line.to.strip_prefix("lsn_").is_some_and(is_event_id)
+        }
+        "index_doc" => is_event_id(&line.from) && line.to == line.from,
+        "recurrence" => {
+            is_event_id(&line.from)
+                && !line.to.is_empty()
+                && !line.to.chars().any(char::is_whitespace)
+        }
+        // Reserved: a writer MUST NOT emit it, so its presence is corruption.
+        "embedding" => false,
+        _ => return LineClass::UnknownKind,
+    };
+    if ok {
+        LineClass::Good
+    } else {
+        LineClass::Corrupt
+    }
+}
+
+/// Merkle root over the given leaves (already unique and byte-sorted), per
+/// `docs/provenance.md`: leaf = SHA-256(id), parent = SHA-256(left || right)
+/// over raw bytes, odd node promoted unchanged, empty = SHA-256("").
+fn merkle_root<'a>(leaves: impl Iterator<Item = &'a str>) -> [u8; 32] {
+    let mut level: Vec<[u8; 32]> = leaves
+        .map(|id| Sha256::digest(id.as_bytes()).into())
+        .collect();
+    if level.is_empty() {
+        return Sha256::digest([]).into();
+    }
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| match pair {
+                [l, r] => {
+                    let mut h = Sha256::new();
+                    h.update(l);
+                    h.update(r);
+                    h.finalize().into()
+                }
+                [odd] => *odd,
+                _ => unreachable!("chunks(2) yields one or two nodes"),
+            })
+            .collect();
+    }
+    level[0]
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Check the ledger against the live memory files. Read-only: it never
+/// writes the ledger or `LESSONS.md` and never repairs a line.
+///
+/// A missing ledger is `Ok` with the empty-ledger root. Corrupt lines
+/// (unparseable, wrong `schema_version`, `embedding`, or a known kind with a
+/// bad shape) and unknown kinds are left out of the root. An orphan is a good
+/// edge whose `from` is absent from the live JSONL; orphans stay in the root.
+/// An event with no `index_doc` edge is not reported: the index watermark is
+/// not a contiguous prefix.
+pub fn verify(agent_root: &AgentRoot) -> Result<ProvenanceReport, ProvenanceError> {
+    let bytes = match fs::read(agent_root.provenance_ledger()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut good: Vec<(u64, VerifyLine)> = Vec::new();
+    let mut corrupt_lines = Vec::new();
+    let mut skipped_unknown_kind = 0u64;
+    for (idx, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let line_no = idx as u64 + 1;
+        let Ok(line) = serde_json::from_slice::<VerifyLine>(raw) else {
+            corrupt_lines.push(line_no);
+            continue;
+        };
+        match classify(&line) {
+            LineClass::Good => good.push((line_no, line)),
+            LineClass::Corrupt => corrupt_lines.push(line_no),
+            LineClass::UnknownKind => skipped_unknown_kind += 1,
+        }
+    }
+
+    let leaves: BTreeSet<&str> = good.iter().map(|(_, l)| l.from.as_str()).collect();
+    let root = to_hex(&merkle_root(leaves.into_iter()));
+
+    let live: HashSet<String> = episodic::read_all(&agent_root.episodic_jsonl())?
+        .into_iter()
+        .map(|ev| ev.id.as_str().to_owned())
+        .collect();
+    let orphans = good
+        .iter()
+        .filter(|(_, l)| !live.contains(&l.from))
+        .map(|(n, l)| EdgeFault {
+            line: *n,
+            kind: l.kind.clone(),
+            from: l.from.clone(),
+            to: l.to.clone(),
+        })
+        .collect();
+
+    let present: HashSet<(&str, &str, &str)> = good
+        .iter()
+        .map(|(_, l)| (l.kind.as_str(), l.from.as_str(), l.to.as_str()))
+        .collect();
+    let mut expected: Vec<(Kind, String, String)> = Vec::new();
+    if let Ok(file) = lessons::read_lessons_file(&agent_root.lessons_md()) {
+        if let Some(exemplar) = file.lessons.first().map(|l| l.id.clone()) {
+            let lesson_doc = format!("lsn_{exemplar}");
+            expected.extend(
+                file.citations
+                    .iter()
+                    .map(|id| (Kind::LessonCitation, id.clone(), lesson_doc.clone())),
+            );
+            let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
+            let sidecar = fs::read_to_string(&sidecar_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<RecurrenceSidecar>(&raw).ok());
+            if sidecar.is_some_and(|s| {
+                s.clusters
+                    .iter()
+                    .any(|c| c.skill_action == file.cluster_key)
+            }) {
+                expected.push((Kind::Recurrence, exemplar, file.cluster_key.clone()));
+            }
+        }
+    }
+    let missing = expected
+        .into_iter()
+        .filter(|(k, f, t)| !present.contains(&(k.as_str(), f.as_str(), t.as_str())))
+        .map(|(k, from, to)| EdgeFault {
+            line: 0,
+            kind: k.as_str().to_owned(),
+            from,
+            to,
+        })
+        .collect();
+
+    Ok(ProvenanceReport {
+        root,
+        orphans,
+        missing,
+        corrupt_lines,
+        skipped_unknown_kind,
+    })
 }
 
 #[cfg(test)]
@@ -363,5 +573,228 @@ mod tests {
         record_cycle(&root).unwrap();
         assert!(!root.provenance_ledger().exists());
         assert!(!root.provenance_dir().exists());
+    }
+
+    // ---- verify (BZR-148) ----
+
+    fn sha256(bytes: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).into()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn edge(kind: &str, from: &str, to: &str) -> String {
+        format!(
+            r#"{{"schema_version":"provenance/1.0","kind":"{kind}","from":"{from}","to":"{to}"}}"#
+        )
+    }
+
+    fn write_ledger(root: &AgentRoot, lines: &[String]) {
+        let path = root.provenance_ledger();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut body = lines.join("\n");
+        body.push('\n');
+        fs::write(path, body).unwrap();
+    }
+
+    fn write_events(root: &AgentRoot, ids: &[&str]) {
+        let path = root.episodic_jsonl();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body: String = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    r#"{{"schema_version":"1.0.0","id":"{id}","timestamp":"2025-05-13T12:00:00Z","pain":5.0,"importance":5.0,"pinned":false,"skill_action":"rust::errors","source_harness":"test","content":"c"}}"#
+                ) + "\n"
+            })
+            .collect();
+        fs::write(path, body).unwrap();
+    }
+
+    fn verify_ledger(lines: &[String], events: &[&str]) -> ProvenanceReport {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        write_events(&root, events);
+        write_ledger(&root, lines);
+        verify(&root).unwrap()
+    }
+
+    #[test]
+    fn verify_missing_ledger_is_ok_with_empty_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let report = verify(&root).unwrap();
+        assert_eq!(report.root, hex(&sha256(b"")));
+        assert!(report.orphans.is_empty());
+        assert!(report.missing.is_empty());
+        assert!(report.corrupt_lines.is_empty());
+        assert_eq!(report.skipped_unknown_kind, 0);
+        assert!(
+            !root.provenance_ledger().exists(),
+            "verify must not create the ledger"
+        );
+    }
+
+    #[test]
+    fn verify_two_leaves_root_is_hash_of_concatenated_leaf_hashes() {
+        assert!(EVT_A < EVT_B);
+        let lsn = format!("lsn_{EVT_A}");
+        // Written B first: leaf order is by sort, not by line order.
+        let report = verify_ledger(
+            &[
+                edge("lesson_citation", EVT_B, &lsn),
+                edge("lesson_citation", EVT_A, &lsn),
+            ],
+            &[EVT_A, EVT_B],
+        );
+        let mut cat = sha256(EVT_A.as_bytes()).to_vec();
+        cat.extend_from_slice(&sha256(EVT_B.as_bytes()));
+        assert_eq!(report.root, hex(&sha256(&cat)));
+        assert!(report.orphans.is_empty());
+        assert!(report.corrupt_lines.is_empty());
+    }
+
+    #[test]
+    fn verify_edge_absent_from_jsonl_is_an_orphan_and_stays_in_root() {
+        let lsn = format!("lsn_{EVT_A}");
+        let lines = [
+            edge("lesson_citation", EVT_A, &lsn),
+            edge("lesson_citation", EVT_B, &lsn),
+        ];
+        let report = verify_ledger(&lines, &[EVT_A]);
+        assert_eq!(
+            report.orphans,
+            vec![EdgeFault {
+                line: 2,
+                kind: "lesson_citation".into(),
+                from: EVT_B.into(),
+                to: lsn.clone(),
+            }]
+        );
+        let with_both = verify_ledger(&lines, &[EVT_A, EVT_B]);
+        assert!(with_both.orphans.is_empty());
+        assert_eq!(report.root, with_both.root);
+    }
+
+    #[test]
+    fn verify_uncited_citation_is_missing_not_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let key = "rust::errors";
+        write_lessons(&root, key, &[EVT_A, EVT_B]);
+        write_sidecar(&root, &[key]);
+        write_events(&root, &[EVT_A, EVT_B]);
+        let lsn = format!("lsn_{EVT_A}");
+        write_ledger(
+            &root,
+            &[
+                edge("lesson_citation", EVT_A, &lsn),
+                edge("recurrence", EVT_A, key),
+            ],
+        );
+
+        let report = verify(&root).unwrap();
+        assert_eq!(
+            report.missing,
+            vec![EdgeFault {
+                line: 0,
+                kind: "lesson_citation".into(),
+                from: EVT_B.into(),
+                to: lsn,
+            }]
+        );
+        assert!(report.orphans.is_empty());
+    }
+
+    #[test]
+    fn verify_missing_recurrence_only_when_sidecar_names_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let key = "rust::errors";
+        write_lessons(&root, key, &[EVT_A]);
+        write_events(&root, &[EVT_A]);
+        write_ledger(
+            &root,
+            &[edge("lesson_citation", EVT_A, &format!("lsn_{EVT_A}"))],
+        );
+
+        // No sidecar: no recurrence edge is expected.
+        assert!(verify(&root).unwrap().missing.is_empty());
+        // Unparseable sidecar: still none.
+        fs::write(
+            root.semantic_dir().join("recurrence_counts.json"),
+            "{not json",
+        )
+        .unwrap();
+        assert!(verify(&root).unwrap().missing.is_empty());
+        // Sidecar names the key: one missing recurrence edge.
+        write_sidecar(&root, &[key]);
+        let missing = verify(&root).unwrap().missing;
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].kind, "recurrence");
+        assert_eq!(missing[0].from, EVT_A);
+        assert_eq!(missing[0].to, key);
+    }
+
+    #[test]
+    fn verify_non_json_line_is_corrupt_and_left_out_of_root() {
+        let a = edge("index_doc", EVT_A, EVT_A);
+        let b = edge("index_doc", EVT_B, EVT_B);
+        let report = verify_ledger(&[a.clone(), "not json".into(), b.clone()], &[EVT_A, EVT_B]);
+        assert_eq!(report.corrupt_lines, vec![2]);
+        assert_eq!(report.root, verify_ledger(&[a, b], &[EVT_A, EVT_B]).root);
+    }
+
+    #[test]
+    fn verify_embedding_is_corrupt_and_unknown_kind_is_skipped() {
+        let a = edge("index_doc", EVT_A, EVT_A);
+        let baseline = verify_ledger(std::slice::from_ref(&a), &[EVT_A, EVT_B]);
+
+        let report = verify_ledger(
+            &[a.clone(), edge("embedding", EVT_B, EVT_B)],
+            &[EVT_A, EVT_B],
+        );
+        assert_eq!(report.corrupt_lines, vec![2]);
+        assert_eq!(report.root, baseline.root);
+
+        let report = verify_ledger(&[a, edge("other", EVT_B, "x")], &[EVT_A, EVT_B]);
+        assert!(report.corrupt_lines.is_empty());
+        assert_eq!(report.skipped_unknown_kind, 1);
+        assert_eq!(report.root, baseline.root);
+    }
+
+    #[test]
+    fn verify_index_doc_with_different_to_is_corrupt() {
+        let report = verify_ledger(&[edge("index_doc", EVT_A, EVT_B)], &[EVT_A, EVT_B]);
+        assert_eq!(report.corrupt_lines, vec![1]);
+        assert_eq!(report.root, hex(&sha256(b"")));
+    }
+
+    #[test]
+    fn verify_wrong_schema_version_and_bad_lsn_are_corrupt() {
+        let wrong_version = edge("index_doc", EVT_A, EVT_A).replace("provenance/1.0", "1.0.0");
+        let bad_lsn = edge("lesson_citation", EVT_A, "lsn_nope");
+        let report = verify_ledger(&[wrong_version, bad_lsn], &[EVT_A]);
+        assert_eq!(report.corrupt_lines, vec![1, 2]);
+    }
+
+    #[test]
+    fn verify_does_not_write_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        write_lessons(&root, "rust::errors", &[EVT_A, EVT_B]);
+        write_ledger(&root, &["{\"torn".into()]);
+        // Strip the trailing newline so the file ends in a torn tail.
+        let path = root.provenance_ledger();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.pop();
+        fs::write(&path, &bytes).unwrap();
+
+        let report = verify(&root).unwrap();
+        assert_eq!(report.corrupt_lines, vec![1]);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }

@@ -4,7 +4,8 @@
 //! top-level `--help`, each subcommand `--help` (archive, blame, init, dream, mcp,
 //! memory, migrate, doctor, recall, salience-drift, score, watch, reset, service,
 //! setup, status, uninstall, update, version), nested `reset workspace --help`,
-//! `memory branch|checkout|branches|delete --help`, and
+//! `memory branch|checkout|branches|delete|bisect --help`,
+//! `memory bisect start|good|bad|run --help`, and
 //! `service install|start|restart|status|uninstall --help`,
 //! plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`).
@@ -47,6 +48,19 @@ fn nested_subcommand_help(parent: &str, child: &str) -> String {
         .unwrap_or_else(|| panic!("subcommand {parent:?} missing from Cli builder"))
         .find_subcommand_mut(child)
         .unwrap_or_else(|| panic!("subcommand {child:?} missing under {parent:?}"))
+        .render_long_help()
+        .to_string()
+}
+
+fn nested2_subcommand_help(parent: &str, child: &str, grandchild: &str) -> String {
+    Cli::command()
+        .color(ColorChoice::Never)
+        .find_subcommand_mut(parent)
+        .unwrap_or_else(|| panic!("subcommand {parent:?} missing from Cli builder"))
+        .find_subcommand_mut(child)
+        .unwrap_or_else(|| panic!("subcommand {child:?} missing under {parent:?}"))
+        .find_subcommand_mut(grandchild)
+        .unwrap_or_else(|| panic!("subcommand {grandchild:?} missing under {parent:?} {child:?}"))
         .render_long_help()
         .to_string()
 }
@@ -178,6 +192,46 @@ fn snapshot_memory_delete_help() {
     assert_snapshot!(
         "memory_delete_help",
         nested_subcommand_help("memory", "delete")
+    );
+}
+
+#[test]
+fn snapshot_memory_bisect_help() {
+    assert_snapshot!(
+        "memory_bisect_help",
+        nested_subcommand_help("memory", "bisect")
+    );
+}
+
+#[test]
+fn snapshot_memory_bisect_start_help() {
+    assert_snapshot!(
+        "memory_bisect_start_help",
+        nested2_subcommand_help("memory", "bisect", "start")
+    );
+}
+
+#[test]
+fn snapshot_memory_bisect_good_help() {
+    assert_snapshot!(
+        "memory_bisect_good_help",
+        nested2_subcommand_help("memory", "bisect", "good")
+    );
+}
+
+#[test]
+fn snapshot_memory_bisect_bad_help() {
+    assert_snapshot!(
+        "memory_bisect_bad_help",
+        nested2_subcommand_help("memory", "bisect", "bad")
+    );
+}
+
+#[test]
+fn snapshot_memory_bisect_run_help() {
+    assert_snapshot!(
+        "memory_bisect_run_help",
+        nested2_subcommand_help("memory", "bisect", "run")
     );
 }
 

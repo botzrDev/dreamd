@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested2_subcommand_help(\"memory\", \"bisect\", \"run\")"
+---
+Run SCRIPT once with `sh -c` and mark good on exit 0, bad otherwise.
+
+Requires a bisect in progress.
+
+Usage: run <SCRIPT>
+
+Arguments:
+  <SCRIPT>
+          Shell command string, passed to `sh -c`
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

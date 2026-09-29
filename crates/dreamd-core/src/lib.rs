@@ -6,6 +6,7 @@
 //! building path strings.
 
 pub mod autobiography;
+pub mod bisect;
 /// HTTP-over-UDS client for CLI → daemon proxying (WEG-271 fast-follow).
 #[cfg(unix)]
 pub mod client;

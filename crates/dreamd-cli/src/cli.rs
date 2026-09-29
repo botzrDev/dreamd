@@ -327,6 +327,52 @@ pub enum MemoryCommand {
         /// Branch name to delete.
         name: String,
     },
+    /// Binary-search the snap-* timeline for the first bad snapshot (BZR-153).
+    ///
+    /// Searches refs by the timestamp on their second line; there is no parent
+    /// pointer. Each step checks out a snapshot, so it refuses while `dreamd
+    /// watch` is running. Prints `<name> <id>`.
+    Bisect(BisectArgs),
+}
+
+/// Args for `dreamd memory bisect` (BZR-153). State is
+/// `.agent/.dreamd/branches/bisect`, which is not a ref.
+#[derive(Args)]
+pub struct BisectArgs {
+    #[command(subcommand)]
+    pub command: BisectCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BisectCommand {
+    /// Start a bisect between a good and a bad ref, and check out the midpoint.
+    ///
+    /// Endpoints are ref names or object ids a ref names. The good ref's
+    /// timestamp must be strictly earlier than the bad ref's. Adjacent
+    /// endpoints print the bad ref and start nothing.
+    Start {
+        /// Last known good ref (name or 64-hex object id).
+        #[arg(long)]
+        good: String,
+        /// First known bad ref (name or 64-hex object id).
+        #[arg(long)]
+        bad: String,
+        /// Run SCRIPT with `sh -c` after each checkout and mark by its exit
+        /// status (0 = good) until the first bad ref is found.
+        #[arg(long, value_name = "SCRIPT")]
+        auto_test: Option<String>,
+    },
+    /// Mark the checked-out snapshot good and check out the next midpoint.
+    Good,
+    /// Mark the checked-out snapshot bad and check out the next midpoint.
+    Bad,
+    /// Run SCRIPT once with `sh -c` and mark good on exit 0, bad otherwise.
+    ///
+    /// Requires a bisect in progress.
+    Run {
+        /// Shell command string, passed to `sh -c`.
+        script: String,
+    },
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -1009,9 +1055,15 @@ fn run_salience_drift(args: SalienceDriftArgs) -> ExitCode {
     }
 }
 
-/// `dreamd memory …` (BZR-150). Never opens a Tantivy index; stdout stays
-/// unlocked per call. Exit 2 when no `.agent/` store is found, 1 on any
-/// snapshot error (including the daemon-socket refusal on checkout).
+/// The daemon UDS path checkout refuses on, when a home directory resolves.
+fn daemon_socket() -> Option<PathBuf> {
+    home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).socket_path())
+}
+
+/// `dreamd memory …` (BZR-150, bisect BZR-153). Never opens a Tantivy index;
+/// stdout stays unlocked per call. Exit 2 when no `.agent/` store is found, 1
+/// on any snapshot or bisect error (including the daemon-socket refusal on
+/// checkout and a bisect script `sh` cannot spawn).
 fn run_memory(command: MemoryCommand) -> ExitCode {
     use commands::memory::{self, MemoryError};
     let cwd = match current_dir_or_exit() {
@@ -1024,12 +1076,36 @@ fn run_memory(command: MemoryCommand) -> ExitCode {
             memory::run_branch(&cwd, &name, chrono::Utc::now().timestamp(), &mut out)
         }
         MemoryCommand::Checkout { name } => {
-            let socket = home_dir()
-                .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).socket_path());
-            memory::run_checkout(&cwd, &name, socket.as_deref(), &mut out)
+            memory::run_checkout(&cwd, &name, daemon_socket().as_deref(), &mut out)
         }
         MemoryCommand::Branches => memory::run_branches(&cwd, &mut out),
         MemoryCommand::Delete { name } => memory::run_delete(&cwd, &name),
+        MemoryCommand::Bisect(BisectArgs { command }) => {
+            let socket = daemon_socket();
+            match command {
+                BisectCommand::Start {
+                    good,
+                    bad,
+                    auto_test,
+                } => memory::run_bisect_start(
+                    &cwd,
+                    &good,
+                    &bad,
+                    auto_test.as_deref(),
+                    socket.as_deref(),
+                    &mut out,
+                ),
+                BisectCommand::Good => {
+                    memory::run_bisect_mark(&cwd, true, socket.as_deref(), &mut out)
+                }
+                BisectCommand::Bad => {
+                    memory::run_bisect_mark(&cwd, false, socket.as_deref(), &mut out)
+                }
+                BisectCommand::Run { script } => {
+                    memory::run_bisect_run(&cwd, &script, socket.as_deref(), &mut out)
+                }
+            }
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1787,6 +1863,44 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["dreamd", "memory", "branch"]).is_err());
         assert!(Cli::try_parse_from(["dreamd", "memory"]).is_err());
+    }
+
+    #[test]
+    fn parses_memory_bisect() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Some(Command::Memory(MemoryArgs {
+                command: MemoryCommand::Bisect(BisectArgs { command }),
+            })) => command,
+            _ => panic!("expected Memory Bisect for {argv:?}"),
+        };
+        assert!(matches!(
+            parse(&["dreamd", "memory", "bisect", "start", "--good", "a", "--bad", "b"]),
+            BisectCommand::Start { good, bad, auto_test: None } if good == "a" && bad == "b"
+        ));
+        assert!(matches!(
+            parse(&[
+                "dreamd", "memory", "bisect", "start", "--good", "a", "--bad", "b",
+                "--auto-test", "make check",
+            ]),
+            BisectCommand::Start { auto_test: Some(s), .. } if s == "make check"
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "bisect", "good"]),
+            BisectCommand::Good
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "bisect", "bad"]),
+            BisectCommand::Bad
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "bisect", "run", "./t.sh --x"]),
+            BisectCommand::Run { script } if script == "./t.sh --x"
+        ));
+        assert!(
+            Cli::try_parse_from(["dreamd", "memory", "bisect", "start", "--good", "a"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["dreamd", "memory", "bisect", "run"]).is_err());
+        assert!(Cli::try_parse_from(["dreamd", "memory", "bisect"]).is_err());
     }
 
     #[test]

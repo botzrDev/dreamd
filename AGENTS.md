@@ -160,18 +160,18 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
 7. **BZR-827** — on `main` (`187cc50`). `GrantedStore` / `ContextGrant` in `context_grant.rs` filter recall by `source` (`episodic` / `semantic`) and refuse an append when episodic is not granted. `ContextGrant::both()` returns the inner recall string unchanged. MCP is not wired. Spec: `assignments/BZR-827.v2.md`. Doc: `docs/context-grant.md`. Do not claim momo `MemoryRegion` objects. Do not reopen it.
 8. **BZR-198** — on `main` (`f400d82`). `explain=1` on `GET /api/v1/recall` adds a `citations` array; every other caller, including MCP `search_nodes`, keeps the body with no `citations` key. Spec: `assignments/BZR-198.v2.md`. Doc: `docs/observability.md`. Do not reopen it.
-9. **BZR-193** — in the working tree, not on `main` yet. `dreamd blame <query>` prints id, timestamp, skill_action, content, bm25, salience, total, layer. Default `-k` is 5. `--explain` reuses `explain_factors`. `--json` is one compact array. `dreamd recall` stays `-k` 10. Spec: `assignments/BZR-193.v2.md`. Do not start a second copy.
-10. **BZR-194** — counterfactual `--without`.
-11. **BZR-195** — salience observability endpoint.
+9. **BZR-193** — on `main` (`63791b9`). `dreamd blame <query>` prints id, timestamp, skill_action, content, bm25, salience, total, layer. Default `-k` is 5. `--explain` reuses `explain_factors`. `--json` is one compact array. `dreamd recall` stays `-k` 10. Spec: `assignments/BZR-193.v2.md`. Do not start a second copy.
+10. **BZR-194** — on `main` (`260f37d`). `dreamd recall --without` / `--without-cluster`, and repeatable `exclude=` on `GET /api/v1/recall`. The filter runs inside the collector before the top-k heap. MCP `search_nodes` and `dreamd blame` do not take it. Spec: `assignments/BZR-194.v2.md`.
+11. **BZR-195** — on `main` (`806b764`). `GET /api/v1/observability/salience` and `dreamd salience-drift`. Score is `salience()` with no BM25. Drift reads only the snapshot dated exactly seven UTC days earlier. Spec: `assignments/BZR-195.v2.md`.
 12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
-13. **BZR-160** — snapshot model.
-14. **BZR-150** — branch and checkout.
-15. **BZR-156** — `memory diff`.
-16. **BZR-153** — `memory bisect`.
-17. **BZR-146** — branching demo.
+13. **BZR-160** — on `main` (`806b764`). `snapshot::create_autosnap` writes `branches/objects/<id>/` and a `snap-*` ref. It does not write `HEAD`. There is no `dreamd memory snapshot` command. Spec: `assignments/BZR-160.v2.md`.
+14. **BZR-150** — on `main` (`702636a`). `dreamd memory branch|checkout|branches|delete`. Refs are two-line files under `branches/refs/`. `HEAD` is `branches/HEAD`. Checkout refuses while the daemon socket exists. Spec: `assignments/BZR-150.v2.md`.
+15. **BZR-156** — library on `main` (`702636a`, same commit as BZR-150). `memory_diff::diff_objects` compares two object ids. `dreamd memory diff` is not implemented. Spec: `assignments/BZR-156.v2.md`. Do not start the command while BZR-153 owns `cli.rs`.
+16. **BZR-153** — `memory bisect`. Next. Spec: `assignments/BZR-153.v2.md`. Owns `cli.rs` and `commands/memory.rs`. The search range is `snap-*` refs by timestamp. There is no parent pointer.
+17. **BZR-146** — branching demo. Blocked until bisect and `dreamd memory diff` both exist. `docs/competitor-comparison.md` does not exist; do not invent it.
 18. **BZR-154** — on `main` (`adb7a40`, same commit as BZR-173). Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
-19. **BZR-155** — provenance recording. Inherit the BZR-154 locks: a leaf hash is SHA-256 of the event id's UTF-8 bytes; signing bytes are compact JSON with no trailing newline; a promoted odd node adds no path entry; an unknown `kind` is skipped.
-20. **BZR-148** — `doctor --provenance`, before any delete path.
+19. **BZR-155** — on `main` (`260f37d`). Provenance recording. Leaf hash is SHA-256 of the event id's UTF-8 bytes. `index_doc` is appended from `commit_and_persist` and from `TantivyIndexHandle::open`. The learn path does not open the ledger. No `embedding` edge.
+20. **BZR-148** — provenance verify, before any delete path. Spec: `assignments/BZR-148.v2.md`. This slice is `provenance::verify` only. `dreamd doctor --provenance` and `--repair` wait until `cli.rs` is free. `--repair` rewrites ledger lines; the format forbids that, so do not add it under another name.
 21. **BZR-158** — forget cascade.
 22. **BZR-151** — `forget --proof`.
 23. **BZR-188** — vector backend stub. Measure stripped `target/release/dreamd` first. Keep the dependency off the default build; the 20 MB size gate has rejected this crate before.
@@ -193,7 +193,7 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 - Claim one ticket and its file list before editing. One writer per file.
 - Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
 - **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is implemented in the working tree and waiting on the user's commit. Do not reopen it. **BZR-194** is next only after that commit is on `main`. 195, 160, 150, 156, 153, 146, 155, 148, 158, 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). The current pair is **BZR-153** (`cli.rs`, `commands/memory.rs`, `bisect.rs`) and **BZR-148** (`provenance.rs`, `docs/provenance.md` only). **BZR-146** stays blocked. The `dreamd memory diff` command is still open on BZR-156 and must not start while 153 owns `cli.rs`. 158, 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -785,7 +785,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, and 168 are on `main`. 159 and 154 are docs on `main`; their code waits on 160 and 155. 170 and 183 are on `main` (`4bb3509`). 147 and 171 are Done on Linear (2026-09-24); 147's leftovers (types.rs, client merge, status mappers) still need a new ticket if wanted. 827 is on `main` (`187cc50`). 198 is on `main` (`f400d82`). 193 is in the working tree awaiting commit; 194 is next after that lands. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187, 173, 172, 168, 170, 183, 827, 198, 193, 194, 195, 159, 160, 150, 154, and 155 are on `main`. The BZR-156 library is on `main`; its CLI is not. The current pair is BZR-153 (owns `cli.rs`) and BZR-148 (`provenance::verify` only). 146 waits on bisect and on `dreamd memory diff`. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard
@@ -808,3 +808,17 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** BZR-155 spec item 7 said a failed ledger append is healed because the next startup replays the batch. `open` committed that replay and moved the watermark with no `append_edges` call, so those ids never got an edge. The in-process retry (keep the batch when `append_edges` fails) does not survive a process restart.
 - **How to apply:** Any new commit path that updates `index_progress.json` for episodic ids appends `index_doc` edges first. Semantic `lsn_` docs are not edges. The append is idempotent on `(kind, from, to)`. `run_indexer` takes the watermark path and the ledger path as one `IndexerPersist` argument; a separate `PathBuf` pushes the signature to 8 and `cargo clippy -- -D warnings` fails at 7.
 - **Cross-refs:** `indexer-shed-is-not-replay-healed`
+
+### bisect-searches-snap-refs-not-a-parent-graph
+
+- **Rule:** `dreamd memory bisect` searches `branches/refs/snap-*` by the timestamp on line 2 of the ref. There is no parent pointer on an object or a ref. A named branch is one point on that timeline, not a chain.
+- **Why:** BZR-153's Linear text says "binary search across branch history" in the git sense. `write_ref` stores an object id and a UTC timestamp (`snapshot.rs`). Two refs with the same timestamp are not ordered by ancestry. Same-second autosnaps overwrite the ref name and leave the earlier object unnamed.
+- **How to apply:** Resolve endpoints through `refs/<name>` or a 64-hex id that some ref already names. Require the good timestamp string to be strictly less than the bad one. Do not invent a parent field. State lives at `branches/bisect`, beside `HEAD`, so `list_branches` does not show it. `dreamd memory diff` is still not a command; do not add it inside the bisect ticket.
+- **Cross-refs:** `remaining-build-order-2026-09-24`
+
+### provenance-verify-does-not-rewrite-the-ledger
+
+- **Rule:** `provenance::verify` only reads. There is no stored Merkle root to compare against, and no `--repair`. An unknown `kind` is skipped. `embedding` is corrupt, not skipped. A JSONL id with no `index_doc` edge is not a missing edge.
+- **Why:** BZR-148's Linear AC asks for hash mismatches against a root and for `--repair`. BZR-155 never writes the root. The format forbids rewriting ledger lines. The index watermark is not a contiguous prefix, so "every event has an index_doc" would flag healthy logs.
+- **How to apply:** Recompute the root from the good lines and return it. Report orphans (`from` absent from the live JSONL), missing `lesson_citation` / `recurrence` edges, and corrupt line numbers. Do not add `dreamd doctor --provenance` while another ticket owns `cli.rs`. Do not rebuild the ledger under another flag name.
+- **Cross-refs:** `replay-open-is-an-index-doc-writer`, `remaining-build-order-2026-09-24`
