@@ -18,11 +18,13 @@ use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
-use tantivy::schema::{IndexRecordOption, TantivyDocument, Term, Value};
+use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Term, Value};
+use tantivy::store::StoreReader;
 use tantivy::{DocAddress, DocId, IndexReader, Score, SegmentOrdinal, SegmentReader};
 
 use crate::index::{
-    Layer, SchemaFields, IMPORTANCE_FIELD, PAIN_FIELD, RECURRENCE_FIELD, TIMESTAMP_SEC_FIELD,
+    Layer, SchemaFields, EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, RECURRENCE_FIELD,
+    SKILL_ACTION_FIELD, TIMESTAMP_SEC_FIELD,
 };
 use crate::salience::{salience_with_context, RecurrenceContext};
 
@@ -93,6 +95,48 @@ impl Ord for ScoredDoc {
     }
 }
 
+/// Documents to drop before the top-k heap is filled (BZR-194).
+///
+/// Counterfactual recall: "what would recall return if these memories were
+/// absent?" The index is never modified; matching documents are skipped inside
+/// [`SalienceSegmentCollector::collect`] so the remaining hits backfill `k`.
+///
+/// * `ids` match the stored `event_id` exactly. An `evt_…` id does not match
+///   the `lsn_evt_…` lesson document derived from it.
+/// * `cluster_prefixes` match `skill_action` per [`cluster_prefix_matches`],
+///   on both layers.
+#[derive(Debug, Clone, Default)]
+pub struct RecallExclusion {
+    pub ids: Vec<String>,
+    pub cluster_prefixes: Vec<String>,
+}
+
+impl RecallExclusion {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.cluster_prefixes.is_empty()
+    }
+
+    fn excludes(&self, event_id: &str, skill_action: &str) -> bool {
+        self.ids.iter().any(|id| id == event_id)
+            || self
+                .cluster_prefixes
+                .iter()
+                .any(|prefix| cluster_prefix_matches(skill_action, prefix))
+    }
+}
+
+/// `true` when `skill_action` is `prefix` or extends it with a `::` segment.
+///
+/// `rust::error_handling` matches itself and `rust::error_handling::axum`, not
+/// `rust`, `rustacean`, or `rust::errors`. `skill_action` is one exact STRING
+/// token in the index, so this is a stored-field check, not a Tantivy term.
+pub fn cluster_prefix_matches(skill_action: &str, prefix: &str) -> bool {
+    skill_action == prefix
+        || skill_action
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
 /// Per-segment collector. Tantivy invokes `collect()` once per matching
 /// doc; the min-heap (`BinaryHeap<Reverse<…>>`) caps at `k` entries.
 pub struct SalienceSegmentCollector {
@@ -104,12 +148,50 @@ pub struct SalienceSegmentCollector {
     importance_col: Column<f64>,
     recurrence_col: Column<u64>,
     now_sec: i64,
+    /// Present only when the exclusion is non-empty, so the default recall
+    /// path never touches the doc store.
+    exclusion: Option<SegmentExclusion>,
+}
+
+/// Per-segment exclusion state: the stored-field reader plus the two fields
+/// the match reads (`event_id`, `skill_action` are `STRING | STORED`, not
+/// fastfields).
+struct SegmentExclusion {
+    exclusion: RecallExclusion,
+    store: StoreReader,
+    event_id: Field,
+    skill_action: Field,
+}
+
+impl SegmentExclusion {
+    /// `true` when the stored doc matches the exclusion. A doc that fails to
+    /// load is kept: exclusion never turns a read error into a silent drop.
+    fn excludes(&self, doc: DocId) -> bool {
+        let Ok(stored) = self.store.get::<TantivyDocument>(doc) else {
+            return false;
+        };
+        let text = |field| {
+            stored
+                .get_first(field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        self.exclusion
+            .excludes(&text(self.event_id), &text(self.skill_action))
+    }
 }
 
 impl SegmentCollector for SalienceSegmentCollector {
     type Fruit = Vec<ScoredDoc>;
 
     fn collect(&mut self, doc: DocId, score: Score) {
+        if let Some(exclusion) = &self.exclusion {
+            if exclusion.excludes(doc) {
+                return;
+            }
+        }
+
         let ts = self.timestamp_col.first(doc).unwrap_or(0) as i64;
         let p = self.pain_col.first(doc).unwrap_or(0.0);
         let imp = self.importance_col.first(doc).unwrap_or(0.0);
@@ -152,11 +234,22 @@ impl SegmentCollector for SalienceSegmentCollector {
 pub struct SalienceCollector {
     k: usize,
     now_sec: i64,
+    exclusion: RecallExclusion,
 }
 
 impl SalienceCollector {
     pub fn new(k: usize, now_sec: i64) -> Self {
-        Self { k, now_sec }
+        Self {
+            k,
+            now_sec,
+            exclusion: RecallExclusion::default(),
+        }
+    }
+
+    /// Skip documents matching `exclusion` before the top-k heap (BZR-194).
+    pub fn with_exclusion(mut self, exclusion: RecallExclusion) -> Self {
+        self.exclusion = exclusion;
+        self
     }
 }
 
@@ -170,6 +263,19 @@ impl Collector for SalienceCollector {
         segment: &SegmentReader,
     ) -> tantivy::Result<SalienceSegmentCollector> {
         let ff = segment.fast_fields();
+        // Empty exclusion (every caller but counterfactual recall) never opens
+        // the doc store. SegmentReader has no `doc()` in Tantivy 0.26.
+        let exclusion = if self.exclusion.is_empty() {
+            None
+        } else {
+            let schema = segment.schema();
+            Some(SegmentExclusion {
+                exclusion: self.exclusion.clone(),
+                store: segment.get_store_reader(1)?, // for_segment, !is_empty()
+                event_id: schema.get_field(EVENT_ID_FIELD)?,
+                skill_action: schema.get_field(SKILL_ACTION_FIELD)?,
+            })
+        };
         Ok(SalienceSegmentCollector {
             heap: BinaryHeap::with_capacity(self.k + 1),
             k: self.k,
@@ -180,6 +286,7 @@ impl Collector for SalienceCollector {
             importance_col: ff.f64(IMPORTANCE_FIELD)?,
             recurrence_col: ff.u64(RECURRENCE_FIELD)?,
             now_sec: self.now_sec,
+            exclusion,
         })
     }
 
@@ -285,6 +392,31 @@ pub fn recall(
     layer: Option<Layer>,
     now_sec: i64,
 ) -> tantivy::Result<Vec<RecallResult>> {
+    recall_excluding(
+        reader,
+        fields,
+        query_text,
+        k,
+        layer,
+        &RecallExclusion::default(),
+        now_sec,
+    )
+}
+
+/// [`recall`] with counterfactual exclusion (BZR-194).
+///
+/// Documents matching `exclusion` are dropped inside the collector, before the
+/// top-k heap, so up to `k` of the remaining hits come back. The index is not
+/// modified. An empty exclusion is exactly [`recall`].
+pub fn recall_excluding(
+    reader: &IndexReader,
+    fields: &SchemaFields,
+    query_text: &str,
+    k: usize,
+    layer: Option<Layer>,
+    exclusion: &RecallExclusion,
+    now_sec: i64,
+) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
 
     let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
@@ -301,7 +433,7 @@ pub fn recall(
         bm25_query
     };
 
-    let collector = SalienceCollector::new(k, now_sec);
+    let collector = SalienceCollector::new(k, now_sec).with_exclusion(exclusion.clone());
     let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
     hydrate_scored(searcher, fields, top_docs)
 }
@@ -696,5 +828,215 @@ mod tests {
             vec![0.9, 0.8, 0.7],
             "merge must keep the highest scores"
         );
+    }
+
+    /// BZR-194 fixtures: `(content, event_id, skill_action, timestamp_sec, pain, layer)`.
+    /// `build_index_with` never sets `event_id`, so exclusion tests build their own.
+    fn build_exclusion_index(
+        entries: &[(&str, &str, &str, i64, f64, Layer)],
+    ) -> (Index, SchemaFields, IndexReader) {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        for (content, event_id, skill_action, ts, pain, layer) in entries {
+            writer
+                .add_document(doc!(
+                    fields.content => *content,
+                    fields.timestamp_sec => *ts as u64,
+                    fields.pain => *pain,
+                    fields.importance => 9.0_f64,
+                    fields.recurrence => 1_u64,
+                    fields.layer => layer.as_str(),
+                    fields.last_updated_sec => *ts as u64,
+                    fields.cited_event_count => 0_u64,
+                    fields.event_id => *event_id,
+                    fields.skill_action => *skill_action,
+                    fields.source_harness => "claude-code",
+                ))
+                .expect("add doc");
+        }
+        writer.commit().expect("commit");
+        let reader = index.reader().expect("reader");
+        (index, fields, reader)
+    }
+
+    fn ids(results: &[RecallResult]) -> Vec<&str> {
+        results.iter().map(|r| r.event_id.as_str()).collect()
+    }
+
+    #[test]
+    fn exclusion_by_id_backfills_top_k() {
+        // The excluded doc outranks the other (newer, higher pain). With k = 1
+        // a post-filter would return nothing; the in-collector skip backfills.
+        let (_idx, fields, reader) = build_exclusion_index(&[
+            (
+                "axum error handling",
+                "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "rust::axum",
+                NOW_SEC - DAY_SECS,
+                9.0,
+                Layer::Episodic,
+            ),
+            (
+                "axum error handling",
+                "evt_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+                "rust::axum",
+                NOW_SEC - 20 * DAY_SECS,
+                3.0,
+                Layer::Episodic,
+            ),
+        ]);
+        let baseline = recall(&reader, &fields, "axum", 1, None, NOW_SEC).unwrap();
+        assert_eq!(ids(&baseline), vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+
+        let exclusion = RecallExclusion {
+            ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()],
+            cluster_prefixes: Vec::new(),
+        };
+        let results =
+            recall_excluding(&reader, &fields, "axum", 1, None, &exclusion, NOW_SEC).unwrap();
+        assert_eq!(ids(&results), vec!["evt_01BX5ZZKBKACTAV9WEVGEMMVRZ"]);
+    }
+
+    #[test]
+    fn exclusion_cluster_prefix_matches_token_or_colon_extension() {
+        let (_idx, fields, reader) = build_exclusion_index(&[
+            (
+                "error handling",
+                "evt_a",
+                "rust::error_handling",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+            (
+                "error handling",
+                "evt_b",
+                "rust::error_handling::axum",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+            (
+                "error handling",
+                "lsn_evt_b",
+                "rust::error_handling::axum",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Semantic,
+            ),
+            (
+                "error handling",
+                "evt_c",
+                "rustacean",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+            (
+                "error handling",
+                "evt_d",
+                "rust::errors",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+        ]);
+        let exclusion = RecallExclusion {
+            ids: Vec::new(),
+            cluster_prefixes: vec!["rust::error_handling".to_string()],
+        };
+        let results =
+            recall_excluding(&reader, &fields, "error", 10, None, &exclusion, NOW_SEC).unwrap();
+        let mut got = ids(&results);
+        got.sort_unstable();
+        // Both layers drop; `rustacean` and `rust::errors` are not extensions.
+        assert_eq!(got, vec!["evt_c", "evt_d"]);
+
+        assert!(cluster_prefix_matches(
+            "rust::error_handling",
+            "rust::error_handling"
+        ));
+        assert!(cluster_prefix_matches(
+            "rust::error_handling::axum",
+            "rust::error_handling"
+        ));
+        assert!(!cluster_prefix_matches("rust", "rust::error_handling"));
+        assert!(!cluster_prefix_matches("rustacean", "rust"));
+        assert!(!cluster_prefix_matches("rust::errors", "rust::error"));
+    }
+
+    #[test]
+    fn exclusion_by_evt_id_keeps_lsn_lesson_doc() {
+        let (_idx, fields, reader) = build_exclusion_index(&[
+            (
+                "tokio runtime",
+                "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "rust::tokio",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+            (
+                "tokio runtime",
+                "lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "rust::tokio",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Semantic,
+            ),
+        ]);
+        let exclusion = RecallExclusion {
+            ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()],
+            cluster_prefixes: Vec::new(),
+        };
+        let results =
+            recall_excluding(&reader, &fields, "tokio", 10, None, &exclusion, NOW_SEC).unwrap();
+        assert_eq!(ids(&results), vec!["lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+        assert_eq!(results[0].layer, Layer::Semantic);
+    }
+
+    #[test]
+    fn recall_excluding_default_matches_recall() {
+        let (_idx, fields, reader) = build_exclusion_index(&[
+            (
+                "serde derive",
+                "evt_a",
+                "rust::serde",
+                NOW_SEC - DAY_SECS,
+                8.0,
+                Layer::Episodic,
+            ),
+            (
+                "serde derive",
+                "evt_b",
+                "rust::serde",
+                NOW_SEC - 5 * DAY_SECS,
+                6.0,
+                Layer::Episodic,
+            ),
+            (
+                "serde derive",
+                "lsn_evt_a",
+                "rust::serde",
+                NOW_SEC - 2 * DAY_SECS,
+                7.0,
+                Layer::Semantic,
+            ),
+        ]);
+        let plain = recall(&reader, &fields, "serde", 2, None, NOW_SEC).unwrap();
+        let excluding = recall_excluding(
+            &reader,
+            &fields,
+            "serde",
+            2,
+            None,
+            &RecallExclusion::default(),
+            NOW_SEC,
+        )
+        .unwrap();
+        assert!(RecallExclusion::default().is_empty());
+        assert_eq!(ids(&plain), ids(&excluding));
+        assert_eq!(plain.len(), 2);
     }
 }

@@ -27,6 +27,7 @@ use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLes
 use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
+use crate::provenance::{self, ProvenanceError};
 use crate::wal::{self, WalError};
 
 /// Unified error type for dream-cycle orchestration.
@@ -38,6 +39,8 @@ pub enum DreamCycleError {
     Decay(#[from] DecayError),
     #[error("WAL: {0}")]
     Wal(#[from] WalError),
+    #[error("provenance: {0}")]
+    Provenance(#[from] ProvenanceError),
     #[cfg(unix)]
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
@@ -223,6 +226,9 @@ async fn filesystem_phases<B: LlmBackend>(
     }
 
     let decay = decay::run_decay_pruner(agent_root, now_sec, cycle_date)?;
+    // BZR-155: ledger lines land inside the existing envelope, not as a new
+    // WalIntent. An append failure skips commit_cycle like any other phase.
+    provenance::record_cycle(agent_root)?;
     wal::commit_cycle(agent_root, now_sec)?;
     Ok(decay)
 }

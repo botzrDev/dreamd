@@ -40,6 +40,7 @@ pub mod memory_store;
 pub mod migrate;
 pub mod observability;
 pub mod privacy;
+pub mod provenance;
 pub mod redaction;
 pub mod registry;
 pub mod salience;

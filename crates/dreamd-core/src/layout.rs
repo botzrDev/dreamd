@@ -175,6 +175,17 @@ impl AgentRoot {
         self.dreamd_dir().join("snapshots")
     }
 
+    /// `<project>/.agent/.dreamd/provenance/` — the provenance ledger tree
+    /// (BZR-154 format, BZR-155 writer). Not `snapshots/`, not `branches/`.
+    pub fn provenance_dir(&self) -> PathBuf {
+        self.dreamd_dir().join("provenance")
+    }
+
+    /// `<project>/.agent/.dreamd/provenance/ledger.jsonl` — append-only edges.
+    pub fn provenance_ledger(&self) -> PathBuf {
+        self.provenance_dir().join("ledger.jsonl")
+    }
+
     /// `<project>/.agent/.dreamd/snapshots/<date>.jsonl`
     /// `date` is caller-supplied as `"YYYY-MM-DD"` — no wall-clock calls here.
     pub fn snapshot_file(&self, date: &str) -> PathBuf {

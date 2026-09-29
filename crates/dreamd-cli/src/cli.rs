@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
+use dreamd_core::collector::RecallExclusion;
 use dreamd_core::config::{load_config, Config, DreamCycleMode};
 
 use crate::commands;
@@ -251,6 +252,12 @@ pub struct RecallArgs {
     /// Print per-hit salience factor breakdown (DR-204).
     #[arg(long)]
     pub explain: bool,
+    /// Drop these event ids before top-k. Repeatable. Does not modify the index.
+    #[arg(long = "without", action = ArgAction::Append)]
+    pub without: Vec<String>,
+    /// Drop hits whose skill_action equals this prefix or extends it with `::`.
+    #[arg(long = "without-cluster", action = ArgAction::Append)]
+    pub without_cluster: Vec<String>,
 }
 
 /// Arguments for the `dreamd score` subcommand (WEG-52 / DR-704).
@@ -863,11 +870,17 @@ fn run_recall(args: RecallArgs) -> ExitCode {
     // hoisted lock that a logging index thread could deadlock on (AILAB-575).
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
+    // Counterfactual recall (BZR-194): drop before top-k, index untouched.
+    let exclusion = RecallExclusion {
+        ids: args.without,
+        cluster_prefixes: args.without_cluster,
+    };
     match commands::recall::run(
         &cwd,
         &args.query,
         args.k,
         args.explain,
+        &exclusion,
         now_sec,
         &mut out,
         &mut err,
@@ -1946,6 +1959,31 @@ mod tests {
                 assert_eq!(args.query, "axum error");
                 assert_eq!(args.k, 10, "CLI default -k is 10 (HTTP/MCP stay at 5)");
                 assert!(!args.explain);
+            }
+            _ => panic!("expected Recall"),
+        }
+    }
+
+    #[test]
+    fn parses_recall_without_and_without_cluster() {
+        let cli = Cli::try_parse_from([
+            "dreamd",
+            "recall",
+            "q",
+            "--without",
+            "evt_a",
+            "--without",
+            "evt_b",
+            "--without-cluster",
+            "rust::error_handling",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Recall(args)) => {
+                assert_eq!(args.query, "q");
+                assert_eq!(args.without, vec!["evt_a", "evt_b"]);
+                assert_eq!(args.without_cluster, vec!["rust::error_handling"]);
+                assert_eq!(args.k, 10, "--without does not move the CLI default -k");
             }
             _ => panic!("expected Recall"),
         }

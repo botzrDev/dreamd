@@ -56,6 +56,7 @@ use crate::index::{
 };
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
+use crate::provenance::{append_edges, Kind};
 use crate::server::index_freshness::{
     read_jsonl_events, read_progress, write_progress, IndexProgress,
 };
@@ -63,7 +64,7 @@ use crate::server::index_map::{
     io_to_index, tantivy_io_to_index, tantivy_to_index, IndexError, IndexHandle,
 };
 use crate::server::indexer_actor::{
-    add_document, index_semantic_lessons, run_indexer, IndexerHandle,
+    add_document, index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist,
     DEFAULT_INDEXER_CHANNEL_CAPACITY,
 };
 
@@ -180,6 +181,19 @@ impl TantivyIndexHandle {
             // wholesale delete-then-add and is idempotent by construction, so it
             // deliberately has no watermark of its own (AILAB-205 §3 step 3).
             if !to_index.is_empty() {
+                // BZR-155: replay does not go through `commit_and_persist`.
+                // Edges land after this commit and before the watermark, or a
+                // restart covers ids that never got an `index_doc` line.
+                // Semantic lesson docs are not in `to_index`.
+                let edges: Vec<(Kind, String, String)> = to_index
+                    .iter()
+                    .map(|event| {
+                        let id = event.id.as_str().to_owned();
+                        (Kind::IndexDoc, id.clone(), id)
+                    })
+                    .collect();
+                append_edges(&agent_root.provenance_ledger(), &edges)
+                    .map_err(|e| IndexError::Io(e.to_string()))?;
                 write_progress(
                     &progress_path,
                     &IndexProgress {
@@ -213,7 +227,10 @@ impl TantivyIndexHandle {
             rx,
             commit_cadence,
             clusters,
-            progress_path.clone(),
+            IndexerPersist {
+                progress_path,
+                ledger_path: agent_root.provenance_ledger(),
+            },
             latest_committed,
         ));
 
@@ -1637,6 +1654,58 @@ mod tests {
             2,
             "A from first open + B from replay"
         );
+    }
+
+    /// Replay writes `index_doc` before the watermark. A second open of the
+    /// same ids does not append a duplicate line.
+    #[tokio::test]
+    async fn startup_replay_records_index_doc_and_skips_a_duplicate() {
+        let dir = unique_tmpdir("replay-ledger");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let id_a = make_event_id('A');
+        let id_b = make_event_id('B');
+
+        prime_jsonl(&dir, &[sample_learning(id_a.clone(), "rust.test", "first")]);
+        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        handle.shutdown().await.expect("shutdown");
+
+        let ledger = agent_root.provenance_ledger();
+        let lines = std::fs::read_to_string(&ledger).expect("ledger after first open");
+        assert_eq!(lines.matches("\"kind\":\"index_doc\"").count(), 1);
+        assert!(lines.contains(id_a.as_str()));
+        assert!(
+            !lines.contains("lsn_"),
+            "semantic docs are not index_doc edges"
+        );
+
+        // Watermark lost after the edge was written: replay re-indexes A.
+        std::fs::remove_file(agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME)).unwrap();
+        let handle =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("replay A");
+        handle.shutdown().await.expect("shutdown replay A");
+        let lines = std::fs::read_to_string(&ledger).unwrap();
+        assert_eq!(
+            lines.matches("\"kind\":\"index_doc\"").count(),
+            1,
+            "idempotent append keeps one line"
+        );
+
+        let mut extra =
+            serde_json::to_string(&sample_learning(id_b.clone(), "rust.test", "second")).unwrap();
+        extra.push('\n');
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(agent_root.episodic_jsonl())
+            .unwrap()
+            .write_all(extra.as_bytes())
+            .unwrap();
+        let handle =
+            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("replay B");
+        handle.shutdown().await.expect("shutdown replay B");
+        let lines = std::fs::read_to_string(&ledger).unwrap();
+        assert_eq!(lines.matches("\"kind\":\"index_doc\"").count(), 2);
+        assert!(lines.contains(id_b.as_str()));
     }
 
     /// An append that met a full indexer channel is still searchable after the

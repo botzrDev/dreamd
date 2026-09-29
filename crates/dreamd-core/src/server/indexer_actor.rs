@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use crate::index::{ClusterCount, Layer, RecurrenceSidecar, SchemaFields};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
+use crate::provenance::{append_edges, Kind};
 use crate::server::index_freshness::{read_jsonl_events, write_progress, IndexProgress};
 use crate::server::index_map::{tantivy_to_index, IndexError};
 
@@ -149,6 +150,16 @@ impl IndexerHandle {
     }
 }
 
+/// On-disk paths the indexer writes after a successful Tantivy commit.
+///
+/// One argument so [`run_indexer`] stays within clippy's argument limit.
+/// `progress_path` is the episodic watermark. `ledger_path` is the
+/// provenance `index_doc` append (BZR-155).
+pub(crate) struct IndexerPersist {
+    pub progress_path: PathBuf,
+    pub ledger_path: PathBuf,
+}
+
 /// The indexer task: owns the `IndexWriter`, batches appends, commits on the
 /// cadence tick or on [`IndexerMsg::Flush`], and exits after a final commit
 /// when every sender is dropped.
@@ -158,10 +169,13 @@ pub(crate) async fn run_indexer(
     mut rx: mpsc::Receiver<IndexerMsg>,
     commit_cadence: Duration,
     mut clusters: HashMap<String, u32>,
-    progress_path: PathBuf,
+    persist: IndexerPersist,
     mut last_committed_id: Option<String>,
 ) {
     let mut batch_last_id: Option<String> = None;
+    // Ids from successful `Append`s since the last commit; each becomes one
+    // `index_doc` ledger edge in `commit_and_persist` (BZR-155).
+    let mut batch_ids: Vec<String> = Vec::new();
     let mut interval = tokio::time::interval(commit_cadence);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Burn the first immediate tick so the cadence is measured from
@@ -182,12 +196,15 @@ pub(crate) async fn run_indexer(
                             tracing::warn!(error = ?e, "indexer add_document failed");
                             continue;
                         }
+                        batch_ids.push(event_id.as_str().to_owned());
                         batch_last_id = Some(event_id.as_str().to_owned());
                     }
                     Some(IndexerMsg::Flush { ack }) => {
                         let result = commit_and_persist(
                             &mut writer,
-                            &progress_path,
+                            &persist.progress_path,
+                            &persist.ledger_path,
+                            &mut batch_ids,
                             &mut batch_last_id,
                             &mut last_committed_id,
                         );
@@ -229,7 +246,9 @@ pub(crate) async fn run_indexer(
                         // Channel closed: final flush, then exit.
                         let _ = commit_and_persist(
                             &mut writer,
-                            &progress_path,
+                            &persist.progress_path,
+                            &persist.ledger_path,
+                            &mut batch_ids,
                             &mut batch_last_id,
                             &mut last_committed_id,
                         );
@@ -241,7 +260,9 @@ pub(crate) async fn run_indexer(
                 if batch_last_id.is_some() {
                     if let Err(e) = commit_and_persist(
                         &mut writer,
-                        &progress_path,
+                        &persist.progress_path,
+                        &persist.ledger_path,
+                        &mut batch_ids,
                         &mut batch_last_id,
                         &mut last_committed_id,
                     ) {
@@ -256,19 +277,31 @@ pub(crate) async fn run_indexer(
 pub(crate) fn commit_and_persist(
     writer: &mut IndexWriter<TantivyDocument>,
     progress_path: &Path,
+    ledger_path: &Path,
+    batch_ids: &mut Vec<String>,
     batch_last_id: &mut Option<String>,
     last_committed_id: &mut Option<String>,
 ) -> Result<(), IndexError> {
-    let Some(new_last) = batch_last_id.take() else {
+    if batch_last_id.is_none() {
         return Ok(());
-    };
+    }
     // Write protocol (WEG-42): Tantivy commit first, then watermark on disk.
     // If we crash after commit but before write_progress, the next startup
     // replay re-indexes at most one 5-second window (idempotent). If we wrote
     // the watermark first and then crashed, those events would be silently
     // skipped on recovery -- silent data loss.
     writer.commit().map_err(tantivy_to_index)?;
-    *last_committed_id = Some(new_last);
+    // BZR-155: `index_doc` edges after the commit, before the watermark. On a
+    // ledger failure the batch stays pending (ids and `batch_last_id` intact),
+    // so the next commit retries it and no watermark covers an unrecorded id.
+    // The append is idempotent on (kind, from, to).
+    let edges: Vec<(Kind, String, String)> = batch_ids
+        .iter()
+        .map(|id| (Kind::IndexDoc, id.clone(), id.clone()))
+        .collect();
+    append_edges(ledger_path, &edges).map_err(|e| IndexError::Io(e.to_string()))?;
+    batch_ids.clear();
+    *last_committed_id = batch_last_id.take();
     write_progress(
         progress_path,
         &IndexProgress {

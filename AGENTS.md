@@ -801,3 +801,10 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** BZR-168 unified on the CLI rule. `dirs::home_dir()` on Unix falls through to the passwd entry when `HOME` is unset, so watch and MCP can disagree under Git-Bash.
 - **How to apply:** Do not put `dirs::home_dir()` back on the watch or daemon-client path. The Windows MCP call is still `mcp/mod.rs:649`. BZR-170 and BZR-183 left that file alone. A later ticket may switch it once `mcp/mod.rs` has a single writer.
 - **Cross-refs:** `remaining-build-order-2026-09-24`
+
+### replay-open-is-an-index-doc-writer
+
+- **Rule:** `index_doc` edges are written in two places, both after `writer.commit()` and before `write_progress`: `commit_and_persist` for a live `Append` batch, and `TantivyIndexHandle::open` for the episodic ids in `to_index`. Startup replay does not call `commit_and_persist`.
+- **Why:** BZR-155 spec item 7 said a failed ledger append is healed because the next startup replays the batch. `open` committed that replay and moved the watermark with no `append_edges` call, so those ids never got an edge. The in-process retry (keep the batch when `append_edges` fails) does not survive a process restart.
+- **How to apply:** Any new commit path that updates `index_progress.json` for episodic ids appends `index_doc` edges first. Semantic `lsn_` docs are not edges. The append is idempotent on `(kind, from, to)`. `run_indexer` takes the watermark path and the ledger path as one `IndexerPersist` argument; a separate `PathBuf` pushes the signature to 8 and `cargo clippy -- -D warnings` fails at 7.
+- **Cross-refs:** `indexer-shed-is-not-replay-healed`

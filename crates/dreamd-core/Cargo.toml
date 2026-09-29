@@ -59,6 +59,11 @@ tracing-appender = "0.2"
 # pulls hyper + tower-service; the explicit tower-http dep it used to defer to
 # WEG-144 now sits right below (AILAB-189).
 axum = { version = "0.8", default-features = true }
+# BZR-194 — repeatable `exclude=` on `GET /api/v1/recall`. axum's `Query`
+# cannot collect a repeated key into a Vec, so `RecallParams::from_query`
+# splits pairs itself. Pinned to "0.7" to land on the 0.7.1 axum already
+# resolves (default `query` feature); adds no new crate to the graph.
+serde_urlencoded = "0.7"
 # AILAB-189 / WEG-144 — per-request HTTP spans (peer UID + request id) on the
 # UDS router; `server::http::router::build_router` is the sole user. Pinned to
 # "0.6" to land on the 0.6.11 already resolved in Cargo.lock as a reqwest

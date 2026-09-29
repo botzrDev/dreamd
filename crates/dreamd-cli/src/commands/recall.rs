@@ -22,6 +22,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use dreamd_core::collector::RecallExclusion;
 use dreamd_core::{AgentRoot, LayoutError, RecallResult};
 use tantivy::Index;
 
@@ -217,7 +218,9 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
 /// `dreamd recall <query>` entry point.
 ///
 /// Discovers the store, opens the index read-only, runs the salience-scored
-/// recall, and writes the rendered report to `out`. `now_sec` is the query
+/// recall, and writes the rendered report to `out`. Documents matching
+/// `exclusion` (`--without` / `--without-cluster`, BZR-194) are dropped before
+/// top-k; the index is opened read-only and never modified. `now_sec` is the query
 /// instant (wall clock at the call site) used to derive `age_days` and the
 /// salience decay. Errors are written to `err` as `dreamd: error — …` and
 /// returned typed for exit-code mapping in `cli::run`.
@@ -226,6 +229,7 @@ pub fn run(
     query: &str,
     k: usize,
     explain: bool,
+    exclusion: &RecallExclusion,
     now_sec: i64,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -270,8 +274,10 @@ pub fn run(
     let reader = index.reader().map_err(RecallError::Search)?;
 
     let (_schema, fields) = dreamd_core::index::build_schema();
-    let results = dreamd_core::recall(&reader, &fields, query, k, None, now_sec)
-        .map_err(RecallError::Search)?;
+    let results = dreamd_core::collector::recall_excluding(
+        &reader, &fields, query, k, None, exclusion, now_sec,
+    )
+    .map_err(RecallError::Search)?;
 
     write!(out, "{}", render_report(&results, now_sec, explain))?;
     Ok(())

@@ -86,3 +86,27 @@ the markdown table. Each object carries `id`, `timestamp`, `skill_action`,
 
 `dreamd blame` does not change the `dreamd recall` columns or its default
 `-k` of 10.
+
+## Counterfactual recall: `--without` / `exclude=` (BZR-194)
+
+Counterfactual recall answers "what would recall return if these memories
+were absent?" Matching documents are dropped inside the salience collector,
+before the top-k heap is filled, so up to `k` of the remaining hits come
+back. The index is not written; nothing is deleted.
+
+- `dreamd recall <query> --without <event_id>` is repeatable and matches the
+  stored `event_id` exactly.
+- `dreamd recall <query> --without-cluster <skill_action>` is repeatable. It
+  drops every hit whose `skill_action` equals the prefix or extends it with
+  `::`, on both the episodic and semantic layers. `rust::error_handling`
+  matches itself and `rust::error_handling::axum`; it does not match `rust`,
+  `rustacean`, or `rust::errors`.
+- `GET /api/v1/recall?q=…&exclude=<event_id>` takes a repeatable `exclude`
+  (`exclude=evt_a&exclude=evt_b`). There is no cluster query parameter. With
+  `explain=1`, `citations` covers the filtered hits.
+- An `evt_…` id does not remove the `lsn_evt_…` lesson document derived from
+  it. Exclude the cluster to drop the lesson too.
+- MCP `search_nodes` and `dreamd blame` do not take these flags.
+
+With no exclusion, recall is unchanged and never reads the stored-document
+store during collection.

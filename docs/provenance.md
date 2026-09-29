@@ -1,8 +1,8 @@
 # Provenance ledger format (`provenance/1.0`)
 
-**Status: not implemented.** This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. dreamd does not read or write this tree. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (unimplemented branch objects).
+**Status: recording is implemented; proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). Proofs, signatures, and `embedding` edges are not implemented. This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (unimplemented branch objects).
 
-This page specifies how a future implementation records which derived artifacts each episodic event feeds, commits to that set with a Merkle root, and proves one event's membership with a signed proof. It is the format only. Recording, the proof command, and the verifier program are separate, later work that builds on this page.
+This page specifies how dreamd records which derived artifacts each episodic event feeds, how that set is committed to with a Merkle root, and how one event's membership is proved with a signed proof. It is the format. The proof command and the verifier program are separate, later work that builds on this page.
 
 **Why this format also matters beyond forgetting (future).** The ledger records which derived artifacts each event feeds. The same edges are the substrate a trust label would ride on: a scalar per event saying where it came from and how far to trust it, joined along these edges on derivation, so that whatever releases an effect can refuse one built on data below its label. That rule is recorded as direction in the dreamOS charter in the momo kernel repository (RFC-011, accepted 2026-09-26; see `ROADMAP.md`, "Direction — provenance and trust"). This page specifies no label, no join rule, and no consumer of one; a trust label MUST NOT be inferred from any field defined here.
 

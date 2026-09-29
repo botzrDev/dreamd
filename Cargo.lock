@@ -964,6 +964,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tantivy",
  "tempfile",
  "thiserror 1.0.69",

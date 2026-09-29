@@ -42,6 +42,11 @@ pub struct RecallParams {
     /// including absent, omits it. HTTP-only — MCP `search_nodes` has no
     /// equivalent parameter.
     pub explain: Option<String>,
+    /// Repeatable `exclude=<event_id>`. Absent deserializes as an empty vec.
+    /// Counterfactual recall (BZR-194); HTTP-only, and there is no cluster
+    /// parameter.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Default max results for recall when `k` is omitted (HTTP and MCP).
@@ -56,6 +61,22 @@ impl RecallParams {
     /// `true` only when `explain` is the exact string `"1"`.
     pub fn explain_requested(&self) -> bool {
         self.explain.as_deref() == Some("1")
+    }
+
+    /// Parse a raw URL query string, collecting every `exclude=` value.
+    ///
+    /// `serde_urlencoded` (axum's `Query`) cannot deserialize a repeated key
+    /// into a `Vec`, so the `exclude` pairs are split off first and the rest
+    /// goes through the derived `Deserialize` unchanged.
+    pub fn from_query(raw: &str) -> Result<Self, serde_urlencoded::de::Error> {
+        let pairs: Vec<(String, String)> = serde_urlencoded::from_str(raw)?;
+        let (exclude, rest): (Vec<_>, Vec<_>) =
+            pairs.into_iter().partition(|(key, _)| key == "exclude");
+        let rest = serde_urlencoded::to_string(rest)
+            .map_err(<serde_urlencoded::de::Error as serde::de::Error>::custom)?;
+        let mut params: Self = serde_urlencoded::from_str(&rest)?;
+        params.exclude = exclude.into_iter().map(|(_, value)| value).collect();
+        Ok(params)
     }
 }
 
@@ -129,4 +150,29 @@ pub struct CitationJson {
     pub importance: f64,
     /// Cluster occurrence count (bounded-staleness sidecar).
     pub recurrence: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_params_exclude_is_repeatable_and_defaults_empty() {
+        let params = RecallParams::from_query("q=axum&exclude=evt_a&k=3&exclude=evt_b").unwrap();
+        assert_eq!(params.q, "axum");
+        assert_eq!(params.k, Some(3));
+        assert_eq!(params.exclude, vec!["evt_a", "evt_b"]);
+
+        let params = RecallParams::from_query("q=axum").unwrap();
+        assert!(params.exclude.is_empty());
+        assert_eq!(params.k_or_default(), DEFAULT_RECALL_K);
+
+        let params: RecallParams = serde_json::from_str(r#"{"q":"axum"}"#).unwrap();
+        assert!(params.exclude.is_empty(), "serde default is an empty vec");
+
+        assert!(
+            RecallParams::from_query("exclude=evt_a").is_err(),
+            "q is still required"
+        );
+    }
 }
