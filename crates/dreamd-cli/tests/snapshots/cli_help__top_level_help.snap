@@ -13,6 +13,7 @@ Commands:
   dream           Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
   init            Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
   mcp             Start the MCP server (bridges to daemon if running, otherwise in-process)
+  memory          Name memory snapshots as branches and check them out (BZR-150)
   migrate         Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
   recall          Search stored memories by query, ranked by relevance and importance (markdown table)
   score           List the top-N stored memories by importance, without a search query

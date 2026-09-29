@@ -84,6 +84,9 @@ test('blame -> dreamd blame (BZR-193: not routed to mcp)', () => {
 test('salience-drift -> dreamd salience-drift (BZR-195: not routed to mcp)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['salience-drift']), ['salience-drift']);
 });
+test('memory -> dreamd memory (BZR-150: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['memory', 'branches']), ['memory', 'branches']);
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

@@ -1,0 +1,11 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"memory\", \"branches\")"
+---
+List branches; `*` marks the current one
+
+Usage: branches
+
+Options:
+  -h, --help
+          Print help

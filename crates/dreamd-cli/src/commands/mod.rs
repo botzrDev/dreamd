@@ -11,6 +11,7 @@ pub mod dream;
 pub mod init;
 pub mod lifecycle_cleanup;
 pub mod mcp;
+pub mod memory;
 pub mod migrate;
 pub mod recall;
 pub mod reset;

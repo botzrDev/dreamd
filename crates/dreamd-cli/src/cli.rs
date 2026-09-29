@@ -120,6 +120,11 @@ pub enum Command {
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),
+    /// Name memory snapshots as branches and check them out (BZR-150).
+    ///
+    /// Refs live under .agent/.dreamd/branches/. Checkout replaces the live
+    /// memory files and refuses while `dreamd watch` is running.
+    Memory(MemoryArgs),
     /// Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op).
     Migrate(MigrateArgs),
     /// Search stored memories by query, ranked by relevance and importance (markdown table).
@@ -286,6 +291,42 @@ pub struct SalienceDriftArgs {
     /// Print one compact JSON report instead of the text lines.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Args for `dreamd memory` (BZR-150). Nested like [`ServiceArgs`]. Format is
+/// `docs/branching.md` (`branches/1.0`).
+#[derive(Args)]
+pub struct MemoryArgs {
+    #[command(subcommand)]
+    pub command: MemoryCommand,
+}
+
+#[derive(Subcommand)]
+pub enum MemoryCommand {
+    /// Snapshot the live memory files, name the snapshot <NAME>, and make it current.
+    ///
+    /// Fails if the branch already exists. Prints the object id.
+    Branch {
+        /// Branch name: [a-z0-9][a-z0-9._-]{0,63}, no `..`.
+        name: String,
+    },
+    /// Replace the live memory files with branch <NAME> and make it current.
+    ///
+    /// Refuses while the daemon socket exists; stop `dreamd watch` first.
+    /// Prints the object id.
+    Checkout {
+        /// Branch name to check out.
+        name: String,
+    },
+    /// List branches; `*` marks the current one.
+    Branches,
+    /// Delete branch <NAME>. The snapshot object stays on disk.
+    ///
+    /// Refuses to delete the current branch.
+    Delete {
+        /// Branch name to delete.
+        name: String,
+    },
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -968,6 +1009,41 @@ fn run_salience_drift(args: SalienceDriftArgs) -> ExitCode {
     }
 }
 
+/// `dreamd memory …` (BZR-150). Never opens a Tantivy index; stdout stays
+/// unlocked per call. Exit 2 when no `.agent/` store is found, 1 on any
+/// snapshot error (including the daemon-socket refusal on checkout).
+fn run_memory(command: MemoryCommand) -> ExitCode {
+    use commands::memory::{self, MemoryError};
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let mut out = std::io::stdout();
+    let result = match command {
+        MemoryCommand::Branch { name } => {
+            memory::run_branch(&cwd, &name, chrono::Utc::now().timestamp(), &mut out)
+        }
+        MemoryCommand::Checkout { name } => {
+            let socket = home_dir()
+                .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).socket_path());
+            memory::run_checkout(&cwd, &name, socket.as_deref(), &mut out)
+        }
+        MemoryCommand::Branches => memory::run_branches(&cwd, &mut out),
+        MemoryCommand::Delete { name } => memory::run_delete(&cwd, &name),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e @ MemoryError::NotFound) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_reset_workspace(yes: bool) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
@@ -1436,6 +1512,7 @@ pub fn run() -> ExitCode {
         Command::Dream(args) => run_dream(args),
         Command::Init(args) => run_init(args),
         Command::Mcp(args) => run_mcp(args),
+        Command::Memory(args) => run_memory(args.command),
         Command::Migrate(args) => run_migrate(args),
         Command::Recall(args) => run_recall(args),
         Command::Score(args) => run_score(args),
@@ -1684,6 +1761,32 @@ mod tests {
             })) => assert!(yes),
             _ => panic!("expected Reset workspace --yes"),
         }
+    }
+
+    #[test]
+    fn parses_memory_subcommands() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Some(Command::Memory(MemoryArgs { command })) => command,
+            _ => panic!("expected Memory for {argv:?}"),
+        };
+        assert!(matches!(
+            parse(&["dreamd", "memory", "branch", "main"]),
+            MemoryCommand::Branch { name } if name == "main"
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "checkout", "exp.1"]),
+            MemoryCommand::Checkout { name } if name == "exp.1"
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "branches"]),
+            MemoryCommand::Branches
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "delete", "old"]),
+            MemoryCommand::Delete { name } if name == "old"
+        ));
+        assert!(Cli::try_parse_from(["dreamd", "memory", "branch"]).is_err());
+        assert!(Cli::try_parse_from(["dreamd", "memory"]).is_err());
     }
 
     #[test]

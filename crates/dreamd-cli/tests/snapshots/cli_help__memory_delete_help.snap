@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"memory\", \"delete\")"
+---
+Delete branch <NAME>. The snapshot object stays on disk.
+
+Refuses to delete the current branch.
+
+Usage: delete <NAME>
+
+Arguments:
+  <NAME>
+          Branch name to delete
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

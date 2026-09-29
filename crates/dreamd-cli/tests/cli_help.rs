@@ -2,8 +2,9 @@
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
 //! top-level `--help`, each subcommand `--help` (archive, blame, init, dream, mcp,
-//! migrate, doctor, recall, salience-drift, score, watch, reset, service, setup,
-//! status, uninstall, update, version), nested `reset workspace --help` and
+//! memory, migrate, doctor, recall, salience-drift, score, watch, reset, service,
+//! setup, status, uninstall, update, version), nested `reset workspace --help`,
+//! `memory branch|checkout|branches|delete --help`, and
 //! `service install|start|restart|status|uninstall --help`,
 //! plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`).
@@ -140,6 +141,43 @@ fn snapshot_reset_workspace_help() {
     assert_snapshot!(
         "reset_workspace_help",
         nested_subcommand_help("reset", "workspace")
+    );
+}
+
+#[test]
+fn snapshot_memory_help() {
+    assert_snapshot!("memory_help", subcommand_help("memory"));
+}
+
+#[test]
+fn snapshot_memory_branch_help() {
+    assert_snapshot!(
+        "memory_branch_help",
+        nested_subcommand_help("memory", "branch")
+    );
+}
+
+#[test]
+fn snapshot_memory_checkout_help() {
+    assert_snapshot!(
+        "memory_checkout_help",
+        nested_subcommand_help("memory", "checkout")
+    );
+}
+
+#[test]
+fn snapshot_memory_branches_help() {
+    assert_snapshot!(
+        "memory_branches_help",
+        nested_subcommand_help("memory", "branches")
+    );
+}
+
+#[test]
+fn snapshot_memory_delete_help() {
+    assert_snapshot!(
+        "memory_delete_help",
+        nested_subcommand_help("memory", "delete")
     );
 }
 

@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"memory\", \"checkout\")"
+---
+Replace the live memory files with branch <NAME> and make it current.
+
+Refuses while the daemon socket exists; stop `dreamd watch` first. Prints the object id.
+
+Usage: checkout <NAME>
+
+Arguments:
+  <NAME>
+          Branch name to check out
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

@@ -35,6 +35,7 @@ pub mod letta;
 /// AILAB-204 / DR-304 — LLM client wrapper with deterministic auto-fallback.
 pub mod llm;
 pub mod mcp;
+pub mod memory_diff;
 /// BZR-173 — one recall/append interface, in-process and daemon adapters.
 pub mod memory_store;
 pub mod migrate;

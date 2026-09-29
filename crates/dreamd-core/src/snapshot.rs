@@ -7,7 +7,12 @@
 //! recorded on the ref that names it, `branches/refs/snap-<yyyymmddthhmmssz>`.
 //!
 //! The decay archive directory is a different tree and is never written here.
-//! Neither is the branch pointer file, checkout, or any CLI: those are BZR-150.
+//!
+//! Named branches (BZR-150): [`create_branch`] points `refs/<name>` at a fresh
+//! object and attaches `branches/HEAD`; [`checkout`] copies an object's bytes
+//! back over the live files; [`delete_branch`] removes a ref, never an object.
+//! [`create_autosnap`] alone never writes HEAD. There is one live store: learns
+//! keep appending to the live JSONL, and no ref moves when they do.
 //!
 //! Object bytes are copies of the live files, read once and hashed from the
 //! same buffer that is written. A live path is never hardlinked (the episodic
@@ -48,6 +53,23 @@ pub enum SnapshotError {
     Serialize(#[from] serde_json::Error),
     #[error("timestamp {0} is out of range")]
     InvalidTimestamp(i64),
+    #[error("invalid branch name {0:?}: expected [a-z0-9][a-z0-9._-]{{0,63}} with no `..`")]
+    InvalidName(String),
+    #[error("branch {0:?} already exists")]
+    BranchExists(String),
+    #[error("branch {0:?} not found")]
+    BranchNotFound(String),
+    #[error("branch {0:?} is checked out (HEAD); check out another branch first")]
+    BranchIsHead(String),
+    #[error("ref {path}: {reason}")]
+    BadRef { path: PathBuf, reason: String },
+    #[error("object {id}: {reason}")]
+    BadObject { id: String, reason: String },
+    #[error(
+        "daemon socket {0} exists; stop `dreamd watch` before checkout \
+         (it holds the live episodic log open)"
+    )]
+    DaemonRunning(PathBuf),
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> SnapshotError + '_ {
@@ -252,6 +274,228 @@ pub fn create_autosnap(agent_root: &AgentRoot, now_sec: i64) -> Result<String, S
     Ok(id)
 }
 
+/// Filename of the branch pointer inside `branches/`.
+pub const HEAD_FILE: &str = "HEAD";
+
+/// A row of [`list_branches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRow {
+    pub name: String,
+    pub id: String,
+    /// `branches/HEAD` is `ref: refs/<name>`.
+    pub current: bool,
+}
+
+/// `[a-z0-9][a-z0-9._-]{0,63}`, no `..`. The grammar already excludes `/`.
+pub fn is_valid_branch_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter().all(|&c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-')
+        })
+        && !name.contains("..")
+}
+
+fn validate_name(name: &str) -> Result<(), SnapshotError> {
+    if is_valid_branch_name(name) {
+        Ok(())
+    } else {
+        Err(SnapshotError::InvalidName(name.to_string()))
+    }
+}
+
+fn is_object_id(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Object id on the first line of `refs/<name>`. A missing ref is
+/// [`SnapshotError::BranchNotFound`].
+fn read_ref_id(refs_dir: &Path, name: &str) -> Result<String, SnapshotError> {
+    let path = refs_dir.join(name);
+    let body = match fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(SnapshotError::BranchNotFound(name.to_string()))
+        }
+        Err(e) => return Err(io_err(&path)(e)),
+    };
+    let id = body.lines().next().unwrap_or("");
+    if !is_object_id(id) {
+        return Err(SnapshotError::BadRef {
+            path,
+            reason: "first line is not a 64-hex object id".to_string(),
+        });
+    }
+    Ok(id.to_string())
+}
+
+/// The branch name HEAD is attached to, or `None` when HEAD is absent,
+/// detached, or unreadable as a ref line.
+fn head_branch(agent_root: &AgentRoot) -> Result<Option<String>, SnapshotError> {
+    let path = agent_root.branches_dir().join(HEAD_FILE);
+    match fs::read_to_string(&path) {
+        Ok(body) => Ok(body
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("ref: refs/"))
+            .map(str::to_string)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(&path)(e)),
+    }
+}
+
+/// `std::fs::write` to a dot-prefixed sibling, then `rename` over `dest`.
+fn write_replace(dest: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir).map_err(io_err(dir))?;
+    let file_name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, bytes).map_err(io_err(&tmp))?;
+    fs::rename(&tmp, dest).map_err(io_err(dest))
+}
+
+fn write_head(agent_root: &AgentRoot, name: &str) -> Result<(), SnapshotError> {
+    let head = agent_root.branches_dir().join(HEAD_FILE);
+    write_replace(&head, format!("ref: refs/{name}\n").as_bytes())
+}
+
+/// Snapshot the live files (via [`create_autosnap`]), point `refs/<name>` at
+/// the object, and attach HEAD to it. Returns the object id.
+///
+/// An existing `refs/<name>` is an error and is left unchanged; no autosnap is
+/// taken in that case. `now_sec` is the caller's clock.
+pub fn create_branch(
+    agent_root: &AgentRoot,
+    name: &str,
+    now_sec: i64,
+) -> Result<String, SnapshotError> {
+    validate_name(name)?;
+    let refs_dir = agent_root.branches_refs_dir();
+    if refs_dir.join(name).exists() {
+        return Err(SnapshotError::BranchExists(name.to_string()));
+    }
+    let id = create_autosnap(agent_root, now_sec)?;
+    write_ref(&refs_dir, name, &id, now_sec)?;
+    write_head(agent_root, name)?;
+    Ok(id)
+}
+
+/// Replace the four live memory files with the bytes of the object
+/// `refs/<name>` names, then attach HEAD to `<name>`. Returns the object id.
+///
+/// Refuses, touching nothing, when `daemon_socket` is `Some` and exists: a
+/// running daemon holds the live JSONL open and would keep appending to the
+/// replaced inode. Every object file is read and hash-checked before any live
+/// file is replaced. Each live file is written by copy (never hardlinked to the
+/// object) to a temp sibling and renamed. The four renames are sequential; a
+/// crash between them can leave a torn live store, and HEAD is written only
+/// after all four succeed.
+pub fn checkout(
+    agent_root: &AgentRoot,
+    name: &str,
+    daemon_socket: Option<&Path>,
+) -> Result<String, SnapshotError> {
+    validate_name(name)?;
+    if let Some(sock) = daemon_socket {
+        if sock.exists() {
+            return Err(SnapshotError::DaemonRunning(sock.to_path_buf()));
+        }
+    }
+    let id = read_ref_id(&agent_root.branches_refs_dir(), name)?;
+    let obj = agent_root.branches_objects_dir().join(&id);
+    let manifest_path = obj.join(MANIFEST_FILE);
+    let raw = fs::read(&manifest_path).map_err(io_err(&manifest_path))?;
+    let bad = |reason: String| SnapshotError::BadObject {
+        id: id.clone(),
+        reason,
+    };
+    if sha256_hex(&raw) != id {
+        return Err(bad("manifest hash does not match the object id".to_string()));
+    }
+    let manifest: Manifest = serde_json::from_slice(&raw)?;
+
+    // Stage every replacement in memory before the first live rename.
+    let mut plan: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(4);
+    for (rel, live) in live_files(agent_root) {
+        let bytes = match manifest.files.iter().find(|f| f.path == rel) {
+            Some(entry) => {
+                let src = obj.join(rel);
+                let bytes = fs::read(&src).map_err(io_err(&src))?;
+                if sha256_hex(&bytes) != entry.sha256 {
+                    return Err(bad(format!("{rel} does not match its manifest sha256")));
+                }
+                Some(bytes)
+            }
+            None => None,
+        };
+        plan.push((live, bytes));
+    }
+
+    for (live, bytes) in &plan {
+        match bytes {
+            Some(bytes) => write_replace(live, bytes)?,
+            None => match fs::remove_file(live) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err(live)(e)),
+            },
+        }
+    }
+    write_head(agent_root, name)?;
+    Ok(id)
+}
+
+/// Remove `refs/<name>`. The object directory stays. Refuses when HEAD is
+/// attached to `<name>`; a missing ref is [`SnapshotError::BranchNotFound`].
+pub fn delete_branch(agent_root: &AgentRoot, name: &str) -> Result<(), SnapshotError> {
+    validate_name(name)?;
+    if head_branch(agent_root)?.as_deref() == Some(name) {
+        return Err(SnapshotError::BranchIsHead(name.to_string()));
+    }
+    let path = agent_root.branches_refs_dir().join(name);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(SnapshotError::BranchNotFound(name.to_string()))
+        }
+        Err(e) => Err(io_err(&path)(e)),
+    }
+}
+
+/// Every well-named ref under `refs/`, sorted by name. Temp files and other
+/// names outside the grammar are skipped. A missing `refs/` is an empty list.
+pub fn list_branches(agent_root: &AgentRoot) -> Result<Vec<BranchRow>, SnapshotError> {
+    let refs_dir = agent_root.branches_refs_dir();
+    let entries = match fs::read_dir(&refs_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(&refs_dir)(e)),
+    };
+    let head = head_branch(agent_root)?;
+    let mut rows = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_err(&refs_dir))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_valid_branch_name(&name) || !entry.path().is_file() {
+            continue;
+        }
+        let id = read_ref_id(&refs_dir, &name)?;
+        let current = head.as_deref() == Some(name.as_str());
+        rows.push(BranchRow { name, id, current });
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +687,234 @@ mod tests {
             .modified()
             .unwrap();
         assert_eq!(before, after, "an existing object is not rewritten");
+    }
+
+    fn head_path(root: &AgentRoot) -> PathBuf {
+        root.branches_dir().join(HEAD_FILE)
+    }
+
+    #[test]
+    fn branch_name_grammar() {
+        for ok in ["main", "a", "0x", "feat.v2", "a_b-c", &"a".repeat(64)] {
+            assert!(is_valid_branch_name(ok), "{ok:?} should be valid");
+        }
+        for bad in [
+            "",
+            "Main",
+            "-a",
+            ".a",
+            "_a",
+            "a..b",
+            "a/b",
+            "a b",
+            "HEAD",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_valid_branch_name(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn create_branch_writes_ref_and_head_but_autosnap_alone_does_not() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        create_autosnap(&root, NOW_SEC).unwrap();
+        assert!(!head_path(&root).exists(), "autosnap never writes HEAD");
+
+        let id = create_branch(&root, "main", NOW_SEC + 1).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.branches_refs_dir().join("main")).unwrap(),
+            format!("{id}\n2026-09-29T14:03:01Z\n")
+        );
+        assert_eq!(
+            fs::read_to_string(head_path(&root)).unwrap(),
+            "ref: refs/main\n"
+        );
+        assert!(object_dir(&root, &id).join(MANIFEST_FILE).is_file());
+
+        let rows = list_branches(&root).unwrap();
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["main", "snap-20260929t140300z", "snap-20260929t140301z"]
+        );
+        assert!(rows[0].current && !rows[1].current && !rows[2].current);
+        assert_eq!(rows[0].id, id);
+    }
+
+    #[test]
+    fn create_branch_rejects_bad_name() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        assert!(matches!(
+            create_branch(&root, "../x", NOW_SEC),
+            Err(SnapshotError::InvalidName(_))
+        ));
+        assert!(!root.branches_dir().exists());
+    }
+
+    #[test]
+    fn existing_branch_is_an_error_and_ref_bytes_are_unchanged() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        create_branch(&root, "main", NOW_SEC).unwrap();
+        let ref_path = root.branches_refs_dir().join("main");
+        let before = fs::read(&ref_path).unwrap();
+
+        fs::write(root.episodic_jsonl(), b"{\"x\":1}\n{\"x\":2}\n").unwrap();
+        let err = create_branch(&root, "main", NOW_SEC + 60).unwrap_err();
+        assert!(matches!(err, SnapshotError::BranchExists(ref n) if n == "main"));
+        assert_eq!(fs::read(&ref_path).unwrap(), before);
+        assert!(
+            !root
+                .branches_refs_dir()
+                .join("snap-20260929t140400z")
+                .exists(),
+            "no autosnap is taken for a refused branch"
+        );
+    }
+
+    #[test]
+    fn checkout_replaces_live_files_with_object_copies() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        let id_a = create_branch(&root, "a", NOW_SEC).unwrap();
+
+        // Diverge: grow the log and add lessons, then branch b.
+        fs::write(root.episodic_jsonl(), b"{\"x\":1}\n{\"x\":2}\n").unwrap();
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        fs::write(root.lessons_md(), b"# lessons\n").unwrap();
+        create_branch(&root, "b", NOW_SEC + 1).unwrap();
+
+        assert_eq!(checkout(&root, "a", None).unwrap(), id_a);
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"{\"x\":1}\n");
+        assert!(
+            !root.lessons_md().exists(),
+            "file the object omits is removed"
+        );
+        assert_eq!(
+            fs::read_to_string(head_path(&root)).unwrap(),
+            "ref: refs/a\n"
+        );
+
+        // Appending to the live log does not reach the object.
+        let mut live = fs::OpenOptions::new()
+            .append(true)
+            .open(root.episodic_jsonl())
+            .unwrap();
+        live.write_all(b"{\"x\":3}\n").unwrap();
+        live.sync_all().unwrap();
+        let obj_log = object_dir(&root, &id_a).join("episodic/AGENT_LEARNINGS.jsonl");
+        assert_eq!(fs::read(&obj_log).unwrap(), b"{\"x\":1}\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                fs::metadata(root.episodic_jsonl()).unwrap().ino(),
+                fs::metadata(&obj_log).unwrap().ino()
+            );
+        }
+        // No learn moves a ref.
+        assert!(fs::read_to_string(root.branches_refs_dir().join("a"))
+            .unwrap()
+            .starts_with(&id_a));
+
+        checkout(&root, "b", None).unwrap();
+        assert_eq!(
+            fs::read(root.episodic_jsonl()).unwrap(),
+            b"{\"x\":1}\n{\"x\":2}\n"
+        );
+        assert_eq!(fs::read(root.lessons_md()).unwrap(), b"# lessons\n");
+        let leftovers: Vec<_> = fs::read_dir(root.episodic_jsonl().parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    #[test]
+    fn checkout_refuses_when_daemon_socket_exists() {
+        let (dir, root) = scaffold(b"{\"x\":1}\n", None);
+        create_branch(&root, "a", NOW_SEC).unwrap();
+        fs::write(root.episodic_jsonl(), b"{\"x\":1}\n{\"x\":2}\n").unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let err = checkout(&root, "a", Some(&sock)).unwrap_err();
+        assert!(matches!(err, SnapshotError::DaemonRunning(_)));
+        assert!(err.to_string().contains("dreamd watch"));
+        assert_eq!(
+            fs::read(root.episodic_jsonl()).unwrap(),
+            b"{\"x\":1}\n{\"x\":2}\n"
+        );
+
+        // An absent socket path does not block.
+        fs::remove_file(&sock).unwrap();
+        checkout(&root, "a", Some(&sock)).unwrap();
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"{\"x\":1}\n");
+    }
+
+    #[test]
+    fn checkout_rejects_a_tampered_object_before_touching_live_files() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        let id = create_branch(&root, "a", NOW_SEC).unwrap();
+        fs::write(root.episodic_jsonl(), b"{\"x\":9}\n").unwrap();
+        let obj_log = object_dir(&root, &id).join("episodic/AGENT_LEARNINGS.jsonl");
+        fs::remove_file(&obj_log).unwrap();
+        fs::write(&obj_log, b"{\"x\":666}\n").unwrap();
+
+        assert!(matches!(
+            checkout(&root, "a", None),
+            Err(SnapshotError::BadObject { .. })
+        ));
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"{\"x\":9}\n");
+    }
+
+    #[test]
+    fn checkout_of_missing_branch_is_not_found() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        assert!(matches!(
+            checkout(&root, "nope", None),
+            Err(SnapshotError::BranchNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn delete_refuses_head_and_keeps_objects() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        let id_a = create_branch(&root, "a", NOW_SEC).unwrap();
+        create_branch(&root, "b", NOW_SEC + 1).unwrap(); // HEAD -> b
+
+        let err = delete_branch(&root, "b").unwrap_err();
+        assert!(matches!(err, SnapshotError::BranchIsHead(ref n) if n == "b"));
+        assert!(root.branches_refs_dir().join("b").is_file());
+
+        delete_branch(&root, "a").unwrap();
+        assert!(!root.branches_refs_dir().join("a").exists());
+        assert!(object_dir(&root, &id_a).join(MANIFEST_FILE).is_file());
+
+        assert!(matches!(
+            delete_branch(&root, "a"),
+            Err(SnapshotError::BranchNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn list_skips_names_outside_the_grammar() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        let id = create_branch(&root, "main", NOW_SEC).unwrap();
+        let refs = root.branches_refs_dir();
+        fs::write(refs.join(".main.tmp"), format!("{id}\n")).unwrap();
+        fs::write(refs.join("Upper"), format!("{id}\n")).unwrap();
+
+        let names: Vec<_> = list_branches(&root)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["main", "snap-20260929t140300z"]);
+    }
+
+    #[test]
+    fn list_without_refs_dir_is_empty() {
+        let (_dir, root) = scaffold(b"{\"x\":1}\n", None);
+        assert!(list_branches(&root).unwrap().is_empty());
     }
 }
