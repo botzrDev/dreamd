@@ -110,3 +110,44 @@ back. The index is not written; nothing is deleted.
 
 With no exclusion, recall is unchanged and never reads the stored-document
 store during collection.
+
+## Salience distribution: `GET /api/v1/observability/salience` / `dreamd salience-drift` (BZR-195)
+
+Both surfaces report the same distribution over every episodic document in
+the project index:
+
+- **Score.** Each document is scored with `salience()` —
+  `exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`.
+  There is no query, so there is no BM25 term.
+- **Excluded.** Lesson documents (`event_id` starting with `lsn_`) are derived
+  from events, not events, and are not counted.
+- **`histogram`.** Ten buckets. Index `i` is `[i/10, (i+1)/10)` for `i` in
+  0..9; index 9 is `[0.9, +∞)`. A score below 0 goes in index 0.
+- **`top_clusters`.** At most 5 `skill_action` clusters by mean salience,
+  descending, ties broken by `skill_action` ascending. Each is
+  `{"skill_action","count","mean"}`.
+- **Snapshot.** Every call — the GET and the CLI — writes today's snapshot to
+  `.agent/.dreamd/observability/salience-<UTC date>.json`, overwriting that
+  date's file. There is no background scheduler. The snapshot omits `drift`
+  and `drift_against`.
+- **`drift`.** Today's `mean` minus the `mean` in
+  `salience-<date − 7 days>.json`. It is `null` when that exact file is absent
+  or does not parse; a file from 6 or 8 days earlier does not count.
+  `drift_against` names that date even when `drift` is `null`.
+
+Body (`200`), field order as shown; `schema_version` is `observability/1.0`:
+
+```json
+{"schema_version":"observability/1.0","date":"2026-09-29","total":42,"mean":0.183,"histogram":[20,9,6,3,2,1,1,0,0,0],"top_clusters":[{"skill_action":"rust::tokio","count":4,"mean":0.41}],"drift":null,"drift_against":"2026-09-22"}
+```
+
+`dreamd salience-drift` prints one summary line, then one line per cluster:
+
+```
+2026-09-29 total=42 mean=0.183000 drift=none
+rust::tokio count=4 mean=0.410000
+```
+
+`dreamd salience-drift --json` prints the body above as one compact line. The
+CLI opens the index read-only and exits 2 when no `.agent/` store is found.
+The endpoint takes no query parameters; MCP `search_nodes` is unchanged.

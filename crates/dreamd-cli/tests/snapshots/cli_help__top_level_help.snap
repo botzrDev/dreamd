@@ -1,6 +1,5 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 53
 expression: top_help()
 ---
 Portable memory layer for AI coding agents
@@ -8,23 +7,25 @@ Portable memory layer for AI coding agents
 Usage: dreamd [COMMAND]
 
 Commands:
-  archive    Maintain the on-disk memory log. Today: unpin entries with --force-unpin
-  doctor     Run health checks and print status (dream-cycle mode, etc.)
-  dream      Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
-  init       Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
-  mcp        Start the MCP server (bridges to daemon if running, otherwise in-process)
-  migrate    Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
-  recall     Search stored memories by query, ranked by relevance and importance (markdown table)
-  score      List the top-N stored memories by importance, without a search query
-  reset      Reset scratch state. Today only `workspace` is supported
-  service    Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task)
-  setup      Front door: scaffold .agent/ (via init) and print the harness wiring next steps
-  status     Print daemon liveness, resolved project, last dream cycle, and recent log
-  uninstall  Stop local dreamd servers, unregister this project, and clear caches
-  update     Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
-  watch      Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
-  version    Print structured version information (semver, commit, build date, target, schema)
-  help       Print this message or the help of the given subcommand(s)
+  archive         Maintain the on-disk memory log. Today: unpin entries with --force-unpin
+  blame           Show which stored memories drove a query's recall ranking (BZR-193)
+  doctor          Run health checks and print status (dream-cycle mode, etc.)
+  dream           Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+  init            Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
+  mcp             Start the MCP server (bridges to daemon if running, otherwise in-process)
+  migrate         Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
+  recall          Search stored memories by query, ranked by relevance and importance (markdown table)
+  score           List the top-N stored memories by importance, without a search query
+  salience-drift  Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago
+  reset           Reset scratch state. Today only `workspace` is supported
+  service         Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task)
+  setup           Front door: scaffold .agent/ (via init) and print the harness wiring next steps
+  status          Print daemon liveness, resolved project, last dream cycle, and recent log
+  uninstall       Stop local dreamd servers, unregister this project, and clear caches
+  update          Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
+  watch           Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+  version         Print structured version information (semver, commit, build date, target, schema)
+  help            Print this message or the help of the given subcommand(s)
 
 Options:
   -V, --version

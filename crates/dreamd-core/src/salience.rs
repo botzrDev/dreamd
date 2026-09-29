@@ -19,6 +19,12 @@
 //! Monotonicity properties over the valid input ranges are enforced by the
 //! WEG-47 proptest suite (`tests/salience_proptest.rs`).
 
+/// BZR-195 — salience distribution report and daily snapshot.
+///
+/// Declared here rather than in `lib.rs` (BZR-160 owns that file).
+#[path = "salience_report.rs"]
+pub mod report;
+
 /// Phase-specific recurrence input for query-time salience.
 ///
 /// Each variant documents what "recurrence" means for that consumer. Callers

@@ -977,6 +977,45 @@ async fn recall_empty_index_returns_empty_results() {
     );
 }
 
+// BZR-195: GET /api/v1/observability/salience.
+#[tokio::test]
+async fn salience_report_empty_index_writes_today_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let state = make_test_state(registry_path);
+    let router = build_router(state);
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/observability/salience")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["schema_version"], "observability/1.0");
+    assert_eq!(json["total"], 0);
+    assert_eq!(
+        json["histogram"],
+        serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    );
+    assert_eq!(json["drift"], serde_json::Value::Null);
+
+    let date = json["date"].as_str().unwrap();
+    let snapshot = crate::layout::AgentRoot::new(dir.path())
+        .dreamd_dir()
+        .join("observability")
+        .join(format!("salience-{date}.json"));
+    assert!(snapshot.exists(), "missing {}", snapshot.display());
+}
+
 #[tokio::test]
 async fn recall_returns_200_for_registered_root() {
     // Smoke test: registered root + valid q param → 200 with results array.

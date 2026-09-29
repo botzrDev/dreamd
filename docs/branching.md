@@ -1,8 +1,8 @@
 # Branch storage format (`branches/1.0`)
 
-**Status: not implemented.** This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. dreamd does not read or write this tree. The directory `.agent/.dreamd/snapshots/` is the decay archive (`<YYYY-MM-DD>.jsonl`) and is not this format.
+**Status: partly implemented.** This format is not part of the v0.1 `.agent/` contract in `SPEC.md`. Each dream cycle writes one snapshot object under `branches/objects/` and one `snap-<yyyymmddthhmmssz>` ref under `branches/refs/` (BZR-160), taken after the cycle starts and before it changes lessons or prunes the episodic log. dreamd does not write `branches/HEAD`, has no checkout, and has no CLI or HTTP route for this tree; branch and checkout commands are later work (BZR-150). The directory `.agent/.dreamd/snapshots/` is the decay archive (`<YYYY-MM-DD>.jsonl`) and is not this format.
 
-This page specifies how a future implementation stores snapshots of a project's memory and names them as branches. It is the storage format only: there is no CLI and no HTTP route for it. The snapshot model and branch commands are separate, later work, and they build on this page.
+This page specifies how dreamd stores snapshots of a project's memory and names them as branches. It is the storage format only.
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), same as [`SPEC.md`](../SPEC.md).
 

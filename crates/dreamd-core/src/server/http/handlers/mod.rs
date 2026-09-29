@@ -6,6 +6,7 @@ mod learn;
 mod migrate;
 mod preferences;
 mod recall;
+mod salience;
 
 pub(crate) use dream::post_dream;
 pub(crate) use health::get_health;
@@ -13,6 +14,7 @@ pub(crate) use learn::post_learn;
 pub(crate) use migrate::post_migrate;
 pub(crate) use preferences::get_preferences;
 pub(crate) use recall::get_recall;
+pub(crate) use salience::get_salience;
 
 // Its sole consumer is `http::tests`, which AILAB-192 gated to
 // `all(test, unix)`. The gate has to match: a `cfg(test)`-only re-export with no

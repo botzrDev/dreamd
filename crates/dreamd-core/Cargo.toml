@@ -154,6 +154,10 @@ tiktoken-rs = "0.12"
 # (0.1.89 in Cargo.lock), so this adds no new crate to the graph. MIT OR
 # Apache-2.0.
 async-trait = "0.1"
+# BZR-160 — SHA-256 object ids and file digests for `snapshot` (`branches/1.0`,
+# docs/branching.md). RustCrypto, MIT OR Apache-2.0. Hex is `{:02x}` over the
+# digest; no `hex` crate.
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

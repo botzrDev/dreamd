@@ -1,0 +1,16 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"salience-drift\")"
+---
+Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago.
+
+Scores every episodic doc with salience alone (no BM25) and writes today's snapshot under `.agent/.dreamd/observability/`.
+
+Usage: salience-drift [OPTIONS]
+
+Options:
+      --json
+          Print one compact JSON report instead of the text lines
+
+  -h, --help
+          Print help (see a summary with '-h')

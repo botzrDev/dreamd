@@ -66,5 +66,6 @@ pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry}
 // `127.0.0.1:0`, publishes the port to `~/.agent/server.json`, and puts a
 // bearer layer from `~/.agent/auth.json` in the slot peer-UID holds on Unix.
 pub mod server;
+pub mod snapshot;
 
 pub use layout::{AgentRoot, DaemonHome, LayoutError, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};

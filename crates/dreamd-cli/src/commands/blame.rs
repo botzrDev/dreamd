@@ -160,6 +160,7 @@ pub fn render_json(results: &[RecallResult], now_sec: i64, explain: bool) -> Str
 /// query instant used to derive `age_days` and the salience decay under
 /// `--explain`. Errors are written to `err` as `dreamd: error — …` and
 /// returned typed for exit-code mapping in `cli::run`.
+#[allow(clippy::too_many_arguments)] // CLI entry: cwd, query, flags, now_sec, out, err
 pub fn run(
     cwd: &Path,
     query: &str,

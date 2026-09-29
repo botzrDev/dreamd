@@ -81,6 +81,9 @@ test('--bind -> dreamd mcp --bind (AILAB-206: Streamable HTTP opt-in)', () => {
 test('blame -> dreamd blame (BZR-193: not routed to mcp)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['blame', 'q']), ['blame', 'q']);
 });
+test('salience-drift -> dreamd salience-drift (BZR-195: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['salience-drift']), ['salience-drift']);
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

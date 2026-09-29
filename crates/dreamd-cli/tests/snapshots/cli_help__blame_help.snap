@@ -1,0 +1,26 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"blame\")"
+---
+Show which stored memories drove a query's recall ranking (BZR-193)
+
+Usage: blame [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>
+          Free-text query (BM25 over episodic content)
+
+Options:
+  -k, --k <K>
+          Max results (default 5 — recall stays at 10)
+          
+          [default: 5]
+
+      --explain
+          Print per-hit salience factor breakdown (DR-204)
+
+      --json
+          Print one compact JSON array instead of the markdown table
+
+  -h, --help
+          Print help

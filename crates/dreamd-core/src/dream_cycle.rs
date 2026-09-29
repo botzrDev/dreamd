@@ -28,6 +28,7 @@ use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
 use crate::provenance::{self, ProvenanceError};
+use crate::snapshot::{self, SnapshotError};
 use crate::wal::{self, WalError};
 
 /// Unified error type for dream-cycle orchestration.
@@ -41,6 +42,8 @@ pub enum DreamCycleError {
     Wal(#[from] WalError),
     #[error("provenance: {0}")]
     Provenance(#[from] ProvenanceError),
+    #[error("snapshot: {0}")]
+    Snapshot(#[from] SnapshotError),
     #[cfg(unix)]
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
@@ -202,6 +205,9 @@ async fn filesystem_phases<B: LlmBackend>(
     // BEFORE commit, leaving an uncommitted WAL for next-startup recovery
     // (state=failed) — so no half-finished cycle is ever recorded "complete".
     wal::begin_cycle(agent_root, now_sec)?;
+    // BZR-160: one pre-mutation image of the four live files, before lessons
+    // can be rewritten or unlinked and before decay prunes the log.
+    snapshot::create_autosnap(agent_root, now_sec)?;
 
     // Consolidation, split so the model call can sit between selection and the
     // write while both still share one exemplar id, one WAL intent, one pin pass.
@@ -829,6 +835,44 @@ mod tests {
 
         assert!(root.lessons_md().exists());
         assert!(!result.decay.decayed_ids.is_empty() || result.decay.kept_count > 0);
+    }
+
+    /// BZR-160: a real cycle leaves one object and one `snap-*` ref, taken
+    /// before consolidation, and never the branch pointer file.
+    #[test]
+    fn in_process_cycle_writes_one_autosnap() {
+        let (_dir, root) = scaffold_fixture();
+        let project_root = root.project_root().to_path_buf();
+        let jsonl_before = fs::read(root.episodic_jsonl()).unwrap();
+
+        run_in_process(&project_root, NOW_SEC, true, true, false).expect("full cycle");
+
+        let refs: Vec<_> = fs::read_dir(root.branches_refs_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(refs, ["snap-20250513t120000z"]);
+        let body = fs::read_to_string(root.branches_refs_dir().join(&refs[0])).unwrap();
+        let id = body.lines().next().unwrap();
+        let obj = root.branches_objects_dir().join(id);
+        assert!(obj.join(snapshot::MANIFEST_FILE).is_file());
+        // Pre-mutation image: the fixture had no LESSONS.md before the cycle.
+        assert!(!obj.join("semantic/LESSONS.md").exists());
+        assert_eq!(
+            fs::read(obj.join("episodic/AGENT_LEARNINGS.jsonl")).unwrap(),
+            jsonl_before
+        );
+        assert!(!root.branches_dir().join("HEAD").exists());
+    }
+
+    #[test]
+    fn preview_leaves_branches_absent() {
+        let (_dir, root) = scaffold_fixture();
+        let project_root = root.project_root().to_path_buf();
+
+        preview_in_process(&project_root, NOW_SEC, true, false).expect("preview");
+
+        assert!(!root.branches_dir().exists(), "--dry must not snapshot");
     }
 
     #[test]

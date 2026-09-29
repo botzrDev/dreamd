@@ -175,6 +175,22 @@ impl AgentRoot {
         self.dreamd_dir().join("snapshots")
     }
 
+    /// `<project>/.agent/.dreamd/branches/` — `branches/1.0` tree
+    /// (`docs/branching.md`, BZR-160 writer). Not the decay archive.
+    pub fn branches_dir(&self) -> PathBuf {
+        self.dreamd_dir().join("branches")
+    }
+
+    /// `<project>/.agent/.dreamd/branches/objects/` — one `<id>/` per snapshot object.
+    pub fn branches_objects_dir(&self) -> PathBuf {
+        self.branches_dir().join("objects")
+    }
+
+    /// `<project>/.agent/.dreamd/branches/refs/` — one two-line file per ref.
+    pub fn branches_refs_dir(&self) -> PathBuf {
+        self.branches_dir().join("refs")
+    }
+
     /// `<project>/.agent/.dreamd/provenance/` — the provenance ledger tree
     /// (BZR-154 format, BZR-155 writer). Not `snapshots/`, not `branches/`.
     pub fn provenance_dir(&self) -> PathBuf {

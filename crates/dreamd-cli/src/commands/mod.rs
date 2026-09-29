@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod migrate;
 pub mod recall;
 pub mod reset;
+pub mod salience;
 pub mod score;
 pub mod service;
 pub mod setup;

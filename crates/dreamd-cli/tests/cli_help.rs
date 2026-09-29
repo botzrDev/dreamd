@@ -1,9 +1,9 @@
 //! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
-//! top-level `--help`, each subcommand `--help` (archive, init, dream, mcp, migrate,
-//! doctor, recall, score, watch, reset, service, setup, status, uninstall, update,
-//! version), nested `reset workspace --help` and
+//! top-level `--help`, each subcommand `--help` (archive, blame, init, dream, mcp,
+//! migrate, doctor, recall, salience-drift, score, watch, reset, service, setup,
+//! status, uninstall, update, version), nested `reset workspace --help` and
 //! `service install|start|restart|status|uninstall --help`,
 //! plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`).
@@ -88,6 +88,16 @@ fn snapshot_doctor_help() {
 #[test]
 fn snapshot_recall_help() {
     assert_snapshot!("recall_help", subcommand_help("recall"));
+}
+
+#[test]
+fn snapshot_blame_help() {
+    assert_snapshot!("blame_help", subcommand_help("blame"));
+}
+
+#[test]
+fn snapshot_salience_drift_help() {
+    assert_snapshot!("salience_drift_help", subcommand_help("salience-drift"));
 }
 
 #[test]

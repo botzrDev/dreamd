@@ -8,7 +8,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 
 use super::handlers::{
-    get_health, get_preferences, get_recall, post_dream, post_learn, post_migrate,
+    get_health, get_preferences, get_recall, get_salience, post_dream, post_learn, post_migrate,
 };
 use super::state::AppState;
 
@@ -31,6 +31,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/health", axum::routing::get(get_health))
         .route("/api/v1/dream", axum::routing::post(post_dream))
         .route("/api/v1/migrate", axum::routing::post(post_migrate))
+        .route(
+            "/api/v1/observability/salience",
+            axum::routing::get(get_salience),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             agent_root_middleware,

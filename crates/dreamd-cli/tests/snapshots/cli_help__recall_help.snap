@@ -19,5 +19,11 @@ Options:
       --explain
           Print per-hit salience factor breakdown (DR-204)
 
+      --without <WITHOUT>
+          Drop these event ids before top-k. Repeatable. Does not modify the index
+
+      --without-cluster <WITHOUT_CLUSTER>
+          Drop hits whose skill_action equals this prefix or extends it with `::`
+
   -h, --help
           Print help

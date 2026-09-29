@@ -129,6 +129,11 @@ pub enum Command {
     /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
     /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
     Score(ScoreArgs),
+    /// Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago.
+    ///
+    /// Scores every episodic doc with salience alone (no BM25) and writes
+    /// today's snapshot under `.agent/.dreamd/observability/`.
+    SalienceDrift(SalienceDriftArgs),
     /// Reset scratch state. Today only `workspace` is supported.
     Reset(ResetArgs),
     /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task).
@@ -273,6 +278,14 @@ pub struct ScoreArgs {
     /// Print per-hit salience factor breakdown (same blocks as `dreamd recall --explain`).
     #[arg(long)]
     pub explain: bool,
+}
+
+/// Args for `dreamd salience-drift` (BZR-195).
+#[derive(Args)]
+pub struct SalienceDriftArgs {
+    /// Print one compact JSON report instead of the text lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
@@ -930,6 +943,31 @@ fn run_score(args: ScoreArgs) -> ExitCode {
     }
 }
 
+fn run_salience_drift(args: SalienceDriftArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let now_sec = chrono::Utc::now().timestamp();
+    // Unlocked handles (AILAB-583): opens the Tantivy index read-only, same as
+    // `run_score` (`no-hoisted-stdio-lock-across-tantivy`).
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    match commands::salience::run(&cwd, args.json, now_sec, &mut out, &mut err) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(commands::salience::SalienceError::NotFound) => ExitCode::from(2),
+        Err(commands::salience::SalienceError::IndexUnavailable(_)) => ExitCode::from(1),
+        Err(commands::salience::SalienceError::Report(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+        Err(commands::salience::SalienceError::Io(e)) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_reset_workspace(yes: bool) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
@@ -1401,6 +1439,7 @@ pub fn run() -> ExitCode {
         Command::Migrate(args) => run_migrate(args),
         Command::Recall(args) => run_recall(args),
         Command::Score(args) => run_score(args),
+        Command::SalienceDrift(args) => run_salience_drift(args),
         Command::Reset(args) => match args.command {
             ResetCommand::Workspace { yes } => run_reset_workspace(yes),
         },
@@ -2024,6 +2063,24 @@ mod tests {
                 assert!(args.explain);
             }
             _ => panic!("expected Score"),
+        }
+    }
+
+    #[test]
+    fn parses_salience_drift_defaults_to_text() {
+        let cli = Cli::try_parse_from(["dreamd", "salience-drift"]).unwrap();
+        match cli.command {
+            Some(Command::SalienceDrift(args)) => assert!(!args.json),
+            _ => panic!("expected SalienceDrift"),
+        }
+    }
+
+    #[test]
+    fn parses_salience_drift_json() {
+        let cli = Cli::try_parse_from(["dreamd", "salience-drift", "--json"]).unwrap();
+        match cli.command {
+            Some(Command::SalienceDrift(args)) => assert!(args.json),
+            _ => panic!("expected SalienceDrift"),
         }
     }
 
