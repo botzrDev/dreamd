@@ -333,6 +333,22 @@ pub enum MemoryCommand {
     /// pointer. Each step checks out a snapshot, so it refuses while `dreamd
     /// watch` is running. Prints `<name> <id>`.
     Bisect(BisectArgs),
+    /// Compare two snapshots: added/removed events, salience changes, file verdicts.
+    ///
+    /// Reads objects only; never checks out. Each side is a ref name,
+    /// `<name>:<id>` (the ref must name that id), or a 64-hex object id.
+    Diff {
+        /// Older side: ref name, `<name>:<id>`, or 64-hex object id.
+        from: String,
+        /// Newer side: ref name, `<name>:<id>`, or 64-hex object id.
+        to: String,
+        /// When LESSONS.md is modified, dump both versions (`-` from, `+` to).
+        #[arg(long)]
+        unified: bool,
+        /// Print one compact JSON object instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Args for `dreamd memory bisect` (BZR-153). State is
@@ -1060,7 +1076,7 @@ fn daemon_socket() -> Option<PathBuf> {
     home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).socket_path())
 }
 
-/// `dreamd memory …` (BZR-150, bisect BZR-153). Never opens a Tantivy index;
+/// `dreamd memory …` (BZR-150, bisect BZR-153, diff BZR-156). Never opens a Tantivy index;
 /// stdout stays unlocked per call. Exit 2 when no `.agent/` store is found, 1
 /// on any snapshot or bisect error (including the daemon-socket refusal on
 /// checkout and a bisect script `sh` cannot spawn).
@@ -1106,6 +1122,20 @@ fn run_memory(command: MemoryCommand) -> ExitCode {
                 }
             }
         }
+        MemoryCommand::Diff {
+            from,
+            to,
+            unified,
+            json,
+        } => memory::run_diff(
+            &cwd,
+            &from,
+            &to,
+            unified,
+            json,
+            chrono::Utc::now().timestamp(),
+            &mut out,
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1901,6 +1931,36 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["dreamd", "memory", "bisect", "run"]).is_err());
         assert!(Cli::try_parse_from(["dreamd", "memory", "bisect"]).is_err());
+    }
+
+    #[test]
+    fn parses_memory_diff() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Some(Command::Memory(MemoryArgs { command })) => command,
+            _ => panic!("expected Memory for {argv:?}"),
+        };
+        assert!(matches!(
+            parse(&["dreamd", "memory", "diff", "a", "b"]),
+            MemoryCommand::Diff { from, to, unified: false, json: false }
+                if from == "a" && to == "b"
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "diff", "a", "b", "--unified"]),
+            MemoryCommand::Diff {
+                unified: true,
+                json: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["dreamd", "memory", "diff", "--json", "a", "b"]),
+            MemoryCommand::Diff {
+                unified: false,
+                json: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["dreamd", "memory", "diff", "a"]).is_err());
     }
 
     #[test]

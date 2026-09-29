@@ -196,6 +196,11 @@ fn snapshot_memory_delete_help() {
 }
 
 #[test]
+fn snapshot_memory_diff_help() {
+    assert_snapshot!("memory_diff_help", nested_subcommand_help("memory", "diff"));
+}
+
+#[test]
 fn snapshot_memory_bisect_help() {
     assert_snapshot!(
         "memory_bisect_help",

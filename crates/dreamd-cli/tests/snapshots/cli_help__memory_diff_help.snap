@@ -1,0 +1,26 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"memory\", \"diff\")"
+---
+Compare two snapshots: added/removed events, salience changes, file verdicts.
+
+Reads objects only; never checks out. Each side is a ref name, `<name>:<id>` (the ref must name that id), or a 64-hex object id.
+
+Usage: diff [OPTIONS] <FROM> <TO>
+
+Arguments:
+  <FROM>
+          Older side: ref name, `<name>:<id>`, or 64-hex object id
+
+  <TO>
+          Newer side: ref name, `<name>:<id>`, or 64-hex object id
+
+Options:
+      --unified
+          When LESSONS.md is modified, dump both versions (`-` from, `+` to)
+
+      --json
+          Print one compact JSON object instead of text
+
+  -h, --help
+          Print help (see a summary with '-h')

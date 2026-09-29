@@ -55,7 +55,8 @@ pub enum DiffError {
 }
 
 /// How one non-event file changed between the two objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileChange {
     Same,
     Added,
@@ -64,14 +65,14 @@ pub enum FileChange {
 }
 
 /// One event present on both sides whose salience differs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SalienceChange {
     pub id: String,
     pub from: f64,
     pub to: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MemoryDiff {
     pub events_added: Vec<String>,
     pub events_removed: Vec<String>,

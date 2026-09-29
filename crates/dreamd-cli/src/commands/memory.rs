@@ -1,5 +1,6 @@
 //! `dreamd memory branch|checkout|branches|delete` — named memory branches (BZR-150).
 //! `dreamd memory bisect start|good|bad|run` — search the `snap-*` timeline (BZR-153).
+//! `dreamd memory diff <from> <to>` — compare two snapshot objects (BZR-156).
 //!
 //! Thin wrappers over [`dreamd_core::snapshot`]: the format is
 //! `docs/branching.md` (`branches/1.0`). Refs live in
@@ -11,12 +12,14 @@
 //! socket exists: `dreamd watch` holds the episodic log open and would keep
 //! appending to the replaced file. Branch, branches, and delete do not check
 //! the socket — they only write refs and HEAD. Bisect checks out through the
-//! same function, so it refuses the same way.
+//! same function, so it refuses the same way. Diff only reads objects and refs,
+//! so it does not check the socket either.
 
 use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::bisect::{self, BisectError, BisectOutcome};
+use dreamd_core::memory_diff::{self, DiffError, FileChange, MemoryDiff};
 use dreamd_core::snapshot::{self, SnapshotError};
 use dreamd_core::{AgentRoot, LayoutError};
 
@@ -30,6 +33,10 @@ pub enum MemoryError {
     Bisect(BisectError),
     /// `sh` could not be spawned for a bisect script. Nothing was marked.
     Script(std::io::Error),
+    /// A diff argument is not a ref, `<name>:<id>`, or a 64-hex object id.
+    Resolve(String),
+    /// Diff failed reading an object.
+    Diff(DiffError),
     /// Failure writing to the `out`/`err` sinks.
     Io(std::io::Error),
 }
@@ -52,6 +59,12 @@ impl From<BisectError> for MemoryError {
     }
 }
 
+impl From<DiffError> for MemoryError {
+    fn from(e: DiffError) -> Self {
+        Self::Diff(e)
+    }
+}
+
 impl std::fmt::Display for MemoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -59,6 +72,8 @@ impl std::fmt::Display for MemoryError {
             Self::Snapshot(e) => write!(f, "{e}"),
             Self::Bisect(e) => write!(f, "{e}"),
             Self::Script(e) => write!(f, "could not run bisect script with `sh -c`: {e}"),
+            Self::Resolve(msg) => write!(f, "{msg}"),
+            Self::Diff(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -203,6 +218,142 @@ pub fn run_bisect_run(
     let good = run_script(cwd, script)?;
     let outcome = bisect::bisect_mark(&root, good, daemon_socket)?;
     print_outcome(out, &outcome)?;
+    Ok(())
+}
+
+fn is_object_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Line 1 of `refs/<name>`, or `None` when the ref file does not exist.
+fn read_ref_line(root: &AgentRoot, name: &str) -> Result<Option<String>, MemoryError> {
+    match std::fs::read_to_string(root.branches_refs_dir().join(name)) {
+        Ok(text) => Ok(Some(text.lines().next().unwrap_or("").to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(MemoryError::Io(e)),
+    }
+}
+
+/// Resolve one `dreamd memory diff` argument to an object id:
+/// `<name>:<id>` (the ref must name exactly that id), a branch name whose ref
+/// exists, or a bare 64-hex id passed through for `diff_objects` to check.
+fn resolve_object(root: &AgentRoot, arg: &str) -> Result<String, MemoryError> {
+    if let Some((name, id)) = arg.split_once(':') {
+        if !snapshot::is_valid_branch_name(name) || !is_object_id(id) {
+            return Err(MemoryError::Resolve(format!(
+                "{arg:?} is not <name>:<64-hex object id>"
+            )));
+        }
+        return match read_ref_line(root, name)? {
+            Some(line) if line == id => Ok(line),
+            Some(line) => Err(MemoryError::Resolve(format!(
+                "ref {name} names object {line}, not {id}"
+            ))),
+            None => Err(MemoryError::Resolve(format!(
+                "ref {name} not found (expected object {id})"
+            ))),
+        };
+    }
+    if snapshot::is_valid_branch_name(arg) {
+        if let Some(line) = read_ref_line(root, arg)? {
+            return Ok(line);
+        }
+    }
+    if is_object_id(arg) {
+        return Ok(arg.to_string());
+    }
+    Err(MemoryError::Resolve(format!(
+        "{arg:?} is not a ref, <name>:<id>, or a 64-hex object id"
+    )))
+}
+
+fn file_change_str(c: FileChange) -> &'static str {
+    match c {
+        FileChange::Same => "same",
+        FileChange::Added => "added",
+        FileChange::Removed => "removed",
+        FileChange::Modified => "modified",
+    }
+}
+
+/// Text form of `dreamd memory diff`: `added`, `removed`, and `salience`
+/// lines in [`MemoryDiff`] order, then the three file verdicts. Every line
+/// ends in `\n`.
+#[must_use]
+pub fn render_diff(diff: &MemoryDiff) -> String {
+    let mut s = String::new();
+    for id in &diff.events_added {
+        s.push_str(&format!("added {id}\n"));
+    }
+    for id in &diff.events_removed {
+        s.push_str(&format!("removed {id}\n"));
+    }
+    for c in &diff.events_salience_changed {
+        s.push_str(&format!("salience {} {} {}\n", c.id, c.from, c.to));
+    }
+    s.push_str(&format!("lessons {}\n", file_change_str(diff.lessons)));
+    s.push_str(&format!(
+        "preferences {}\n",
+        file_change_str(diff.preferences)
+    ));
+    s.push_str(&format!(
+        "recurrence {}\n",
+        file_change_str(diff.recurrence)
+    ));
+    s
+}
+
+/// `--unified` dump: a `---`/`+++` header, every line of the `from` object's
+/// `LESSONS.md` prefixed `-`, then every line of the `to` one prefixed `+`.
+/// Not a line diff; a missing side prints no lines for that side.
+fn write_lessons_dump(
+    out: &mut dyn Write,
+    root: &AgentRoot,
+    from_id: &str,
+    to_id: &str,
+) -> Result<(), MemoryError> {
+    const REL: &str = "semantic/LESSONS.md";
+    writeln!(out, "--- {from_id}/{REL}")?;
+    writeln!(out, "+++ {to_id}/{REL}")?;
+    for (id, prefix) in [(from_id, '-'), (to_id, '+')] {
+        let path = root.branches_objects_dir().join(id).join(REL);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(MemoryError::Io(e)),
+        };
+        for line in text.lines() {
+            writeln!(out, "{prefix}{line}")?;
+        }
+    }
+    Ok(())
+}
+
+/// `dreamd memory diff <from> <to>`: compare two snapshot objects with
+/// [`memory_diff::diff_objects`] at `now_sec`. Reads objects and refs only.
+/// `json` prints one compact object and ignores `unified`.
+pub fn run_diff(
+    cwd: &Path,
+    from: &str,
+    to: &str,
+    unified: bool,
+    json: bool,
+    now_sec: i64,
+    out: &mut dyn Write,
+) -> Result<(), MemoryError> {
+    let root = discover(cwd)?;
+    let from_id = resolve_object(&root, from)?;
+    let to_id = resolve_object(&root, to)?;
+    let diff = memory_diff::diff_objects(&root, &from_id, &to_id, now_sec)?;
+    if json {
+        let body = serde_json::to_string(&diff).map_err(std::io::Error::other)?;
+        writeln!(out, "{body}")?;
+        return Ok(());
+    }
+    out.write_all(render_diff(&diff).as_bytes())?;
+    if unified && diff.lessons == FileChange::Modified {
+        write_lessons_dump(out, &root, &from_id, &to_id)?;
+    }
     Ok(())
 }
 
@@ -361,11 +512,152 @@ mod tests {
         assert!(lines[1].starts_with(&format!("{} ", names[1])), "{text}");
     }
 
+    fn learning_line(id: &str) -> String {
+        format!(
+            "{{\"schema_version\":\"1.0.0\",\"id\":\"{id}\",\
+             \"timestamp\":\"2026-09-28T00:00:00+00:00\",\
+             \"pain\":6.0,\"importance\":7.0,\"pinned\":false,\
+             \"skill_action\":\"rust::diff\",\"source_harness\":\"test\",\
+             \"content\":\"c\"}}\n"
+        )
+    }
+
+    /// Two autosnaps: the second adds one event and rewrites LESSONS.md.
+    /// Returns (root, from ref name, to ref name, from id, to id, added id).
+    fn two_objects(dir: &Path) -> (AgentRoot, String, String, String, String, &'static str) {
+        const OLD: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAA";
+        const NEW: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAB";
+        let root = AgentRoot::new(dir);
+        std::fs::create_dir_all(root.episodic_jsonl().parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.lessons_md().parent().unwrap()).unwrap();
+        std::fs::write(root.episodic_jsonl(), learning_line(OLD)).unwrap();
+        std::fs::write(root.lessons_md(), "one\ntwo\n").unwrap();
+        let t1 = 1_790_690_580;
+        let from_id = snapshot::create_autosnap(&root, t1).unwrap();
+
+        let both = format!("{}{}", learning_line(OLD), learning_line(NEW));
+        std::fs::write(root.episodic_jsonl(), both).unwrap();
+        std::fs::write(root.lessons_md(), "three\n").unwrap();
+        let t2 = t1 + 60;
+        let to_id = snapshot::create_autosnap(&root, t2).unwrap();
+        (
+            root,
+            snapshot::autosnap_ref_name(t1).unwrap(),
+            snapshot::autosnap_ref_name(t2).unwrap(),
+            from_id,
+            to_id,
+            NEW,
+        )
+    }
+
+    #[test]
+    fn diff_prints_text_json_and_unified_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_root, from, to, from_id, to_id, added) = two_objects(dir.path());
+        let now = 1_790_700_000;
+
+        let mut out = Vec::new();
+        run_diff(dir.path(), &from, &to, false, false, now, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            format!("added {added}\nlessons modified\npreferences same\nrecurrence same\n")
+        );
+
+        // Reverse direction, by bare id and by pinpoint form.
+        let mut out = Vec::new();
+        let pinned_from = format!("{to}:{to_id}");
+        run_diff(
+            dir.path(),
+            &pinned_from,
+            &from_id,
+            false,
+            false,
+            now,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(&format!("removed {added}\n")), "{text}");
+
+        let mut out = Vec::new();
+        run_diff(dir.path(), &from, &to, true, false, now, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.ends_with(&format!(
+                "recurrence same\n--- {from_id}/semantic/LESSONS.md\n\
+                 +++ {to_id}/semantic/LESSONS.md\n-one\n-two\n+three\n"
+            )),
+            "{text}"
+        );
+
+        // --json is one object and nothing else; --unified is ignored.
+        let mut out = Vec::new();
+        run_diff(dir.path(), &from, &to, true, true, now, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches('\n').count(), 1, "{text}");
+        let v: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        let obj = v.as_object().unwrap();
+        for key in [
+            "events_added",
+            "events_removed",
+            "events_salience_changed",
+            "lessons",
+            "preferences",
+            "recurrence",
+        ] {
+            assert!(obj.contains_key(key), "{key} missing in {text}");
+        }
+        assert_eq!(v["events_added"][0], added);
+        assert_eq!(v["lessons"], "modified");
+        assert_eq!(v["preferences"], "same");
+    }
+
+    #[test]
+    fn diff_pinpoint_mismatch_and_unknown_arg_print_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_root, from, to, from_id, to_id, _) = two_objects(dir.path());
+
+        let mut out = Vec::new();
+        let wrong = format!("{from}:{to_id}");
+        let err = run_diff(dir.path(), &wrong, &to, false, false, 0, &mut out).unwrap_err();
+        assert!(matches!(err, MemoryError::Resolve(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains(&from_id) && msg.contains(&to_id), "{msg}");
+        assert!(out.is_empty());
+
+        let mut out = Vec::new();
+        let err = run_diff(dir.path(), "no-such-ref", &to, false, false, 0, &mut out).unwrap_err();
+        assert!(matches!(err, MemoryError::Resolve(_)), "{err}");
+        assert!(out.is_empty());
+
+        // A well-formed id with no object reaches diff_objects.
+        let err = run_diff(
+            dir.path(),
+            &"f".repeat(64),
+            &to,
+            false,
+            false,
+            0,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Diff(DiffError::MissingObject(_))),
+            "{err}"
+        );
+    }
+
     #[test]
     fn missing_store_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             run_branches(dir.path(), &mut Vec::new()),
+            Err(MemoryError::NotFound)
+        ));
+        let id = "0".repeat(64);
+        assert!(matches!(
+            run_diff(dir.path(), &id, &id, false, false, 0, &mut Vec::new()),
             Err(MemoryError::NotFound)
         ));
     }
