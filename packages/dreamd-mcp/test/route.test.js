@@ -93,6 +93,9 @@ test('forget -> dreamd forget (BZR-151: not routed to mcp)', () => {
     ['forget', 'evt_01ARZ3NDEKTSV4RRFFQ69G5FAV'],
   );
 });
+test('vectors -> dreamd vectors (BZR-181: not routed to mcp)', () => {
+  assert.deepStrictEqual(resolveDreamdArgs(['vectors', 'enable']), ['vectors', 'enable']);
+});
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);
 });

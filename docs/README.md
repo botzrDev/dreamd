@@ -36,7 +36,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 |---|---|---|
 | [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) — **not implemented**; dreamd does not read or write this tree |
 | [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) — edge records, Merkle root, signed proof — **not implemented**; dreamd does not read or write this tree |
-| [vectors.md](./vectors.md) | Contributors | Optional `vectors` Cargo feature (off by default) — compile-time `fastembed` seam only; **no vector recall**, no model download, no `dreamd vectors` command |
+| [vectors.md](./vectors.md) | Contributors | Optional `vectors` Cargo feature (off by default) — `dreamd vectors enable` downloads the model on a `--features vectors` build and exits 2 on the default binary; **still no vector recall** |
 
 ## Marketing & narrative
 

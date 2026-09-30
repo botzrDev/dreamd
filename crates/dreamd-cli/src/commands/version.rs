@@ -59,14 +59,31 @@ const TARGET: &str = or_unknown(match option_env!("VERGEN_CARGO_TARGET_TRIPLE") 
 
 const SCHEMA: &str = "1.0";
 
+// BZR-181: whether this binary was built with `--features vectors`.
+#[cfg(feature = "vectors")]
+const VECTORS: &str = "on";
+#[cfg(not(feature = "vectors"))]
+const VECTORS: &str = "off";
+
 pub const VERSION_SHORT: &str = concatcp!(
-    "dreamd ", VERSION, " (", SHA, " build:", BUILD_DATE, " target:", TARGET, " schema:", SCHEMA,
+    "dreamd ",
+    VERSION,
+    " (",
+    SHA,
+    " build:",
+    BUILD_DATE,
+    " target:",
+    TARGET,
+    " schema:",
+    SCHEMA,
+    " vectors:",
+    VECTORS,
     ")",
 );
 
 pub fn render_long() -> String {
     format!(
-        "dreamd {VERSION}\n  commit:  {SHA}\n  built:   {BUILD_DATE}\n  target:  {TARGET}\n  schema:  {SCHEMA}\n"
+        "dreamd {VERSION}\n  commit:  {SHA}\n  built:   {BUILD_DATE}\n  target:  {TARGET}\n  schema:  {SCHEMA}\n  vectors: {VECTORS}\n"
     )
 }
 
@@ -115,6 +132,18 @@ mod tests {
         let mut buf = Vec::new();
         run(&mut buf).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), render_long());
+    }
+
+    #[test]
+    fn version_reports_vectors() {
+        let want = if cfg!(feature = "vectors") {
+            "vectors:on"
+        } else {
+            "vectors:off"
+        };
+        assert!(VERSION_SHORT.contains(want), "{VERSION_SHORT}");
+        let long = render_long().replace("vectors: ", "vectors:");
+        assert!(long.contains(want), "{long}");
     }
 
     #[test]

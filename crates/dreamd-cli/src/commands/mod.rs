@@ -24,5 +24,6 @@ pub mod setup_mcp;
 pub mod status;
 pub mod uninstall;
 pub mod update;
+pub mod vectors;
 pub mod version;
 pub mod watch;

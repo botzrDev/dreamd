@@ -3,7 +3,7 @@
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
 //! top-level `--help`, each subcommand `--help` (archive, blame, init, dream, mcp,
 //! memory, migrate, doctor, recall, salience-drift, score, watch, reset, service,
-//! setup, status, uninstall, update, version), nested `reset workspace --help`,
+//! setup, status, uninstall, update, vectors, version), nested `reset workspace --help`,
 //! `memory branch|checkout|branches|delete|bisect --help`,
 //! `memory bisect start|good|bad|run --help`, and
 //! `service install|start|restart|status|uninstall --help`,
@@ -291,6 +291,11 @@ fn snapshot_service_uninstall_help() {
 }
 
 #[test]
+fn snapshot_vectors_help() {
+    assert_snapshot!("vectors_help", subcommand_help("vectors"));
+}
+
+#[test]
 fn snapshot_version_help() {
     assert_snapshot!("version_help", subcommand_help("version"));
 }
@@ -302,6 +307,7 @@ fn snapshot_version_short() {
             (r"\(\S+ build:", "([sha] build:"),
             (r"build:\S+", "build:[date]"),
             (r"target:\S+", "target:[target]"),
+            (r"vectors:\s*(?:on|off)", "vectors:[state]"),
         ]
     }, {
         assert_snapshot!("version_short", VERSION_SHORT);
@@ -315,6 +321,7 @@ fn snapshot_version_long() {
             (r"commit:\s+\S+", "commit:  [sha]"),
             (r"built:\s+\S+",  "built:   [date]"),
             (r"target:\s+\S+", "target:  [target]"),
+            (r"vectors:\s*(?:on|off)", "vectors:[state]"),
         ]
     }, {
         assert_snapshot!("version_long", render_long());

@@ -1,0 +1,17 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"vectors\")"
+---
+Download the optional embedding model (BZR-181). Recall is unchanged.
+
+The default binary is built without the `vectors` feature: `enable` says so and exits 2. A build with `--features vectors` downloads BAAI/bge-small-en-v1.5 into the daemon home (~/.agent/models).
+
+Usage: vectors <COMMAND>
+
+Commands:
+  enable  Download BAAI/bge-small-en-v1.5 into ~/.agent/models
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

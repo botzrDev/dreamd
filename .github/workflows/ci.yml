@@ -193,6 +193,46 @@ jobs:
           echo "### Binary size gate" >> "$GITHUB_STEP_SUMMARY"
           echo "Stripped size: **${SIZE_MB} MB** (limit: 20 MB)" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Feature-build size report (BZR-181): informational ───────────────────────
+  # Stripped size of `dreamd` built with `--features vectors`. No threshold, not
+  # a merge gate, not in notify-failure. Only a compile failure fails the job.
+  # Own cache key: a shared `target/` with size-gate would let the feature build
+  # land in the default NFR-2 measurement.
+  size-report-vectors:
+    name: Binary size report (vectors feature)
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-vectors-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-vectors-
+
+      - name: Build release binary (vectors)
+        run: cargo build --release -p dreamd --bin dreamd --features vectors
+
+      - name: Strip and report binary size
+        run: |
+          BINARY=target/release/dreamd
+          strip "$BINARY"
+          SIZE_BYTES=$(stat -c%s "$BINARY")
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+          echo "Stripped vectors-feature binary size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          echo "### Binary size report (vectors feature)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stripped size: **${SIZE_MB} MB** (${SIZE_BYTES} bytes, informational, no limit)" >> "$GITHUB_STEP_SUMMARY"
+
   # ── Idle RSS gate (NFR-1: daemon < 30 MB at idle) ─────────────────────────────
   idle-rss-gate:
     name: Idle-RSS gate (< 30 MB, Linux)

@@ -26,6 +26,7 @@ Commands:
   uninstall       Stop local dreamd servers, unregister this project, and clear caches
   update          Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
   watch           Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+  vectors         Download the optional embedding model (BZR-181). Recall is unchanged
   version         Print structured version information (semver, commit, build date, target, schema)
   help            Print this message or the help of the given subcommand(s)
 

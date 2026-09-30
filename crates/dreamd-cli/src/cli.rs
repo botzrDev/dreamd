@@ -180,6 +180,12 @@ pub enum Command {
     Update(UpdateArgs),
     /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
     Watch(WatchArgs),
+    /// Download the optional embedding model (BZR-181). Recall is unchanged.
+    ///
+    /// The default binary is built without the `vectors` feature: `enable`
+    /// says so and exits 2. A build with `--features vectors` downloads
+    /// BAAI/bge-small-en-v1.5 into the daemon home (~/.agent/models).
+    Vectors(VectorsArgs),
     /// Print structured version information (semver, commit, build date, target, schema).
     Version,
 }
@@ -488,6 +494,23 @@ pub enum ServiceCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// Args for `dreamd vectors` (BZR-181). Nested like [`ServiceArgs`].
+#[derive(Args)]
+pub struct VectorsArgs {
+    #[command(subcommand)]
+    pub command: VectorsCommand,
+}
+
+#[derive(Subcommand)]
+pub enum VectorsCommand {
+    /// Download BAAI/bge-small-en-v1.5 into ~/.agent/models.
+    ///
+    /// Works only in a binary built with `--features vectors`. The default
+    /// binary was built without it: this prints that and exits 2, and creates
+    /// no directory. When `HF_HOME` is set, the download goes there instead.
+    Enable,
 }
 
 /// Arguments for the `dreamd setup` subcommand (AILAB-549 / AILAB-550).
@@ -1618,6 +1641,13 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
     }
 }
 
+fn run_vectors_enable() -> ExitCode {
+    // Stdout stays UNLOCKED: loading the model starts ONNX Runtime, which may
+    // log through tracing to stderr. See AGENTS.md
+    // no-hoisted-stdio-lock-across-tantivy.
+    commands::vectors::run(&mut std::io::stdout(), &mut std::io::stderr())
+}
+
 fn run_version() -> ExitCode {
     // lock-ok (AILAB-583): version never opens a Tantivy index — it prints
     // compile-time build metadata only.
@@ -1710,6 +1740,9 @@ pub fn run() -> ExitCode {
         Command::Uninstall(args) => run_uninstall(args),
         Command::Update(args) => run_update(args),
         Command::Watch(args) => run_watch(args),
+        Command::Vectors(args) => match args.command {
+            VectorsCommand::Enable => run_vectors_enable(),
+        },
         Command::Version => run_version(),
     }
 }
@@ -2471,6 +2504,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_vectors_enable() {
+        let cli = Cli::try_parse_from(["dreamd", "vectors", "enable"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Vectors(VectorsArgs {
+                command: VectorsCommand::Enable
+            }))
+        ));
+    }
+
+    #[test]
     fn parses_salience_drift_json() {
         let cli = Cli::try_parse_from(["dreamd", "salience-drift", "--json"]).unwrap();
         match cli.command {
@@ -2821,6 +2865,7 @@ mod tests {
             "update",
             "setup",
             "service",
+            "vectors",
         ] {
             assert!(
                 page.contains(sub),

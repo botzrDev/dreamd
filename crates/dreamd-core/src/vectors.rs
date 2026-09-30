@@ -7,6 +7,17 @@ pub fn model() -> fastembed::EmbeddingModel {
     fastembed::EmbeddingModel::BGESmallENV15
 }
 
+/// Download `MODEL_ID` into `cache_dir` and load it. `HF_HOME`, when set,
+/// wins over `cache_dir` inside fastembed. Does not embed text.
+pub fn download_model(cache_dir: &std::path::Path) -> Result<(), fastembed::Error> {
+    let _loaded = fastembed::TextEmbedding::try_new(
+        fastembed::TextInitOptions::new(model())
+            .with_cache_dir(cache_dir.to_path_buf())
+            .with_show_download_progress(false),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

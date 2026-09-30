@@ -65,6 +65,7 @@ function validateRedirect(location, currentUrl) {
 const DREAMD_SUBCOMMANDS = new Set([
   'init', 'setup', 'watch', 'doctor', 'dream', 'reset', 'service', 'uninstall', 'update',
   'version', 'mcp', 'blame', 'salience-drift', 'memory', 'forget',
+  'vectors',
 ]);
 
 // A recognized first token is forwarded to `dreamd` verbatim; a bare invocation

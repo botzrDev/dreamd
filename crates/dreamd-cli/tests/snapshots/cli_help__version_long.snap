@@ -1,6 +1,5 @@
 ---
 source: crates/dreamd-cli/tests/cli_help.rs
-assertion_line: 78
 expression: render_long()
 ---
 dreamd 0.1.1
@@ -8,3 +7,4 @@ dreamd 0.1.1
   built:   [date]
   target:  [target]
   schema:  1.0
+  vectors:[state]
