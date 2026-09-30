@@ -167,7 +167,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | [SECURITY.md](./SECURITY.md) | Threat model |
 | [docs/marketing.md](./docs/marketing.md) | Product story and positioning |
 
-Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.md) if you want them. They are not the product pitch.
+Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.md) if you want them. They are not the product pitch. To re-run the bench yourself, see [docs/benchmarks.md](./docs/benchmarks.md).
 
 ---
 

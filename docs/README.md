@@ -88,6 +88,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | Document | Audience | Purpose |
 |---|---|---|
 | [../PERF.md](../PERF.md) | Contributors | Performance benchmark methodology (WIP) |
+| [benchmarks.md](./benchmarks.md) | Contributors | How to re-run the in-RAM recall latency bench |
 | [../CHANGELOG.md](../CHANGELOG.md) | Users, contributors | Release history |
 | [v0.1.1-scope.md](./v0.1.1-scope.md) | Maintainers | Frozen v0.1.1 contents, review window, reserve, and cut order |
 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Contributors | Community standards |

@@ -235,7 +235,7 @@ This is a *freshness* constraint, not a *latency* constraint. The
 `<5ms P50 warm` recall latency applies to the query operation itself and
 is unaffected by the commit cadence. The two must not be conflated in
 public copy or benchmark commentary. For Criterion-measured recall numbers
-at n=1k/10k/100k see `README.md § Performance`.
+at n=1k/10k/100k see `benchmarks.md`.
 
 Users who need sub-5s freshness can lower the cadence (toward 1s) at the
 cost of higher I/O. User-facing cadence config is deferred to v0.1.1

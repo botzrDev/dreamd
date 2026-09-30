@@ -126,7 +126,7 @@ Checklist a maintainer works before bumping:
 
 ## Performance baseline (DR-908)
 
-Real recall-latency figures, sourced from `README.md § Performance` (warm in-RAM
+Real recall-latency figures, sourced from `../benchmarks.md` (warm in-RAM
 index, Criterion 0.5, WSL2/Linux; mean across 100 samples, used as a P50 proxy):
 
 | Corpus size | Mean (warm) |
@@ -145,7 +145,7 @@ and must not be conflated with these numbers; see `../architecture.md`.)
 
 - **DR-201 / WEG-41** — schema (`crates/dreamd-core/src/index.rs`, `build_schema()`).
 - **DR-203 / WEG-43** — custom collector (`crates/dreamd-core/src/collector.rs`).
-- **DR-908** — benchmark methodology and figures (`README.md § Performance`).
+- **DR-908** — benchmark methodology and figures (`../benchmarks.md`).
 - [`../architecture.md`](../architecture.md) — the Indexing section this deep-dive
   expands; and `../architecture/durability.md` for the JSONL durability protocol that
   backs re-index-from-source.
