@@ -19,6 +19,11 @@
 //!
 //! `--cluster-health` recomputes the clusters the dream cycle would promote
 //! and compares them against the recurrence sidecar it last wrote.
+//!
+//! `--provenance` prints the `provenance::verify` report (recomputed Merkle
+//! root, orphan edges, missing edges, corrupt lines) and fails the run on any
+//! fault. It only reads the ledger; it does not rewrite it, and `--repair`
+//! does not touch it either (BZR-148).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
@@ -36,13 +41,16 @@ use dreamd_core::llm;
 use dreamd_protocol::{AgentLearning, RECORD_SCHEMA_VERSION};
 
 /// Mode flags for a doctor run. Mirrors `cli::DoctorArgs` without pulling
-/// clap into the command module; both flags compose with the default checks.
+/// clap into the command module; every flag composes with the default checks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DoctorFlags {
     /// Unlink an orphaned daemon socket and rebuild the Tantivy cache.
     pub repair: bool,
     /// Compare episodic prefix counts against the recurrence sidecar.
     pub cluster_health: bool,
+    /// Print the provenance ledger verify report; flag orphans, missing
+    /// edges, and corrupt lines.
+    pub provenance: bool,
 }
 
 /// Run `dreamd doctor` and write output to `out` (repair refusals go to `err`).
@@ -234,6 +242,10 @@ pub fn run(
         all_ok &= check_cluster_health(agent_root, events.as_deref(), now_sec, out)?;
         // AILAB-196 — additive report, deliberately not `&=`-ed into `all_ok`.
         report_next_cycle_cost(agent_root, now_sec, out)?;
+    }
+
+    if flags.provenance {
+        all_ok &= check_provenance(agent_root, out)?;
     }
 
     if flags.repair {
@@ -619,6 +631,57 @@ fn report_next_cycle_cost(
     Ok(())
 }
 
+/// `--provenance`: print the `provenance::verify` report. Orphans, missing
+/// edges, corrupt lines, and a verify error fail the check;
+/// `skipped_unknown_kind` is printed and does not. Reads the ledger only.
+fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<bool> {
+    let report = match dreamd_core::provenance::verify(agent_root) {
+        Ok(report) => report,
+        Err(e) => {
+            writeln!(
+                out,
+                "provenance: error  [WARNING: could not verify the ledger: {e}]"
+            )?;
+            return Ok(false);
+        }
+    };
+    let faults = report.orphans.len() + report.missing.len() + report.corrupt_lines.len();
+    if faults == 0 {
+        writeln!(out, "provenance: ok root={}", report.root)?;
+    } else {
+        writeln!(out, "provenance: root={}", report.root)?;
+        for edge in &report.orphans {
+            writeln!(
+                out,
+                "provenance: orphan line={} kind={} from={} to={}",
+                edge.line, edge.kind, edge.from, edge.to
+            )?;
+        }
+        for edge in &report.missing {
+            writeln!(
+                out,
+                "provenance: missing line={} kind={} from={} to={}",
+                edge.line, edge.kind, edge.from, edge.to
+            )?;
+        }
+        for line in &report.corrupt_lines {
+            writeln!(out, "provenance: corrupt line={line}")?;
+        }
+        writeln!(
+            out,
+            "provenance: {faults} fault(s)  [WARNING: ledger disagrees with the live memory files]"
+        )?;
+    }
+    if report.skipped_unknown_kind > 0 {
+        writeln!(
+            out,
+            "provenance: skipped_unknown_kind={}",
+            report.skipped_unknown_kind
+        )?;
+    }
+    Ok(faults == 0)
+}
+
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
 /// (which repair only ever reads). Fails closed when a live daemon is
@@ -885,6 +948,89 @@ mod tests {
             "default config must report manual mode; got: {output:?}"
         );
         assert!(ok, "manual mode must return all_ok=true; got: {output:?}");
+    }
+
+    fn provenance_flags() -> DoctorFlags {
+        DoctorFlags {
+            provenance: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn provenance_missing_ledger_is_ok_and_prints_verify_root() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("prov-missing");
+        let ledger = root.provenance_ledger();
+        let (ok, output, _) = run_with(&cfg, &root, None, None, provenance_flags());
+        let expected = dreamd_core::provenance::verify(&root).unwrap().root;
+        assert!(
+            output.contains(&format!("provenance: ok root={expected}\n")),
+            "got: {output:?}"
+        );
+        assert!(ok, "missing ledger must not fail doctor; got: {output:?}");
+        assert!(
+            !ledger.exists(),
+            "doctor --provenance must not create the ledger"
+        );
+    }
+
+    #[test]
+    fn provenance_orphan_index_doc_warns_and_leaves_ledger_bytes() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("prov-orphan");
+        let ledger = root.provenance_ledger();
+        fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        let id = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let body = format!(
+            "{{\"schema_version\":\"provenance/1.0\",\"kind\":\"index_doc\",\"from\":\"{id}\",\"to\":\"{id}\"}}\n"
+        );
+        fs::write(&ledger, &body).unwrap();
+
+        let (ok, output, _) = run_with(&cfg, &root, None, None, provenance_flags());
+        let expected = dreamd_core::provenance::verify(&root).unwrap().root;
+
+        assert!(
+            output.contains(&format!(
+                "provenance: orphan line=1 kind=index_doc from={id} to={id}\n"
+            )),
+            "got: {output:?}"
+        );
+        assert!(
+            output.contains(
+                "provenance: 1 fault(s)  [WARNING: ledger disagrees with the live memory files]"
+            ),
+            "got: {output:?}"
+        );
+        assert!(
+            output.contains(&format!("provenance: root={expected}\n")),
+            "got: {output:?}"
+        );
+        assert!(!output.contains("provenance: ok"), "got: {output:?}");
+        assert!(!ok, "an orphan edge must fail doctor; got: {output:?}");
+        assert_eq!(fs::read(&ledger).unwrap(), body.as_bytes());
+    }
+
+    #[test]
+    fn provenance_flag_off_prints_no_provenance_line() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("prov-off");
+        let ledger = root.provenance_ledger();
+        fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        let id = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        fs::write(
+            &ledger,
+            format!(
+                "{{\"schema_version\":\"provenance/1.0\",\"kind\":\"index_doc\",\"from\":\"{id}\",\"to\":\"{id}\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let (_, output, _) = run_default(&cfg, &root, None);
+        assert!(
+            !output.lines().any(|l| l.starts_with("provenance:")),
+            "got: {output:?}"
+        );
     }
 
     #[test]

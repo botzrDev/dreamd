@@ -655,6 +655,7 @@ fn report_doctor(cwd: &Path, out: &mut dyn Write) -> std::io::Result<()> {
         super::doctor::DoctorFlags {
             repair: false,
             cluster_health: false,
+            provenance: false,
         },
         now_sec,
         &mut report,

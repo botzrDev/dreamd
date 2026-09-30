@@ -127,7 +127,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-09-27
+**Last updated:** 2026-09-30
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -146,9 +146,9 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Remaining build order — 2026-09-24
 
-Locked 2026-09-24 for the finish race. Re-checked against Linear on 2026-09-27: the sequence is unchanged. Claude, Cursor, and DeepSeek all follow this section. The August 27 "remaining 50" queue numbers are not the order. Live issue ids are `BZR-<n>` on team **Botzr-Research** (same numbers as the old `AILAB-<n>` ids). Shipped tickets remain on project **dreamd-eng** (`P-BZR-1`). That project has no open issues, and its five milestones all read 100% because the unfinished issues left the project on 2026-09-26. The open spine is **Backlog** on project **R&D** (`P-BZR-79`, created 2026-09-26). One ticket at a time per agent. The user runs commits.
+Locked 2026-09-24 for the finish race. Re-checked against `main` and Linear on 2026-09-30. Claude, Cursor, and DeepSeek all follow this section. The August 27 "remaining 50" queue numbers are not the order. Live issue ids are `BZR-<n>` on team **Botzr-Research** (same numbers as the old `AILAB-<n>` ids). Shipped tickets remain on project **dreamd-eng** (`P-BZR-1`). That project has no open issues, and its five milestones all read 100% because the unfinished issues left the project on 2026-09-26. The open spine is **Backlog** on project **R&D** (`P-BZR-79`, created 2026-09-26). One ticket at a time per agent. The user runs commits.
 
-**Do not start a ticket until every ticket above it in this list has landed**, except the two spec-only drafts called out under parallel work.
+**Do not start a ticket until every ticket above it in this list has landed.** There is no parallel pair: the next ticket owns `cli.rs`.
 
 An empty backlog query on `dreamd-eng` is that move. Milestone progress there is not evidence a v0.2 ticket shipped. The dreamd-eng description body still says RFC-011 is proposed; the project summary, BZR-1075, and the "Where it fits" section above record it **accepted** (2026-09-26). BZR-1077 (the local docs pointer) is Done, commit `312983b`.
 
@@ -166,13 +166,13 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
 13. **BZR-160** — on `main` (`806b764`). `snapshot::create_autosnap` writes `branches/objects/<id>/` and a `snap-*` ref. It does not write `HEAD`. There is no `dreamd memory snapshot` command. Spec: `assignments/BZR-160.v2.md`.
 14. **BZR-150** — on `main` (`702636a`). `dreamd memory branch|checkout|branches|delete`. Refs are two-line files under `branches/refs/`. `HEAD` is `branches/HEAD`. Checkout refuses while the daemon socket exists. Spec: `assignments/BZR-150.v2.md`.
-15. **BZR-156** — library on `main` (`702636a`). `memory_diff::diff_objects` compares two object ids. The command is the open half. Spec: `assignments/BZR-156.cli.v2.md`. It owns `cli.rs`.
+15. **BZR-156** — on `main`. Library `memory_diff::diff_objects` in `702636a`. Command `dreamd memory diff` in `13ae1ca` (same commit as BZR-146). `--json` is one line and ignores `--unified`. The command reads objects and does not check out or test the daemon socket. Spec: `assignments/BZR-156.cli.v2.md`.
 16. **BZR-153** — on `main` (`e3b7ecf`). `dreamd memory bisect`. Search range is `snap-*` refs by the timestamp line. No parent pointer. State is `branches/bisect`, beside `HEAD`. Spec: `assignments/BZR-153.v2.md`.
-17. **BZR-146** — user-facing guide for the commands already on `main`. Spec: `assignments/BZR-146.v2.md`. Does not edit `cli.rs` or `docs/branching.md`. No screencast file and no `docs/competitor-comparison.md`. The diff walkthrough waits until the command exists.
+17. **BZR-146** — on `main` (`13ae1ca`, same commit as the diff command). `docs/branching-guide.md` and `scripts/branch-demo.sh`. No screencast and no `docs/competitor-comparison.md`. The guide does not document memory diff flags. The script resolves `dreamd` to an absolute path before `cd` and sets `HOME` to its temp directory. Spec: `assignments/BZR-146.v2.md`.
 18. **BZR-154** — on `main` (`adb7a40`, same commit as BZR-173). Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
 19. **BZR-155** — on `main` (`260f37d`). Provenance recording. Leaf hash is SHA-256 of the event id's UTF-8 bytes. `index_doc` is appended from `commit_and_persist` and from `TantivyIndexHandle::open`. The learn path does not open the ledger. No `embedding` edge.
-20. **BZR-148** — `provenance::verify` is on `main` (`e3b7ecf`). Read-only. `dreamd doctor --provenance` waits until `cli.rs` is free again (BZR-156's command owns it now). `--repair` stays out: it would rewrite ledger lines. Do not start BZR-158 until that flag exists.
-21. **BZR-158** — forget cascade.
+20. **BZR-148** — on `main`. `provenance::verify` is `e3b7ecf`. `dreamd doctor --provenance` prints that report and fails the run on orphans, missing edges, or corrupt lines. `skipped_unknown_kind` is printed and does not fail the check. `--repair` stays the Tantivy rebuild. Spec: `assignments/BZR-148.cli.v2.md` (local; `assignments/` is gitignored).
+21. **BZR-158** — forget cascade. Next. No v2 yet. Do not implement the Linear AC (embeddings, a new forget command, mid-cascade `kill -9`) until a spec exists. `cli.rs` is free.
 22. **BZR-151** — `forget --proof`.
 23. **BZR-188** — vector backend stub. Measure stripped `target/release/dreamd` first. Keep the dependency off the default build; the 20 MB size gate has rejected this crate before.
 24. **BZR-181** — vector opt-in, zero cost when off.
@@ -191,9 +191,9 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 **Parallel agents**
 
 - Claim one ticket and its file list before editing. One writer per file.
-- Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets (160 and 155) still wait.
+- Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets landed later: 160 in `806b764`, 155 in `260f37d`.
 - **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). **BZR-153** and **BZR-148**'s `provenance::verify` are on `main` (`e3b7ecf`). The current pair is **BZR-156**'s command (owns `cli.rs` and `commands/memory.rs`) and **BZR-146** (`docs/branching-guide.md` and `scripts/branch-demo.sh` only). The doctor flag and BZR-158 stay waiting. 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
+- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). **BZR-153** and **BZR-148**'s `provenance::verify` are on `main` (`e3b7ecf`). **BZR-156**'s command and **BZR-146** are on `main` (`13ae1ca`). `dreamd doctor --provenance` is on `main` (BZR-148, spec `assignments/BZR-148.cli.v2.md`). The next ticket is BZR-158 (forget cascade). It has no v2. Do not start it from the Linear AC. 151, 188, 181, 182, 177, and 157 stay Backlog on project **R&D**. Do not start vectors (188+) until the stripped binary is measured and under 20 MB.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -785,7 +785,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187 through 155, plus 153 and `provenance::verify`, are on `main` at or before `e3b7ecf`. The current pair is BZR-156's command (owns `cli.rs`) and BZR-146 (guide and demo script only). `dreamd doctor --provenance` and BZR-158 wait. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187 through 146, including the BZR-156 command, are on `main` at or before `13ae1ca`. `provenance::verify` is on `main` at `e3b7ecf`. `dreamd doctor --provenance` is on `main` (BZR-148, spec `assignments/BZR-148.cli.v2.md`). The next ticket is BZR-158. It has no v2; do not implement the Linear AC. 207, 210, 149, and 152 are not claimable implement tickets. Vectors (188+) wait on a stripped-binary measurement under 20 MB. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### in-process-dream-now-honors-the-409-guard
@@ -813,12 +813,33 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `dreamd memory bisect` searches `branches/refs/snap-*` by the timestamp on line 2 of the ref. There is no parent pointer on an object or a ref. A named branch is one point on that timeline, not a chain.
 - **Why:** BZR-153's Linear text says "binary search across branch history" in the git sense. `write_ref` stores an object id and a UTC timestamp (`snapshot.rs`). Two refs with the same timestamp are not ordered by ancestry. Same-second autosnaps overwrite the ref name and leave the earlier object unnamed.
-- **How to apply:** Resolve endpoints through `refs/<name>` or a 64-hex id that some ref already names. Require the good timestamp string to be strictly less than the bad one. Do not invent a parent field. State lives at `branches/bisect`, beside `HEAD`, so `list_branches` does not show it. `dreamd memory diff` is still not a command; do not add it inside the bisect ticket.
+- **How to apply:** Resolve endpoints through `refs/<name>` or a 64-hex id that some ref already names. Require the good timestamp string to be strictly less than the bad one. Do not invent a parent field. State lives at `branches/bisect`, beside `HEAD`, so `list_branches` does not show it. `dreamd memory diff` is a separate command (`13ae1ca`); do not fold it into a bisect change.
 - **Cross-refs:** `remaining-build-order-2026-09-24`
 
 ### provenance-verify-does-not-rewrite-the-ledger
 
 - **Rule:** `provenance::verify` only reads. There is no stored Merkle root to compare against, and no `--repair`. An unknown `kind` is skipped. `embedding` is corrupt, not skipped. A JSONL id with no `index_doc` edge is not a missing edge.
 - **Why:** BZR-148's Linear AC asks for hash mismatches against a root and for `--repair`. BZR-155 never writes the root. The format forbids rewriting ledger lines. The index watermark is not a contiguous prefix, so "every event has an index_doc" would flag healthy logs.
-- **How to apply:** Recompute the root from the good lines and return it. Report orphans (`from` absent from the live JSONL), missing `lesson_citation` / `recurrence` edges, and corrupt line numbers. Do not add `dreamd doctor --provenance` while another ticket owns `cli.rs`. Do not rebuild the ledger under another flag name.
-- **Cross-refs:** `replay-open-is-an-index-doc-writer`, `remaining-build-order-2026-09-24`
+- **How to apply:** Recompute the root from the good lines and return it. Report orphans (`from` absent from the live JSONL), missing `lesson_citation` / `recurrence` edges, and corrupt line numbers. The doctor flag is its own ticket now that `cli.rs` is free: print this report, and do not rebuild the ledger under `--repair` or any other flag name.
+- **Cross-refs:** `replay-open-is-an-index-doc-writer`, `remaining-build-order-2026-09-24`, `doctor-repair-is-the-index-rebuild`
+
+### memory-diff-reads-and-does-not-check-out
+
+- **Rule:** `dreamd memory diff` resolves refs and calls `diff_objects`. It does not call `checkout` and it does not look for the daemon socket. `--json` prints one line and returns before any `--unified` dump.
+- **Why:** BZR-156. Checkout and bisect refuse while the socket exists because they replace the live log. Diff only reads objects. A lessons dump on the JSON path would break the one-object contract.
+- **How to apply:** Resolve `name:<64-hex>` first (ref line 1 must equal that id; the error names both ids), then an existing ref, then a bare 64-hex id. `serde_json::to_string` plus one newline, then return. `FileChange` serializes `snake_case`. `diff_objects` itself stays free of `Serialize` logic beyond the derives.
+- **Cross-refs:** `bisect-searches-snap-refs-not-a-parent-graph`, `remaining-build-order-2026-09-24`
+
+### branch-demo-uses-an-absolute-binary-and-a-temp-home
+
+- **Rule:** `scripts/branch-demo.sh` resolves `dreamd` on `PATH` to an absolute path before `cd`, and exports `HOME` to the temp directory for the script process.
+- **Why:** `PATH="target/debug:$PATH"` is relative. After the script changes into its temp project, that entry no longer finds the binary. `dreamd init` writes `~/.agent/registry.toml`, and checkout refuses when `~/.agent/dreamd.sock` exists, so a demo that keeps the caller's `HOME` writes into the real registry and can be blocked by a running `dreamd watch`.
+- **How to apply:** `command -v dreamd`, prefix `$PWD` when the path is relative, then call that binary. Set `HOME` to the temp home before any `dreamd` invocation. The exit trap removes the temp directory, including that home. Two `memory branch` calls with unchanged live files share one object id.
+- **Cross-refs:** `remaining-build-order-2026-09-24`, `memory-diff-reads-and-does-not-check-out`
+
+### doctor-repair-is-the-index-rebuild
+
+- **Rule:** `dreamd doctor --repair` rebuilds the Tantivy cache and unlinks an orphaned socket. It does not rewrite `provenance/ledger.jsonl`. Ledger repair is not a flag.
+- **Why:** BZR-148's Linear AC asks `--repair` to rebuild the ledger from current state. The flag already shipped as the index rebuild (`run_repair` in `commands/doctor.rs`). Pointing it at the ledger would rewrite lines the format forbids, on a command operators already run.
+- **How to apply:** `dreamd doctor --provenance` (`assignments/BZR-148.cli.v2.md`) prints `provenance::verify` and fails the run on orphans, missing edges, and corrupt lines. `skipped_unknown_kind` is printed and does not fail the check. Do not call `append_edges` from doctor. Do not branch `run_repair` into the ledger. There is no stored Merkle root to mismatch against.
+- **Cross-refs:** `provenance-verify-does-not-rewrite-the-ledger`, `remaining-build-order-2026-09-24`

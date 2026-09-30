@@ -13,5 +13,8 @@ Options:
       --cluster-health
           Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift
 
+      --provenance
+          Recompute the provenance Merkle root and list orphan edges, missing lesson and recurrence edges, and corrupt ledger lines. Reads the ledger. Does not rewrite it
+
   -h, --help
           Print help

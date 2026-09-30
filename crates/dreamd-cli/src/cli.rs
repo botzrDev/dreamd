@@ -102,6 +102,11 @@ pub struct DoctorArgs {
     /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
     #[arg(long)]
     pub cluster_health: bool,
+    /// Recompute the provenance Merkle root and list orphan edges, missing
+    /// lesson and recurrence edges, and corrupt ledger lines. Reads the ledger.
+    /// Does not rewrite it.
+    #[arg(long)]
+    pub provenance: bool,
 }
 
 /// Top-level subcommands exposed by the `dreamd` binary.
@@ -770,6 +775,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let flags = commands::doctor::DoctorFlags {
         repair: args.repair,
         cluster_health: args.cluster_health,
+        provenance: args.provenance,
     };
     let now_sec = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2433,6 +2439,7 @@ mod tests {
             Some(Command::Doctor(args)) => {
                 assert!(!args.repair);
                 assert!(!args.cluster_health);
+                assert!(!args.provenance);
             }
             _ => panic!("expected Doctor"),
         }
@@ -2444,6 +2451,15 @@ mod tests {
                 assert!(args.cluster_health);
             }
             _ => panic!("expected Doctor with both flags"),
+        }
+        let provenance = Cli::try_parse_from(["dreamd", "doctor", "--provenance"]).unwrap();
+        match provenance.command {
+            Some(Command::Doctor(args)) => {
+                assert!(args.provenance);
+                assert!(!args.repair);
+                assert!(!args.cluster_health);
+            }
+            _ => panic!("expected Doctor --provenance"),
         }
     }
 
