@@ -28,6 +28,9 @@ default = []
 # CI clippy and tests run `--all-features`, so this code is still linted and
 # tested there.
 mcp-http = ["rmcp/transport-streamable-http-server"]
+# BZR-188 — fastembed is compiled only with this feature. The default
+# release binary is the NFR-2 artifact and must not link it.
+vectors = ["dep:fastembed"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -158,6 +161,10 @@ async-trait = "0.1"
 # docs/branching.md). RustCrypto, MIT OR Apache-2.0. Hex is `{:02x}` over the
 # digest; no `hex` crate.
 sha2 = "0.10"
+# BZR-188 — optional embedder seam (`vectors` module). Behind the `vectors`
+# feature only; the default release binary must not link it (NFR-2).
+# Apache-2.0.
+fastembed = { version = "5", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # WEG-21 / DR-118 — double-fork (fork + setsid) for writer-process daemonization,

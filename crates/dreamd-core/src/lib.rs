@@ -71,5 +71,7 @@ pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry}
 // bearer layer from `~/.agent/auth.json` in the slot peer-UID holds on Unix.
 pub mod server;
 pub mod snapshot;
+#[cfg(feature = "vectors")]
+pub mod vectors;
 
 pub use layout::{AgentRoot, DaemonHome, LayoutError, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
