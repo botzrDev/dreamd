@@ -111,6 +111,11 @@ fn snapshot_blame_help() {
 }
 
 #[test]
+fn snapshot_forget_help() {
+    assert_snapshot!("forget_help", subcommand_help("forget"));
+}
+
+#[test]
 fn snapshot_salience_drift_help() {
     assert_snapshot!("salience_drift_help", subcommand_help("salience-drift"));
 }

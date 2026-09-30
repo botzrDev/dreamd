@@ -8,6 +8,7 @@ pub mod archive;
 pub mod blame;
 pub mod doctor;
 pub mod dream;
+pub mod forget;
 pub mod init;
 pub mod lifecycle_cleanup;
 pub mod mcp;

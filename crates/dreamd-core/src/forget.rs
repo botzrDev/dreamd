@@ -13,13 +13,18 @@
 //! This module does not touch the index.
 //!
 //! Existing ledger lines are left in place. A forgotten id's old edge stays in
-//! the file, and `provenance::verify` reports it as an orphan. `dreamd forget`
-//! and the proof file are BZR-151.
+//! the file, and `provenance::verify` reports it as an orphan.
+//!
+//! `dreamd forget` (BZR-151) is the CLI. It calls [`cascade`] when no daemon is
+//! live, or [`preview`] for `--dry-run`. `--proof` writes a forget receipt
+//! ([`render_receipt`], `forget-receipt/1.0`). The signed membership proof in
+//! `docs/provenance.md` is still absent.
 
 use std::io;
 
 use chrono::DateTime;
 use dreamd_protocol::EventId;
+use serde::Serialize;
 
 use crate::consolidation::{self, ConsolidationError};
 use crate::dream_cycle::{self, DreamCycleError};
@@ -44,7 +49,18 @@ pub enum LessonEffect {
     Unlinked,
 }
 
-/// Outcome of [`cascade`].
+impl LessonEffect {
+    /// Stable token for CLI output and the forget receipt.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Untouched => "untouched",
+            Self::CitationDropped => "citation_dropped",
+            Self::Unlinked => "unlinked",
+        }
+    }
+}
+
+/// Outcome of [`cascade`] or [`preview`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForgetReport {
     /// `false` when the id was not in the live log. Nothing was written.
@@ -157,18 +173,18 @@ fn cascade_lessons(
         Err(e) => return Err(ForgetError::Lessons(e)),
     };
 
-    if file.lessons.iter().any(|l| l.id == id) {
-        // The body is the forgotten event's content; there is nothing to keep.
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(ForgetError::Lessons(e)),
+    match classify_lessons(&file, id) {
+        LessonEffect::Untouched => return Ok(LessonEffect::Untouched),
+        LessonEffect::Unlinked => {
+            // The body is the forgotten event's content; there is nothing to keep.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(ForgetError::Lessons(e)),
+            }
+            return Ok(LessonEffect::Unlinked);
         }
-        return Ok(LessonEffect::Unlinked);
-    }
-
-    if !file.citations.iter().any(|c| c == id) {
-        return Ok(LessonEffect::Untouched);
+        LessonEffect::CitationDropped => {}
     }
 
     file.citations.retain(|c| c != id);
@@ -180,6 +196,106 @@ fn cascade_lessons(
         GuardedReplaceKind::ReplaceSemanticMemory,
     )?;
     Ok(LessonEffect::CitationDropped)
+}
+
+/// What forgetting `id` does to `file`. Shared by [`cascade_lessons`] and
+/// [`preview`] so the two cannot drift: the exemplar unlinks, a citation drops,
+/// anything else is untouched.
+fn classify_lessons(file: &lessons::LessonsFile, id: &str) -> LessonEffect {
+    if file.lessons.iter().any(|l| l.id == id) {
+        LessonEffect::Unlinked
+    } else if file.citations.iter().any(|c| c == id) {
+        LessonEffect::CitationDropped
+    } else {
+        LessonEffect::Untouched
+    }
+}
+
+/// Report what [`cascade`] would do to `id`, writing nothing.
+///
+/// Same decision order as `cascade`: a missing id returns `removed: false`
+/// without checking the dream-cycle status; a present id refuses with
+/// [`ForgetError::InProgress`] before reading `LESSONS.md`. Opens no WAL and
+/// reads no clock.
+pub fn preview(agent_root: &AgentRoot, id: &EventId) -> Result<ForgetReport, ForgetError> {
+    let events = episodic::read_all(&agent_root.episodic_jsonl())?;
+    if !events.iter().any(|ev| ev.id == *id) {
+        return Ok(ForgetReport {
+            removed: false,
+            lesson: LessonEffect::Untouched,
+        });
+    }
+
+    dream_cycle::ensure_not_in_progress(agent_root)?;
+
+    let lesson = match lessons::read_lessons_file(&agent_root.lessons_md()) {
+        Ok(file) => classify_lessons(&file, id.as_str()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => LessonEffect::Untouched,
+        Err(e) => return Err(ForgetError::Lessons(e)),
+    };
+    Ok(ForgetReport {
+        removed: true,
+        lesson,
+    })
+}
+
+/// Schema token of the file `dreamd forget --proof` writes.
+pub const FORGET_RECEIPT_SCHEMA: &str = "forget-receipt/1.0";
+
+#[derive(Serialize)]
+struct Receipt<'a> {
+    schema_version: &'static str,
+    event_id: &'a str,
+    removed: bool,
+    lesson: &'static str,
+    root: &'a str,
+    orphans: Vec<ReceiptOrphan<'a>>,
+}
+
+#[derive(Serialize)]
+struct ReceiptOrphan<'a> {
+    line: u64,
+    kind: &'a str,
+    from: &'a str,
+    to: &'a str,
+}
+
+/// Render the `forget-receipt/1.0` file: one compact JSON object and a
+/// trailing `\n`.
+///
+/// Keys are `schema_version`, `event_id`, `removed` (always `true`), `lesson`,
+/// `root` (the recomputed Merkle root from `provenance::verify`), and
+/// `orphans` — the orphan edges whose `from` is `event_id`, in report order.
+/// This is a receipt, not the signed membership proof in `docs/provenance.md`:
+/// it carries no inclusion path and no signature.
+pub fn render_receipt(
+    event_id: &EventId,
+    lesson: LessonEffect,
+    report: &crate::provenance::ProvenanceReport,
+) -> String {
+    let id = event_id.as_str();
+    let receipt = Receipt {
+        schema_version: FORGET_RECEIPT_SCHEMA,
+        event_id: id,
+        removed: true,
+        lesson: lesson.as_str(),
+        root: &report.root,
+        orphans: report
+            .orphans
+            .iter()
+            .filter(|o| o.from == id)
+            .map(|o| ReceiptOrphan {
+                line: o.line,
+                kind: &o.kind,
+                from: &o.from,
+                to: &o.to,
+            })
+            .collect(),
+    };
+    // Plain strings, integers, and a bool: serialization cannot fail.
+    let mut out = serde_json::to_string(&receipt).expect("receipt serializes");
+    out.push('\n');
+    out
 }
 
 #[cfg(all(test, unix))]
@@ -424,5 +540,108 @@ mod tests {
         assert_eq!(fs::read(&jsonl).unwrap(), before);
         assert!(!tmp.exists());
         assert!(!root.wal_path().exists());
+    }
+
+    #[test]
+    fn preview_of_missing_id_writes_nothing() {
+        let (root, _g) = setup("forget-preview-missing", &[learning('A', "alpha", false)]);
+        let before = fs::read(root.episodic_jsonl()).unwrap();
+
+        let report = preview(&root, &eid('Z')).unwrap();
+
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed: false,
+                lesson: LessonEffect::Untouched
+            }
+        );
+        assert!(!root.wal_path().exists());
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), before);
+    }
+
+    #[test]
+    fn preview_of_cited_non_exemplar_reports_citation_dropped_and_writes_nothing() {
+        let (root, _g) = setup(
+            "forget-preview-citation",
+            &[learning('A', "alpha", false), learning('B', "beta", false)],
+        );
+        seed_lessons(&root, 'B', "beta", &['B', 'A']);
+        let log_before = fs::read(root.episodic_jsonl()).unwrap();
+        let lessons_before = fs::read(root.lessons_md()).unwrap();
+
+        let report = preview(&root, &eid('A')).unwrap();
+
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed: true,
+                lesson: LessonEffect::CitationDropped
+            }
+        );
+        assert_eq!(fs::read(root.lessons_md()).unwrap(), lessons_before);
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), log_before);
+        assert!(!root.wal_path().exists());
+    }
+
+    #[test]
+    fn preview_of_present_id_while_in_progress_refuses() {
+        let (root, _g) = setup(
+            "forget-preview-inprogress",
+            &[learning('A', "alpha", false)],
+        );
+        update_daemon_state(&root, |s| {
+            s.last_dream_cycle_status = "in_progress".to_string()
+        })
+        .unwrap();
+
+        let err = preview(&root, &eid('A')).unwrap_err();
+
+        assert!(matches!(err, ForgetError::InProgress), "{err}");
+        assert!(!root.wal_path().exists());
+    }
+
+    #[test]
+    fn render_receipt_keeps_only_this_ids_orphans() {
+        use crate::provenance::{EdgeFault, ProvenanceReport};
+
+        let report = ProvenanceReport {
+            root: "ab".repeat(32),
+            orphans: vec![
+                EdgeFault {
+                    line: 1,
+                    kind: "lesson_citation".to_string(),
+                    from: eid('A').to_string(),
+                    to: format!("lsn_{}", eid('B')),
+                },
+                EdgeFault {
+                    line: 2,
+                    kind: "index_doc".to_string(),
+                    from: eid('C').to_string(),
+                    to: "idx".to_string(),
+                },
+            ],
+            missing: vec![],
+            corrupt_lines: vec![],
+            skipped_unknown_kind: 0,
+        };
+
+        let text = render_receipt(&eid('A'), LessonEffect::CitationDropped, &report);
+
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"));
+        assert!(!text.contains("\"path\""), "{text}");
+        assert!(!text.contains("\"signature\""), "{text}");
+        assert!(text.starts_with("{\"schema_version\":\"forget-receipt/1.0\",\"event_id\""));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["schema_version"], FORGET_RECEIPT_SCHEMA);
+        assert_eq!(v["event_id"], eid('A').as_str());
+        assert_eq!(v["removed"], true);
+        assert_eq!(v["lesson"], "citation_dropped");
+        assert_eq!(v["root"], report.root.as_str());
+        let orphans = v["orphans"].as_array().unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0]["line"], 1);
+        assert_eq!(orphans[0]["kind"], "lesson_citation");
+        assert_eq!(orphans[0]["from"], eid('A').as_str());
     }
 }

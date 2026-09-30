@@ -71,6 +71,21 @@ impl DreamArgs {
     }
 }
 
+/// Arguments for the `dreamd forget` subcommand (BZR-151).
+#[derive(Args, Debug)]
+pub struct ForgetArgs {
+    /// The event id to remove (`evt_` + 26 Crockford base32 characters).
+    #[arg(value_name = "EVENT_ID")]
+    pub id: String,
+    /// Print what would be removed without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Write a forget-receipt/1.0 JSON file (event id, lesson effect, ledger
+    /// root, orphan edges) to PATH after a removal. Not a signed proof.
+    #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
+    pub proof: Option<PathBuf>,
+}
+
 /// Arguments for the `dreamd watch` subcommand.
 ///
 /// Both flags configure the TCP listener, which only the off-Unix `watch` has
@@ -121,6 +136,11 @@ pub enum Command {
     /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
     /// prune decayed episodic events.
     Dream(DreamArgs),
+    /// Remove one episodic event and the lesson state that names it (BZR-151).
+    ///
+    /// Stop a live `dreamd watch` first; the command refuses while the daemon
+    /// is running.
+    Forget(ForgetArgs),
     /// Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor.
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
@@ -793,6 +813,49 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     ) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_forget(args: ForgetArgs) -> ExitCode {
+    let cwd = match current_dir_or_exit() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // Same daemon address as `run_archive`: the UDS socket on Unix,
+    // `~/.agent/server.json` off it.
+    #[cfg(unix)]
+    let socket = dreamd_core::client::resolve_daemon_socket();
+    #[cfg(not(unix))]
+    let socket: Option<PathBuf> =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).server_json());
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    // Unlocked handles (AILAB-583): after a removal the write path opens the
+    // Tantivy index, whose writer thread logs to stderr. A hoisted lock would
+    // deadlock the same way `run_doctor` did. See AGENTS.md
+    // no-hoisted-stdio-lock-across-tantivy.
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    match commands::forget::run(
+        &cwd,
+        socket.as_deref(),
+        &args.id,
+        args.dry_run,
+        args.proof.as_deref(),
+        now_sec,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Usage / precondition — `run` already printed the hint.
+        Err(commands::forget::ForgetCliError::NotFound)
+        | Err(commands::forget::ForgetCliError::BadId(_)) => ExitCode::from(2),
         Err(e) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)
@@ -1622,6 +1685,7 @@ pub fn run() -> ExitCode {
         Command::Blame(args) => run_blame(args),
         Command::Doctor(args) => run_doctor(args),
         Command::Dream(args) => run_dream(args),
+        Command::Forget(args) => run_forget(args),
         Command::Init(args) => run_init(args),
         Command::Mcp(args) => run_mcp(args),
         Command::Memory(args) => run_memory(args.command),
@@ -2202,6 +2266,54 @@ mod tests {
     fn resolve_home_without_either_variable_is_none() {
         assert_eq!(resolve_home_from_vars(None, None, true), None);
         assert_eq!(resolve_home_from_vars(None, None, false), None);
+    }
+
+    #[test]
+    fn parses_forget_id_dry_run_and_proof() {
+        let id = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        match Cli::try_parse_from(["dreamd", "forget", id])
+            .unwrap()
+            .command
+        {
+            Some(Command::Forget(args)) => {
+                assert_eq!(args.id, id);
+                assert!(!args.dry_run);
+                assert!(args.proof.is_none());
+            }
+            _ => panic!("expected Forget"),
+        }
+        match Cli::try_parse_from(["dreamd", "forget", id, "--dry-run"])
+            .unwrap()
+            .command
+        {
+            Some(Command::Forget(args)) => assert!(args.dry_run),
+            _ => panic!("expected Forget --dry-run"),
+        }
+        match Cli::try_parse_from(["dreamd", "forget", id, "--proof", "out.json"])
+            .unwrap()
+            .command
+        {
+            Some(Command::Forget(args)) => {
+                assert_eq!(
+                    args.proof.as_deref(),
+                    Some(std::path::Path::new("out.json"))
+                );
+            }
+            _ => panic!("expected Forget --proof"),
+        }
+    }
+
+    #[test]
+    fn parses_forget_rejects_dry_run_with_proof() {
+        assert!(Cli::try_parse_from([
+            "dreamd",
+            "forget",
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--dry-run",
+            "--proof",
+            "out.json",
+        ])
+        .is_err());
     }
 
     #[test]

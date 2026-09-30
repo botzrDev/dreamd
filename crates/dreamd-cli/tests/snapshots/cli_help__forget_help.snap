@@ -1,0 +1,23 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "subcommand_help(\"forget\")"
+---
+Remove one episodic event and the lesson state that names it (BZR-151).
+
+Stop a live `dreamd watch` first; the command refuses while the daemon is running.
+
+Usage: forget [OPTIONS] <EVENT_ID>
+
+Arguments:
+  <EVENT_ID>
+          The event id to remove (`evt_` + 26 Crockford base32 characters)
+
+Options:
+      --dry-run
+          Print what would be removed without writing anything
+
+      --proof <PATH>
+          Write a forget-receipt/1.0 JSON file (event id, lesson effect, ledger root, orphan edges) to PATH after a removal. Not a signed proof
+
+  -h, --help
+          Print help (see a summary with '-h')

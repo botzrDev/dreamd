@@ -11,6 +11,7 @@ Commands:
   blame           Show which stored memories drove a query's recall ranking (BZR-193)
   doctor          Run health checks and print status (dream-cycle mode, etc.)
   dream           Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+  forget          Remove one episodic event and the lesson state that names it (BZR-151)
   init            Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
   mcp             Start the MCP server (bridges to daemon if running, otherwise in-process)
   memory          Name memory snapshots as branches and check them out (BZR-150)

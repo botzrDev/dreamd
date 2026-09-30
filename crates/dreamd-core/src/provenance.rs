@@ -16,8 +16,9 @@
 //!   replay does not go through `commit_and_persist`.
 //!
 //! The learn path never opens the ledger. The reserved vector kind in the
-//! format has no variant here: a writer MUST NOT emit it. There is no proof,
-//! signature, or key in this module (proofs are BZR-151).
+//! format has no variant here: a writer MUST NOT emit it. This module has no
+//! signature and no key. `dreamd forget --proof` writes a forget receipt
+//! (BZR-151) and does not write the signed membership proof.
 //!
 //! [`verify`] (BZR-148) is read-only: it recomputes the Merkle root from the
 //! good lines and reports orphans, missing edges, and corrupt lines. It does
