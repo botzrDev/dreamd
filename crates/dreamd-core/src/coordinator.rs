@@ -74,6 +74,11 @@ pub enum CoordinatorError {
     /// to HTTP 500.
     #[error("dream cycle: {0}")]
     DreamCycle(String),
+    /// [`MemoryCoordinatorMsg::Forget`] failed (BZR-158): the cascade itself,
+    /// or an indexer step after the cascade committed. Carries the display
+    /// string.
+    #[error("forget: {0}")]
+    Forget(String),
 }
 
 impl From<EpisodicError> for CoordinatorError {
@@ -129,6 +134,18 @@ pub enum MemoryCoordinatorMsg {
         /// site that forgets it must fail to compile, not quietly disclose.
         share_personal: bool,
         response_tx: oneshot::Sender<Result<crate::decay::DecayResult, CoordinatorError>>,
+    },
+    /// Remove one event from the JSONL and cascade to its derived state
+    /// (BZR-158), then reopen the append fd.
+    ///
+    /// Runs [`forget::cascade`](crate::forget::cascade) inside the actor so
+    /// the rewrite cannot race an append. When the event was removed and an
+    /// indexer is wired, the live index is told to drop the document and
+    /// refresh the sidecar and lesson layers. `now_sec` is caller-supplied.
+    Forget {
+        event_id: EventId,
+        now_sec: i64,
+        response_tx: oneshot::Sender<Result<crate::forget::ForgetReport, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
     Shutdown { response_tx: oneshot::Sender<()> },
@@ -249,6 +266,14 @@ impl MemoryCoordinator {
                     let result = self
                         .handle_run_dream_cycle(now_sec, &cycle_date, no_llm, share_personal)
                         .await;
+                    let _ = response_tx.send(result);
+                }
+                MemoryCoordinatorMsg::Forget {
+                    event_id,
+                    now_sec,
+                    response_tx,
+                } => {
+                    let result = self.handle_forget(&event_id, now_sec).await;
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -377,6 +402,43 @@ impl MemoryCoordinator {
         Ok(decay)
     }
 
+    /// BZR-158: run the forget cascade, reopen the append fd, then update the
+    /// live index.
+    ///
+    /// The cascade replaces `AGENT_LEARNINGS.jsonl` by rename, so the fd is
+    /// reopened before any indexer send. It is also reopened when the cascade
+    /// errors: a failure after the rewrite still leaves the old inode behind.
+    /// Only a clean "id not present" skips the reopen. An indexer error after
+    /// the cascade committed is reported; the JSONL is not rolled back.
+    async fn handle_forget(
+        &mut self,
+        event_id: &EventId,
+        now_sec: i64,
+    ) -> Result<crate::forget::ForgetReport, CoordinatorError> {
+        let result = crate::forget::cascade(&self.agent_root, event_id, now_sec);
+        if !matches!(result, Ok(ref r) if !r.removed) {
+            self.file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&self.jsonl_path)?;
+            self.file.seek(SeekFrom::End(0))?;
+        }
+        let report = result.map_err(|e| CoordinatorError::Forget(e.to_string()))?;
+
+        #[cfg(unix)]
+        if report.removed {
+            if let Some(tx) = self.indexer_tx.clone() {
+                forget_index_phases(&self.agent_root, &tx, event_id)
+                    .await
+                    .map_err(|e| CoordinatorError::Forget(e.to_string()))?;
+            }
+        }
+
+        Ok(report)
+    }
+
     /// Hand one durable append to the indexer task, **awaiting** the send.
     ///
     /// The await is the point. A bounded channel that is momentarily full must
@@ -413,6 +475,53 @@ impl MemoryCoordinator {
             self.indexer_tx = None;
         }
     }
+}
+
+/// The index half of a forget, in the order the dream cycle's index phases use:
+/// recurrence sidecar (when present), drop the one event document, then
+/// re-index the lesson layer (which clears it when `LESSONS.md` was unlinked).
+#[cfg(unix)]
+async fn forget_index_phases(
+    agent_root: &AgentRoot,
+    tx: &mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>,
+    event_id: &EventId,
+) -> Result<(), crate::server::index_map::IndexError> {
+    use crate::server::index_map::IndexError;
+    use crate::server::tantivy_handle::IndexerMsg;
+
+    if agent_root
+        .semantic_dir()
+        .join("recurrence_counts.json")
+        .exists()
+    {
+        let (resp, rx) = oneshot::channel();
+        tx.send(IndexerMsg::ApplyRecurrenceSidecar {
+            agent_root: agent_root.clone(),
+            response: resp,
+        })
+        .await
+        .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)??;
+    }
+
+    let (resp, rx) = oneshot::channel();
+    tx.send(IndexerMsg::PruneDecayedEvents {
+        event_ids: vec![event_id.clone()],
+        response: resp,
+    })
+    .await
+    .map_err(|_| IndexError::ChannelClosed)?;
+    rx.await.map_err(|_| IndexError::TaskDropped)??;
+
+    let (resp, rx) = oneshot::channel();
+    tx.send(IndexerMsg::IndexSemanticLessons {
+        agent_root: agent_root.clone(),
+        response: resp,
+    })
+    .await
+    .map_err(|_| IndexError::ChannelClosed)?;
+    rx.await.map_err(|_| IndexError::TaskDropped)??;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -650,6 +759,61 @@ mod tests {
             let _: AgentLearning = serde_json::from_str(line).expect("each line parses cleanly");
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BZR-158: `Forget` goes through the actor, and the append after it lands
+    /// on the rewritten file rather than the orphaned inode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forget_removes_first_id_and_later_append_lands() {
+        let dir = unique_tmp_dir("forget");
+        let root = AgentRoot::new(&dir);
+        let path = root.episodic_jsonl();
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let (r_tx, r_rx) = oneshot::channel();
+            tx.send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: None,
+                response_tx: r_tx,
+            })
+            .await
+            .unwrap();
+            ids.push(r_rx.await.unwrap().unwrap().id);
+        }
+
+        let (f_tx, f_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::Forget {
+            event_id: ids[0].clone(),
+            now_sec: 1_751_500_800,
+            response_tx: f_tx,
+        })
+        .await
+        .unwrap();
+        let report = f_rx.await.unwrap().expect("forget ok");
+        assert!(report.removed);
+
+        let (r_tx, r_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: sample_learning(),
+            client_dedup_key: None,
+            response_tx: r_tx,
+        })
+        .await
+        .unwrap();
+        ids.push(r_rx.await.unwrap().unwrap().id);
+
+        shutdown(tx, handle).await;
+
+        let on_disk: Vec<EventId> = episodic::read_all(&path)
+            .unwrap()
+            .into_iter()
+            .map(|ev| ev.id)
+            .collect();
+        assert_eq!(on_disk, vec![ids[1].clone(), ids[2].clone()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

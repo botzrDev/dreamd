@@ -27,6 +27,8 @@ pub mod daemon_state;
 pub mod decay;
 pub mod dream_cycle;
 pub mod episodic;
+/// BZR-158 — remove one event and cascade to its derived state.
+pub mod forget;
 pub mod index;
 pub mod ingress;
 pub mod io;
