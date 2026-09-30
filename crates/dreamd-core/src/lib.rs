@@ -47,6 +47,7 @@ pub mod privacy;
 pub mod provenance;
 pub mod redaction;
 pub mod registry;
+pub mod rrf;
 pub mod salience;
 pub use salience::{salience_with_context, RecurrenceContext};
 #[cfg(test)]

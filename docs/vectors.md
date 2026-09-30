@@ -1,6 +1,6 @@
 # Optional vector backend (`vectors` feature)
 
-**Status: a model download command only; vector recall is not implemented.** The `vectors` Cargo feature is off by default. The default `dreamd` binary does not link `fastembed`, and the release artifacts are built without the feature. Recall is still BM25 × salience. There is no JSONL vector index, nothing embeds text, and `embedding` ledger lines are still not written (see [`provenance.md`](./provenance.md)). Hybrid ranking is a later ticket (BZR-182).
+**Status: a model download command only; vector recall is not implemented.** The `vectors` Cargo feature is off by default. The default `dreamd` binary does not link `fastembed`, and the release artifacts are built without the feature. Recall is still BM25 × salience. There is no JSONL vector index, nothing embeds text, and `embedding` ledger lines are still not written (see [`provenance.md`](./provenance.md)). `dreamd_core::rrf::fuse` fuses two best-first id lists by reciprocal rank (`1 / (RRF_K + rank)`, `RRF_K` = 60, 1-based rank), but recall does not call it: there is no dense ranking to fuse and no hybrid query mode (BZR-182).
 
 ## `dreamd vectors enable`
 
