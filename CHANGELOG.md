@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0-alpha.1] - 2026-09-30
+
+### Highlights
+
+- Pre-release of the commits on `main` since v0.1.1. Recall is still BM25 × salience.
+- Published binaries are the default build. `dreamd vectors enable` exits 2 on them. A `--features vectors` build is not a release asset.
+- `rrf::fuse` is in the library. Recall does not call it.
+
 ### Added
 
 - **`POST /api/v1/migrate` answers 501 after the existing auth stack (BZR-187).** The handler ignores its body and does not call `MigrationRegistry` or rewrite the store. `current_schema_version` is the episodic token `"1.0.0"`. Unix missing peer UID is 403, Windows missing bearer is 401, and a missing `X-Agent-Root` is 400. Documented in `docs/http-api.md`. (`crates/dreamd-core/src/server/http/handlers/migrate.rs`, `docs/http-api.md`)
@@ -241,7 +249,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v0.2.0-alpha.1...HEAD
+[0.2.0-alpha.1]: https://github.com/botzrDev/dreamd/compare/v0.1.1...v0.2.0-alpha.1
 [0.1.1]: https://github.com/botzrDev/dreamd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.8...v0.1.0
 [0.1.0-rc.4]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...v0.1.0-rc.4

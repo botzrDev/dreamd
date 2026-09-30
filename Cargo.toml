@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# Patch after GA 0.1.0 (DR-009). This tag is 0.1.1.
-version = "0.1.1"
+# Pre-release. Recall is still BM25 × salience. This tag is 0.2.0-alpha.1.
+version = "0.2.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

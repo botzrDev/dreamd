@@ -2,4 +2,4 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: VERSION_SHORT
 ---
-dreamd 0.1.1 ([sha] build:[date] target:[target] schema:1.0 vectors:[state])
+dreamd 0.2.0-alpha.1 ([sha] build:[date] target:[target] schema:1.0 vectors:[state])
