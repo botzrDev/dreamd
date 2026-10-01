@@ -1,5 +1,5 @@
 {
-    "version": "0.2.0-alpha.1",
+    "version": "1.0.0",
     "binaries": {
         "linux-x86_64": {
             "sha256": "PENDING_LINUX"

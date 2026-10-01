@@ -31,11 +31,11 @@ mcp-http = ["dreamd-core/mcp-http"]
 vectors = ["dreamd-core/vectors"]
 
 [dependencies]
-dreamd-core = { path = "../dreamd-core", version = "0.2.0-alpha.1" }
+dreamd-core = { path = "../dreamd-core", version = "1.0.0" }
 # AILAB-223 — `dreamd doctor` compares stored records against
 # RECORD_SCHEMA_VERSION; also provides typed episodic fixtures in tests.
 # Already linked into the binary transitively via dreamd-core.
-dreamd-protocol = { path = "../dreamd-protocol", version = "0.2.0-alpha.1" }
+dreamd-protocol = { path = "../dreamd-protocol", version = "1.0.0" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
 # WEG-51 / DR-703 — `dreamd recall` opens the per-project index read-only with
