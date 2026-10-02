@@ -26,7 +26,7 @@ fn short_version_format_and_no_sentinel() {
         "vergen sentinel leaked into --version: {stdout}"
     );
 
-    // Format: "dreamd 0.0.0 (<sha7> build:<date> target:<triple> schema:1.0)\n"
+    // Format: "dreamd 0.0.0 (<sha7> build:<date> target:<triple> schema:1.0 vectors:<on|off>)\n"
     let pkg_version = env!("CARGO_PKG_VERSION");
     let expected_prefix = format!("dreamd {pkg_version} (");
     assert!(
@@ -39,8 +39,8 @@ fn short_version_format_and_no_sentinel() {
         "missing target: field: {stdout}"
     );
     assert!(
-        stdout.contains(" schema:1.0)"),
-        "missing schema:1.0): {stdout}"
+        stdout.contains(" schema:1.0 vectors:off)") || stdout.contains(" schema:1.0 vectors:on)"),
+        "missing schema:1.0 vectors:<on|off>): {stdout}"
     );
     assert!(
         stdout.ends_with('\n'),
