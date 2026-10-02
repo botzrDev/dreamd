@@ -17,8 +17,7 @@
 > RFC-011, accepted 2026-09-26), of memory as plain files a person owns, with
 > provenance. No trust label ships today; see ROADMAP.md, "Direction".
 >
-> Version: 1.0.0 (GitHub release; the npm package is published separately and can
-> trail it — `npx -y dreamd-mcp --version` shows the installed version). Recall is
+> Version: 1.0.0 (GitHub release `v1.0.0` and npm `dreamd-mcp` 1.0.0). Recall is
 > lexical BM25 × salience — no vector or hybrid recall.
 
 ## Documentation

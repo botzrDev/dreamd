@@ -8,7 +8,8 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 |---|---|---|
 | [../README.md](../README.md) | Everyone | What dreamd is, install, quickstart, status |
 | [../GUIDE.md](../GUIDE.md) | New users | 20-minute linear tutorial (install → crash recovery) |
-| [./dreamd.1](./dreamd.1) | Power users | Man page, generated from the CLI definitions (`scripts/generate-man.sh`) |
+| [./dreamd.1](./dreamd.1) | Power users | Top-level man page, generated from the CLI definitions (`scripts/generate-man.sh`). The `dreamd-<cmd>(1)` labels are not separate pages |
+| [cli.md](./cli.md) | Power users | Command index. `status`, `score`, `setup`, `reset workspace`, and `version` are written out here |
 | [../SPEC.md](../SPEC.md) | Implementers, contributors | On-disk layout, JSON schema, scoring formula, dream-cycle contract — **canonical**; MUST/SHOULD language lives here |
 | [spec/README.md](./spec/README.md) | Adapter authors, new implementers | Two-page digest of that contract — [layout](./spec/layout.md) and [schemas](./spec/schemas.md) |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Contributors | Load-bearing engineering decisions and crate boundaries |

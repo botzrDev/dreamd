@@ -1,4 +1,6 @@
-# Citation observability (`GET /api/v1/recall?explain=1`)
+# Recall citations, blame, and salience drift
+
+This page covers `explain=1` on `GET /api/v1/recall`, `dreamd blame`, counterfactual recall (`--without` / `exclude=`), and `dreamd salience-drift`. The per-request `http request` log line and the `x-request-id` header are in [http-api.md](./http-api.md) (Request ID).
 
 ## What this is
 

@@ -135,7 +135,7 @@ Concurrent third-party writers to the JSONL are not supported.
 
 ### 2. Salience is query-time, not indexed
 
-Storing the score would force daily re-indexing as `age_days` drifts. Tantivy schema fields: `content` (TEXT), `timestamp_sec`, `pain`, `importance`, `recurrence` (fastfields), plus the `STRING | STORED` provenance anchors `skill_action` and `source_harness` (hydrated into recall `metadata`, WEG-424 — stored for surfacing, not salience inputs). A custom collector computes:
+Storing the score would force daily re-indexing as `age_days` drifts. Tantivy schema fields, all eleven: `content` (`TEXT | STORED`); fastfields `timestamp_sec`, `pain`, `importance`, `recurrence`, `last_updated_sec`, `cited_event_count`; `STRING | STORED` `layer`, `event_id`, `skill_action`, `source_harness`. `skill_action` and `source_harness` are hydrated into recall `metadata` (stored for surfacing, not salience inputs). `last_updated_sec` and `cited_event_count` are on the schema for lesson documents; salience does not read them. The full flag table is in [docs/architecture/tantivy-migration.md](docs/architecture/tantivy-migration.md). A custom collector computes:
 
 ```
 salience = exp(-age_days / 14.0) * (pain / 10.0) * (importance / 10.0) * (1.0 + ln(1.0 + recurrence))

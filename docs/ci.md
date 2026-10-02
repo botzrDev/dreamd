@@ -335,6 +335,13 @@ cargo test --all-features --workspace
 cargo build --release -p dreamd && strip target/release/dreamd
 ```
 
+`--all-features` compiles `vectors` and `mcp-http`. The `vectors` build downloads a prebuilt ONNX Runtime, so a cold cache needs network. Offline, drop `--all-features` (default features only; that is not the CI lint or test job):
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
 Optional deeper checks:
 
 ```bash

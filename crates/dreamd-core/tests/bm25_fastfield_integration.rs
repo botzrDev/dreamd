@@ -75,10 +75,10 @@ fn load_fixture() -> Vec<FixtureRecord> {
 }
 
 /// Build an in-RAM Tantivy index from the fixture and derive `recurrence`
-/// per `skill_action` cluster from the count of records sharing it. Mirrors
-/// WEG-42's planned index-time recurrence semantics (demo-corpus/README.md
-/// "Recurrence note"); the production indexer isn't shipped yet, so the test
-/// performs the derivation locally.
+/// per `skill_action` cluster from the count of records sharing it. The
+/// production indexer reads `semantic/recurrence_counts.json`. This fixture
+/// ships no sidecar, so the test counts locally
+/// (demo-corpus/README.md "Recurrence note").
 fn build_index_from_fixture(records: &[FixtureRecord]) -> (Index, SchemaFields, IndexReader) {
     let (schema, fields) = build_schema();
     let index = Index::create_in_ram(schema);

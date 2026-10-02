@@ -35,8 +35,8 @@ use crate::layout::AgentRoot;
 /// a property of the on-disk line format, so it lives here; the coordinator
 /// re-exports it (`pub use crate::episodic::MAX_LEARNING_LINE_BYTES;`). Anything
 /// larger is rejected at the write boundary ([`EpisodicError::PayloadTooLarge`])
-/// and the HTTP handler maps it to 413. Sidecar storage for oversized payloads
-/// is deferred to v0.1.1.
+/// and the HTTP handler maps it to 413. Oversized payloads are rejected;
+/// there is no sidecar for them.
 pub const MAX_LEARNING_LINE_BYTES: usize = 4096;
 
 /// Errors surfaced by the episodic I/O seam.

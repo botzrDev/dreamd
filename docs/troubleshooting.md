@@ -105,6 +105,16 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 
 ---
 
+## `dreamd dream --no-commit` while `watch` is running
+
+**Symptom:** `dreamd dream --no-commit` exits 1 with Tantivy `LockBusy` while `dreamd watch` is up.
+
+**Cause:** `--no-commit` skips the git commit and also skips the daemon proxy, so the cycle runs in this process and writes the log the daemon already has open. The help text only mentions the git step.
+
+**Fix:** Stop `dreamd watch`, then run the cycle. Or omit `--no-commit` and let the running daemon run it (`dream cycle complete (via daemon)`). Do not treat the `LockBusy` exit as a clean no-op.
+
+---
+
 ## How do I reset or clear memory?
 
 | Goal | Command |

@@ -55,10 +55,8 @@ pub const SOURCE_HARNESS_FIELD: &str = "source_harness";
 
 /// Memory layer for an indexed document.
 ///
-/// At v0.1, every indexed document carries `Layer::Episodic`. The
-/// `Semantic` variant exists for forward-compatibility with WEG-136
-/// (DR-211, v0.1.1) which adds the LESSONS.md → Tantivy semantic
-/// indexing pipeline.
+/// `Episodic` is a raw event. `Semantic` is a `LESSONS.md` lesson. Both
+/// are scored by BM25 × salience; `Semantic` is not an embedding layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {

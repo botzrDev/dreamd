@@ -107,17 +107,17 @@ register a real transform in `dreamd-core::migrate` (WEG-133 shipped the stub:
 
 ---
 
-## Scope (through the 0.2.0-alpha.1 bump)
+## Scope (1.0.0)
 
 Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
 
 Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
 
-On `origin/main` at `2e34181` the workspace version is `0.2.0-alpha.1`. There is no `v0.2.0-alpha.1` git tag. `packages/dreamd-mcp/manifest.json` still has `PENDING_*` shas, so npm `dreamd-mcp` is still `0.1.1` until the human steps in `RELEASING.md`.
+On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`.
 
 Still out of scope: vector/embedding recall, hybrid retrieval, Windows `write_atomic` (dream cycle and index), Homebrew install, animated GIF, auto dream cycle.
 
-The optional `vectors` feature downloads a model and does not rank. `rrf::fuse` is unused by recall. Forget, memory branches, and the in-RAM latency page are on `main`. Do not describe vector recall, hybrid retrieval, or a published tag as shipped.
+The optional `vectors` feature downloads a model and does not rank. `rrf::fuse` is unused by recall. Forget, memory branches, and the in-RAM latency page are shipped. Do not describe vector recall or hybrid retrieval as shipped. `v1.0.0` is a published tag; `v0.2.0-alpha.1` was never tagged.
 
 ---
 
@@ -129,7 +129,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-02
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -195,7 +195,7 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 - Claim one ticket and its file list before editing. One writer per file.
 - Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets landed later: 160 in `806b764`, 155 in `260f37d`.
 - **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). **BZR-153** and **BZR-148**'s `provenance::verify` are on `main` (`e3b7ecf`). **BZR-156**'s command and **BZR-146** are on `main` (`13ae1ca`). `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main` at `2e34181`. Linear marks 151, 188, 181, 182, 177, and 157 Done on dreamd-eng. Do not reopen them. The 1.0.0 bump is local commit `bb84721` on `main` (ahead of `origin/main` by 1). There is no next implement ticket. Do not cut the tag, publish npm, or fill the `PENDING_*` shas from an agent session.
+- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). **BZR-153** and **BZR-148**'s `provenance::verify` are on `main` (`e3b7ecf`). **BZR-156**'s command and **BZR-146** are on `main` (`13ae1ca`). `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main`. Linear marks 151, 188, 181, 182, 177, and 157 Done on dreamd-eng. Do not reopen them. The 1.0.0 bump is `bb84721`, tagged `v1.0.0` at `dacd95d`. Manifest shas are filled (`42e8e62`). The docs pass is `41e4ee5` and `0064355` (`origin/main`). There is no next implement ticket. Do not cut another tag or publish npm from an agent session. Behaviour bugs, founder decisions, and doc gaps left after that docs pass are listed in `context/audits/v1.0.0-docs-audit-remaining-2026-10-02.md` (gitignored; none of those items have tickets). Do not file them unless asked.
 
 Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
 
@@ -206,7 +206,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### privacy-disclosure-tracks-the-shipped-network-story
 
 - **Rule:** `DR413_DISCLOSURE` in `privacy.rs` is the first-run banner printed by `dreamd init` and first MCP spawn. `tests/fixtures/init.golden.txt` is byte-locked to it. When whether the daemon can make network calls changes, rewrite **both** in the same commit. Never leave "planned for v0.X.Y" in the banner after that version is tagged.
-- **Why:** The v0.1.1 honesty pass updated README / ROADMAP / SECURITY but missed this string. Users who `npx dreamd-mcp@0.1.1 init` still saw "LLM-assisted dream cycles … planned for v0.1.1" after that release had shipped the LLM path.
+- **Why:** The v0.1.1 honesty pass updated README / ROADMAP / SECURITY but missed this string. Users who ran init from the then-published npm package still saw "LLM-assisted dream cycles … planned for v0.1.1" after that release had shipped the LLM path.
 - **How to apply:** Edit the const and the golden together; `cargo test -p dreamd --test init_golden` is the gate. Do not rewrite historical CHANGELOG `[0.1.0]` bullets that also said `--dry` was planned (`changelog-historical-entries-stay-put`).
 - **Cross-refs:** `changelog-historical-entries-stay-put`
 
@@ -787,7 +787,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187 through 146, including the BZR-156 command, are on `main` at or before `13ae1ca`. `provenance::verify` is on `main` at `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main` at `2e34181`. The stripped default binary on `f786bff` is 20,674,976 bytes. The 1.0.0 bump is local commit `bb84721`. There is no next implement ticket. Do not cut the tag or publish npm from an agent session. 207, 210, 149, and 152 are not claimable implement tickets. dreamd-eng milestone bars at 100% do not mean those tickets shipped.
+- **How to apply:** Claim one ticket from that section. One writer per file. 187 through 146, including the BZR-156 command, are on `main` at or before `13ae1ca`. `provenance::verify` is on `main` at `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main`. The stripped default binary on `f786bff` is 20,674,976 bytes. Tag `v1.0.0` is `dacd95d`; `origin/main` is `0064355`. There is no next implement ticket. Do not cut another tag or publish npm from an agent session. 207, 210, 149, and 152 are not claimable implement tickets. dreamd-eng milestone bars at 100% do not mean those tickets shipped. Leftovers after the 1.0.0 docs pass have no tickets; the list is `context/audits/v1.0.0-docs-audit-remaining-2026-10-02.md`.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `vectors-feature-stays-out-of-the-default-binary`, `ailab-210-ac-is-pre-watch-architecture`
 
 ### vectors-feature-stays-out-of-the-default-binary
@@ -869,8 +869,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### public-benchmark-is-the-in-ram-recall-bench
 
-- **Rule:** BZR-177's public harness is the existing `cargo bench -p dreamd-core --bench recall` (`crates/dreamd-core/benches/recall.rs`, `Index::create_in_ram`). `scripts/benchmark/recall_summary.py` prints sample P50/P99 from `target/criterion/recall/n/{1000,10000,100000}/new/sample.json`. Divide `times[i]` by `iters[i]`. Do not read `estimates.json`. Do not add `benches/public`, a CI bench job, a LongMemEval score, a vectors install, or a dreamd.dev page.
-- **Why:** Linear BZR-177 asks for `benches/public/`, LongMemEval mini scores (BZR-270), a vectors install, and CI publish to dreamd.dev. DR-208 already shipped the bench. The index is in RAM, so a disk-speed note is false. Criterion 0.5 stores iteration totals in `sample.json`, and its `median.point_estimate` is a bootstrap, not the sample percentile. Python `round` is banker's rounding; the index is `int((p / 100) * (n - 1) + 0.5)`. Criterion writes `./target/criterion` from the process cwd and ignores `CARGO_TARGET_DIR`. dreamd.dev is canceled. WasTrue (`scripts/benchmark/wastrue_bench.py`) is a different eval.
+- **Rule:** BZR-177's public harness is the existing `cargo bench -p dreamd-core --bench recall` (`crates/dreamd-core/benches/recall.rs`, `Index::create_in_ram`). `scripts/benchmark/recall_summary.py` prints sample P50/P99 from `target/criterion/recall/n/{1000,10000,100000}/new/sample.json`. Divide `times[i]` by `iters[i]`. Do not read `estimates.json`. Do not add `benches/public`, a CI bench job, a LongMemEval score, a vectors install, or a dreamd.dev page. The no-argument printer always reads `<repo>/target/criterion`. Criterion 0.5.1 writes `$CRITERION_HOME` if set, otherwise `$CARGO_TARGET_DIR/criterion`, otherwise the target dir from `cargo metadata`, otherwise `./target/criterion`.
+- **Why:** Linear BZR-177 asks for `benches/public/`, LongMemEval mini scores (BZR-270), a vectors install, and CI publish to dreamd.dev. DR-208 already shipped the bench. The index is in RAM, so a disk-speed note is false. Criterion 0.5 stores iteration totals in `sample.json`, and its `median.point_estimate` is a bootstrap, not the sample percentile. Python `round` is banker's rounding; the index is `int((p / 100) * (n - 1) + 0.5)`. dreamd.dev is canceled. WasTrue (`scripts/benchmark/wastrue_bench.py`) is a different eval.
 - **How to apply:** Spec `assignments/BZR-177.v2.md`. Leave `benches/recall.rs` alone. Leave the PERF.md measured cells and the 2026-07-28 / `e8e27fd` stamp. Do not rewrite the µs table in `docs/architecture/tantivy-migration.md`. The full 100k bench is not a report-back gate; `cargo check -p dreamd-core --benches` is. A grep that bans the token `LongMemEval` also bans a sentence saying the page omits that eval. The shipped `docs/benchmarks.md` names vector recall and WasTrue and omits the token. The printer parses `sys.argv` (`json`, `pathlib`, `subprocess`, `sys`). Do not send either back.
 - **Cross-refs:** `remaining-build-order-2026-09-24`, `vectors-feature-stays-out-of-the-default-binary`, `spec-page-is-in-repo-not-dreamd-dev`, `layer-semantic-is-not-embeddings`, `changelog-historical-entries-stay-put`
 
@@ -878,12 +878,12 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** BZR-157 prepares `0.2.0-alpha.1` on the six `RELEASING.md` surfaces plus a changelog section. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`. Published binaries stay the default build (`cargo build --release`). `dreamd vectors enable` exits 2 on them. Recall stays BM25 × salience. `rrf::fuse` stays uncalled. The bump commit belongs on `release/v0.2.0-alpha.1`, because `PENDING_*` shas fail `manifest.test.js` on `main`.
 - **Why:** Linear BZR-157 asks for a vectors-feature release asset, hybrid retrieval enabled, a one-paste installer check, and the BZR-271 blog post in the same tag. The feature build is 46,589,208 bytes. `release.yml` fails NFR-2 above 20,971,520 and builds the default binary only. A hyphenated tag is already a GitHub prerelease. npm publish is the `dataprime1` passkey. Hybrid recall is not in the tree.
-- **How to apply:** The bump is on `origin/main` at `2e34181`, including `PENDING_*` shas, so `manifest.test.js` fails on `main` until the release workflow fills them. Do not `git tag`, `git push`, or `npm publish` from an agent session. A bare path-dep `version = "0.1.0-rc.2"` is `^0.1.0-rc.2` and rejects `0.2.0-alpha.1`. The three fields in `crates/dreamd-core/Cargo.toml` and `crates/dreamd-cli/Cargo.toml` move with the workspace version. `RELEASING.md` step 1 row 7 names them.
+- **How to apply:** The 0.2.0-alpha.1 bump is `2e34181` and was never tagged. Manifest shas on `main` are the v1.0.0 release shas (`42e8e62`). Do not `git tag`, `git push`, or `npm publish` from an agent session. A bare path-dep `version = "0.1.0-rc.2"` is `^0.1.0-rc.2` and rejects `0.2.0-alpha.1`. The three fields in `crates/dreamd-core/Cargo.toml` and `crates/dreamd-cli/Cargo.toml` move with the workspace version. `RELEASING.md` step 1 row 7 names them.
 - **Cross-refs:** `remaining-build-order-2026-09-24`, `releasing-npm-is-human-passkey`, `nfr-2-stripped-binary-is-20mb`, `vectors-feature-stays-out-of-the-default-binary`, `changelog-historical-entries-stay-put`, `v1-is-the-version-bump-of-the-current-tree`
 
 ### v1-is-the-version-bump-of-the-current-tree
 
 - **Rule:** Product 1.0.0 is the version bump in `assignments/v1.0.0.v2.md`. `SPEC.md` stays v0.1. Episodic `schema_version` stays `"1.0.0"`. Recall stays BM25 × salience. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`.
 - **Why:** On 2026-10-01 the finish list was empty and `context/planning/future-directions.md` still described identity, hypergraph, CRDT, and cryptographic deletion as later phases. The user chose to ship 1.0 from the tree on `main` (`2e34181`) rather than finish that document. There is no `v0.2.0-alpha.1` tag. `2e34181` has no Actions run. `release.yml` marks a tag as a prerelease only when the name contains `-`, so `v1.0.0` publishes as stable. The release notes are only the `## [1.0.0]` block.
-- **How to apply:** The bump is local commit `bb84721` (`chore: release version 1.0.0`), unpushed, untagged, with `PENDING_*` shas. Do not queue it again. The next action is the human tag `v1.0.0` on that commit. Do not implement Windows `write_atomic`, wire `rrf::fuse` into recall, or bump `SPEC.md`. Do not `git tag`, `git push`, or `npm publish` from an agent session.
+- **How to apply:** The bump is `bb84721`. Tag `v1.0.0` is `dacd95d` (published 2026-10-02, stable). Manifest shas are filled (`42e8e62`). npm `dreamd-mcp` 1.0.0 is on `latest` and `next`. Do not queue the bump again. Do not implement Windows `write_atomic`, wire `rrf::fuse` into recall, or bump `SPEC.md`. Do not `git tag`, `git push`, or `npm publish` from an agent session.
 - **Cross-refs:** `alpha-tag-is-the-version-bump-not-the-publish`, `changelog-historical-entries-stay-put`, `vectors-feature-stays-out-of-the-default-binary`, `remaining-build-order-2026-09-24`

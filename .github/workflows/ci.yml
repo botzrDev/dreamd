@@ -96,13 +96,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows daemon support (DR-121) is deferred to v0.1.1. AILAB-174 made the
-    # workspace *compile* on Windows, but the daemon does not run there: server /
-    # client / daemon_client stay unix-only (UDS / SO_PEERCRED) and
-    # io::write_atomic is ErrorKind::Unsupported, so `watch` / `mcp` exit 2.
-    # Keep Windows in the matrix for visibility but non-gating until DR-121 /
-    # AILAB-203 lands — mirroring the informational Windows binary-size job.
-    # Linux + macOS remain hard gates.
+    # Windows `watch` serves loopback TCP + bearer. Dream cycle and the Tantivy
+    # index still need `write_atomic`, which returns Unsupported, so those paths
+    # do not run there. The job stays continue-on-error: a Windows failure does
+    # not block merge. Linux and macOS remain hard gates.
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
     permissions:
       contents: read

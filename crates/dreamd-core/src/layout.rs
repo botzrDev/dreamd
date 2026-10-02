@@ -157,7 +157,8 @@ impl AgentRoot {
         self.dreamd_dir().join("state.json")
     }
 
-    /// `<project>/.agent/.dreamd/agent.log` — rolling daemon log for this project.
+    /// `<project>/.agent/.dreamd/agent.log`. No production caller. The daemon
+    /// log is `~/.agent/dreamd.log` (`DaemonHome::log_file`).
     pub fn agent_log(&self) -> PathBuf {
         self.dreamd_dir().join("agent.log")
     }
@@ -208,8 +209,9 @@ impl AgentRoot {
         self.snapshots_dir().join(format!("{date}.jsonl"))
     }
 
-    /// All seven `.agent/` subdirectories, in canonical order. Useful for
-    /// scaffolding (`dreamd init`, DR-105) and integrity checks (DR-107).
+    /// Seven `.agent/` paths, in canonical order. `dreamd init` creates
+    /// `working`, `episodic`, `semantic`, `personal`, and `.dreamd`. It does
+    /// not create `skills/` or `protocols/`.
     pub fn subdirs(&self) -> [PathBuf; 7] {
         [
             self.working_dir(),

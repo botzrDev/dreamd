@@ -19,7 +19,7 @@ python3 scripts/benchmark/wastrue_bench.py --bakeoff
 
 `--demo` and `--verify-determinism` need no API keys. `--trials N` sets the trials per scenario. For `--bakeoff`, the keys can also come from a file of `export KEY=VAL` lines: pass `--env-file PATH`, or run `bash scripts/benchmark/run_bakeoff.sh [ENV_FILE]`, which sources the file (default `/tmp/anth20_bakeoff.env`) and then runs `--bakeoff`.
 
-Design doc: [Linear — bake-off harness v0](https://linear.app/wegetit/document/state-drift-benchmark-bake-off-harness-v0-scaffold-verified-d5babfc6700a).
+The bake-off design note is a private Linear document. It is not in this repository. The commands above are the runnable contract.
 
 ## Recall latency summary
 

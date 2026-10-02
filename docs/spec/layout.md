@@ -53,8 +53,17 @@ the ignore rule (`/.agent/.dreamd/`) for you:
   index_progress.json      # Newest indexed event id.
   semantic_pass.json       # Which lessons the last index pass indexed or skipped.
   snapshots/<YYYY-MM-DD>.jsonl   # Decay archive: events pruned from the log, never deleted.
-  branches/                # Memory branches: HEAD, refs/, objects/<id>/ (docs/branching.md).
-  provenance/ledger.jsonl  # Append-only provenance ledger (docs/provenance.md).
+  branches/
+    HEAD                     # Current ref name. A dream cycle does not write this.
+    refs/<name>              # Two lines: 64-hex object id, then a UTC timestamp.
+    objects/<id>/            # <id> is the SHA-256 of manifest.json's canonical bytes.
+      manifest.json
+      episodic/AGENT_LEARNINGS.jsonl
+      semantic/LESSONS.md
+      semantic/recurrence_counts.json
+      personal/PREFERENCES.md
+  provenance/
+    ledger.jsonl             # Append-only. One compact JSON edge per line.
 ```
 
 Only `config.toml` and `state.json` exist after `init`; the rest appear the

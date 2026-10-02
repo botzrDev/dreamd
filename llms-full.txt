@@ -44,10 +44,9 @@ Supported: Linux x86_64, macOS x86_64/aarch64 (the prebuilt binaries the npm shi
 downloads). Windows is watch + learn only (loopback TCP + bearer), from a source
 build; dream cycle and Tantivy index need Unix atomic writes. Node >= 18 required.
 
-Version note: this describes 1.0.0 (released on GitHub). The npm package is published
-separately and can trail it; `npx -y dreamd-mcp --version` shows what you have.
-0.1.1 lacks `blame`, `salience-drift`, `memory`, `forget`, `recall --without`,
-`doctor --provenance`, and `explain=1`.
+Version note: this describes 1.0.0, published on GitHub as `v1.0.0` and on npm
+as `dreamd-mcp` 1.0.0. `blame`, `salience-drift`, `memory`, `forget`,
+`recall --without`, `doctor --provenance`, and `explain=1` are in that version.
 
 ### From source (requires Rust stable)
 

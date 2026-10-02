@@ -78,9 +78,8 @@ pub use crate::server::indexer_actor::{
     read_semantic_pass_record, IndexerMsg, SemanticPassRecord, SEMANTIC_PASS_FILENAME,
 };
 
-/// Config-file parsing for `commit_cadence_seconds` and other runtime
-/// settings is deferred to v0.1.1 (natural home: LLM cost cap ticket WEG-140
-/// / DR-307). Do not add a config reader in this ticket.
+/// `commit_cadence_seconds` is not read from config. Callers pass the
+/// duration. Production uses [`DEFAULT_COMMIT_CADENCE`].
 ///
 /// Wall-clock cadence at which the indexer flushes accumulated `add_document`
 /// calls to Tantivy. Production callers pass this value;

@@ -1,7 +1,7 @@
 //! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
-//! top-level `--help`, each subcommand `--help` (archive, blame, init, dream, mcp,
+//! top-level `--help`, each subcommand `--help` (archive, blame, forget, init, dream, mcp,
 //! memory, migrate, doctor, recall, salience-drift, score, watch, reset, service,
 //! setup, status, uninstall, update, vectors, version), nested `reset workspace --help`,
 //! `memory branch|checkout|branches|delete|bisect --help`,

@@ -1,15 +1,15 @@
 name: MCP manifest
 
 # Pre-release helper: build shim-target tarballs and regenerate
-# packages/dreamd-mcp/manifest.json. Run before npm publish when the
-# manifest still has PENDING_* placeholders.
+# packages/dreamd-mcp/manifest.json. The release workflow is the path that
+# fills shas for a tag; this dispatch is the manual rerun.
 on:
   workflow_dispatch:
     inputs:
       version:
         description: "Semver for manifest.json (no leading v)"
         required: true
-        default: "0.1.0-rc.2"
+        default: "1.0.0"
 
 permissions:
   contents: read

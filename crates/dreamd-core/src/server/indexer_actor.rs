@@ -613,7 +613,8 @@ fn add_semantic_document(
 const SEMANTIC_SOURCE_HARNESS: &str = "dreamd";
 
 /// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
-/// `layer` is always [`Layer::Episodic`] in v0.1; semantic indexing is WEG-136.
+/// `layer` is always [`Layer::Episodic`]. Lesson documents are added by the
+/// semantic pass, not by this function.
 /// `event_id` is stored as `STRING | STORED` for targeted delete-and-re-add
 /// during recurrence sidecar application (WEG-45 / DR-205′).
 pub(crate) fn add_document(

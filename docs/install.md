@@ -67,6 +67,18 @@ ls -l ~/.agent/dreamd.sock    # srw------- owned by you
 tail -f ~/.agent/dreamd.log
 ```
 
+When no unit is installed, Linux prints:
+
+```text
+service: not-installed
+backend: systemd
+pid: -
+active_since: -
+recent log: (none)
+```
+
+A running unit fills `pid` and `active_since` and, when the daemon log has lines, prints `recent log (last 10 lines):` with those lines indented. `dreamd status` is a different command (socket liveness); its log tail is 5 lines.
+
 `dreamd status` is the daemon-level view — Unix-socket liveness, the project
 under your current directory, when the last dream cycle ran — and works for a
 foreground `dreamd watch` too, whereas `dreamd service status` reports what

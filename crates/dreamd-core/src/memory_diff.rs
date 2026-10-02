@@ -2,8 +2,8 @@
 //!
 //! An object is `branches/objects/<id>/` in the `branches/1.0` format
 //! (`docs/branching.md`, written by [`crate::snapshot`]). This module only
-//! reads objects; it never writes one and never takes a snapshot. There is no
-//! CLI here: `dreamd memory` is BZR-150's command.
+//! reads objects; it never writes one and never takes a snapshot. The command
+//! is `dreamd memory diff` in `dreamd-cli`.
 //!
 //! Events are compared by `AgentLearning.id`. Salience is the query-time
 //! formula without the BM25 term, scored with one `now_sec` for both sides,

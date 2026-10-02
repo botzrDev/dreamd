@@ -291,6 +291,21 @@ curl --unix-socket ~/.agent/dreamd.sock \
   "http://localhost/api/v1/recall?q=route+handlers&k=3"
 ```
 
+The same call with citations, and with one event left out of the ranking:
+
+```bash
+curl --unix-socket ~/.agent/dreamd.sock \
+  -H "X-Agent-Root: $PROJECT" \
+  --get \
+  --data-urlencode "q=route handlers" \
+  --data-urlencode "k=3" \
+  --data-urlencode "explain=1" \
+  --data-urlencode "exclude=evt_01ARZ3NDEKTSV4RRFFQ69G5FAV" \
+  "http://localhost/api/v1/recall"
+```
+
+`explain=1` adds `citations` for the hits that remain after `exclude`. Repeat `--data-urlencode "exclude=…"` for another id. There is no Windows curl in this section; the Windows recall smoke test is under [Transport](#windows).
+
 **Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
 
 ---

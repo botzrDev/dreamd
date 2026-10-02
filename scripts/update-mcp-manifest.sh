@@ -9,7 +9,7 @@
 #   scripts/update-mcp-manifest.sh <version> <dist-dir>
 #
 # Example (after release workflow artifacts are in dist/):
-#   scripts/update-mcp-manifest.sh 0.1.0-rc.2 dist
+#   scripts/update-mcp-manifest.sh 1.0.0 dist
 set -euo pipefail
 
 VERSION="${1:?usage: $0 <version> <dist-dir>}"

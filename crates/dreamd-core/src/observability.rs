@@ -10,7 +10,7 @@
 //!     text when stderr is a TTY; JSON when it is not (CI / service-managed
 //!     daemon).
 //!   - **File → `~/.agent/dreamd.log`,** JSON always, non-blocking, truncated
-//!     at startup (rotation is v0.1.1). Optional, and **the caller decides**:
+//!     at startup. There is no rotation. Optional, and **the caller decides**:
 //!     this module only consumes whatever path it is handed, and `None` means
 //!     console-only. Since AILAB-184 the only caller that hands one over is the
 //!     daemon (`dreamd watch`) — see `cli::wants_daemon_log`, which owns that

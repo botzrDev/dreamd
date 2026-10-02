@@ -85,8 +85,9 @@ def run_summarize(criterion_dir: Path) -> int:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        # Criterion writes ./target/criterion from the process cwd and ignores
-        # CARGO_TARGET_DIR, so run from the repo root and read there.
+        # Criterion 0.5.1 writes $CRITERION_HOME, else $CARGO_TARGET_DIR/criterion,
+        # else ./target/criterion. This mode always reads <repo>/target/criterion.
+        # Use --summarize when the samples are elsewhere (docs/benchmarks.md).
         code = subprocess.call(
             ["cargo", "bench", "-p", "dreamd-core", "--bench", "recall"],
             cwd=REPO_ROOT,

@@ -11,18 +11,12 @@ synthetic corpus and does not read this fixture. The 20 episodic entries in
 and `personal/` layers follow the `.agent/` layer layout. Unlike a store made
 by `dreamd init`, there is no `working/WORKSPACE.md` and no `.dreamd/`.
 
-## Freeze window
+## Freeze
 
-The corpus is frozen between **end of Sprint 2** and the **DR-908 record**.
-Any change inside that window requires a snapshot tag (see the Sprint 2
-retro entry for procedure). Edits outside the window should bump the README
-note and re-author `EXPECTED.md` in the same commit.
-
-## Hard rule
-
-Do **not** edit during a shoot week. The on-camera takes anchor against the
-canonical results listed in `EXPECTED.md`; a drift here invalidates the
-reel.
+`EXPECTED.md` and `bm25_fastfield_integration` lock this corpus. A change to
+the JSONL, the queries, or the scoring tables has to update `EXPECTED.md` in
+the same commit and re-run that test. Local production notes, if any, are in
+`context/video/demo-corpus.md`, which is gitignored and not part of a clone.
 
 ## Files
 
@@ -31,11 +25,6 @@ reel.
 - `.agent/working/`, `.agent/semantic/`, `.agent/personal/` — empty
   directories preserved via `.gitkeep`.
 - `EXPECTED.md` — canonical top-3 scoring tables for the two demo queries.
-
-## Provenance
-
-Engineering provenance, tuning rationale, and the per-entry justification
-notes live in `context/video/demo-corpus.md` (gitignored — local-only).
 
 ## Recurrence note
 

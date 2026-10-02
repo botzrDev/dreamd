@@ -12,7 +12,7 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
-This guide describes dreamd 1.0.0. The npm package is published separately from the GitHub release and can trail it, so check what you have with `npx -y dreamd-mcp --version`. On 0.1.1, sections 1–7 work except where marked 1.0.0; section 8 needs 1.0.0 or later (the cargo path always builds the current tree). A few commands are never forwarded by the npm shim and always need the `dreamd` binary: `status`, `recall`, `score`, `archive`, `migrate`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
+This guide describes dreamd 1.0.0. That is the published npm package (`latest` and `next`). If `npx -y dreamd-mcp --version` prints an older version, section 8's commands are not in that package. A few commands are never forwarded by the npm shim and always need the `dreamd` binary: `status`, `recall`, `score`, `archive`, `migrate`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
 
 ```bash
 # npm (no Rust required)
@@ -127,7 +127,7 @@ npx -y dreamd-mcp dream
 
 With the daemon running the cycle is proxied to it and prints `dream cycle complete (via daemon)`. With no API key configured the cycle is deterministic and makes no network call.
 
-> **Git:** after a successful cycle dreamd commits `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl` to your project's git repo as `dreamd <noreply@dreamd.dev>` with the message `dreamd: cycle YYYY-MM-DD`. Pass `--no-commit` to skip that. The commit is also skipped (with a WARN log line) when either file had uncommitted changes when the cycle started — which includes a fresh `.agent/` you have not committed yet.
+> **Git:** after a successful cycle dreamd commits `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl` to your project's git repo as `dreamd <noreply@dreamd.dev>` with the message `dreamd: cycle YYYY-MM-DD`. Pass `--no-commit` to skip that commit. The commit is also skipped (with a WARN log line) when either file had uncommitted changes when the cycle started — which includes a fresh `.agent/` you have not committed yet. `--no-commit` also skips the daemon proxy and runs the cycle in this process. Do not use it while `dreamd watch` is serving the same project: it rewrites the log under the daemon and then fails on the index lock the daemon holds. Stop `watch` first, or run `dreamd dream` with no flag so the daemon stays the writer.
 
 **What just happened:**
 
@@ -255,7 +255,7 @@ dreamd memory branches                   # `*` marks the current branch; snap-* 
 dreamd memory diff <older-ref> <newer-ref>
 ```
 
-`memory checkout <name>` replaces the live memory files with that snapshot. It and `memory bisect` refuse while `dreamd watch` is running, so stop the daemon first. Full walkthrough: [docs/branching-guide.md](./docs/branching-guide.md).
+`memory checkout <name>` replaces the live memory files with that snapshot. It and `memory bisect` refuse while `dreamd watch` is running, so stop the daemon first. Checkout does not rebuild the recall index; `dreamd recall` can keep returning the store you left until `dreamd doctor --repair`. Full walkthrough: [docs/branching-guide.md](./docs/branching-guide.md). Bisect is in that guide too; there is no `memory bisect reset`.
 
 Remove one event (stop the daemon first — `forget` refuses while it is running):
 
@@ -278,5 +278,6 @@ dreamd doctor --provenance
 | Memory branches | [docs/branching-guide.md](./docs/branching-guide.md) |
 | Recall citations and salience drift | [docs/observability.md](./docs/observability.md) |
 | Architecture | [ARCHITECTURE.md](./ARCHITECTURE.md) |
+| CLI reference | [docs/cli.md](./docs/cli.md) |
 | Troubleshooting | [docs/troubleshooting.md](./docs/troubleshooting.md) |
 | Runnable fixtures | [examples/README.md](./examples/README.md) |
