@@ -32,4 +32,4 @@ curl --unix-socket ~/.agent/dreamd.sock \
 Read the `body` field. If non-empty, use it to calibrate `pain` and `importance` values. If the daemon is not running, skip silently.
 
 ## MCP protocol note
-After `initialize`, send `notifications/initialized` before calling any tools. Without it, `search_nodes` returns empty results silently.
+After `initialize`, send `notifications/initialized` before calling any tools, as the MCP lifecycle requires. Cursor's MCP client does this for you; it only matters when driving `dreamd mcp` by hand.

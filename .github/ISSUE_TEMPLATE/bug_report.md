@@ -12,9 +12,9 @@ A one-line description of what went wrong.
 
 ## Environment
 
-- dreamd version (`dreamd --version` or commit SHA):
+- dreamd version (`dreamd --version`, `npx -y dreamd-mcp version`, or commit SHA):
 - OS / arch (e.g. `macOS 14.4 arm64`, `Ubuntu 22.04 x86_64`):
-- Harness in use (Claude Code / Cursor / OpenCode / direct API / other):
+- Harness in use (Claude Code / Cursor / Cline / Aider / direct API / other):
 - Install method (`npx dreamd-mcp`, `cargo install`, prebuilt binary, source build):
 
 ## Steps to reproduce

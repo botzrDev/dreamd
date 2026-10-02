@@ -1,9 +1,9 @@
 # `dreamd migrate`
 
 Operator command that migrates the **durable** `.agent/` store between episodic
-record schema versions. At v0.1 it is a **stub**: the only registered path is the
-identity migration, which is a no-op. The trait + registry it sits on let v0.1.1
-register real transforms without changing the command surface.
+record schema versions. In 1.0.0 it is still a **stub**: the only registered path
+is the identity migration, which is a no-op. The trait + registry it sits on let
+a later release register real transforms without changing the command surface.
 
 WEG-133 / DR-108.
 
@@ -12,12 +12,14 @@ WEG-133 / DR-108.
 `--from` and `--to` take an **episodic record** schema string — the
 `schema_version` field stamped on every line of
 `.agent/episodic/AGENT_LEARNINGS.jsonl`. That value is
-`dreamd_protocol::RECORD_SCHEMA_VERSION`, which is `1.0.0` in v0.1.
+`dreamd_protocol::RECORD_SCHEMA_VERSION`, which is `1.0.0`. It is the on-disk
+record format's version and only coincidentally equal to the dreamd 1.0.0
+product version.
 
 dreamd carries three independent version streams. Only the first is a
 `--from`/`--to` token:
 
-| Stream | Where | Value (v0.1) | A migrate token? |
+| Stream | Where | Value | A migrate token? |
 |---|---|---|---|
 | Episodic record schema | `AGENT_LEARNINGS.jsonl` `schema_version` | `1.0.0` | **yes** |
 | Daemon state schema | `.agent/.dreamd/state.json` `schema_version` | `1.0` | no |
@@ -27,15 +29,15 @@ The daemon state schema (`1.0`) is what the `dreamd version` **display** line
 prints as `schema:`. Do not read that as the episodic token — passing `--from`
 with the state value is an unregistered path and is rejected.
 
-## v0.1 behavior: the only registered path
+## Behavior: the only registered path
 
 The single registered migration is the identity transform of the current
 episodic schema — `1.0.0` → `1.0.0` — and it does nothing but take backups (see
 below). Any other pair is unregistered and exits `1`:
 
 ```bash
-# v0.1 registers exactly one path; every other pair is rejected.
-dreamd migrate --from 1.0.0 --to 1.0.0   # no-op; dreamd never registers another pair at v0.1
+# Exactly one path is registered; every other pair is rejected.
+dreamd migrate --from 1.0.0 --to 1.0.0   # no-op
 ```
 
 Output reports the three observed on-disk versions, then the result:
@@ -47,11 +49,16 @@ index schema: index/1.3
 migrate: 1.0.0 → 1.0.0 (no-op)
 ```
 
+Each of the three lines reports what is on disk. `episodic schema:` is `empty`
+for a log with no records and `absent` when the file is missing; `state schema:`
+and `index schema:` are `absent` when their file is missing (the index manifest
+does not exist until the index is first opened, e.g. by `dreamd watch`).
+
 An unregistered pair (for example, the daemon-state value, or a forward
-transform that does not exist yet) fails:
+transform that does not exist yet) prints the same three lines and then fails:
 
 ```
-dreamd: error — no migration registered for that path (…)
+dreamd: error — no migration registered for that path (1.0 → 1.0.0)
 ```
 
 Exit codes:
@@ -70,10 +77,10 @@ On the registered path, before the migration runs, `dreamd migrate` copies each
 - `.agent/episodic/AGENT_LEARNINGS.jsonl` → `AGENT_LEARNINGS.jsonl.bak`
 - `.agent/.dreamd/state.json` → `state.json.bak`
 
-Missing sources are skipped. The v0.1 identity migration does not rewrite the
+Missing sources are skipped. The identity migration does not rewrite the
 JSONL, so this is purely a safety net that a future non-identity transform
 inherits. Because nothing rewrites the log, a running daemon can stay up during
-a v0.1 `migrate`.
+a `migrate`.
 
 ## The index is not migrated
 
@@ -83,9 +90,15 @@ self-heals it — it wipes the index and replays the JSONL under the current sch
 on first open (ARCHITECTURE.md §4). `dreamd migrate` only *reads and reports* the
 index schema; index rebuilds are owned entirely by that self-heal path.
 
-## v0.1.1 and beyond
+## HTTP route
 
-When the episodic schema next changes, v0.1.1 registers a real
+`POST /api/v1/migrate` exists on the daemon but is a stub that returns `501`
+after the normal auth checks; it does not call the registry and takes no
+backups. Use the CLI. See [http-api.md](./http-api.md).
+
+## When the schema changes
+
+When the episodic schema next changes, that release registers a real
 `from → to` transform in the same registry. `dreamd migrate` will then rewrite
 `AGENT_LEARNINGS.jsonl` in place (after the `.bak` copy) to bring older records
 up to the current schema. The command surface — `--from` / `--to`, the `.bak`

@@ -17,7 +17,9 @@ Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.mcp.json` at
 
 **Project-level:** copy [`.mcp.json.example`](./.mcp.json.example) to `.mcp.json` at your project root.
 
-**User-level (all projects):** merge the `mcpServers` block into `~/.claude/settings.json` — `setup` only writes inside the project.
+**User-level (all projects):** register it at user scope with `claude mcp add --scope user dreamd -- npx -y dreamd-mcp` — `setup` only writes inside the project. Each project still needs its own `.agent/` (`npx -y dreamd-mcp init`).
+
+The block in `.mcp.json.example`:
 
 ```json
 {

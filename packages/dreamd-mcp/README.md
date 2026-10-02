@@ -26,9 +26,22 @@ The prebuilt binaries this shim downloads serve MCP over stdio only. The opt-in 
 > starts the current version. Two caveats: a **running** MCP server or `dreamd watch`
 > daemon keeps the version it started with until you restart it, and an **offline**
 > run falls back to the last-cached binary. A hard version pin
-> (`dreamd-mcp@0.1.0-rc.3`) is the one form that never picks up new releases.
+> (`dreamd-mcp@<version>`) is the one form that never picks up new releases.
 
-No Rust installation required. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`). **Native Windows in v0.1.1 is watch + learn only** — `dreamd watch` serves loopback TCP with a bearer token; the dream cycle and Tantivy index need atomic writes that are still Unix-only. For consolidate-and-search, use WSL2 or a Linux/macOS host ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+No Rust installation required; the shim needs Node 18 or later and `tar` on `PATH`. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`). The binary is downloaded once from the matching GitHub release into `~/.cache/dreamd-mcp/<version>/` and its SHA-256 is checked against `manifest.json` before every run. On any other platform the shim exits 1.
+
+**This shim ships no Windows binary.** On native Windows `npx -y dreamd-mcp` exits 1 and points you at WSL2. A `dreamd` built from source does run there, but it is watch + learn only — `dreamd watch` serves loopback TCP with a bearer token; the dream cycle and Tantivy index need atomic writes that are still Unix-only. For consolidate-and-search, use WSL2 or a Linux/macOS host ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+
+## Commands
+
+`npx -y dreamd-mcp` with no arguments starts the MCP server over stdio. When the first argument is one of the commands below, the whole argument list is forwarded to the native `dreamd` binary unchanged:
+
+```text
+blame, doctor, dream, forget, init, mcp, memory, reset, salience-drift,
+service, setup, uninstall, update, vectors, version, watch
+```
+
+Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --project-root /abs/path` works). That also means the native commands missing from the list — `status`, `recall`, `score`, `archive`, `migrate` — are **not** reachable through the shim; they need a `dreamd` binary on `PATH` (`cargo install --path crates/dreamd-cli` from a source checkout). A leading `--help` / `-h` or `--version` / `-V` is answered by the shim itself; `npx -y dreamd-mcp version` prints the native binary's build info.
 
 Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor)
 

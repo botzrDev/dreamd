@@ -33,8 +33,17 @@ Supporting detail, after the spine:
 The workspace currently has three crates:
 
 - `dreamd-protocol` — pure serde types (DR-102 / WEG-6).
-- `dreamd-core` — `layout`, `privacy`, `lessons`, `io`, `coordinator`.
-- `dreamd` (the CLI crate, package name `dreamd`, dir `dreamd-cli`).
+- `dreamd-core` — the whole engine. Storage and paths: `layout`, `io`,
+  `episodic`, `coordinator`, `registry`, `daemon_state`, `config`, `privacy`,
+  `redaction`, `migrate`. Recall: `index`, `collector`, `salience`, `ingress`,
+  `memory_store`. Dream cycle: `dream_cycle`, `consolidation`, `lessons`, `llm`,
+  `decay`, `wal`, `autobiography`. Forget, branches, provenance: `forget`,
+  `snapshot`, `memory_diff`, `bisect`, `provenance`. Transport: `server`
+  (HTTP + daemon), `mcp`, `client` / `daemon_client`, `observability`.
+  Library-only, not wired into recall or MCP: `context_grant`, `letta`, `rrf`,
+  and `vectors` (behind the non-default `vectors` feature).
+- `dreamd` (the CLI crate, package name `dreamd`, dir `dreamd-cli`) — clap
+  definitions in `cli.rs`, one module per subcommand under `commands/`.
 
 Neither `dreamd-server` nor `dreamd-store` exists. Both names below are
 extraction **triggers** — conditions to re-evaluate under — not workspace
@@ -54,14 +63,21 @@ before:
     directory is the whole HTTP surface.
   - `crates/dreamd-core/src/server/lifecycle.rs` — `Supervisor` owning the
     coordinator sender + handle, plus the Unix `detach_double_fork` helper.
-  - `crates/dreamd-core/src/server/index_map.rs` — `IndexHandle` trait
-    skeleton + `ProjectIndexMap<H>` (LRU cap 10, idle eviction 30 min) with
-    `TestIndexHandle`. The Tantivy-backed `TantivyIndexHandle` lands in
-    WEG-42 alongside the index writer.
+  - `crates/dreamd-core/src/server/index_map.rs` — `IndexHandle` trait,
+    `IndexError`, and `ProjectIndexMap<H>` (LRU cap 10, idle eviction 30 min;
+    the policy itself lives in `project_resource_map.rs` and is shared with
+    `supervisor_map.rs`) with `TestIndexHandle`.
+  - `crates/dreamd-core/src/server/tantivy_handle.rs` — the Tantivy-backed
+    `TantivyIndexHandle` (`open` / `flush` / `shutdown` / `close`) and the
+    startup replay. The indexer task is `server/indexer_actor.rs`; the
+    watermark and `assess_index_freshness` are `server/index_freshness.rs`
+    (BZR-170 split; `tantivy_handle` re-exports their public items).
+  - `crates/dreamd-core/src/server/watch.rs` — `run_watch`: daemon boot,
+    signal handling, and the bounded shutdown drain.
 
   **Re-evaluation triggers** (when, not if, to revisit the extraction):
-    1. WEG-42 lands the Tantivy dep and dreamd-core's compile time crosses
-       an empirical threshold (rule of thumb: >2× current cold compile).
+    1. dreamd-core's compile time crosses an empirical threshold (rule of
+       thumb: >2× the cold compile measured when the Tantivy dep landed).
     2. A second Rust binary consumer needs the server stack without
        pulling the index/dream/io modules along with it.
 
@@ -74,16 +90,17 @@ before:
   callsite is `server::lifecycle::detach_double_fork`, which calls
   `nix::unistd::fork` (an `unsafe fn`). **Zero production call sites in
   any shipped path** — `dreamd service install` (systemd `--user` unit,
-  AILAB-190; macOS LaunchAgent, AILAB-169) supervises the foreground
-  `dreamd watch` it registers rather than calling this helper
-  (see `ARCHITECTURE.md` §8.1). All other modules in the crate still
+  AILAB-190; macOS LaunchAgent, AILAB-169; Windows scheduled task,
+  AILAB-203) supervises the foreground `dreamd watch` it registers rather
+  than calling this helper (see `ARCHITECTURE.md` §8.1). All other modules in the crate still
   surface unsafe usage at compile time.
 
 - **`dreamd-layout`** splits out when (and only when) a no-tokio consumer
   of layout appears. Today every layout caller already pulls in tokio
   indirectly via the coordinator; a split would create an empty re-export
-  crate. The DR-002 plan anticipates a `dreamd-store` split too — defer
-  that until the index + WAL code actually lands and a clear seam exists.
+  crate. The DR-002 plan anticipates a `dreamd-store` split too — the index
+  and WAL code have landed inside `dreamd-core`, and no consumer has needed
+  them without the rest of the crate, so that tripwire has not fired either.
 
 Premature splits are reversible but costly: each split adds a `version =`
 bump, a Cargo path entry, and a CI matrix dimension. The default answer to
@@ -92,9 +109,13 @@ bump, a Cargo path entry, and a CI matrix dimension. The default answer to
 ## Actor model: `MemoryCoordinator` is the serialization point
 
 State management is an actor model. A single `MemoryCoordinator` tokio task
-owns the mutable handle to `AGENT_LEARNINGS.jsonl`. API handlers, the file
-watcher, and the dream-cycle pipeline send intents over a
-`tokio::sync::mpsc` channel; only the coordinator writes.
+owns the mutable handle to `AGENT_LEARNINGS.jsonl`. API handlers, the
+in-process MCP store, and the dream-cycle and forget paths send messages
+(`AppendLearning`, `RunDreamCycle`, `Forget`, `Shutdown`) over a
+`tokio::sync::mpsc` channel; only the coordinator writes. The one exception is
+a CLI command run with no daemon (`dreamd dream`, `dreamd forget`,
+`dreamd archive`, `dreamd memory checkout`): it rewrites the files in-process,
+and `forget`, `archive`, and `checkout` refuse while a daemon is live.
 
 The coordinator does **not** wrap its `File` in a `Mutex`. The `&mut self`
 on `MemoryCoordinator::run` is the exclusivity guarantee — there is no other
@@ -104,20 +125,23 @@ the implementation realises that contract by making the coordinator the sole
 owner of an unwrapped `File`. The serialization is structural, not
 lock-based.
 
-Durability path for `AppendLearning`:
+Durability path for `AppendLearning` (`MemoryCoordinator::handle_append`, which
+first checks the idempotency LRU and stamps the daemon-minted `id`,
+`schema_version`, and `timestamp`, then calls `episodic::append`):
 
 1. `serde_json::to_string(&learning)` — produce a single JSON line.
-2. Ensure a trailing `\n`.
+2. Ensure a trailing `\n`; reject a line over 4 KiB (`MAX_LEARNING_LINE_BYTES`).
 3. `file.write_all(...)` — returns only once the complete prepared line has been
    written, or errors. It is not a single-syscall guarantee: `write_all` loops
    over the underlying `write` until the buffer is drained, so a line may reach
    the file through more than one write.
 4. `file.sync_data()` — fdatasync to disk.
-5. Send `Ok(())` over the oneshot.
+5. Await the hand-off of `IndexerMsg::Append` to the indexer task, then send
+   `Ok(AppendOutcome)` over the oneshot.
 
 The `POST /api/v1/learn` 201 response must not return until step 5 fires.
-Concurrent third-party writers to the JSONL are explicitly out of scope for
-v0.1 despite the looser language in PRD FR-1.2.
+Concurrent third-party writers to the JSONL are explicitly out of scope
+despite the looser language in PRD FR-1.2.
 
 Single-writer serialization and fsync-before-ack are the two claims here that
 draw the most scrutiny, so they should be checked against live evidence rather
@@ -135,50 +159,58 @@ Do not introduce `tokio::fs` or `spawn_blocking` without benchmark evidence
 and an ADR amendment; the cost of context switching per append likely
 dominates the benefit at our target write rates.
 
-The message enum `MemoryCoordinatorMsg` is `#[non_exhaustive]` to keep WEG-7
-(idempotency + ULID), WEG-50 (dream-cycle trigger), and later additions
-non-breaking for downstream `match` consumers.
+The message enum `MemoryCoordinatorMsg` is `#[non_exhaustive]` so additions
+stay non-breaking for downstream `match` consumers. Its variants today are
+`AppendLearning`, `RunDreamCycle`, `Forget` (BZR-158), and `Shutdown`.
 
 ## Indexing and salience
 
 Tantivy 0.26.1 backs episodic recall. The schema is defined in
-`dreamd-core::index::build_schema()` — one TEXT field (`content`), six
-u64/f64 FastFields for the salience inputs, plus three forward-compatible
-fields (`layer`, `last_updated_sec`, `cited_event_count`) reserved for
-the v0.1.1 LESSONS.md indexing pipeline (WEG-136). Salience is computed
-at query time by a custom collector (WEG-43) that reads the FastFields
+`dreamd-core::index::build_schema()` — eleven fields: one TEXT field
+(`content`), four FastFields for the salience inputs (`timestamp_sec`, `pain`,
+`importance`, `recurrence`), two more FastFields that are written but not read
+on the recall path (`last_updated_sec`, `cited_event_count`), and four
+exact-match `STRING | STORED` fields (`layer`, `event_id`, `skill_action`,
+`source_harness`). One index holds two document layers: `episodic` events and
+`semantic` lessons from `LESSONS.md` (AILAB-205, ids `lsn_<lesson id>`). The
+semantic layer is still lexical BM25 × salience — not embeddings. Salience is
+computed at query time by a custom collector (WEG-43) that reads the FastFields
 and combines BM25 × `exp(-age/14) × ...` — no indexed score, no nightly
-re-rank (see CLAUDE.md load-bearing decision #2).
+re-rank (see `ARCHITECTURE.md` load-bearing decision #2).
 
 The per-project index manifest at `<project>/.agent/.dreamd/index_manifest.json`
 — the path is `AgentRoot::dreamd_dir()`, i.e. `.dreamd` under the project's
-`.agent/` directory (`layout.rs:106-108`) — carries the schema version defined
+`.agent/` directory (`layout.rs`) — carries the schema version defined
 by `dreamd-core::index::SCHEMA_VERSION`
-(`index.rs:24` — `index/1.3` at time of writing, pinned by a guard test at
-`index.rs:420-424`). Read the constant, not this sentence: the value bumps
+(`index.rs` — `index/1.3` at time of writing, pinned by a guard test in the
+same file). Read the constant, not this sentence: the value bumps
 whenever the schema changes, and any copy of it in prose goes stale on the
-next bump. WEG-42 writes the manifest on first index init; WEG-49 enforces
-`binary.expected == manifest.version` on daemon startup. WEG-24-A binds:
+next bump. `TantivyIndexHandle::open` writes the manifest on first index init
+and checks it against the binary on every open. WEG-24-A binds:
 never `rm` `.tantivy-writer.lock` / `.tantivy-meta.lock` — kernel handles
 advisory flock.
 
-On startup, the daemon reads `<project>/.agent/.dreamd/index_manifest.json`
+On open, `<project>/.agent/.dreamd/index_manifest.json` is read
 via `dreamd-core::index::check_manifest_version`. A missing manifest is
-a pre-index state and logs a warning.
+a pre-index state (`ManifestCheckOutcome::Absent`); the open writes one.
 
 A manifest version **older** than the binary (`NeedsMigration`) does not wait
 for a migration tool and does not merely warn — `TantivyIndexHandle::open`
-**rebuilds the derived index in place** (`server/tantivy_handle.rs:226-238`).
+**rebuilds the derived index in place** (`server/tantivy_handle.rs`).
 It logs `"index schema outdated; rebuilding from JSONL"`, removes the index
 directory, the manifest, **and the progress watermark** — resetting the
 watermark is what forces a *full* replay rather than a tail replay — then
-re-indexes through `replay_two_pass` (`:257`). The framing comment at
-`:224-225` gives the reason in one line: **the index is a rebuildable cache.**
-No `dreamd migrate` step is involved in this path.
+re-indexes through `replay_two_pass`. The framing comment above that match
+gives the reason in one line: **the index is a rebuildable cache.**
+No `dreamd migrate` step is involved in this path. The same wipe-and-rebuild
+runs when Tantivy rejects the on-disk index with a schema error
+(`IndexError::SchemaIncompatible`, the only variant that gates a wipe).
 
-A manifest *newer* than the binary aborts startup with
-`ServerError::ManifestCheck(ManifestVersionError::TooNew)` (`:239-244`) — a
-hard error, not a rebuild. The user must downgrade or migrate.
+A manifest *newer* than the binary (`ManifestVersionError::TooNew`) makes
+`open` return `IndexError::Other("index schema … is newer than binary …")`,
+which `dreamd watch` surfaces as a startup failure — a hard error, not a
+rebuild. The user must upgrade dreamd, or wipe the index directory to rebuild
+under the older binary.
 
 The scope of that self-heal is worth stating precisely, because the two halves
 of schema versioning are governed by different rules.
@@ -196,9 +228,9 @@ an index schema bump.
 ### Query-time salience
 
 Salience is **not stored** — it is recomputed per hit at query time
-(`salience.rs:5-7`), which is exactly what lets the index stay static and
+(`salience.rs` module doc), which is exactly what lets the index stay static and
 removes any need for a nightly re-index pass. The formula
-(`salience.rs:84-90`) is locked by `ARCHITECTURE.md`
+(`salience::salience`) is locked by `ARCHITECTURE.md`
 [decision #2](../ARCHITECTURE.md#2-salience-is-query-time-not-indexed) and PRD
 FR-4.2:
 
@@ -211,14 +243,14 @@ see [Decay](#decay); **not** a half-life), times normalised pain, times
 normalised importance, times a logarithmic recurrence boost.
 
 The ranking score is **BM25 × salience — a product, not a weighted sum**
-(`collector.rs:1`, `:4`). `RecallHit` carries `bm25` (the raw, pre-multiply
-score) and `salience` as separate fields (`:53-56`), so `dreamd recall
+(`collector.rs` module doc). `RecallResult` carries `bm25` (the raw,
+pre-multiply score) and `salience` as separate fields, so `dreamd recall
 --explain` can show both factors instead of one blended number.
 
 **Property tests (WEG-47).** Monotonicity and finiteness invariants for the
 formula above are enforced by a `proptest` suite in
-`crates/dreamd-core/tests/salience_proptest.rs` (nightly CI, 512 cases
-locally / 1024 via `PROPTEST_CASES`). Valid ranges: `age_days` ∈ \[0, 10000\],
+`crates/dreamd-core/tests/salience_proptest.rs` (512 cases by default;
+nightly CI sets `PROPTEST_CASES=1024`). Valid ranges: `age_days` ∈ \[0, 10000\],
 `pain` / `importance` ∈ \[0, 10\], `recurrence` ∈ \[0, `u64::MAX`/2\]. Edge
 cases: `pain=0` or `importance=0` → score 0; `recurrence=0` → ln factor 1.
 
@@ -227,7 +259,7 @@ Full derivation and lineage: [`salience.md`](salience.md).
 ### Read-after-write visibility (commit-cadence window)
 
 The indexer commits to Tantivy on a wall-clock cadence
-(`DEFAULT_COMMIT_CADENCE`, default 5 seconds — `tantivy_handle.rs:63`). A
+(`DEFAULT_COMMIT_CADENCE`, default 5 seconds — `server/tantivy_handle.rs`). A
 document appended via `POST /api/v1/learn` at T+0 is **not** searchable until
 the next commit lands — worst-case T+5s.
 
@@ -237,9 +269,10 @@ is unaffected by the commit cadence. The two must not be conflated in
 public copy or benchmark commentary. For Criterion-measured recall numbers
 at n=1k/10k/100k see `benchmarks.md`.
 
-Users who need sub-5s freshness can lower the cadence (toward 1s) at the
-cost of higher I/O. User-facing cadence config is deferred to v0.1.1
-(DR-307 / WEG-140); the value is a constructor argument today.
+A lower cadence (toward 1s) would buy sub-5s freshness at the cost of higher
+I/O, but there is no user-facing cadence setting (DR-307 / WEG-140, not
+shipped): the value is a constructor argument, and every production caller
+passes `DEFAULT_COMMIT_CADENCE`.
 
 For the forward-looking plan across a future Tantivy major bump — how each schema
 field is consumed, the custom collector's Tantivy-internal assumptions, and what a

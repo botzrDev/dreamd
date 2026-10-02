@@ -1,17 +1,17 @@
 # dreamd compared
 
-Honest comparison as of v0.1.1. Concede competitor strengths; name our gaps.
+Honest comparison as of v1.0.0 (dreamd column re-checked for 1.0.0; competitor cells and star counts are as dated in the table). Concede competitor strengths; name our gaps.
 For the product story, see [marketing.md](./marketing.md). For install and usage, see the [README](../README.md).
 
 ---
 
 ## TL;DR
 
-| Dimension | dreamd v0.1.1 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
+| Dimension | dreamd v1.0.0 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
 |---|---|---|---|---|---|
 | Cross-harness portability | ✓ Claude Code / Cursor / Cline share one `.agent/` | ✓ MCP + broad framework integrations; hosted path common | — harness-native (stateful Letta agent) | ✓ any MCP-capable client | — Cline-native markdown ritual |
-| Salience-aware recall | ✓ BM25 × published formula ([SPEC.md](../SPEC.md)); `dreamd recall` / score explain | extraction + retrieval (managed / hosted options) | agent-managed memory / sleep-time reflection | string search over knowledge-graph nodes | LLM reads structured markdown; no ranking formula |
-| Vector embeddings | — lexical only (BM25 × salience, including the `LESSONS.md` document layer; embeddings later) | ✓ typically vector / hybrid in product surface | not claimed here | — (graph JSON, not embeddings) | — |
+| Salience-aware recall | ✓ BM25 × published formula ([SPEC.md](../SPEC.md)); `dreamd recall --explain` / `dreamd blame` / `dreamd score --explain` | extraction + retrieval (managed / hosted options) | agent-managed memory / sleep-time reflection | string search over knowledge-graph nodes | LLM reads structured markdown; no ranking formula |
+| Vector embeddings | — lexical only (BM25 × salience, including the `LESSONS.md` document layer; no vector or hybrid recall) | ✓ typically vector / hybrid in product surface | not claimed here | — (graph JSON, not embeddings) | — |
 | Schema versioning | ✓ `schema_version: "1.0.0"` on episodic records | product-specific (verify in their docs) | MemFS / context-repo layout (evolving) | tool/schema of the reference server | informal markdown file set |
 | File-system source of truth | ✓ JSONL + Markdown in-repo ([SPEC.md](../SPEC.md)) | often DB / service-backed; local options vary | ✓ git-backed MemFS / context repositories | local JSON knowledge graph file | ✓ markdown files in the project |
 | LLM consolidation | ✓ opt-in LLM dream cycle with deterministic fallback when no key / over cap / `--no-llm` | extraction / update pipelines (typically LLM-assisted) | ✓ sleep-time / dreaming subagents | — no dream-cycle contract | manual / prompt-driven “update memory bank” |
@@ -22,13 +22,14 @@ Cell legend: ✓ = strength for that dimension; — = not offered (or not yet fo
 
 ---
 
-## Weaknesses we own (v0.1.1)
+## Weaknesses we own (v1.0.0)
 
 Pulled from [AGENTS.md](../AGENTS.md) scope — not a marketing softener:
 
-- **No vector embeddings.** Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer. Embedding / hybrid recall is later.
+- **No vector embeddings.** Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer. Embedding / hybrid recall is not shipped; the optional `vectors` build feature only downloads a model and does not rank ([vectors.md](./vectors.md)).
 - **Windows is watch + learn only.** `io::write_atomic` is still `Unsupported`, so the dream cycle and Tantivy index do not run there. Full consolidate-and-search is Linux / macOS / WSL2. See [windows.md](./windows.md).
 - **No auto dream cycle.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
+- **Provenance is unsigned.** The ledger records which event fed which index document and lesson, and `dreamd doctor --provenance` re-checks it, but nothing is signed, `source_harness` is caller-asserted, and `dreamd forget --proof` writes a receipt, not a cryptographic proof. See [provenance.md](./provenance.md).
 
 Maturity is also a gap: dreamd is a small open-source project (star count date-stamped in the table). On dense-vector recall benchmarks today, we lose — that is intentional substrate work, not a denied shortfall. See [marketing.md](./marketing.md) on natural language vs embeddings.
 
@@ -72,4 +73,4 @@ For claims that draw HN heat, prefer live evidence over paste-walls (no separate
 | “Just use embeddings” | Substrate bet in [marketing.md](./marketing.md) (“Why natural language, not embeddings”) and [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | “Unsafe local daemon” | Threat model and socket UID checks in [SECURITY.md](../SECURITY.md) |
 | “How is this different from Mem0 / a graph memory?” | This page + [marketing.md](./marketing.md) positioning table |
-| “Show me inspectability” | `dreamd recall` / explain path in [GUIDE.md](../GUIDE.md); plain JSONL under `.agent/` |
+| “Show me inspectability” | `dreamd recall --explain` / `dreamd blame` in [GUIDE.md](../GUIDE.md) §8; `explain=1` citations in [observability.md](./observability.md); plain JSONL under `.agent/` |

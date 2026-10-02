@@ -68,6 +68,8 @@ curl.exe -H "X-Agent-Root: $proj" -H "Authorization: Bearer $tok" `
 
 Requests pass through two middleware layers (outermost first). The outer one is the platform's authentication layer — `peer_uid_middleware` on Unix, `bearer_auth_middleware` on Windows — and the inner one, `agent_root_middleware`, is the same on both.
 
+**Request ID.** Every response from a request that passed the authentication layer carries an `x-request-id` header. If the request sent its own `x-request-id` the daemon echoes that value; otherwise it generates a UUID. The same id is the `request_id` field on that request's `http request` line in `~/.agent/dreamd.log`. A request rejected by the authentication layer (`403` / `401`) gets no `x-request-id`.
+
 ### `peer_uid_middleware` (Unix only)
 
 Compares the connecting process UID (injected at accept time from `SO_PEERCRED`) to the daemon owner's UID.
@@ -90,7 +92,7 @@ Compares the `Authorization` header against the token in `~/.agent/auth.json`. T
 | Credential present but does not match | `401 Unauthorized` | `{"error":"…"}` |
 | `auth.json` missing, unreadable, or malformed | `401 Unauthorized` | `{"error":"…"}` |
 
-The verdict is always **401, never 403**: `403` is the Unix peer-UID answer and that layer is not mounted on Windows. Rejection happens outermost, before the tracing layer, so a rejected caller never reaches a handler; the daemon logs a reason category only (`missing_authorization`, `malformed_authorization`, `no_auth_file`, `token_mismatch`) and never the presented credential or the file's contents.
+The verdict is always **401, never 403**: `403` is the Unix peer-UID answer and that layer is not mounted on Windows. Rejection happens outermost, before the tracing layer, so a rejected caller never reaches a handler; the daemon logs a reason category only (`missing_authorization`, `malformed_authorization`, `no_auth_file`, `unreadable_auth_file`, `token_mismatch`) and never the presented credential or the file's contents.
 
 ### `agent_root_middleware`
 
@@ -129,7 +131,7 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 |---|---|---|---|
 | `pain` | number | Yes | `0.0`–`10.0` inclusive |
 | `importance` | number | Yes | `0.0`–`10.0` inclusive |
-| `pinned` | boolean | No | Default `false`. Live in v0.1: dream-cycle pin union keeps pinned events through decay; `dreamd archive --force-unpin` clears pins. |
+| `pinned` | boolean | No | Default `false`. Dream-cycle pin union keeps pinned events through decay; `dreamd archive --force-unpin` clears pins. |
 | `skill_action` | string | Yes | Clustering key; normalized and validated (see below) |
 | `source_harness` | string | Yes | Provenance tag, e.g. `"cursor"`, `"claude-code"` |
 | `content` | string | Yes | Free-text body; max ~4 KiB serialized line (413 if exceeded) |
@@ -144,7 +146,8 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 |---|---|---|
 | `201 Created` | `{"id":"evt_…","timestamp":"…","deduplicated":false}` | New durable write |
 | `201 Created` | `{"id":"evt_…","timestamp":"…","deduplicated":true}` | Duplicate `X-Client-Dedup-Key` within this project |
-| `400 Bad Request` | `{"error":"…"}` | Invalid `skill_action`, score out of range, missing header |
+| `400 Bad Request` | `{"error":"…"}` | Invalid `skill_action`, score out of range, missing `X-Agent-Root` |
+| `400` / `415` / `422` | plain text, not JSON | Body rejected before the handler runs: malformed JSON (`400`), `Content-Type` not `application/json` (`415`), a required field missing or of the wrong type (`422`). See [Error body shape](#error-body-shape) |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |
 | `413 Payload Too Large` | `{"error":"payload too large"}` | Serialized line exceeds cap |
@@ -181,7 +184,7 @@ Optional opaque string. When present, a second `POST /learn` with the **same key
 
 ### `GET /api/v1/recall`
 
-BM25 lexical search with query-time salience scoring. Returns ranked episodic matches from the Tantivy index.
+BM25 lexical search with query-time salience scoring. Returns ranked matches from the Tantivy index: raw events (`source: "episodic"`) and dream-cycle lessons from `LESSONS.md` (`source: "semantic"`), ranked together. The query is matched against the `content` text only, on whole lowercased words with no stemming (`unwrap` does not match `unwrapping`); several words are OR-ed.
 
 #### Request headers
 
@@ -193,9 +196,10 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 
 | Param | Required | Default | Description |
 |---|---|---|---|
-| `q` | Yes | — | Search query string |
-| `k` | No | [`DEFAULT_RECALL_K`] (`5`) | Maximum results to return |
+| `q` | Yes | — | Search query string. Parsed by Tantivy's query parser, so `"`, `(`, `:` and `AND`/`OR` are query syntax; a query it cannot parse — `rust::error` is one, because of the `:` — is a `500` (see below). Send plain words |
+| `k` | No | `5` (`DEFAULT_RECALL_K`) | Maximum results to return. Unsigned integer |
 | `explain` | No | omitted | Exact value `1` adds a `citations` array (see below). Any other value, including absent, omits it. HTTP-only — MCP `search_nodes` has no equivalent parameter. |
+| `exclude` | No | none | Repeatable (`exclude=evt_a&exclude=evt_b`). Drops the document with that exact `event_id` before the top-`k` cut, so up to `k` of the remaining hits come back. Nothing is deleted. There is no cluster parameter. HTTP-only. See [`docs/observability.md`](observability.md#counterfactual-recall---without--exclude-bzr-194). |
 
 #### Response (`200 OK`)
 
@@ -203,9 +207,9 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 {
   "results": [
     {
-      "score": 0.42,
+      "score": 0.99,
       "bm25": 1.8,
-      "salience": 0.42,
+      "salience": 0.55,
       "source": "episodic",
       "content": "Route handlers must return impl IntoResponse…",
       "metadata": {
@@ -223,20 +227,26 @@ BM25 lexical search with query-time salience scoring. Returns ranked episodic ma
 
 | Field | Description |
 |---|---|
-| `score` | Combined ranking score used for ordering |
+| `score` | Combined ranking score used for ordering: `bm25 × salience` |
 | `bm25` | Raw BM25 relevance |
-| `salience` | Query-time salience (see formula below) |
-| `source` | Index layer (`"episodic"`, `"semantic"`, etc.) |
+| `salience` | Query-time salience multiplier — the formula below without its BM25 term |
+| `source` | Index layer: `"episodic"` (a raw event) or `"semantic"` (a `LESSONS.md` lesson). There are no other values |
 | `content` | Matched text |
+| `metadata.timestamp_sec` | Unix seconds: the event's timestamp, or for a lesson the time it was consolidated |
+| `metadata.pain`, `metadata.importance` | Stored `0.0`–`10.0` scores |
 | `metadata.recurrence` | Cluster recurrence count from index fast field (see below) |
 | `metadata.skill_action` | Hierarchical cluster key of the matched learning (e.g. `rust::error_handling::axum_rejection`) |
 | `metadata.source_harness` | Harness that authored the learning (e.g. `"cursor"`, `"claude-code"`) — makes recall cross-harness-attributable |
 
-**Salience formula** (computed at query time, not stored):
+Hits carry no event id; request `explain=1` for the `citations[].id` of each hit.
+
+**Score formula** (computed at query time, not stored):
 
 ```
 BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + recurrence))
 ```
+
+`salience` is everything after the `BM25 ×`. The `14` is an e-folding time constant in days, not a half-life.
 
 #### `explain=1` response (`200 OK`)
 
@@ -248,9 +258,9 @@ BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + r
   "citations": [
     {
       "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      "score": 0.42,
+      "score": 0.99,
       "bm25_component": 1.8,
-      "salience_component": 0.42,
+      "salience_component": 0.55,
       "layer": "episodic",
       "snippet": "Route handlers must return impl IntoResponse…",
       "age_days": 12.4,
@@ -266,22 +276,22 @@ BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + r
 
 | Status | When |
 |---|---|
-| `400 Bad Request` | Missing `q` parameter |
+| `400 Bad Request` | Missing `q`, or a `k` that is not an unsigned integer; missing `X-Agent-Root` |
 | `403 Forbidden` | UID mismatch |
 | `404 Not Found` | Unregistered project |
-| `500 Internal Server Error` | Index open or search failure |
+| `500 Internal Server Error` | Index open or search failure. This includes a `q` the query parser rejects (for example an unbalanced `"` or `(`), which answers `{"error":"recall failed: …"}` |
 
-Empty index returns `200` with `"results": []`.
+All of these use the `{"error":"…"}` envelope. An empty index, an empty `q`, or a query with no match returns `200` with `{"results":[]}` (plus `"citations":[]` under `explain=1`).
 
 #### curl example
 
 ```bash
 curl --unix-socket ~/.agent/dreamd.sock \
   -H "X-Agent-Root: $PROJECT" \
-  "http://localhost/api/v1/recall?q=axum+unwrap&k=3"
+  "http://localhost/api/v1/recall?q=route+handlers&k=3"
 ```
 
-**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds in v0.1). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
+**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
 
 ---
 
@@ -300,9 +310,9 @@ Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught 
 ```json
 {
   "index": {
-    "stale": false,
     "jsonl_tail_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "last_indexed_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "stale": false,
     "unindexed_count": 0
   }
 }
@@ -311,8 +321,8 @@ Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught 
 | Field | Meaning |
 |---|---|
 | `stale` | `true` when JSONL has events strictly after `last_indexed_id` |
-| `jsonl_tail_id` | `id` of the last well-formed JSONL record, if any |
-| `last_indexed_id` | Watermark from `index_progress.json`, if present |
+| `jsonl_tail_id` | `id` of the last well-formed JSONL record, or `null` on an empty log |
+| `last_indexed_id` | Watermark from `index_progress.json`, or `null` if nothing has been indexed |
 | `unindexed_count` | JSONL events after the watermark |
 
 `stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. Staleness that outlives the backlog indicates a crash gap between JSONL `sync_data` and the next commit; that is what restart replay heals.
@@ -350,7 +360,8 @@ No request body.
 | Status | Body | When |
 |---|---|---|
 | `200 OK` | `{"status":"ok"}` | Cycle completed |
-| `409 Conflict` | `{"error":"dream cycle in progress"}` | WAL shows `in_progress` |
+| `409 Conflict` | `{"error":"dream cycle in progress"}` | `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
+| `400 Bad Request` | `{"error":"…"}` | Missing `X-Agent-Root` |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |
 | `503 Service Unavailable` | `{"error":"coordinator busy, retry"}` | `Retry-After: 1` |
@@ -382,14 +393,16 @@ Returns the contents of `.agent/personal/PREFERENCES.md` for the resolved projec
 ```json
 {
   "body": "# My Preferences\n\nI prefer concise answers.\n",
-  "last_modified": "2026-06-20T14:30:00+00:00"
+  "last_modified": "2026-06-20T14:30:00.123456789Z"
 }
 ```
 
 | Field | Description |
 |---|---|
 | `body` | File contents (empty string if file absent) |
-| `last_modified` | RFC 3339 timestamp, or `null` if file absent |
+| `last_modified` | RFC 3339 UTC timestamp (file mtime, `Z` suffix), or `null` if file absent |
+
+A file that exists but cannot be read is `500` with `{"error":"preferences read failed: …"}`.
 
 #### Truncation
 
@@ -406,6 +419,63 @@ Files larger than **16 KiB** are truncated. Response includes:
 curl --unix-socket ~/.agent/dreamd.sock \
   -H "X-Agent-Root: $PROJECT" \
   http://localhost/api/v1/preferences
+```
+
+---
+
+### `GET /api/v1/observability/salience`
+
+Salience distribution over every episodic document in the project index: total, mean, a ten-bucket histogram, the top clusters, and the drift against the snapshot from exactly seven UTC days earlier. No query parameters and no request body. Despite the `GET`, each call writes today's snapshot to `.agent/.dreamd/observability/salience-<UTC date>.json`. `dreamd salience-drift` is the CLI form. Field semantics are in [`docs/observability.md`](observability.md#salience-distribution-get-apiv1observabilitysalience--dreamd-salience-drift-bzr-195).
+
+#### Request headers
+
+| Header | Required |
+|---|---|
+| `X-Agent-Root` | Yes |
+
+#### Response (`200 OK`)
+
+```json
+{
+  "schema_version": "observability/1.0",
+  "date": "2026-09-29",
+  "total": 42,
+  "mean": 0.183,
+  "histogram": [20, 9, 6, 3, 2, 1, 1, 0, 0, 0],
+  "top_clusters": [
+    { "skill_action": "rust::tokio", "count": 4, "mean": 0.41 }
+  ],
+  "drift": null,
+  "drift_against": "2026-09-22"
+}
+```
+
+| Field | Description |
+|---|---|
+| `schema_version` | Always `"observability/1.0"` |
+| `date` | UTC date of this report |
+| `total` | Episodic documents scored (lesson documents are not counted) |
+| `mean` | Mean salience (no BM25 term — there is no query) |
+| `histogram` | Ten counts; index `i` covers `[i/10, (i+1)/10)`, index 9 is `[0.9, +∞)` |
+| `top_clusters` | At most 5 `skill_action` clusters by mean salience, descending |
+| `drift` | Today's `mean` minus the `mean` of the snapshot dated `drift_against`; `null` when that snapshot is absent |
+| `drift_against` | The date seven UTC days before `date` |
+
+#### Error responses
+
+| Status | When |
+|---|---|
+| `400 Bad Request` | Missing `X-Agent-Root` |
+| `403 Forbidden` | UID mismatch |
+| `404 Not Found` | Unregistered project |
+| `500 Internal Server Error` | Index open, scan, or snapshot write failure |
+
+#### curl example
+
+```bash
+curl --unix-socket ~/.agent/dreamd.sock \
+  -H "X-Agent-Root: $PROJECT" \
+  http://localhost/api/v1/observability/salience
 ```
 
 ---
@@ -427,7 +497,7 @@ The handler does not run a migration, call the CLI migrator, or write `.bak` fil
 #### Response (`501 Not Implemented`)
 
 ```json
-{"error":"no schema migration available","current_schema_version":"1.0.0"}
+{"current_schema_version":"1.0.0","error":"no schema migration available"}
 ```
 
 `current_schema_version` is the episodic `RECORD_SCHEMA_VERSION` (`dreamd_protocol::RECORD_SCHEMA_VERSION`, `"1.0.0"`), the same token `dreamd migrate --from` / `--to` take. It is not the daemon state token `"1.0"`. This is the only error body that carries a field besides `error`.
@@ -457,13 +527,19 @@ See `crates/dreamd-core/src/server/tantivy_handle.rs` (`apply_recurrence_sidecar
 
 ## Error body shape
 
-All error responses use a JSON object:
+Error responses produced by dreamd's middleware and handlers use a JSON object:
 
 ```json
 { "error": "human-readable message" }
 ```
 
-Axum JSON deserialization failures (malformed body, wrong content type) return standard Axum status codes (`415 Unsupported Media Type`, etc.) without the dreamd error envelope.
+Three kinds of response come from the framework (axum) instead and do **not** use that envelope:
+
+| Status | Body | When |
+|---|---|---|
+| `400` / `415` / `422` | `text/plain` message | `POST /api/v1/learn` body rejected by the JSON extractor: unparseable JSON (`400`), `Content-Type` not `application/json` (`415`), missing or mistyped field (`422`) |
+| `404 Not Found` | empty | A path that is not one of the routes on this page. The middleware runs first, so such a request without a valid `X-Agent-Root` gets that header's `400` / `404` JSON error instead |
+| `405 Method Not Allowed` | empty, with an `Allow` header | A known path with the wrong method (e.g. `GET /api/v1/migrate`) |
 
 ---
 

@@ -8,8 +8,8 @@ dreamd gives you persistent memory across every coding agent you use. What Claud
 
 ## Protocol note — do this first
 
-After `initialize`, send `notifications/initialized` before calling any tools.  
-Without it, `search_nodes` returns empty results silently.
+After `initialize`, send `notifications/initialized` before calling any tools, as the MCP lifecycle requires.  
+A node you just appended becomes searchable after the next index commit (up to 5 s) — an empty result right after an append is that delay, not a failure.
 
 ---
 
@@ -29,9 +29,9 @@ Without it, `search_nodes` returns empty results silently.
 | `query` | string | yes      | —       |
 | `k`     | number | no       | 5       |
 
-Returns a ranked list of episodic events scored by BM25 × salience (recency, pain, importance, recurrence).
+Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter.
 
-Each result carries `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can see each hit's cluster and which tool taught it.
+Each result carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can see each hit's cluster and which tool taught it.
 
 **Call `search_nodes` when:**
 
@@ -62,9 +62,9 @@ Each result carries `metadata.skill_action` (its cluster key) and `metadata.sour
 | `skill_action`     | string | **yes**  | Clustering key. See naming rules below.                                                                           |
 | `pain`             | number | no       | 0–10. How disruptive is it to not know this? Default 5.0.                                                         |
 | `importance`       | number | no       | 0–10. How broadly applicable is this? Default 5.0.                                                                |
-| `client_dedup_key` | string | no       | Idempotency key. First 60 chars of content, lowercased, spaces → underscores. Prevents duplicate writes on retry. |
+| `client_dedup_key` | string | no       | Idempotency key (any string; convention: first 60 chars of content, lowercased, spaces → underscores). Prevents duplicate writes on retry. |
 
-Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d the JSONL line (fdatasync-equivalent on Unix). The HTTP learn path returns 201; the MCP tool does not.
+Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d the JSONL line (fdatasync-equivalent on Unix). The result text is `{"id":"evt_…","timestamp":"…","deduplicated":false}` — the server mints the id and timestamp. The HTTP learn path returns 201; the MCP tool does not.
 
 **Call `append_node` when:**
 
@@ -98,7 +98,7 @@ Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d
 ## `skill_action` naming rules
 
 Format: `language::domain::specific`  
-Charset: `[a-z0-9_]` segments joined by `::` — dots, hyphens, and slashes are rejected.
+Charset: `[a-z0-9_]` segments joined by `::` — dots, hyphens, and slashes are rejected (`invalid skill_action: …`).
 
 ```
 rust::error_handling::axum_rejection
@@ -151,6 +151,7 @@ You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Hand-edits ar
   episodic/AGENT_LEARNINGS.jsonl   # append-only event log — written by append_node
   semantic/LESSONS.md              # consolidated lessons — written by dream cycle
   personal/PREFERENCES.md          # user preferences — committed with `.agent/` unless you gitignore it
+  working/WORKSPACE.md             # scratch file
   .dreamd/                         # implementation state — gitignored
 ```
 
@@ -161,7 +162,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 ## What dreamd is not
 
 - Not a replacement for `AGENTS.md` or `SKILL.md`. Those are human-authored project rules; `.agent/` is machine-written runtime memory. They work together.
-- Not a vector database. v0.1 uses BM25 lexical recall. Semantic/embedding recall is on the roadmap.
+- Not a vector database. Recall is BM25 lexical × salience, for events and lessons alike. Vector/embedding recall is not shipped.
 - Not a hosted service. Memory stays local by default; an LLM-assisted dream cycle is the only opt-in network path (API key required; `--no-llm` stays offline). `npx` downloads the prebuilt binary from GitHub on first run. Everything in `.agent/` stays on your machine.
 
 ---
@@ -170,9 +171,11 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 
 | Mistake                                                 | Fix                                                                                 |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Skipping `notifications/initialized`                    | Always send it after `initialize`; `search_nodes` silently returns empty without it |
+| Skipping `notifications/initialized`                    | Send it after `initialize`, per the MCP lifecycle                                   |
+| Searching immediately after `append_node`               | The index commits every 5 s; retry after a few seconds                              |
 | Using slashes in `skill_action` (`rust/borrow-checker`) | Use `::` (`rust::borrow_checker`) — slashes are rejected                            |
 | Omitting `source_harness`                               | Required field; omitting causes a deserialization error                             |
+| No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |
 | Writing vague content                                   | One concrete fact per node; vague content scores low on recall                      |
 | Not calling `search_nodes` at session start             | You will re-discover things already known; call it first                            |
 
@@ -192,6 +195,8 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 ```
 
 Add to `.mcp.json` in your project root (Claude Code) or your harness's equivalent config file.
+
+`npx -y dreamd-mcp setup` writes this block for you (`.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor) and scaffolds `.agent/`; the tools need that folder to exist.
 
 No Rust required. Node ≥ 18. Prebuilt binaries: linux-x86_64, darwin-x86_64, darwin-aarch64.
 

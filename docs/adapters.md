@@ -40,7 +40,9 @@ For any MCP-capable harness:
 3. Confirm the two tools appear: `search_nodes` and `append_node`. The names are
    fixed (see below) — do not rename or alias them.
 4. Multi-writer setups: run `dreamd watch` so several agents share one daemon
-   instead of each spawning an in-process server.
+   instead of each spawning an in-process server. (On native Windows there is
+   no in-process server and no prebuilt `npx` binary — see
+   [windows.md](./windows.md).)
 
 Point at an existing adapter rather than duplicating full JSON — each ships a
 `.mcp.json.example` and a verification walkthrough:
@@ -51,6 +53,8 @@ Point at an existing adapter rather than duplicating full JSON — each ships a
 - Cline → [`../adapters/cline/`](../adapters/cline/README.md)
 - Aider (documentation-first) → [`../adapters/aider/`](../adapters/aider/README.md)
   (CONVENTIONS.md template; append via UDS HTTP — no MCP)
+- Letta → [`../adapters/letta/`](../adapters/letta/README.md) (a code seam only,
+  nothing to install; a Letta agent that speaks MCP uses the same `npx` block)
 
 ### 2. Documentation-first (no MCP)
 
@@ -59,8 +63,10 @@ a `CONVENTIONS.md`, or an agent-rule file — that tells the agent to:
 
 - **Recall** by reading `.agent/semantic/LESSONS.md` (and, if needed, the episodic
   log `.agent/episodic/AGENT_LEARNINGS.jsonl`) before starting work.
-- **Append** new learnings via Unix-socket `POST /api/v1/learn` (placeholder
-  `EventId` / `timestamp` / `schema_version`; see [http-api.md](./http-api.md)).
+- **Append** new learnings via Unix-socket `POST /api/v1/learn` (see
+  [http-api.md](./http-api.md); the daemon mints `id`, `timestamp` and
+  `schema_version`, and ignores placeholders for them in the body). This needs
+  a running `dreamd watch` — an in-process MCP session opens no socket.
   Never `echo >>` or hand-edit `AGENT_LEARNINGS.jsonl` — durable appends go
   through the coordinator. Include `source_harness` and a `skill_action` cluster
   key.

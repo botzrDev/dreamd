@@ -5,9 +5,9 @@ service manager — a systemd `--user` unit on Linux, a LaunchAgent on macOS, a
 logon-triggered scheduled task on Windows — so the daemon starts at login and
 is restarted if it dies. `dreamd service start` starts it on demand; `dreamd
 service restart` bounces it; `dreamd service status` reports what the service
-manager thinks of it. All four verbs shell out to `systemctl --user` /
-`launchctl` / `schtasks` as you; none needs `sudo` or an elevated prompt, and
-none should ever be run with one.
+manager thinks of it; `dreamd service uninstall` removes it again. All five
+verbs shell out to `systemctl --user` / `launchctl` / `schtasks` as you; none
+needs `sudo` or an elevated prompt, and none should ever be run with one.
 
 This is **optional**. If you run one agent, the in-process MCP server that
 `npx -y dreamd-mcp` starts is enough — nothing on this page is required.
@@ -19,7 +19,7 @@ it running in a terminal ([GUIDE.md §5](../GUIDE.md#5-daemon-mode)).
 
 The daemon binds `~/.agent/dreamd.sock` with mode `0600`, so only your user can
 connect. The first process to bind it is the writer: a second `dreamd watch`
-finds the live socket and exits instead of taking it over, while a stale socket
+finds the live socket and exits 1 instead of taking it over, while a stale socket
 file left behind by a crashed daemon is unlinked and rebound. Every request is
 then checked against the connecting peer's UID (`SO_PEERCRED` on Linux,
 `getpeereid` on macOS) and rejected with `403` if it is not the daemon owner's
@@ -61,7 +61,7 @@ dreamd service restart        # systemctl --user restart dreamd.service
 To check on it:
 
 ```bash
-dreamd service status         # running / stopped / failed / not-installed, PID, last 10 log lines
+dreamd service status         # running / stopped / failed / not-installed, PID, start time, last 10 log lines
 journalctl --user -u dreamd.service   # optional: the daemon's stderr in the user journal
 ls -l ~/.agent/dreamd.sock    # srw------- owned by you
 tail -f ~/.agent/dreamd.log
@@ -74,9 +74,14 @@ systemd (or launchd) thinks of the unit; the two can disagree, e.g. a foreground
 `watch` live with no unit installed.
 
 Without a systemd user instance (probe: `/run/systemd/system` — most
-containers, WSL without systemd, non-systemd distros) all four verbs exit 2
-and tell you to run `dreamd watch` in the foreground instead. Nothing is
-written.
+containers, WSL without systemd, non-systemd distros) all five verbs exit 2
+and tell you to run `dreamd watch` in the foreground instead:
+
+```text
+dreamd: error — dreamd service requires systemd --user; run `dreamd watch` in the foreground instead.
+```
+
+Nothing is written.
 
 ## macOS (LaunchAgent)
 
@@ -193,12 +198,10 @@ dreamd service uninstall      # schtasks /Delete /TN … /F, then remove the XML
 
 `install` itself deliberately does **not** `/Run` the task.
 
-Via npx:
-
-```bash
-npx -y dreamd-mcp service install
-npx -y dreamd-mcp service start
-```
+There is no npx route on native Windows. The `dreamd-mcp` shim ships prebuilt
+binaries for Linux x86_64 and macOS only; on `win32` it exits 1 and points you
+at WSL2 before it forwards anything. Run these verbs from a `dreamd.exe` you
+built yourself (`cargo install --path crates/dreamd-cli`).
 
 **`dreamd watch` boots on Windows as of AILAB-192**, and the token this
 `install` just minted is what it needs. `watch` binds `127.0.0.1` on an
@@ -268,12 +271,15 @@ npx -y dreamd-mcp service start
 npx -y dreamd-mcp service restart
 ```
 
-The shim forwards `service` to the native binary. The `ExecStart` /
+On Linux and macOS the shim forwards `service` to the native binary (it has no
+Windows binary to forward to — see above). The `ExecStart` /
 `ProgramArguments` path written into the unit is that binary's own resolved
 path (`current_exe`, canonicalized) — under `npx` that is the cached native
-`dreamd` the shim downloaded, not `npx` or `node`. If you clear the npm cache
-or upgrade the package, reinstall the service so the unit points at the new
-binary (`--force` on macOS and Windows).
+`dreamd` the shim downloaded (`~/.cache/dreamd-mcp/<version>/dreamd`), not
+`npx` or `node`. That directory is per version, and `dreamd update` /
+`dreamd uninstall` clear it, so after either of those — or after a new
+`dreamd-mcp` release — reinstall the service so the unit points at the new
+binary (`--force` on macOS).
 
 ## Fallback: foreground `dreamd watch`
 
@@ -325,8 +331,8 @@ To also delete the daemon home, add `--purge`:
 dreamd service uninstall --purge --yes
 ```
 
-`--purge` removes `~/.agent/` — the registry, the socket and `dreamd.log` — and
-nothing else. It **never** touches a per-project `<repo>/.agent/` store; to
+`--purge` removes `~/.agent/` — the registry, the socket and `dreamd.log` (and,
+on Windows, `auth.json`) — and nothing else. It **never** touches a per-project `<repo>/.agent/` store; to
 clear one of those, see the *Full fresh store* row in
 [troubleshooting.md](./troubleshooting.md#how-do-i-reset-or-clear-memory).
 Because it is destructive it asks first, like `dreamd reset workspace`: pass

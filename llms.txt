@@ -8,7 +8,7 @@
 # dreamd
 
 > dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a
-> `.agent/` folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding
+> `.agent/` folder in your repo, run `npx -y dreamd-mcp`, and every MCP-aware coding
 > agent reads and writes the same memory — checked into git alongside your code.
 >
 > AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
@@ -16,10 +16,15 @@
 > Where it fits: dreamd is the Linux-hosted proof, in the dreamOS charter (momo
 > RFC-011, accepted 2026-09-26), of memory as plain files a person owns, with
 > provenance. No trust label ships today; see ROADMAP.md, "Direction".
+>
+> Version: 1.0.0 (GitHub release; the npm package is published separately and can
+> trail it — `npx -y dreamd-mcp --version` shows the installed version). Recall is
+> lexical BM25 × salience — no vector or hybrid recall.
 
 ## Documentation
 
 - [README](https://github.com/botzrDev/dreamd/blob/main/README.md): Overview, install, and quick start
+- [GUIDE.md](https://github.com/botzrDev/dreamd/blob/main/GUIDE.md): 20-minute linear tutorial — setup, learn, recall, dream cycle, daemon, memory branches, forget
 - [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): `.agent/` folder layout, JSON schema, salience formula, dream-cycle contract
 - [SKILL.md](https://github.com/botzrDev/dreamd/blob/main/SKILL.md): Agent memory skill — MCP tool usage, `skill_action` naming, session patterns
 - [ARCHITECTURE.md](https://github.com/botzrDev/dreamd/blob/main/ARCHITECTURE.md): Engineering invariants for the reference implementation
@@ -27,12 +32,22 @@
 - [CONTRIBUTING.md](https://github.com/botzrDev/dreamd/blob/main/CONTRIBUTING.md): Dev setup and contribution guide
 - [SECURITY.md](https://github.com/botzrDev/dreamd/blob/main/SECURITY.md): Threat model and disclosure policy
 - [CHANGELOG.md](https://github.com/botzrDev/dreamd/blob/main/CHANGELOG.md): Version history
+- [ROADMAP.md](https://github.com/botzrDev/dreamd/blob/main/ROADMAP.md): Shipped vs. not shipped, and direction
+- [docs/README.md](https://github.com/botzrDev/dreamd/blob/main/docs/README.md): Full documentation index
+- [docs/http-api.md](https://github.com/botzrDev/dreamd/blob/main/docs/http-api.md): HTTP API over the Unix socket (Windows: loopback TCP + bearer)
+- [docs/configuration.md](https://github.com/botzrDev/dreamd/blob/main/docs/configuration.md): TOML config keys and environment variables
+- [docs/salience.md](https://github.com/botzrDev/dreamd/blob/main/docs/salience.md): Salience formula, factor by factor
+- [docs/branching-guide.md](https://github.com/botzrDev/dreamd/blob/main/docs/branching-guide.md): `dreamd memory` branches, diff, bisect
+- [docs/provenance.md](https://github.com/botzrDev/dreamd/blob/main/docs/provenance.md): Provenance ledger format; `dreamd doctor --provenance`
+- [docs/observability.md](https://github.com/botzrDev/dreamd/blob/main/docs/observability.md): Recall citations (`explain=1`) and `dreamd salience-drift`
 
 ## Adapters
 
 - [Claude Code](https://github.com/botzrDev/dreamd/blob/main/adapters/claude-code/.mcp.json.example): `.mcp.json` config for Claude Code
 - [Cursor](https://github.com/botzrDev/dreamd/blob/main/adapters/cursor/README.md): MCP config and agent recall rule for Cursor
+- [Cline](https://github.com/botzrDev/dreamd/blob/main/adapters/cline/README.md): MCP config for Cline
+- [Aider](https://github.com/botzrDev/dreamd/blob/main/adapters/aider/README.md): Documentation-pattern adapter (no MCP) — append via the daemon's HTTP API
 
 ## Package
 
-- [npm: dreamd-mcp](https://www.npmjs.com/package/dreamd-mcp): `npx dreamd-mcp` — downloads the right prebuilt binary, no Rust required
+- [npm: dreamd-mcp](https://www.npmjs.com/package/dreamd-mcp): `npx -y dreamd-mcp` — downloads the right prebuilt binary (Linux x86_64, macOS x86_64/arm64), no Rust required

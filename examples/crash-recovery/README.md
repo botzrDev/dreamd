@@ -7,7 +7,7 @@ A **frozen mid-cycle state** showing what dreamd leaves behind when a dream cycl
 ```
 .agent/
   episodic/
-    AGENT_LEARNINGS.jsonl       # two valid lines + a torn tail (no trailing newline on partial JSON)
+    AGENT_LEARNINGS.jsonl       # two valid lines + a third, incomplete JSON line
     AGENT_LEARNINGS.jsonl.tmp   # partial rewrite from interrupted prune
   .dreamd/
     dream_in_progress.wal       # PruneEpisodicMemory intent, no Commit
@@ -21,23 +21,27 @@ This mirrors the `recover_incomplete_deletes_tmp_and_marks_failed` test in `crat
 1. **Detect** — `recover_on_startup()` sees `dream_in_progress.wal` on `dreamd watch` startup (boot project) or on first request to a lazy-loaded project.
 2. **Clean** — Delete temp files referenced by WAL intents (the `.jsonl.tmp` file).
 3. **Finalize** — Remove the WAL; set `state.json` → `last_dream_cycle_status: "failed"`.
-4. **Serve** — Daemon accepts traffic; JSONL retains the last valid lines (torn tail truncated on next coordinator append).
+4. **Repair the log** — When the coordinator opens the episodic log, it keeps every well-formed record. A malformed line that ends in a newline is moved to a sidecar, `.agent/episodic/.corrupt-<YYYY-MM-DD>.jsonl`, and logged at WARN. A torn final fragment with no trailing newline is truncated in place. The broken third line in this fixture does end in a newline, so it takes the sidecar path.
+5. **Serve** — Daemon accepts traffic; the JSONL holds the two valid lines.
 
 ## Try it
 
-From this directory (treat `crash-recovery/` as the project root — add a sentinel if running live commands):
+Inspect the broken state from this directory. These commands only read:
 
 ```bash
-# Inspect the broken state
 cat .agent/.dreamd/dream_in_progress.wal | jq .
 cat .agent/.dreamd/state.json | jq .
-tail -c 80 .agent/episodic/AGENT_LEARNINGS.jsonl | xxd   # torn tail visible
-
-# Run recovery via daemon startup
-dreamd watch
+tail -c 80 .agent/episodic/AGENT_LEARNINGS.jsonl | xxd   # the incomplete third line
 ```
 
-To exercise live recovery, copy this `.agent/` tree into a temp project with a `Cargo.toml` sentinel, run `dreamd watch`, and confirm the WAL disappears.
+Recovery rewrites the fixture, so run it on a copy, not in your checkout:
+
+```bash
+cp -r . /tmp/crash-recovery-demo && cd /tmp/crash-recovery-demo
+dreamd watch        # Ctrl-C once it is up
+```
+
+`dreamd watch` finds the `.agent/` store in the current directory; no `dreamd init` is needed. Afterwards `dream_in_progress.wal` and `AGENT_LEARNINGS.jsonl.tmp` are gone, `state.json` says `"last_dream_cycle_status": "failed"`, `AGENT_LEARNINGS.jsonl` has two lines, and the third line is in `.agent/episodic/.corrupt-<today>.jsonl`. The daemon also builds its index under `.agent/.dreamd/`.
 
 ## Prevention
 

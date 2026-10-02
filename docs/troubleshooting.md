@@ -2,43 +2,51 @@
 
 Symptom → cause → fix → prevention. For deeper reference see [http-api.md](./http-api.md), [configuration.md](./configuration.md), and [SECURITY.md](../SECURITY.md).
 
-Commands below use the cargo-installed `dreamd` binary. On the npm path the shim does **not** put `dreamd` on `PATH` — use `npx -y dreamd-mcp <cmd>` for `init`, `setup`, `watch`, `doctor`, `dream`, `reset`, `uninstall`, `update`, and `version`. The shim does **not** forward `status`, `recall`, `score`, `archive`, or `migrate`; those need `cargo install --path crates/dreamd-cli`.
+Commands below use the cargo-installed `dreamd` binary. On the npm path the shim does **not** put `dreamd` on `PATH` — use `npx -y dreamd-mcp <cmd>` for `init`, `setup`, `watch`, `doctor`, `dream`, `reset`, `service`, `uninstall`, `update`, `version`, `mcp`, `blame`, `salience-drift`, `memory`, `forget`, and `vectors`. The shim does **not** forward `status`, `recall`, `score`, `archive`, or `migrate` (an unlisted first token is passed to `dreamd mcp` as an argument and fails there); those need `cargo install --path crates/dreamd-cli`.
 
 ---
 
-## Daemon won't start — address already in use
+## Daemon won't start
 
-**Symptom:** `dreamd watch` fails with bind error on `~/.agent/dreamd.sock`.
+**Symptom:** `dreamd watch` exits 1 right after starting. The stderr line names the cause:
 
-**Cause:** A previous daemon left a stale socket, or another process holds the path.
+| stderr | Cause |
+|---|---|
+| `dreamd watch: supervisor: UDS bind failed: socket already bound by another writer-process` | Another `dreamd watch` (yours, or the one `dreamd service install` supervises) is already serving `~/.agent/dreamd.sock`. There is one daemon per user. |
+| `dreamd watch: index: index error: tantivy: Failed to acquire Lockfile: LockBusy. …` | Another process holds this project's index writer — a second `dreamd watch` started from the same project, or a standalone in-process `dreamd mcp` that a harness spawned before the daemon was up. |
+| `dreamd watch: supervisor: UDS bind failed: UDS bind failed: path must be shorter than SUN_LEN` | `$HOME/.agent/dreamd.sock` is longer than a Unix socket path may be (about 100 bytes). Typical in deeply nested sandbox or CI homes. |
 
 **Fix:**
 
 ```bash
 # Is a dreamd already running?
 pgrep -a dreamd
+dreamd status                 # "daemon: running" means the socket answers
 
-# If not, remove stale socket (same user only)
-rm -f ~/.agent/dreamd.sock
-
-# Retry
-dreamd watch
+# Already-bound: use the running daemon, or stop it first (Ctrl-C / SIGTERM, or `dreamd service restart`).
+# LockBusy: close the harness session(s) holding an in-process `dreamd mcp`, start `dreamd watch`,
+#           then reload the harness so its MCP server bridges to the daemon.
+# SUN_LEN: run under a shorter $HOME.
 ```
 
-**Prevention:** Let `dreamd watch` shut down via SIGINT/SIGTERM when possible — v0.1 unlinks the socket on graceful stop. After `kill -9`, stale socket cleanup is manual (or automatic on next `bind_api_socket` recovery).
+A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these: the next `dreamd watch` probes it, finds nothing listening, unlinks it and binds. `dreamd doctor` reports it as `orphaned_uds: … [WARNING: socket file exists but nothing is listening; …]`, and `dreamd doctor --repair` (or `rm -f ~/.agent/dreamd.sock`) removes it without starting a daemon.
+
+**Prevention:** Start `dreamd watch` before the harnesses that use it, and let it shut down via SIGINT/SIGTERM — a graceful stop unlinks the socket.
 
 ---
 
 ## MCP server won't connect
 
-**Symptom:** Harness shows dreamd MCP disconnected, or stderr says `daemon not found`.
+**Symptom:** Harness shows dreamd MCP disconnected, or `dreamd mcp` exits right after starting.
 
 **Cause (common):**
 
 1. `npx dreamd-mcp` not installed / wrong package name (`dreamd-mcp`, not scoped)
 2. No `.agent/` in the project — server boots empty backend
 3. Daemon expected but not running (Remote / daemon proxy)
-4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`)
+4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1
+5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
+6. Native Windows — the npx shim has no Windows binary and exits 1 (see [windows.md](./windows.md))
 
 **Fix:**
 
@@ -51,7 +59,7 @@ npx -y dreamd-mcp doctor       # verify store health
 
 Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)`. If no daemon is running there is no default-stderr fallback line; `DREAMD_LOG=debug` logs `daemon not found … running in-process`.
 
-**Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per machine.
+**Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per user login.
 
 ---
 
@@ -71,6 +79,8 @@ npx -y dreamd-mcp doctor   # dream-cycle mode + index health; use --repair to re
 ```
 
 Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `failed`. See [examples/crash-recovery/](../examples/crash-recovery/).
+
+Recovery keys off the WAL file (`.agent/.dreamd/dream_in_progress.wal`) and runs when `dreamd watch` starts. `dreamd dream` does not run it: while `state.json` still says `in_progress`, a cycle is refused — `dreamd: dream cycle error: dream cycle already in progress`, exit 1, without a daemon; HTTP 409 with one. If the WAL is still on disk, start `dreamd watch` once to recover, then re-run the cycle. If the status is stuck at `in_progress` with **no** WAL file, a `watch` start does not clear it: stop the daemon and set `"last_dream_cycle_status"` in `.agent/.dreamd/state.json` back to `"failed"` by hand.
 
 **Prevention:** Don't run overlapping dream cycles (HTTP 409 guards concurrent cycles). Use one daemon writer per machine.
 
@@ -99,11 +109,13 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 
 | Goal | Command |
 |---|---|
-| Clear session scratchpad | `dreamd reset workspace` |
+| Clear session scratchpad | `dreamd reset workspace` (asks first; `--yes` skips the prompt and is required when stdin is not a tty) |
+| Remove one memory | `dreamd forget <event id>` — stop the daemon first; `--dry-run` previews. Find the id with `dreamd recall <query>` |
 | Uninstall dreamd (stop servers, unregister project, clear caches; keeps `.agent/` stores) | `dreamd uninstall` — flags and details: [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
 | Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
 | Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project` |
-| Wipe episodic log | Manually delete/truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then re-init the index (or use *Full fresh store* below for a clean slate) |
+| Remove the login service (systemd unit / LaunchAgent / scheduled task) | `dreamd service uninstall` — see [install.md](./install.md#removing-the-service) |
+| Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair` (or use *Full fresh store* below for a clean slate) |
 | Full fresh store | Delete `.agent/` and re-run `dreamd init` |
 
 **Warning:** Deleting `.agent/` is destructive. Commit or back up first if the store has value. There is no `dreamd reset --all`.
@@ -154,7 +166,7 @@ dreamd init
 
 ## No `.agent/` directory found
 
-**Symptom:** `dreamd: no .agent/ store found` or MCP `coordinator unavailable: no agent root found`.
+**Symptom:** `dreamd: no .agent/ store found in … or any parent directory — run \`dreamd init\` first.` (`doctor`, `dream`), `dreamd: error — no .agent/ directory found. Run \`dreamd init\` first.` (`recall`, `migrate`, `service install`, …), `dreamd watch: no project root found from …`, or MCP `coordinator unavailable: no agent root found`. All but the MCP one exit 2.
 
 **Cause:** Project never initialized, or CWD is not inside a project with `.agent/`.
 

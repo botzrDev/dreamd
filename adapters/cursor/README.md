@@ -17,7 +17,7 @@ Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.cursor/mcp.j
 npx -y dreamd-mcp watch &
 ```
 
-Without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
+`watch` runs in the foreground; the `&` backgrounds it in that shell, and it stops when the shell exits. Without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
 
 ## 3. MCP config
 

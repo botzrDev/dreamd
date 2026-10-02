@@ -17,10 +17,11 @@ We follow a coordinated-disclosure model: please give us a reasonable window to 
 
 ## Supported versions
 
-Security fixes land on `main` and the latest `0.1.x` release.
+Security fixes land on `main` and the latest release.
 
 | Version | Supported |
 |---|---|
+| `1.0.x` | Yes |
 | `0.1.1` | Yes |
 | `main` | Yes |
 | Anything else | No |
@@ -33,7 +34,7 @@ The reference implementation is local-first and single-tenant. It assumes:
 - Other local users on the same machine are **not** trusted.
 - The network is **not** trusted by default.
 
-At v0.1, the daemon enforces:
+The daemon enforces:
 
 - **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected.
 
@@ -42,16 +43,16 @@ At v0.1, the daemon enforces:
 
 **Shipped in v0.1.1:**
 
-- **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`.
+- **Windows:** `127.0.0.1` on an ephemeral port with bearer token in `~/.agent/auth.json`. The token is 32 random bytes minted by `dreamd service install` (rotated by `install --force`) and the file is ACL-restricted to the installing user; `dreamd watch` only reads it, re-reads it on every request, and answers `401` to a missing or wrong token.
 
-**Unreleased (AILAB-197, AILAB-206):**
+**Shipped in v1.0.0 (AILAB-197, AILAB-206):**
 
 - **TCP binding to non-localhost** is refused unless `dreamd watch --insecure` is passed (test environments only). `--bind <IP[:port]>` picks the TCP address; a non-loopback one without `--insecure` is refused before anything binds, and every start with `--insecure` logs a warning. Unix `dreamd watch` still has no TCP listener: `watch --bind` / `watch --insecure` exit 2 there. `--insecure` does not skip the bearer token or the `auth.json` requirement, and `~/.agent/server.json` still names a loopback host, so local clients (`dreamd status`, MCP) only ever dial loopback.
 - **`dreamd mcp --bind` (AILAB-206)** is the one TCP listener on Unix. It is compiled only into builds with the non-default `mcp-http` cargo feature, so prebuilt release binaries have no TCP listener on Unix at all. It serves opt-in Streamable HTTP MCP at `/mcp`, loopback by default through the same bind gate (non-loopback needs `--insecure`). It has **no bearer token** and no `auth.json` — any local process can reach a loopback bind, which is weaker than stdio or the `0600` + `SO_PEERCRED` socket — and it does not write `server.json`. Default `dreamd mcp` stays stdio. See [docs/mcp-transports.md](docs/mcp-transports.md).
 
 ### Same-user-cross-project surface (accepted for v0.1)
 
-Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS, any process running as the user can target any registered project. Peer-credential auth verifies **same user**, not same project. If code runs as the user, it can already read project files directly. v0.2 may add per-project tokens or per-project sockets.
+Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS, any process running as the user can target any registered project. Peer-credential auth verifies **same user**, not same project. If code runs as the user, it can already read project files directly. A later release may add per-project tokens or per-project sockets; nothing is scheduled.
 
 ## Lesson-injection surface
 
@@ -62,9 +63,11 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 - The redaction scrubber (below) targets **secret leakage**, not prompt injection.
 - The structural answer is a trust label on every fragment, joined on derivation and read by whatever releases an effect, so a lesson from an untrusted source cannot cause a privileged action. That is direction (`ROADMAP.md`, "Direction — provenance and trust"), recorded in the momo kernel's charter as a design needing its own spec. Nothing in dreamd implements it today.
 
-## Privacy and redaction (through v0.1.1)
+## Privacy and redaction
 
-**As of v0.1.1, dreamd makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `~/.config/dreamd/secrets.toml` (mode `0600`) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
+**The `dreamd` binary makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `secrets.toml` in the platform config directory (`~/.config/dreamd/secrets.toml` on Linux; mode must be exactly `0600` or the file is ignored) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
+
+Two things outside that sentence do use the network. The `npx -y dreamd-mcp` shim downloads the prebuilt binary from this repository's GitHub releases and verifies its SHA-256 before running it. And a binary you build yourself with the non-default `vectors` cargo feature downloads an embedding model when you run `dreamd vectors enable`; the prebuilt binaries are built without that feature, and the command exits 2 on them without touching the network.
 
 ### Personal-layer consent (v0.1)
 
@@ -81,7 +84,7 @@ Passing `dreamd dream --share-personal` — or sending `x-dreamd-share-personal:
 
 `GET /api/v1/preferences` is unaffected — it serves `PREFERENCES.md` to the local agent over the UDS and is not an LLM call.
 
-On every `POST /api/v1/learn`, a pattern scrubber runs **before persistence** (on by default; disable with `redaction = false` in config). It redacts AWS keys, bearer tokens, `sk-…` patterns, and common `*_KEY=` assignments — logging `redaction_hits` but not rejecting the request.
+On every append — `POST /api/v1/learn` and MCP `append_node` alike — a pattern scrubber runs over `content` **before persistence** (on by default; disable with `redaction = false` in config). It replaces AWS access key ids (`AKIA…`), `Bearer <token>` values, `sk-…` / `sk-ant-…` keys, and `API_KEY=` / `SECRET=` / `TOKEN=` / `PASSWORD=` / `AWS_SECRET_ACCESS_KEY=` assignments with `[REDACTED]` — logging `redaction_hits` but not rejecting the request. It is a fixed pattern list, not a guarantee: a secret in any other shape is stored as written.
 
 ## Untrusted-input caps
 

@@ -4,7 +4,7 @@
 
 ## `dreamd vectors enable`
 
-On the default binary the command refuses, exits 2, and creates no directory:
+On the default binary the command refuses with one line on stderr, exits 2, and creates no directory:
 
 ```text
 $ dreamd vectors enable
@@ -23,7 +23,7 @@ The model weights are not in the binary; they are downloaded at run time. When `
 
 ## Which binary do I have?
 
-`dreamd --version` ends with `vectors:off` or `vectors:on`. `dreamd version` prints a `vectors:` line.
+`dreamd --version` prints one line whose last field is `vectors:off` or `vectors:on`, for example `dreamd 1.0.0 (<commit> build:<date> target:<triple> schema:1.0 vectors:off)`. `dreamd version` prints a `vectors: off` or `vectors: on` line.
 
 ## Building with the feature
 

@@ -8,7 +8,7 @@
 ## What dreamd is
 
 dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.agent/`
-folder in your repo, run `npx dreamd-mcp`, and every MCP-aware coding agent reads and
+folder in your repo, run `npx -y dreamd-mcp`, and every MCP-aware coding agent reads and
 writes the same memory — episodic events, lessons, preferences — checked into git
 alongside your code.
 
@@ -21,8 +21,9 @@ read and write via MCP, without any of them needing to know the others exist.
 
 ## What dreamd is not
 
-- Not a vector database. v0.1 uses BM25 lexical recall (Tantivy). Semantic/embedding
-  recall is v0.2.
+- Not a vector database. Recall is BM25 lexical (Tantivy) × salience. Vector/embedding
+  and hybrid recall are not shipped. (The "semantic" layer is LESSONS.md indexed as
+  documents, scored the same lexical way — not embeddings.)
 - Not a hosted SaaS. Memory stays local by default. The only opt-in network path is
   an LLM-assisted dream cycle (API key required; `--no-llm` stays offline).
 - Not a replacement for AGENTS.md or SKILL.md. Those are human-authored project rules;
@@ -39,19 +40,27 @@ read and write via MCP, without any of them needing to know the others exist.
   npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
   npx -y dreamd-mcp         # start the MCP server (stdio)
 
-Supported: Linux x86_64, macOS x86_64/aarch64. Windows in v0.1.1 is watch + learn
-only (loopback TCP + bearer); dream cycle and Tantivy index need Unix atomic writes.
-Node >= 18 required.
+Supported: Linux x86_64, macOS x86_64/aarch64 (the prebuilt binaries the npm shim
+downloads). Windows is watch + learn only (loopback TCP + bearer), from a source
+build; dream cycle and Tantivy index need Unix atomic writes. Node >= 18 required.
+
+Version note: this describes 1.0.0 (released on GitHub). The npm package is published
+separately and can trail it; `npx -y dreamd-mcp --version` shows what you have.
+0.1.1 lacks `blame`, `salience-drift`, `memory`, `forget`, `recall --without`,
+`doctor --provenance`, and `explain=1`.
 
 ### From source (requires Rust stable)
 
   git clone https://github.com/botzrDev/dreamd.git
   cd dreamd
   cargo install --path crates/dreamd-cli
-  dreamd init
+  dreamd setup             # or `dreamd init` to scaffold without writing MCP config
   dreamd mcp
 
 ## MCP configuration
+
+`setup` writes this block for you (`.mcp.json` for Claude Code, `.cursor/mcp.json`
+for Cursor). By hand:
 
 ### Claude Code — add to `.mcp.json` in your project root:
 
@@ -64,11 +73,12 @@ Node >= 18 required.
     }
   }
 
-### Cursor — same `.mcp.json` config. Also copy
+### Cursor — same block in `.cursor/mcp.json`. Also copy
   `adapters/cursor/.cursor/rules/dreamd-recall.mdc`
   into your project's `.cursor/rules/` for automatic recall on session start.
 
-### Cline / other MCP-aware harnesses — same `.mcp.json` config applies.
+### Cline / other MCP-aware harnesses — same `mcpServers` block in the harness's
+  own MCP settings file (Cline: see adapters/cline/README.md).
 
 ## MCP tools
 
@@ -76,8 +86,11 @@ dreamd exposes two MCP tools: `search_nodes` and `append_node`.
 
 ### search_nodes — recall from memory
 
-  Input:  { "query": "string", "k": number }   (k defaults to 10)
-  Output: ranked list of episodic events, scored by BM25 × salience
+  Input:  { "query": "string", "k": number }   (k defaults to 5; no other arguments)
+  Output: { "results": [...] } ranked by BM25 × salience. Each hit has score, bm25,
+          salience, source ("episodic" = raw event, "semantic" = LESSONS.md lesson),
+          content, and metadata (timestamp_sec, pain, importance, recurrence,
+          skill_action, source_harness).
 
   Use when:
   - Starting a new task in a project worked in before
@@ -91,38 +104,44 @@ dreamd exposes two MCP tools: `search_nodes` and `append_node`.
     "skill_action":   "rust::error_handling::axum_rejection",  // :: -separated, language-first
     "content":        "Axum requires custom Error types to implement IntoResponse.",
     "source_harness": "claude-code",   // required — omitting causes a deserialization error
-    "pain":           7.5,             // 0–10, friction caused by this problem
-    "importance":     8.0,             // 0–10, how often this pattern recurs
+    "pain":           7.5,             // 0–10, how disruptive if not known (default 5.0)
+    "importance":     8.0,             // 0–10, how broadly applicable (default 5.0)
     "client_dedup_key": "axum_requires_custom_error_types_to_implement_intoresponse"
-      // optional; first 60 chars of content, lowercased, spaces → underscores
+      // optional idempotency key; a repeat call with the same key returns the first id
   }
-  Returns: 201 after fdatasync
+  Returns: a tool result with { "id": "evt_…", "timestamp": "…", "deduplicated": false }
+  after the line is synced to disk. (HTTP `POST /api/v1/learn` returns 201 with the
+  same body.) The server mints `id`, `timestamp`, and `schema_version`.
 
   skill_action convention: language::domain::specific
     rust::error_handling::axum_rejection
     typescript::testing::vitest_async_timeout
     python::deps::virtualenv_activation
 
-PROTOCOL NOTE: after `initialize`, send `notifications/initialized` before calling any
-tools. Without it, `search_nodes` returns empty results silently.
+PROTOCOL NOTE: after `initialize`, send `notifications/initialized` before calling
+tools, as the MCP lifecycle requires. A just-appended node becomes searchable after
+the next index commit (up to 5 s); an empty result right after an append is that delay.
 
 ## .agent/ folder layout
 
   .agent/
     episodic/AGENT_LEARNINGS.jsonl   # append-only event log
     semantic/LESSONS.md              # lessons consolidated by the dream cycle
+    semantic/recurrence_counts.json  # cluster counts written by the dream cycle
     personal/PREFERENCES.md          # user preferences (never sent to LLM without consent)
-    working/                         # reserved for v0.2
-    .dreamd/                         # implementation state — gitignored
+    working/WORKSPACE.md             # scratch file; `dreamd reset workspace` re-scaffolds it
+    .dreamd/                         # implementation state — gitignored (index, state,
+                                     # config.toml, branches/, provenance/, snapshots/)
 
-All files are UTF-8 plaintext. `.agent/` is checked into git. You can cat, grep,
-git diff, and hand-edit any file. The agent reads your edits.
+All files are UTF-8 plaintext. `.agent/` is checked into git. You can cat, grep, and
+git diff any file. Durable appends to the JSONL go through `append_node` / the daemon
+(single writer), not hand-edits; the dream cycle rewrites LESSONS.md wholesale.
 
 ## Episodic record schema (schema_version: "1.0.0")
 
   {
     "schema_version": "1.0.0",
-    "id":             "evt_01hz8k2x",
+    "id":             "evt_01M3YEFV3K86X3S7AKJTVERJ0B",   // evt_ + 26-char ULID, server-minted
     "timestamp":      "2026-05-08T10:55:00Z",
     "source_harness": "claude-code",
     "skill_action":   "rust::error_handling::axum_rejection",
@@ -134,22 +153,52 @@ git diff, and hand-edit any file. The agent reads your edits.
 
 ## CLI commands
 
+  dreamd setup             # scaffold .agent/ (via init) and write the harness MCP config
   dreamd init              # scaffold .agent/ in the current project
   dreamd mcp               # start MCP server over stdio
   dreamd watch             # foreground daemon mode (SIGINT/SIGTERM-graceful)
+  dreamd service install|start|restart|status|uninstall   # per-user service running `watch`
+  dreamd status            # daemon liveness, project, last dream cycle
   dreamd dream             # run the dream cycle: consolidate episodic → semantic
-  dreamd dream --dry       # preview what the dream cycle would do
-  dreamd doctor            # health check
+  dreamd dream --dry       # print the LESSONS.md the cycle would write; writes nothing
+  dreamd recall <query>    # ranked search (table); --explain, --without, --without-cluster
+  dreamd blame <query>     # which memories drove a query's ranking; --explain, --json
+  dreamd score             # top memories by salience, no query
+  dreamd salience-drift    # salience distribution and drift vs. 7 days ago; --json
+  dreamd memory branch|checkout|branches|delete|diff|bisect   # named memory snapshots
+  dreamd forget <evt_id>   # remove one event + the lesson state naming it; --dry-run, --proof <path>
+  dreamd doctor            # health check; --repair, --cluster-health, --provenance
+  dreamd archive <evt_id> --force-unpin   # clear a pin so decay can prune the entry
+  dreamd migrate --from 1.0.0 --to 1.0.0  # episodic schema migration (identity no-op only)
+  dreamd vectors enable    # model download on a `--features vectors` build; exits 2 on
+                           # the default binary; recall is unchanged either way
+  dreamd uninstall         # stop local servers, unregister project, clear caches
+  dreamd update            # clear the binary cache so npx fetches the latest
   dreamd version           # structured version output
   dreamd reset workspace   # re-scaffold working/WORKSPACE.md
 
-## Recall latency (v0.1, warm BM25 index, Criterion 0.5, WSL2/Linux)
+On the npm path, `npx -y dreamd-mcp <cmd>` forwards init, setup, watch, doctor, dream,
+reset, service, uninstall, update, version, mcp, blame, salience-drift, memory, forget,
+vectors. recall, score, status, archive, and migrate need the `dreamd` binary.
+
+## HTTP API (daemon)
+
+`dreamd watch` serves HTTP on the Unix socket `~/.agent/dreamd.sock` (peer-UID checked);
+every request carries `X-Agent-Root: <project root>`. On Windows it is loopback TCP +
+bearer token instead. Main routes: `POST /api/v1/learn`, `GET /api/v1/recall`
+(`q`, `k`, `explain=1` for a `citations` array, repeatable `exclude=`),
+`POST /api/v1/dream`, `GET /api/v1/health`, `GET /api/v1/preferences`,
+`GET /api/v1/observability/salience`. `POST /api/v1/migrate`
+is a stub that answers 501. Full reference: docs/http-api.md.
+
+## Recall latency (warm in-RAM BM25 index, Criterion 0.5, WSL2/Linux; historical measurement, not re-run on 1.0.0)
 
   1,000 entries    ~50 µs
   10,000 entries   ~313 µs
   100,000 entries  ~2.8 ms
 
-All well under the <5ms P50 warm target. Run `cargo bench -p dreamd-core` to reproduce.
+All well under the <5ms P50 warm target. Run `cargo bench -p dreamd-core --bench recall` to
+reproduce (docs/benchmarks.md).
 Read-after-write visibility: up to commit_cadence_seconds (default 5s).
 
 ## Privacy
@@ -160,13 +209,17 @@ into an LLM-assisted dream cycle (API key in the environment or
 `.agent/personal/` is excluded from that request unless you pass
 `--share-personal` on that call.
 
-## Current scope (v0.1.1)
+## Current scope (v1.0.0)
 
 IN: BM25 lexical recall (including `LESSONS.md` as a Tantivy document layer —
 not embeddings), Linux + macOS full daemon, Windows watch+learn, opt-in LLM
-dream cycle, `dreamd service`, npm `dreamd-mcp`.
-NOT: vector/embedding recall, Windows atomic writes (dream cycle + index),
-Homebrew, auto dream cycle.
+dream cycle, `dreamd service`, npm `dreamd-mcp`, memory branches
+(`dreamd memory …`), provenance ledger recording + `dreamd doctor --provenance`
+(unsigned, no trust label), `dreamd forget` (receipt, not a signed proof),
+`dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations.
+NOT: vector/embedding or hybrid recall (the optional `vectors` cargo feature only
+downloads a model), Windows atomic writes (dream cycle + index), Homebrew,
+auto dream cycle, signed proofs, sync/CRDT.
 
 ## Key links
 

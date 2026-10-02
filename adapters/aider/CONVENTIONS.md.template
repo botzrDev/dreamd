@@ -6,6 +6,7 @@ This project uses [dreamd](https://github.com/botzrDev/dreamd) for cross-session
 
 ```bash
 # Recall past learnings before starting work
+# (LESSONS.md exists only once a dream cycle has promoted a recurring cluster)
 /read .agent/semantic/LESSONS.md
 
 # Optional — raw episodic log for deeper context (read only)
@@ -40,9 +41,10 @@ curl --unix-socket ~/.agent/dreamd.sock \
 - `pain` and `importance` are 0.0–10.0. Higher = more salient.
 - `skill_action` follows the `language::domain::specific` convention — see [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md) (`AgentLearning` table) for full rules. Lowercase `[a-z0-9_]` segments joined by `::`. Examples: `rust::error_handling`, `python::api_design`, `typescript::types::branded`.
 - `source_harness` is `"aider"`. This lets dreamd attribute learnings across harnesses.
-- `id` and `schema_version` are placeholders — the daemon overwrites them. `timestamp` is also overwritten at durable write.
+- `id`, `schema_version` and `timestamp` are placeholders — the daemon mints its own and ignores what you send. They may be omitted.
 - `X-Client-Dedup-Key` is optional. If two appends share the same key in the same project, the second returns the original `id` with `"deduplicated": true`.
-- The daemon must be running (`dreamd watch` or an active MCP session from another harness) for the `curl` to succeed. Without it, you get `connection refused`.
+- The daemon must be running (`dreamd watch`) for the `curl` to succeed. Without it there is no socket and `curl` fails to connect (exit code 7). An MCP session from another harness does not open the socket on its own.
+- `PROJECT` is the absolute path of the project root (the directory that contains `.agent/`), as registered by `dreamd init`.
 
 ### Example
 

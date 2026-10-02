@@ -1,6 +1,6 @@
 # Story ID legend
 
-Internal tracker references (`DR-XXX`, `WEG-XXX`) appear in commit messages, PR titles, and some source comments. You do **not** need tracker access to contribute — they are provenance labels, not build inputs.
+Internal tracker references (`DR-XXX`, `WEG-XXX`, `AILAB-XXX`, `BZR-XXX`) appear in commit messages, PR titles, `CHANGELOG.md`, CLI help text, and source comments. You do **not** need tracker access to contribute — they are provenance labels, not build inputs.
 
 ## Prefixes
 
@@ -8,6 +8,10 @@ Internal tracker references (`DR-XXX`, `WEG-XXX`) appear in commit messages, PR 
 |---|---|---|
 | `DR-XXX` | **Dreamd requirement** — user-facing story, bug, or NFR from the product backlog | `DR-402` = `POST /api/v1/learn` |
 | `WEG-XXX` | **Work engineering group** — implementation slice, spike, or engineering task | `WEG-72` = SO_PEERCRED middleware |
+| `AILAB-XXX` | Engineering ticket from the v0.1.1 era. The prefix is retired; the same number lives on as `BZR-XXX` | `AILAB-185` = `dreamd service restart` |
+| `BZR-XXX` | Current engineering ticket prefix (everything after v0.1.1) | `BZR-151` = `dreamd forget` |
+
+`NFR-N` is not a ticket: it names a non-functional requirement that CI enforces (`NFR-1` idle daemon RSS < 30 MB on Linux, `NFR-2` stripped binary ≤ 20 MB).
 
 ## In commits and PRs
 
@@ -26,5 +30,5 @@ Stripping story IDs from source is optional cleanup; new code should prefer link
 
 ## Related
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — commit message conventions
-- [CHANGELOG.md](../CHANGELOG.md) — user-visible history (no story IDs required)
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — commit message conventions
+- [CHANGELOG.md](./CHANGELOG.md) — user-visible history (no story IDs required)

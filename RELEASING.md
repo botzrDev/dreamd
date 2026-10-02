@@ -5,13 +5,16 @@ exists because two silent-drift classes shipped a broken package once (see the
 ["Why"](#why-this-procedure-exists) section): a version constant that drifted from
 `package.json`, and a bundled `manifest.json` whose binary checksums lagged a
 release behind. **Follow every step in order.** The version number below is written
-as `X.Y.Z` (e.g. `0.1.0-rc.5`); substitute throughout.
+as `X.Y.Z` (e.g. `1.0.0`, or `0.1.0-rc.5` for a pre-release); substitute throughout.
 
 ## 0. Prerequisites
 
 - Push access to `botzrDev/dreamd` and permission to publish GitHub Releases.
 - **npm publish requires the `dataprime1` account's passkey 2FA** — it CANNOT run in CI
   and CANNOT be done by an automated agent. A human with the passkey performs step 6.
+  Pushing the tag (step 2), taking the release out of draft (step 5), and the MCP
+  Registry publish (step 8) are human steps too; no workflow and no agent session does them.
+- The `gh` CLI, authenticated for `botzrDev/dreamd`.
 - A clean, green `main` (`gh run list --branch main --limit 1` → success). CI's
   `test` job is gated `needs: lint`, so a red `lint` **hides all test failures** —
   never cut a release off a `main` whose lint is red.
@@ -23,7 +26,7 @@ drift ships. Bump `X.Y.Z-1` → `X.Y.Z`:
 
 | # | File | What to change |
 |---|------|----------------|
-| 1 | `Cargo.toml` | `[workspace.package] version` (all crates inherit via `version.workspace = true`) — and the `# RC:` comment above it |
+| 1 | `Cargo.toml` | `[workspace.package] version` (all crates inherit via `version.workspace = true`) — and the one-line comment above it that describes the release |
 | 2 | `Cargo.lock` | run `cargo check --workspace` to re-sync the three workspace crate entries (do not hand-edit) |
 | 3 | `packages/dreamd-mcp/package.json` | `"version"` |
 | 4 | `packages/dreamd-mcp/server.json` | BOTH `version` fields (top-level + `packages[0].version`) |
@@ -40,7 +43,10 @@ every bump anyway.
 Also:
 - Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (release notes are
   auto-extracted from it by `release.yml`; a missing section falls back to a generic
-  link).
+  link). Only that one block becomes the release notes — everything up to the next
+  `## [` heading — so it must stand on its own; a line such as "see the previous
+  section" leaves the GitHub Release without the content. Add the `[X.Y.Z]` link
+  reference at the bottom of the file and repoint `[Unreleased]` at `vX.Y.Z...HEAD`.
 
 Do NOT leave real-but-stale shas in `manifest.json` (that is the exact bug this
 procedure prevents) — use `PENDING_*`, which the manifest test rejects, so a
@@ -56,8 +62,9 @@ cargo test --all-features --workspace            # cli_help version snaps must b
 ( cd packages/dreamd-mcp && node --test )        # will FAIL on PENDING shas — expected until step 4
 ```
 
-Commit on a `release/vX.Y.Z` branch (keep it OFF `main` until step 5 so `main` never
-holds a `PENDING` manifest):
+Commit on a `release/vX.Y.Z` branch (keep it OFF `main` until the step-4 PR merges, so
+`main` never holds a `PENDING` manifest). If the bump is pushed to `main` instead, the
+`mcp-shim` CI job is red on `main` from that push until step 4 lands:
 
 ```sh
 git checkout -b release/vX.Y.Z
@@ -66,9 +73,20 @@ git commit -am "chore: release vX.Y.Z (manifest shas pending build)"
 
 ## 2. Tag → trigger the build
 
-Pushing the tag runs `.github/workflows/release.yml`, which builds all targets,
-regenerates `manifest.json` from those exact binaries, and creates a **draft**
-GitHub Release with the tarballs, `checksums.txt`, and `manifest.json` attached.
+Pushing a tag that matches `v[0-9]+.[0-9]+.[0-9]+*` runs
+`.github/workflows/release.yml`, which builds all targets with default features
+(no `vectors`, no `mcp-http`), regenerates `manifest.json` from those exact binaries,
+and creates a **draft** GitHub Release with the tarballs, `checksums.txt`, and
+`manifest.json` attached.
+
+- The workflow does **not** run the test suite. The tag is only as tested as the
+  commit it points at (step 1's local run, and CI on that commit if it was pushed).
+- The Linux and macOS builds fail if the stripped binary is over 20 MB
+  (20,971,520 bytes, NFR-2). The Windows build is `continue-on-error`, unstripped and
+  unchecked.
+- A tag name containing a hyphen (`v0.2.0-alpha.1`, `v0.1.0-rc.5`) is created as a
+  **prerelease**. A hyphen-free tag (`v1.0.0`) is a **stable** release: once it leaves
+  draft in step 5 it becomes the repository's "Latest" release.
 
 ```sh
 git tag vX.Y.Z              # points at the step-1 commit (PENDING manifest — fine; the build ignores it)
@@ -79,7 +97,11 @@ Watch it: `gh run watch $(gh run list --workflow release.yml --limit 1 --json da
 
 ## 3. (nothing — wait for the draft release)
 
-When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 6 assets.
+When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 7 assets: five
+tarballs (`linux-x86_64`, `linux-x86_64-musl`, `darwin-x86_64`, `darwin-aarch64`,
+`windows-x86_64`, each `.tar.gz`), `checksums.txt`, and `manifest.json`. If the
+Windows build failed (it is `continue-on-error`) there are 6 and the release is still
+usable — the npm shim has no Windows manifest entry.
 
 ## 4. Fill the bundled manifest FROM the release build (CI PR)
 
@@ -88,9 +110,26 @@ binaries, attached it to the draft release, and opened a PR
 `chore/mcp-manifest-vX.Y.Z` with that fill. Review the PR: the shas in the diff must
 match the `manifest.json` attached to the draft release (they are the same build —
 **take them from the release, do not regenerate separately**; local rebuilds are not
-byte-reproducible and would mismatch). Merge it.
+byte-reproducible and would mismatch). Merge it. The PR branch is cut from the tag,
+so when the step-1 commit lives only on `release/vX.Y.Z` the PR carries that bump commit
+to `main` along with the fill.
 
-A PR opened by `GITHUB_TOKEN` may not run CI (GitHub's recursion guard); `node --test`
+**If the run ends red at "Open PR with regenerated manifest":** the draft release and
+the pushed branch `chore/mcp-manifest-vX.Y.Z` both exist, and only `gh pr create`
+failed. That is what happens when the repository setting *Allow GitHub Actions to
+create and approve pull requests* is off (`GitHub Actions is not permitted to create or
+approve pull requests`). Open the PR by hand from the branch the workflow pushed, then
+review and merge as above:
+
+```sh
+gh pr create --repo botzrDev/dreamd --base main --head chore/mcp-manifest-vX.Y.Z \
+  --title "chore: fill vX.Y.Z dreamd-mcp manifest shas" \
+  --body "Fills packages/dreamd-mcp/manifest.json from the binaries attached to draft release vX.Y.Z."
+```
+
+A PR opened by a human this way does run CI.
+
+A PR opened by the workflow's `GITHUB_TOKEN` does not run CI (GitHub's recursion guard); `node --test`
 in `packages/dreamd-mcp` still runs on the merge to `main` (step 5 watch). If branch
 protection refuses the merge because checks never started, that is a founder
 PAT/GitHub-App follow-up — do not invent a secret here.
@@ -122,6 +161,9 @@ callers; it is NOT a missing package.
 ```sh
 npm login --auth-type=web              # browser flow; authenticate as dataprime1 with the passkey
 npm whoami                              # must print: dataprime1
+
+git checkout main && git pull --ff-only   # must contain the step-4 fill commit
+grep -c PENDING packages/dreamd-mcp/manifest.json   # must print 0
 
 cd packages/dreamd-mcp
 npm publish                            # passkey-prompts; moves the `latest` dist-tag to X.Y.Z

@@ -20,8 +20,10 @@ n=100000 p50_ns=<int> p99_ns=<int>
 If cargo fails, the script exits with cargo's exit code and prints no summary.
 
 `python3 scripts/benchmark/recall_summary.py --summarize DIR` reads existing
-samples under `DIR` and does not run cargo. A missing or malformed
-`sample.json` exits 1 and prints nothing on stdout.
+samples under `DIR` (a Criterion output directory such as `target/criterion`)
+and does not run cargo. A missing or malformed `sample.json` exits 1, names
+the file on stderr, and prints nothing on stdout. Any other argument form
+prints a usage line and exits 2.
 
 ## What it measures
 
@@ -39,10 +41,15 @@ its median is a bootstrap estimate and not a sample percentile.
 
 ## Where the samples are
 
-Criterion writes to `./target/criterion` under the process's current
-directory, so samples land in `<repo>/target/criterion/recall/n/<size>/new/sample.json`.
-Setting `CARGO_TARGET_DIR` does not move them. The printer reads
-`<repo>/target/criterion` when you run it with no arguments.
+Criterion 0.5 writes under `criterion/` in cargo's target directory, so by
+default samples land in `<repo>/target/criterion/recall/n/<size>/new/sample.json`.
+The printer reads `<repo>/target/criterion` when you run it with no arguments.
+
+If `CARGO_TARGET_DIR` is set, Criterion writes to `$CARGO_TARGET_DIR/criterion`
+instead, and if `CRITERION_HOME` is set it writes there. The no-argument run
+does not look in either place and fails with `missing sample: …`. Unset them,
+or point the printer at the directory:
+`python3 scripts/benchmark/recall_summary.py --summarize "$CARGO_TARGET_DIR/criterion"`.
 
 ## Relation to PERF.md
 

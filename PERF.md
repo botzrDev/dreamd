@@ -1,6 +1,6 @@
 # dreamd — Performance Baseline
 
-CI enforces the limits below. This file records the last measured values.
+CI enforces the idle-RSS and binary-size limits below. The recall latency targets are not gated in CI; that bench is run by hand. This file records the last measured values.
 **CI does not auto-commit this file** — update manually after each significant build change.
 
 ## Idle daemon RSS (NFR-1)
@@ -25,18 +25,18 @@ step summary — CI does not auto-commit this file. A macOS threshold (observed 
 
 | Limit   | Measured | Gate                    |
 | ------- | -------- | ----------------------- |
-| < 20 MB | see CI   | `size-gate` (CI, Linux) |
+| ≤ 20 MB (20,971,520 bytes) | see CI   | `size-gate` (CI, Linux) |
 
 ## Recall latency
 
 | Metric          | Target  | Measured | Gate                         |
 | --------------- | ------- | -------- | ---------------------------- |
-| P50 warm at 10k | < 5 ms  | ~0.30 ms              | `cargo bench -p dreamd-core` |
-| P99 warm at 10k | < 50 ms | **~0.34** ms          | `cargo bench -p dreamd-core` |
+| P50 warm at 10k | < 5 ms  | ~0.30 ms              | none (manual `cargo bench -p dreamd-core`) |
+| P99 warm at 10k | < 50 ms | **~0.34** ms          | none (manual `cargo bench -p dreamd-core`) |
 
 ---
 
-_Last measured:_ 2026-07-28, dreamd 0.1.0-rc.7, commit e8e27fd (x86_64-unknown-linux-gnu, WSL2). Numbers have not been re-run against the current `0.1.0` binary; treat them as a methodology stamp, not a live scoreboard.
+_Last measured:_ 2026-07-28, dreamd 0.1.0-rc.7, commit e8e27fd (x86_64-unknown-linux-gnu, WSL2). Numbers have not been re-run against the current `1.0.0` binary; treat them as a methodology stamp, not a live scoreboard.
 Recall rows: warm in-RAM index, Criterion 0.5, 100 samples at n=10k (`benches/recall.rs`).
 P50 ≈ median per-iteration sample; P99 = 99th percentile of the same samples.
 Re-run the recall bench with `python3 scripts/benchmark/recall_summary.py`; the write-up is [docs/benchmarks.md](docs/benchmarks.md).

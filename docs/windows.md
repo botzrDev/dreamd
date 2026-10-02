@@ -9,15 +9,22 @@ renames it over the target (`rename(2)`), so a crash mid-write can never leave a
 half-written file in the store. That is what `io::write_atomic` provides on
 Linux and macOS.
 
-**Windows durable writes are not in v0.1.1.** The atomic-write path
+**Windows durable writes are not in 1.0.0.** The atomic-write path
 returns [`std::io::ErrorKind::Unsupported`] on Windows rather than silently
 falling back to a non-atomic write that could corrupt the store on a crash.
 
 Native Windows was out of scope for v0.1. v0.1.1 added compile, `dreamd service
 install` (logon task + `auth.json`), and `dreamd watch` over loopback TCP with
-a bearer token. `io::write_atomic` is still `ErrorKind::Unsupported`, so the
-dream cycle and the Tantivy index do not work there. For a store you can
-consolidate and search, use WSL2 or a Linux/macOS host.
+a bearer token. 1.0.0 changes none of that: `io::write_atomic` is still
+`ErrorKind::Unsupported`, so the dream cycle and the Tantivy index do not work
+there. For a store you can consolidate and search, use WSL2 or a Linux/macOS
+host.
+
+**There is no prebuilt Windows binary on the npm path.** The `dreamd-mcp` shim
+ships Linux x86_64 and macOS binaries only; on native Windows
+`npx -y dreamd-mcp …` exits 1 and points you at WSL2 before it runs anything.
+Everything below assumes a `dreamd.exe` you built from source
+(`cargo install --path crates/dreamd-cli`).
 
 The Unix transport stays Unix-only: `~/.agent/dreamd.sock`, the `SO_PEERCRED`
 peer-UID check, and the `dreamd dream` UDS proxy are all `#[cfg(unix)]`. Windows
@@ -78,14 +85,18 @@ connection — and exits **2** otherwise. There is deliberately no in-process
 fallback: a coordinator booted inside `mcp` would accept `append_node` writes it
 cannot durably persist, which is why AILAB-174 deleted that branch. Start
 `dreamd watch` first (or let the logon task start it), then point your harness
-at `npx -y dreamd-mcp`.
+at your built binary — `"command": "dreamd", "args": ["mcp"]` — rather than
+at `npx -y dreamd-mcp`, which has no Windows binary to run. (The shim's
+dev override, `DREAMD_BIN` plus `DREAMD_BIN_ALLOW_UNVERIFIED=1`, is checked
+before the platform refusal, so it also works if you would rather keep the npx
+form.)
 
 ## Which commands see the daemon
 
-`dreamd status` and `dreamd archive` probe the live daemon the Windows way: read
-`server.json`, then try a TCP connect to `127.0.0.1:<port>`. So `status` reports
-a running Windows daemon, and `archive` refuses to rewrite a store underneath
-one — which is the point of that guard.
+`dreamd status`, `dreamd archive` and `dreamd forget` probe the live daemon the
+Windows way: read `server.json`, then try a TCP connect to `127.0.0.1:<port>`.
+So `status` reports a running Windows daemon, and `archive` / `forget` refuse to
+rewrite a store underneath one — which is the point of that guard.
 
 `dreamd uninstall` and `dreamd update` do **not**. Their liveness guard still
 answers `false` on Windows, so both behave as "no daemon running" even while a
@@ -128,5 +139,5 @@ daemon-liveness question; `dreamd service status` is the supervisor one.
 
 `io::write_atomic` is still `ErrorKind::Unsupported` on Windows, and that is the
 one blocker left for parity: it is why the dream cycle, `LESSONS.md`, the
-recurrence sidecar and the Tantivy index are unavailable there. It remains open
-v0.1.1 work.
+recurrence sidecar and the Tantivy index are unavailable there. It is not in
+1.0.0; it is listed as *Windows atomic writes* in [ROADMAP.md](../ROADMAP.md).

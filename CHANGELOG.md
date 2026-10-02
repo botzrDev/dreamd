@@ -10,11 +10,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Highlights
 
-- Stable release of the tree already described under 0.2.0-alpha.1. This tag adds no behavior.
+- First stable release. It is the tree that was prepared as 0.2.0-alpha.1 — a version that was never tagged or published — so the 1.0.0 bump itself adds no behavior. Relative to v0.1.1 it ships everything listed under 0.2.0-alpha.1 below plus the entries under **Added** and **Changed** in this section, which landed on `main` in the same window and were not written up there.
 - Recall is BM25 × salience. Published binaries are the default build. `dreamd vectors enable` exits 2 on them. A `--features vectors` build is not a release asset.
 - `rrf::fuse` is in the library. Recall does not call it.
 - Windows `dreamd watch` serves learn over loopback. The dream cycle and the Tantivy index stay unavailable there (`io::write_atomic` is still unsupported).
 - `SPEC.md` stays v0.1. Episodic records stay `schema_version` `"1.0.0"`.
+
+### Added
+
+- **`dreamd blame <query>` — which stored memories drove a recall ranking (BZR-193).** Prints id, timestamp, `skill_action`, content, BM25, salience, total and layer for the top hits. Default `-k` is 5 (`dreamd recall` stays at 10). `--explain` adds the per-hit salience factor breakdown; `--json` prints one compact array. (`crates/dreamd-cli/src/commands/blame.rs`)
+- **`explain=1` on `GET /api/v1/recall` adds a `citations` array (BZR-198).** One citation per result, in the same order, with the salience-factor breakdown behind the score. Any other value, or no parameter, leaves the body without a `citations` key. MCP `search_nodes` does not take it. Documented in `docs/observability.md`. (`crates/dreamd-core/src/server/http/handlers/recall.rs`)
+- **Counterfactual recall: `dreamd recall --without <id>` / `--without-cluster <prefix>`, and repeatable `exclude=` on `GET /api/v1/recall` (BZR-194).** The named events are dropped inside the collector before the top-k heap; the index is not modified. MCP `search_nodes` and `dreamd blame` do not take the filter.
+- **`dreamd salience-drift` and `GET /api/v1/observability/salience` (BZR-195).** Reports the salience distribution and top clusters, scored with salience alone (no BM25), writes today's snapshot under `.agent/.dreamd/observability/`, and compares against the snapshot dated exactly seven UTC days earlier when one exists. `--json` prints one compact report.
+- **Memory branches: `dreamd memory branch | checkout | branches | delete` (BZR-150, BZR-160).** A branch is a named snapshot of the project's live memory files, stored under `.agent/.dreamd/branches/` (objects, two-line refs, `HEAD`). Each dream cycle also writes a `snap-<timestamp>` ref before it changes lessons or prunes the log. `checkout` replaces the live files and refuses while the daemon socket exists. Format in `docs/branching.md`, usage in `docs/branching-guide.md`, throwaway walkthrough in `scripts/branch-demo.sh` (BZR-146).
+- **`dreamd memory diff <from> <to>` (BZR-156).** Added and removed events, salience changes, and per-file verdicts between two snapshots. Reads objects only: it never checks out and does not care whether the daemon is running. `--unified` dumps both versions of a modified `LESSONS.md`; `--json` prints one line.
+- **`dreamd memory bisect start | good | bad | run` (BZR-153).** Binary-searches the `snap-*` refs by their timestamp for the first bad snapshot. There is no parent pointer between snapshots. Each step checks a snapshot out, so it refuses while `dreamd watch` is running.
+- **Provenance ledger recording and `dreamd doctor --provenance` (BZR-155, BZR-148).** dreamd appends `lesson_citation`, `index_doc` and `recurrence` edges to `.agent/.dreamd/provenance/`. `doctor --provenance` recomputes the Merkle root and fails the run on orphan edges, missing lesson or recurrence edges, or corrupt lines. It only reads: there is no stored root, no signature, no verifier program, and `doctor --repair` is still the Tantivy rebuild, not a ledger rewrite.
+- **`dreamd forget <event-id>` (BZR-158, BZR-151).** Removes one episodic event from the live log under the dream-cycle WAL and drops or unlinks the lesson that names it. Refuses while the daemon is running. `--dry-run` writes nothing. `--proof <path>` writes a `forget-receipt/1.0` JSON file (event id, lesson effect, ledger root, orphan edges); it is a receipt, not a signed membership proof. Old ledger lines stay in place, an id that is already absent exits 0, and there is no HTTP route.
+- **`GrantedStore` / `ContextGrant` and `LettaStore` — library only (BZR-827, BZR-183).** Two more `MemoryStore` implementors on the BZR-173 seam: one filters recall by `source` (`episodic` / `semantic`) and refuses an append when episodic is not granted, the other delegates unchanged to an inner store. Neither is wired to MCP or the CLI. (`docs/context-grant.md`, `adapters/letta/README.md`)
+- **`npx -y dreamd-mcp` forwards `blame`, `salience-drift`, `memory`, `forget` and `vectors` to the native binary.** `status`, `recall`, `score`, `archive` and `migrate` are still not forwarded.
+
+### Changed
+
+- **`docs/branching.md` and `docs/provenance.md` are no longer format-only.** The 0.2.0-alpha.1 entries below call both "docs only" with no CLI; the commands above implement the branch format and the recording / read-only check half of the provenance format. Signed proofs and a standalone verifier remain unimplemented.
+- **Tantivy server code split, no behavior change (BZR-170).** Index freshness lives in `server/index_freshness.rs` and the indexer actor in `server/indexer_actor.rs`; `IndexError::SchemaIncompatible` is the typed gate for wiping an incompatible index. Index schema stays `index/1.3`.
 
 ## [0.2.0-alpha.1] - 2026-09-30
 
@@ -261,7 +280,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 [Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/botzrDev/dreamd/compare/v0.1.1...v1.0.0
-[0.2.0-alpha.1]: https://github.com/botzrDev/dreamd/compare/v0.1.1...v0.2.0-alpha.1
+[0.2.0-alpha.1]: https://github.com/botzrDev/dreamd/compare/v0.1.1...2e34181
 [0.1.1]: https://github.com/botzrDev/dreamd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.8...v0.1.0
 [0.1.0-rc.4]: https://github.com/botzrDev/dreamd/compare/v0.1.0-rc.3...v0.1.0-rc.4
