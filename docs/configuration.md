@@ -56,7 +56,7 @@ A fully commented project config parses successfully and yields built-in default
 | Key | Type | Default | Layer | Effect |
 |---|---|---|---|---|
 | `redaction` | boolean | `true` | user, project | When `true`, secret patterns are redacted from `content` before the durable write — on `POST /api/v1/learn` and on the in-process MCP `append_node` path |
-| `log_level` | string | `"info"` | user, project | **Parsed but unused in v0.1.** The live log filter is the `DREAMD_LOG` env var, not this TOML key. |
+| `log_level` | string | `"info"` | user, project | **Parsed but unused.** The live log filter is the `DREAMD_LOG` env var, not this TOML key. |
 | `dream_cycle_mode` | string | `"manual"` | user, project | `"manual"` or `"auto"`. 1.0.0 is manual-only: `dreamd watch` and `dreamd mcp` **hard-error** (exit 1) if mode is `"auto"` (not a silent ignore). Auto scheduling is not shipped |
 | `provider` | string | `""` | user, project | LLM provider id — `"anthropic"` or `"openai"`. Empty (default) infers the provider from the model name. Read by the dream cycle (AILAB-204) |
 | `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id used to compose `LESSONS.md` bodies. Read by the dream cycle (AILAB-204) |

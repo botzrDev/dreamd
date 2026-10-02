@@ -1,10 +1,15 @@
 # demo-corpus
 
-Frozen demo fixture consumed by DR-908 (canonical demo replay), DR-206 (recall API
-golden), and DR-208 (criterion benchmarks). The 20 episodic entries in
+Frozen demo fixture for DR-908 (canonical demo replay) and DR-206 (recall
+golden). Its one automated consumer is
+`crates/dreamd-core/tests/bm25_fastfield_integration.rs`, which reads the
+episodic log and asserts the tables in `EXPECTED.md`
+(`cargo test -p dreamd-core --test bm25_fastfield_integration`). The Criterion
+recall bench (DR-208, `crates/dreamd-core/benches/recall.rs`) builds its own
+synthetic corpus and does not read this fixture. The 20 episodic entries in
 `.agent/episodic/AGENT_LEARNINGS.jsonl` plus the empty `working/`, `semantic/`,
-and `personal/` layers form a complete `.agent/` shaped exactly like what
-`dreamd init` would produce.
+and `personal/` layers follow the `.agent/` layer layout. Unlike a store made
+by `dreamd init`, there is no `working/WORKSPACE.md` and no `.dreamd/`.
 
 ## Freeze window
 
@@ -34,7 +39,9 @@ notes live in `context/video/demo-corpus.md` (gitignored — local-only).
 
 ## Recurrence note
 
-`recurrence` is **not** stored on episodic events. WEG-42 derives it per
-cluster at index time from the count of events sharing a `skill_action`.
-EXPECTED.md cites the derived values as they apply to this fixture (cluster
-sizes 4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1).
+`recurrence` is **not** stored on episodic events. For this fixture the
+integration test derives it itself, as the count of fixture records sharing the
+exact `skill_action`, and EXPECTED.md cites those values (cluster sizes
+4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1). The daemon does not count at index time:
+it takes recurrence from `semantic/recurrence_counts.json`, which the dream
+cycle writes, and this fixture ships no such file.

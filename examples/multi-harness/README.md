@@ -25,7 +25,7 @@ Code never logged it. The promoted cluster draws from both tools (two
 `cursor` events, two `claude-code` events) — memory that follows the work, not
 the editor.
 
-Recall now surfaces `source_harness` on every hit, so a learning written under
+Recall (the MCP `search_nodes` tool and `GET /api/v1/recall`) returns `source_harness` in each hit's metadata, so a learning written under
 one harness is recalled with its origin attached — Claude Code can see that
 `needless_borrow` was first taught by Cursor.
 
@@ -42,4 +42,7 @@ SOURCE_DATE_EPOCH=1780056000 dreamd dream --no-commit
 ```
 
 `SOURCE_DATE_EPOCH` pins the clock to `2026-05-29T12:00:00Z`; `--no-commit` skips
-the git autobiography commit. Re-running over the committed tree is a no-op.
+the git autobiography commit. Re-running over the committed tree leaves the
+tracked files byte-identical; it also creates the gitignored `.agent/.dreamd/`
+directory. Do not drop `SOURCE_DATE_EPOCH`: with today's clock the cycle
+archives the unpinned learnings and deletes `LESSONS.md`.

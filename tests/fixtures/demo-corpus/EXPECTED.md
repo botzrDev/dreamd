@@ -15,6 +15,14 @@ would predict three entries from the `rust::error_handling::result_vs_panic`
 cluster, but two of those entries (E15, E10) are dominated on the joint
 score by fresher, BM25-stronger competitors from other clusters.
 
+**Labels.** This file uses two label schemes. In the tables and in "E1–E3",
+`E1`, `E2`, `E3` are the rank-1, rank-2, rank-3 rows (the constants `E1_TS` …
+in `crates/dreamd-core/tests/bm25_fastfield_integration.rs`, the test that
+asserts this file), and `E4` is the below-the-cut row. In the prose and the
+audit notes, `E10`, `E15`, `E17`, `E19`, `E20` are line numbers in
+`AGENT_LEARNINGS.jsonl`. They overlap: rank `E1` is line 20, rank `E2` is line
+19, rank `E3` is line 17, and `E4` is line 10.
+
 This amendment (2026-05-16) corrected the originally-authored EXPECTED.md,
 which over-credited the `result_vs_panic` cluster: the headroom analysis
 underestimated the freshest entries in the `thiserror_derive` cluster
@@ -105,6 +113,11 @@ assertion against this file should allow a tolerance of `±1e-3`.
 ## Reference clock
 
 All `age_days` values computed against now = **2026-06-02T12:00:00Z**
-(unix `1780401600`). Recurrence values reflect cluster sizes inside
-this fixture, which WEG-42 will derive at first index write — see
-README §Recurrence note. Cluster sizes: 4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1.
+(unix `1780401600`). Recurrence values are the number of fixture records
+that share the row's exact `skill_action`; the integration test derives them
+that way when it builds its in-RAM index — see README §Recurrence note.
+Cluster sizes: 4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1.
+
+These tables hold for that test's index and that clock. A live `dreamd recall`
+over this corpus uses the current time and the recurrence counts a dream cycle
+has written, so it will not reproduce these salience values.

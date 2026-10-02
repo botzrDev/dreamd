@@ -7,7 +7,7 @@ Shared fixtures and golden files used across `dreamd-cli` and `dreamd-core` test
 ```
 tests/
   fixtures/
-    init*.golden.txt          # byte-exact stdout for `dreamd init` (cli tests)
+    init*.golden.txt          # byte-exact stdout for `dreamd init` (cli tests), four files
     dream-cycle-snapshot/     # frozen JSONL corpus for insta snapshot tests
     demo-corpus/              # recall demo data + EXPECTED.md
 ```
@@ -18,9 +18,10 @@ tests/
 |---|---|---|
 | `fixtures/init.golden.txt` | `dreamd-cli/tests/init_golden.rs` | First `dreamd init` stdout |
 | `fixtures/init.rerun.golden.txt` | same | Idempotent re-run |
-| `fixtures/init.quiet.golden.txt` | same | `--quiet` mode |
-| `fixtures/dream-cycle-snapshot/` | `dreamd-core/tests/dream_cycle_snapshot.rs` | Frozen episodic input — **do not edit** without updating snapshots + SPEC |
-| `fixtures/demo-corpus/` | Manual / demo | Hand-authored recall corpus; see `demo-corpus/README.md` |
+| `fixtures/init.quiet.golden.txt` | same | `--quiet` first run |
+| `fixtures/init.quiet.rerun.golden.txt` | same | `--quiet` re-run |
+| `fixtures/dream-cycle-snapshot/` | `dreamd-core/tests/dream_cycle_snapshot.rs`, unit tests in `dreamd-core/src/dream_cycle.rs` | Frozen episodic input — **do not edit** without updating snapshots + SPEC |
+| `fixtures/demo-corpus/` | `dreamd-core/tests/bm25_fastfield_integration.rs`, manual demo | Hand-authored recall corpus; see `demo-corpus/README.md` |
 
 ## Crate test READMEs
 
@@ -36,4 +37,4 @@ cargo test -p dreamd --test init_golden
 cargo test -p dreamd-core --test dream_cycle_snapshot
 ```
 
-After intentional output changes: `cargo insta review`.
+After intentional snapshot changes: `cargo insta review` (needs `cargo install cargo-insta`). The `init*.golden.txt` files are not insta snapshots; edit them by hand, together with the banner text they lock.

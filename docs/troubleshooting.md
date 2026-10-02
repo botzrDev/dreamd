@@ -14,7 +14,7 @@ Commands below use the cargo-installed `dreamd` binary. On the npm path the shim
 |---|---|
 | `dreamd watch: supervisor: UDS bind failed: socket already bound by another writer-process` | Another `dreamd watch` (yours, or the one `dreamd service install` supervises) is already serving `~/.agent/dreamd.sock`. There is one daemon per user. |
 | `dreamd watch: index: index error: tantivy: Failed to acquire Lockfile: LockBusy. …` | Another process holds this project's index writer — a second `dreamd watch` started from the same project, or a standalone in-process `dreamd mcp` that a harness spawned before the daemon was up. |
-| `dreamd watch: supervisor: UDS bind failed: UDS bind failed: path must be shorter than SUN_LEN` | `$HOME/.agent/dreamd.sock` is longer than a Unix socket path may be (about 100 bytes). Typical in deeply nested sandbox or CI homes. |
+| `dreamd watch: supervisor: UDS bind failed: UDS bind failed: path must be shorter than SUN_LEN` | `$HOME/.agent/dreamd.sock` is longer than a Unix socket path may be (under 108 bytes on Linux, 104 on macOS). Typical in deeply nested sandbox or CI homes. |
 
 **Fix:**
 
@@ -29,7 +29,7 @@ dreamd status                 # "daemon: running" means the socket answers
 # SUN_LEN: run under a shorter $HOME.
 ```
 
-A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these: the next `dreamd watch` probes it, finds nothing listening, unlinks it and binds. `dreamd doctor` reports it as `orphaned_uds: … [WARNING: socket file exists but nothing is listening; …]`, and `dreamd doctor --repair` (or `rm -f ~/.agent/dreamd.sock`) removes it without starting a daemon.
+A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these: the next `dreamd watch` probes it, finds nothing listening, unlinks it and binds. `dreamd doctor` reports it as `orphaned_uds: … [WARNING: socket file exists but nothing is listening; …]`, and `dreamd doctor --repair` (or `rm -f ~/.agent/dreamd.sock`) removes it without starting a daemon. (`--repair` also rebuilds the index, and refuses outright while a daemon is live.)
 
 **Prevention:** Start `dreamd watch` before the harnesses that use it, and let it shut down via SIGINT/SIGTERM — a graceful stop unlinks the socket.
 
@@ -75,7 +75,7 @@ Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (da
 npx -y dreamd-mcp watch    # recovers on startup before serving
 dreamd status              # last_dream_cycle (cargo-installed `dreamd`; npm shim does not forward `status`)
 # or: cat .agent/.dreamd/state.json
-npx -y dreamd-mcp doctor   # dream-cycle mode + index health; use --repair to rebuild a stale index
+npx -y dreamd-mcp doctor   # dream-cycle mode + index health; with the daemon stopped, --repair rebuilds a stale index
 ```
 
 Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `failed`. See [examples/crash-recovery/](../examples/crash-recovery/).
@@ -195,7 +195,7 @@ For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (s
 | Read-after-write window | Wait up to 5 s after append (index commit cadence) |
 | Query mismatch | Try broader terms from known `content` |
 | Wrong project | Verify `X-Agent-Root` / MCP project discovery points at this repo |
-| Index stale | `npx -y dreamd-mcp doctor`; rebuild with `dreamd doctor --repair` (cargo-installed `dreamd`, or `npx -y dreamd-mcp doctor --repair`) |
+| Index stale | `npx -y dreamd-mcp doctor`; rebuild with `dreamd doctor --repair` (cargo-installed `dreamd`, or `npx -y dreamd-mcp doctor --repair`). Stop the daemon first — `--repair` refuses while one is live |
 
 **Fix:**
 

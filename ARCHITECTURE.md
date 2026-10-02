@@ -131,7 +131,7 @@ Write order:
 
 On startup, `episodic::recover` truncates a torn tail (a final line with no trailing `\n`) and quarantines any mid-file blank or malformed `\n`-terminated line to `.corrupt-<YYYY-MM-DD>.jsonl` beside the log, rewriting the live file in place to the well-formed records. Writers must never emit blank lines.
 
-Concurrent third-party writers to the JSONL are not supported in v0.1.
+Concurrent third-party writers to the JSONL are not supported.
 
 ### 2. Salience is query-time, not indexed
 

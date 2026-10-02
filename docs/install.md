@@ -201,7 +201,8 @@ dreamd service uninstall      # schtasks /Delete /TN … /F, then remove the XML
 There is no npx route on native Windows. The `dreamd-mcp` shim ships prebuilt
 binaries for Linux x86_64 and macOS only; on `win32` it exits 1 and points you
 at WSL2 before it forwards anything. Run these verbs from a `dreamd.exe` you
-built yourself (`cargo install --path crates/dreamd-cli`).
+built from source or took from a GitHub release — see
+[windows.md](./windows.md).
 
 **`dreamd watch` boots on Windows as of AILAB-192**, and the token this
 `install` just minted is what it needs. `watch` binds `127.0.0.1` on an

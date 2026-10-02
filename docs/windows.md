@@ -23,8 +23,12 @@ host.
 **There is no prebuilt Windows binary on the npm path.** The `dreamd-mcp` shim
 ships Linux x86_64 and macOS binaries only; on native Windows
 `npx -y dreamd-mcp …` exits 1 and points you at WSL2 before it runs anything.
-Everything below assumes a `dreamd.exe` you built from source
-(`cargo install --path crates/dreamd-cli`).
+Everything below assumes a `dreamd.exe` you obtained yourself: build it from
+source (`cargo install --path crates/dreamd-cli`), or take the
+`windows-x86_64.tar.gz` asset from a
+[GitHub release](https://github.com/botzrDev/dreamd/releases). The release job
+that builds that asset is allowed to fail, so a given release may not carry it;
+v1.0.0 does.
 
 The Unix transport stays Unix-only: `~/.agent/dreamd.sock`, the `SO_PEERCRED`
 peer-UID check, and the `dreamd dream` UDS proxy are all `#[cfg(unix)]`. Windows
@@ -85,7 +89,7 @@ connection — and exits **2** otherwise. There is deliberately no in-process
 fallback: a coordinator booted inside `mcp` would accept `append_node` writes it
 cannot durably persist, which is why AILAB-174 deleted that branch. Start
 `dreamd watch` first (or let the logon task start it), then point your harness
-at your built binary — `"command": "dreamd", "args": ["mcp"]` — rather than
+at that binary — `"command": "dreamd", "args": ["mcp"]` — rather than
 at `npx -y dreamd-mcp`, which has no Windows binary to run. (The shim's
 dev override, `DREAMD_BIN` plus `DREAMD_BIN_ALLOW_UNVERIFIED=1`, is checked
 before the platform refusal, so it also works if you would rather keep the npx

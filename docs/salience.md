@@ -21,7 +21,7 @@ salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + r
 - `(importance / 10)` — normalised importance, in 0.0–1.0.
 - `(1 + ln(1 + recurrence))` — the recurrence boost; the leading `1 +` is load-bearing, not decoration (see [Derivation](#derivation)).
 
-Salience is computed **at query time** and is never stored or indexed. Storing it would force a nightly re-index, because `age_days` drifts continuously. `dreamd recall --explain` (and `dreamd score --explain`) print all four factors for any hit, so the number can be inspected rather than taken on faith.
+Salience is computed **at query time** and is never stored or indexed. Storing it would force a nightly re-index, because `age_days` drifts continuously. `dreamd recall --explain` (and `dreamd score --explain`, `dreamd blame --explain`) print all four factors for any hit, so the number can be inspected rather than taken on faith. `explain=1` on `GET /api/v1/recall` adds a `citations` array carrying each hit's inputs (`age_days`, `pain`, `importance`, `recurrence`) and its BM25 and salience components.
 
 ## Derivation
 
@@ -59,6 +59,6 @@ The three salience inputs are 0–10 scores, and the calibration copy the MCP se
 
 - `importance` — how broadly applicable across sessions; **8+ changes behavior on familiar domains.**
 - `pain` — how disruptive if unknown; **8+ causes bugs, rework, or failed attempts.**
-- Omitted scores default to **5.0**, the neutral midpoint.
+- Omitted scores default to **5.0**, the neutral midpoint (MCP `append_node` only; `POST /api/v1/learn` requires both).
 
-`GET /api/v1/preferences` reads per-user thresholds from free-form `PREFERENCES.md` — user text, not a structured schema. There is deliberately no config key for `14`, no config key for the formula shape, and no scoring rubric beyond the MCP copy above; the formula is locked as-is. To inspect a hit's factors, use `dreamd recall --explain`.
+`GET /api/v1/preferences` reads per-user thresholds from free-form `PREFERENCES.md` — user text, not a structured schema. There is deliberately no config key for `14`, no config key for the formula shape, and no scoring rubric beyond the MCP copy above; the formula is locked as-is. To inspect a hit's factors, use `dreamd recall --explain`; for the distribution of salience across the whole store (no BM25), use `dreamd salience-drift` or `GET /api/v1/observability/salience`.

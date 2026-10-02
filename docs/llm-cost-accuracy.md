@@ -10,7 +10,9 @@ How `cost_cap_usd` is enforced, how accurate the number behind it is, and what t
 
 `dream_cycle::compose_lesson_body` builds the composition prompt, prices it, and only then decides whether to call the model. Nothing is sent over the network before the decision:
 
-1. Build the prompt (`llm::build_lesson_prompt`).
+1. Build the prompt (`llm::build_lesson_prompt`). If the cycle was run with
+   `--share-personal`, the `personal/` context (capped at 16 KiB) is appended
+   here, before pricing, so the estimate covers the exact string to be sent.
 2. `llm::estimate_prompt_cost(model, &prompt)` → `Option<CostEstimate>`.
 3. `None`, or `llm::exceeds_cap(&estimate, cap_usd)` → log a `cost estimate exceeds cap` `WARN` and return the deterministic exemplar body.
 4. Otherwise, the normal retry + citation path.
@@ -71,8 +73,15 @@ To see the number before a cycle runs:
 
 ```bash
 dreamd doctor --cluster-health
-# cluster_health: next_cycle_est_usd=0.0043 cap_usd=0.10 model=claude-haiku-4-5 tokens=3821 (within cap)
+# cluster_health: next_cycle_est_usd=0.0030 cap_usd=0.10 model=claude-haiku-4-5 tokens=398 (within cap)
 ```
+
+That is `398 / 1000 × $0.001 + 512 / 1000 × $0.005 = $0.002958`, printed to four
+places. An over-cap or unpriced model ends the line with
+`[WARNING: would abort LLM]`, and a store with nothing to promote prints
+`next_cycle_est_usd=0.00 (no promotion)`. Doctor prices the cluster prompt
+only; a cycle run with `--share-personal` sends more and is priced on the
+longer prompt at cycle time.
 
 ---
 

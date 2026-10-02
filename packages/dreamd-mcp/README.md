@@ -30,7 +30,7 @@ The prebuilt binaries this shim downloads serve MCP over stdio only. The opt-in 
 
 No Rust installation required; the shim needs Node 18 or later and `tar` on `PATH`. Prebuilt binaries are available for **Linux x86_64** and **macOS x86_64/aarch64** (see `manifest.json`). The binary is downloaded once from the matching GitHub release into `~/.cache/dreamd-mcp/<version>/` and its SHA-256 is checked against `manifest.json` before every run. On any other platform the shim exits 1.
 
-**This shim ships no Windows binary.** On native Windows `npx -y dreamd-mcp` exits 1 and points you at WSL2. A `dreamd` built from source does run there, but it is watch + learn only — `dreamd watch` serves loopback TCP with a bearer token; the dream cycle and Tantivy index need atomic writes that are still Unix-only. For consolidate-and-search, use WSL2 or a Linux/macOS host ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+**This shim ships no Windows binary.** On native Windows `npx -y dreamd-mcp` exits 1 and points you at WSL2. A `dreamd.exe` built from source (or taken from the `windows-x86_64.tar.gz` asset of a GitHub release, when that release has one) does run there, but it is watch + learn only — `dreamd watch` serves loopback TCP with a bearer token; the dream cycle and Tantivy index need atomic writes that are still Unix-only. For consolidate-and-search, use WSL2 or a Linux/macOS host ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
 
 ## Commands
 

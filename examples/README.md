@@ -2,8 +2,10 @@
 
 > **AGENTS.md is what you wrote down. `.agent/` is what your agent learned — across every tool.**
 
-These are five complete, populated `.agent/` workspaces. Clone the repo, open
-them, and you can see exactly what dreamd produces — no install, no daemon, no
+These are five `.agent/` fixtures. The first two are complete workspaces with
+generated lessons; the other three are minimal stores (an episodic log, plus
+WAL state for `crash-recovery/`) that each show one behavior. Clone the repo,
+open them, and you can see exactly what dreamd produces — no install, no daemon, no
 API key. Everything here is the file system of truth: plain Markdown and JSONL
 you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 `echo >>` the JSONL.
@@ -30,20 +32,24 @@ you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 ```
 
 `episodic/` is what the agent logged as it worked. The **dream cycle** clusters
-those learnings by `skill_action`, and when a cluster recurs (≥3 times in a
-trailing window) it promotes the highest-salience example into
+those learnings by `skill_action` prefix, and when a cluster recurs (≥3 times in
+a trailing 7- or 30-day window) it promotes the highest-salience example into
 `semantic/LESSONS.md`. The lesson text in `LESSONS.md` is verbatim agent output,
 not hand-written copy.
 
 ## These are real output, not mock-ups
 
-`semantic/LESSONS.md` and `recurrence_counts.json` were produced by running the
-actual dream cycle over the seeded `episodic/` learnings:
+In `solo-rust-dev/` and `multi-harness/`, `semantic/LESSONS.md` and
+`recurrence_counts.json` were produced by running the actual dream cycle over
+the seeded `episodic/` learnings:
 
 ```sh
 SOURCE_DATE_EPOCH=1780056000 dreamd dream --no-commit
 ```
 
 `SOURCE_DATE_EPOCH` (the reproducible-builds convention) pins the cycle clock to
-`2026-05-29T12:00:00Z`, so regeneration is byte-identical and offline. Each
-scenario's README has the full regeneration recipe.
+`2026-05-29T12:00:00Z`, so regeneration is byte-identical and offline. Those two
+READMEs have the recipe. Keep the variable: without it the cycle uses today's
+date, sees the seeded learnings as months old, archives the unpinned ones, and
+removes the lesson. Any command that runs a cycle or the daemon writes to the
+store, so work on a copy of a fixture directory rather than in your checkout.

@@ -38,5 +38,10 @@ SOURCE_DATE_EPOCH=1780056000 dreamd dream --no-commit
 
 `SOURCE_DATE_EPOCH` pins the clock to `2026-05-29T12:00:00Z` (the seeded
 timestamps sit inside its recurrence window); `--no-commit` skips the git
-autobiography commit. Running it again over the committed tree is a no-op — the
-fixture is a fixed point of the cycle.
+autobiography commit. Running it again over the committed tree leaves the four
+tracked files byte-identical — the fixture is a fixed point of the cycle. The
+run also creates the gitignored `.agent/.dreamd/` directory (state, index,
+snapshot, ledger).
+
+Do not drop `SOURCE_DATE_EPOCH`. With today's clock the seeded learnings are
+months old: the cycle archives the three unpinned ones and deletes `LESSONS.md`.

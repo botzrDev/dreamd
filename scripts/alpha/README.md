@@ -20,15 +20,18 @@ Exit `0` and `7 passed, 0 failed` means the round-trip works.
 The **Alpha suite (cross-harness recall)** job in `.github/workflows/ci.yml`
 (WEG-423) runs this suite on every push / PR to `main`, so a silent recall
 regression (append→index→read broke once while the engine unit tests stayed
-green — WEG-264) can't ship unnoticed. The job's exit code is the gate. Repro it
-locally with the exact commands CI runs:
+green — WEG-264) shows up on the run. The suite exits non-zero on any failed
+check, but the job is marked `continue-on-error: true`, so a red alpha job does
+not block a merge; read its result. Repro it locally with the commands CI runs
+(CI wraps the script in `timeout 180`):
 
 ```bash
-cargo build -p dreamd && scripts/alpha/alpha-suite.sh
+cargo build -p dreamd && bash scripts/alpha/alpha-suite.sh
 ```
 
-Only `alpha-suite.sh` is wired into CI; the `quality-suite.sh` LLM-judge suite in
-this directory is a separate, manually-run tool.
+`alpha-suite.sh` and `install-funnel-suite.sh` (below) are the two scripts here
+that CI runs. `quality-suite.sh` and `quality_judge.py` are run by hand; see
+[Quality suites](#quality-suites-run-by-hand).
 
 ## What it does
 
@@ -67,14 +70,14 @@ cargo build -p dreamd                       # the suite runs the debug binary
 bash scripts/alpha/install-funnel-suite.sh  # from repo root
 ```
 
-Exit `0` and `23 passed, 0 failed` means the funnel holds.
+Exit `0` and `30 passed, 0 failed` means the funnel holds.
 
 ## CI
 
 The **Install funnel suite** job in `.github/workflows/ci.yml` runs it on every
 push / PR to `main`. Unlike the alpha job it is **gating** (no
-`continue-on-error`): it starts no daemon, polls nothing, and hits no network,
-so it has no flake budget to earn. Repro it locally with the exact commands CI
+`continue-on-error`). It hits no network. The one long-lived thing it starts is
+a sandboxed `dreamd watch` for the cross-HOME stop check described below. Repro it locally with the exact commands CI
 runs:
 
 ```bash
@@ -95,6 +98,10 @@ cargo build -p dreamd && bash scripts/alpha/install-funnel-suite.sh
   to match.
 - **`update --dry-run`** exits 0 and prints the restart contract (AILAB-552)
   without touching the cache or reaching the network.
+- **Cross-HOME stop** (AILAB-584) — a real `dreamd watch` runs under a second
+  sandbox `HOME`. A non-dry-run `dreamd update` under the suite's own `HOME`
+  must leave that daemon running, and `dreamd update` under the daemon's `HOME`
+  must stop it.
 - **Conflict taxonomy** — every row of the ratified AILAB-548 §3/§6 matrix:
 
   | Fixture | Asserted |
@@ -112,7 +119,9 @@ cargo build -p dreamd && bash scripts/alpha/install-funnel-suite.sh
 sandbox is removed on exit). `$DREAMD_SOCK` is unset for the same reason — an
 exported override would aim `setup`'s liveness probe and `doctor` at a daemon
 outside the sandbox. Every fixture is its own project dir with a `git init`
-sentinel. Nothing long-lived is started: no `watch`, no daemon, no network.
+sentinel. No network is used. The only daemon is the cross-HOME step's `dreamd
+watch`, which binds its socket under its own sandbox `HOME`; the exit trap kills
+it before the sandbox is removed.
 
 ## Scope / caveat
 
@@ -120,3 +129,25 @@ This drives the CLI, not the TTY wizard — every invocation passes `--yes`,
 because `setup` refuses to prompt off a TTY (AILAB-551, whose own tests cover
 the prompts). It also does not test the npm shim or a real `npx` install; it
 asserts the config dreamd *writes*, not what npm later resolves.
+
+---
+
+# Quality suites (run by hand)
+
+Neither of these runs in CI. Both need the debug binary (`cargo build -p dreamd`)
+and redirect `HOME` to a throwaway `mktemp -d`.
+
+- `bash scripts/alpha/quality-suite.sh` — deterministic gate for memory quality
+  through the MCP surface, using `mcp_driver.py` and `quality_check.py`. Three
+  axes: salience ranking (a painful, important lesson outranks a benign one with
+  higher raw BM25), attribution (a recalled record reports the `source_harness`
+  and `skill_action` it was appended with), and dream-cycle promotion (three
+  events in one cluster are promoted into `semantic/LESSONS.md` with a
+  recurrence count of at least 3). Exit `0` and `14 passed, 0 failed` means all
+  three hold. No API key and no network.
+- `python3 scripts/alpha/quality_judge.py` — report-only relevance check. It
+  seeds a small corpus, runs natural-language queries, and asks an Anthropic
+  model whether the top recalled lesson answers each one. It needs
+  `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`); without one it prints a skip
+  notice. It always exits 0 and is never a gate. `DREAMD_JUDGE_MODEL` overrides
+  the model.

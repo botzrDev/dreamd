@@ -15,7 +15,7 @@ Tantivy dropped index-time sort support in an earlier release; dreamd never reli
 on it, because salience ranking is computed entirely at **query time** by the custom
 collector (`crates/dreamd-core/src/collector.rs`, WEG-43). The BM25 × salience
 product is *never* written to the index — there is no indexed score field and no
-nightly re-rank (CLAUDE.md load-bearing decision #2).
+nightly re-rank (`ARCHITECTURE.md` load-bearing decision #2).
 
 The practical consequence: a future Tantivy bump that changes index-time sort or
 segment-ordering semantics cannot change dreamd's ranking, because dreamd's ranking
@@ -24,10 +24,13 @@ query-time read paths — the FastField accessors and the collector traits — c
 below. This is stated plainly so a maintainer does not go hunting for an index-time
 sort dependency that was never there.
 
-## Schema fields locked at v0.1 (DR-201 / WEG-41)
+## Schema fields (DR-201 / WEG-41)
 
 The canonical schema is `build_schema()` in `crates/dreamd-core/src/index.rs`. Eleven
-fields, locked at v0.1. Two access shapes matter for a migration:
+fields, at `SCHEMA_VERSION` `index/1.3`. One index holds two document layers —
+`episodic` events and `semantic` lessons from `LESSONS.md` (AILAB-205) — with the
+same fields; both are scored by BM25 × salience. Two access shapes matter for a
+migration:
 
 - **STORED** — retrieved via stored-document hydration (`TantivyDocument`) to
   reconstruct a recall result.
@@ -41,22 +44,30 @@ fields, locked at v0.1. Two access shapes matter for a migration:
 | `pain` | f64 | `FAST` | collector salience input (subjective friction) |
 | `importance` | f64 | `FAST` | collector salience input (long-term relevance) |
 | `recurrence` | u64 | `FAST` | collector salience input (cluster occurrence count) |
-| `layer` | text | `STRING \| STORED` | hydrated into the recall result; reserved for the v0.1.1 LESSONS.md pipeline (WEG-136) |
-| `last_updated_sec` | u64 | `FAST` | reserved for the v0.1.1 LESSONS.md pipeline (WEG-136) |
-| `cited_event_count` | u64 | `FAST` | reserved for the v0.1.1 LESSONS.md pipeline (WEG-136) |
-| `event_id` | text | `STRING \| STORED` | exact-match term for delete-and-re-add (WEG-45); STORED for hydration |
-| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; hydrated into the recall result |
+| `layer` | text | `STRING \| STORED` | `"episodic"` or `"semantic"`; hydrated into the recall result (`source`); exact-match term for the whole-layer delete that replaces the semantic documents each cycle |
+| `last_updated_sec` | u64 | `FAST` | written (event timestamp for episodic docs, `LESSONS.md` `last_updated` for lessons); not read on the recall path |
+| `cited_event_count` | u64 | `FAST` | written (`0` for episodic docs, promoted-cluster size for lessons); not read on the recall path |
+| `event_id` | text | `STRING \| STORED` | exact-match term for delete-and-re-add (WEG-45) and decay / forget pruning; lessons use the `lsn_<lesson id>` namespace; STORED for hydration and for recall exclusion (`exclude=` / `--without`) |
+| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; hydrated into the recall result; read from the doc store for cluster exclusion (`--without-cluster`) |
 | `source_harness` | text | `STRING \| STORED` | provenance harness id; hydrated into the recall result |
 
 The **four salience FastFields** the collector reads per matching document are
 `timestamp_sec`, `pain`, `importance`, and `recurrence`. `timestamp_sec` is both
 `INDEXED` (so it can be filtered/range-queried) and `FAST` (so the collector can read
 it as a column). The remaining FAST-only fields (`last_updated_sec`,
-`cited_event_count`) are reserved and not yet read on the recall path.
+`cited_event_count`) are written by the indexer and not read on the recall path.
+
+A semantic lesson has no native `pain` / `importance`: the indexer copies both
+from the exemplar event the lesson names and stamps `timestamp_sec` with the
+lesson's derivation time (`server/indexer_actor.rs`). A document missing either
+fastfield reads as `0.0` in the collector and scores zero, so a migration must
+not drop or default those columns.
 
 `STRING` (not `TEXT`) on `event_id`, `layer`, `skill_action`, and `source_harness` is
 deliberate: these are exact-match terms, not tokenized text. A migration must preserve
 that distinction — re-tokenizing `event_id` would break WEG-45's delete-and-re-add.
+Never key a delete on `skill_action`: episodic and semantic documents share it, so
+a cluster-keyed delete would remove the cluster's whole event history.
 
 ## The custom collector + scorer (DR-203 / WEG-43)
 
@@ -82,9 +93,11 @@ assumptions it depends on:
   alone lacks). This is dreamd-owned, not Tantivy-owned, so it is bump-stable — but it
   consumes `DocAddress` / `DocId` / `SegmentOrdinal`, whose shapes come from Tantivy.
 - **Query construction and hydration types.** The recall path also uses
-  `QueryParser`, `BooleanQuery` / `TermQuery` / `Occur`, and `Term` / `IndexRecordOption`
-  / `TantivyDocument` / `Value` for stored-field hydration. These are lower-risk but
-  should be smoke-checked on a major bump.
+  `QueryParser`, `BooleanQuery` / `TermQuery` / `Occur`, `AllQuery` (for
+  `dreamd score`), and `Term` / `IndexRecordOption` / `TantivyDocument` / `Value`
+  for stored-field hydration. Recall exclusion (BZR-194) additionally opens a
+  per-segment `tantivy::store::StoreReader` inside the collector. These are
+  lower-risk but should be smoke-checked on a major bump.
 
 **On a major bump, re-verify (in order of risk):** (1) the `Collector` /
 `SegmentCollector` trait signatures still compile against `collector.rs`; (2) the
@@ -95,9 +108,11 @@ the acceptance signal.
 
 ## Forward-compatibility notes
 
-Targets: the **next** Tantivy major beyond 0.26.1, and the v0.2 alpha vector backend
-(WEG-155 / WEG-156 / WEG-158), which introduces a second retrieval path alongside
-BM25 × salience.
+Targets: the **next** Tantivy major beyond 0.26.1, and any future vector backend
+(WEG-155 / WEG-156 / WEG-158), which would introduce a second retrieval path
+alongside BM25 × salience. No such path exists today: recall is BM25 × salience
+only, the non-default `vectors` feature only downloads a model, and `rrf::fuse`
+is not called by recall.
 
 Checklist a maintainer works before bumping:
 
@@ -110,15 +125,21 @@ Checklist a maintainer works before bumping:
    which remains the source of truth; the Tantivy index is a derived cache.
 4. **Schema-version manifest gate.** The per-project manifest at
    `<project>/.agent/.dreamd/index_manifest.json` carries the schema version from
-   `dreamd-core::index::SCHEMA_VERSION` (`index.rs:24` — `index/1.3` at time of
-   writing; read the constant, this line goes stale on the next bump). WEG-42
-   writes it on first index init; WEG-49 enforces it on daemon startup. A manifest
+   `dreamd-core::index::SCHEMA_VERSION` (`index.rs` — `index/1.3` at time of
+   writing; read the constant, this line goes stale on the next bump).
+   `TantivyIndexHandle::open` writes it on first index init and checks it on
+   every open. A manifest
    *older* than the binary (`NeedsMigration`) makes `TantivyIndexHandle::open`
    rebuild the derived index from `episodic/AGENT_LEARNINGS.jsonl` in place,
    resetting the replay watermark so the full JSONL re-indexes rather than the
    tail; no `dreamd migrate` step is involved (see `../architecture.md`). A
-   manifest *newer* than the binary aborts startup with
-   `ManifestVersionError::TooNew` — a hard error, not a rebuild. A bump that
+   manifest *newer* than the binary (`ManifestVersionError::TooNew`) makes
+   `open` fail — a hard error, not a rebuild. `open` also wipes and rebuilds
+   when Tantivy reports a schema error against the on-disk index
+   (`IndexError::SchemaIncompatible`); it deliberately does not treat a Tantivy
+   index-*format* mismatch (`TantivyError::IncompatibleIndex`) that way, so a
+   bump that changes the segment format needs the `SCHEMA_VERSION` bump to
+   trigger the rebuild. A bump that
    requires a re-index must also bump `SCHEMA_VERSION` so this gate fires instead
    of silently serving a stale or incompatible index.
 5. **Lock-file discipline unchanged.** Never `rm` `.tantivy-writer.lock` /
@@ -126,8 +147,11 @@ Checklist a maintainer works before bumping:
 
 ## Performance baseline (DR-908)
 
-Real recall-latency figures, sourced from `../benchmarks.md` (warm in-RAM
-index, Criterion 0.5, WSL2/Linux; mean across 100 samples, used as a P50 proxy):
+Recall-latency figures recorded when this plan was written (warm in-RAM
+index, Criterion 0.5, WSL2/Linux; mean across 100 samples, used as a P50 proxy).
+They are a historical baseline, not a current measurement; `../benchmarks.md`
+explains how to re-run the bench and `../../PERF.md` holds the last recorded
+stamp:
 
 | Corpus size | Mean (warm) |
 |---|---|
@@ -136,7 +160,7 @@ index, Criterion 0.5, WSL2/Linux; mean across 100 samples, used as a P50 proxy):
 | 100 000 entries | ~2.8 ms |
 
 All three are well under the `<5ms P50 warm` recall NFR. Reproduce with
-`cargo bench -p dreamd-core`. A migration should re-run this benchmark and confirm no
+`cargo bench -p dreamd-core --bench recall`. A migration should re-run this benchmark and confirm no
 regression past the NFR before landing. (Read-after-write visibility — up to the
 5-second index commit cadence — is a freshness constraint, not a query-latency one,
 and must not be conflated with these numbers; see `../architecture.md`.)
@@ -145,7 +169,7 @@ and must not be conflated with these numbers; see `../architecture.md`.)
 
 - **DR-201 / WEG-41** — schema (`crates/dreamd-core/src/index.rs`, `build_schema()`).
 - **DR-203 / WEG-43** — custom collector (`crates/dreamd-core/src/collector.rs`).
-- **DR-908** — benchmark methodology and figures (`../benchmarks.md`).
+- **DR-908** — benchmark methodology (`../benchmarks.md`); last recorded figures (`../../PERF.md`).
 - [`../architecture.md`](../architecture.md) — the Indexing section this deep-dive
   expands; and `../architecture/durability.md` for the JSONL durability protocol that
   backs re-index-from-source.
