@@ -8,15 +8,15 @@
 //! These commands never touch the decay archive directory and never open a
 //! Tantivy index.
 //!
-//! Checkout replaces the live memory files, so it refuses while the daemon
-//! socket exists: `dreamd watch` holds the episodic log open and would keep
-//! appending to the replaced file. Branch, branches, and delete do not check
-//! the socket — they only write refs and HEAD. Bisect checks out through the
-//! same function, so it refuses the same way. Diff only reads objects and refs,
-//! so it does not check the socket either.
+//! Checkout replaces the live memory files, so it refuses while a daemon holds
+//! the episodic log open. On Unix that is "the socket file exists", including
+//! a stale socket. On Windows the address is `server.json` and the refusal is
+//! a live loopback connect; a leftover `server.json` is not a refusal. Branch,
+//! branches, and delete do not check. Bisect checks out through the same
+//! function, so it refuses the same way. Diff only reads objects and refs.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dreamd_core::bisect::{self, BisectError, BisectOutcome};
 use dreamd_core::memory_diff::{self, DiffError, FileChange, MemoryDiff};
@@ -39,6 +39,9 @@ pub enum MemoryError {
     Diff(DiffError),
     /// Failure writing to the `out`/`err` sinks.
     Io(std::io::Error),
+    /// Windows `dreamd watch` answered a loopback connect. Checkout would
+    /// replace a log that daemon still has open.
+    DaemonListening(PathBuf),
 }
 
 impl From<std::io::Error> for MemoryError {
@@ -75,6 +78,12 @@ impl std::fmt::Display for MemoryError {
             Self::Resolve(msg) => write!(f, "{msg}"),
             Self::Diff(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::DaemonListening(path) => write!(
+                f,
+                "dreamd watch is answering on the loopback address in {}; \
+                 stop it before checkout (it holds the live episodic log open)",
+                path.display()
+            ),
         }
     }
 }
@@ -101,9 +110,43 @@ pub fn run_branch(
     Ok(())
 }
 
+/// Unix keeps `addr` so checkout's exists-check still refuses a stale socket.
+/// Windows returns an error when `tcp_live` is true, and `None` otherwise so a
+/// leftover `server.json` is not treated as a socket file.
+pub(crate) fn decide_checkout_guard(
+    unix: bool,
+    addr: Option<&Path>,
+    tcp_live: bool,
+) -> Result<Option<&Path>, MemoryError> {
+    if unix {
+        return Ok(addr);
+    }
+    if tcp_live {
+        let path = addr.unwrap_or_else(|| Path::new("server.json"));
+        return Err(MemoryError::DaemonListening(path.to_path_buf()));
+    }
+    Ok(None)
+}
+
+fn tcp_checkout_live(addr: Option<&Path>) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = addr;
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        addr.is_some_and(dreamd_core::daemon_client::tcp_daemon_is_live)
+    }
+}
+
+fn guard_checkout(addr: Option<&Path>) -> Result<Option<&Path>, MemoryError> {
+    decide_checkout_guard(cfg!(unix), addr, tcp_checkout_live(addr))
+}
+
 /// `dreamd memory checkout <name>`: replace the live files from the branch's
-/// object and attach HEAD. `daemon_socket` is the daemon's UDS path; when it
-/// exists nothing is replaced. Prints the object id.
+/// object and attach HEAD. `daemon_socket` is the daemon address: the UDS
+/// path on Unix, `server.json` on Windows. Prints the object id.
 pub fn run_checkout(
     cwd: &Path,
     name: &str,
@@ -111,7 +154,8 @@ pub fn run_checkout(
     out: &mut dyn Write,
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
-    let id = snapshot::checkout(&root, name, daemon_socket)?;
+    let socket = guard_checkout(daemon_socket)?;
+    let id = snapshot::checkout(&root, name, socket)?;
     writeln!(out, "{id}")?;
     Ok(())
 }
@@ -161,7 +205,8 @@ fn auto_test_loop(
 ) -> Result<(), MemoryError> {
     loop {
         let good = run_script(cwd, script)?;
-        let outcome = bisect::bisect_mark(root, good, daemon_socket)?;
+        let socket = guard_checkout(daemon_socket)?;
+        let outcome = bisect::bisect_mark(root, good, socket)?;
         print_outcome(out, &outcome)?;
         if matches!(outcome, BisectOutcome::Found { .. }) {
             return Ok(());
@@ -181,7 +226,8 @@ pub fn run_bisect_start(
     out: &mut dyn Write,
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
-    let outcome = bisect::bisect_start(&root, good, bad, daemon_socket)?;
+    let socket = guard_checkout(daemon_socket)?;
+    let outcome = bisect::bisect_start(&root, good, bad, socket)?;
     print_outcome(out, &outcome)?;
     match (auto_test, &outcome) {
         (Some(script), BisectOutcome::Checkout { .. }) => {
@@ -200,7 +246,8 @@ pub fn run_bisect_mark(
     out: &mut dyn Write,
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
-    let outcome = bisect::bisect_mark(&root, mark_good, daemon_socket)?;
+    let socket = guard_checkout(daemon_socket)?;
+    let outcome = bisect::bisect_mark(&root, mark_good, socket)?;
     print_outcome(out, &outcome)?;
     Ok(())
 }
@@ -216,7 +263,8 @@ pub fn run_bisect_run(
     let root = discover(cwd)?;
     bisect::ensure_in_progress(&root)?;
     let good = run_script(cwd, script)?;
-    let outcome = bisect::bisect_mark(&root, good, daemon_socket)?;
+    let socket = guard_checkout(daemon_socket)?;
+    let outcome = bisect::bisect_mark(&root, good, socket)?;
     print_outcome(out, &outcome)?;
     Ok(())
 }
@@ -377,6 +425,31 @@ mod tests {
             id: "0".repeat(64),
             current,
         }
+    }
+
+    #[test]
+    fn checkout_guard_keeps_the_unix_path_including_when_nothing_is_listening() {
+        let path = Path::new("/tmp/dreamd.sock");
+        let kept = decide_checkout_guard(true, Some(path), false).unwrap();
+        assert_eq!(kept, Some(path));
+        let stale = decide_checkout_guard(true, Some(path), true).unwrap();
+        assert_eq!(stale, Some(path));
+    }
+
+    #[test]
+    fn checkout_guard_on_windows_refuses_only_a_live_connect() {
+        let path = Path::new("server.json");
+        let err = decide_checkout_guard(false, Some(path), true).unwrap_err();
+        let MemoryError::DaemonListening(got) = err else {
+            panic!("expected DaemonListening");
+        };
+        assert_eq!(got, path);
+        let msg = MemoryError::DaemonListening(path.to_path_buf()).to_string();
+        assert!(msg.contains("loopback"));
+        assert!(!msg.contains("socket"));
+        assert!(decide_checkout_guard(false, Some(path), false)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -102,7 +102,7 @@ pub enum McpRunError {
     /// [`crate::io::write_atomic`] is still `ErrorKind::Unsupported` there.
     /// Declared unconditionally so this copy is testable on Linux.
     #[error(
-        "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
+        "start `dreamd watch` before `dreamd mcp`; there is no in-process server on Windows (see docs/windows.md)"
     )]
     Unsupported,
     /// `dreamd mcp --bind` was refused by
@@ -864,10 +864,10 @@ mod tests {
     /// `dreamd mcp` and `dreamd watch` (both exit 2). Pin it here so the two
     /// call sites cannot drift and so `docs/windows.md` stays true.
     #[test]
-    fn unsupported_display_points_at_wsl2() {
+    fn unsupported_display_points_at_watch() {
         assert_eq!(
             McpRunError::Unsupported.to_string(),
-            "Windows is not supported in v0.1; use WSL2 or a Linux/macOS host (see docs/windows.md)"
+            "start `dreamd watch` before `dreamd mcp`; there is no in-process server on Windows (see docs/windows.md)"
         );
     }
 

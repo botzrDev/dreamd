@@ -43,11 +43,13 @@ This replaces the four live files with the branch's copies, makes it current, an
 
 Checkout does not save what it replaces. Whatever changed in the live files since the last snapshot was taken is in no snapshot and is gone after the checkout. Run `dreamd memory branch <new-name>` first if you want to keep it.
 
-Stop `dreamd watch` first. The daemon holds the live episodic log open, so checkout refuses while its socket exists, and the error says so:
+Stop `dreamd watch` first. The daemon holds the live episodic log open. On Linux and macOS, checkout refuses while the socket file exists, including a socket left behind after the process died, and the error says so:
 
 ```
 daemon socket /home/you/.agent/dreamd.sock exists; stop `dreamd watch` before checkout (it holds the live episodic log open)
 ```
+
+On Windows the same commands refuse only while a loopback connect to the address in `server.json` succeeds. A `server.json` left behind after the process is gone does not block checkout.
 
 The check is that the socket file exists, not that a daemon answers on it. If a crashed daemon left the file behind, `dreamd doctor --repair` unlinks an orphaned socket.
 

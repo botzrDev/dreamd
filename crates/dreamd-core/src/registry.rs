@@ -17,7 +17,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::io::{lock_exclusive, write_atomic};
+use crate::io::lock_exclusive;
+#[cfg(unix)]
+use crate::io::write_atomic;
 use crate::layout::DaemonHome;
 
 /// Top-level shape of `~/.agent/registry.toml`. The daemon iterates
@@ -72,8 +74,10 @@ pub fn resolve_project(
 /// Takes [`DaemonHome::registry_lock`], re-reads the registry under it (an
 /// absent file reads as empty), canonicalizes `project_root` (falling back to
 /// the path as given when that fails), and hands both to `mutate`. When
-/// `mutate` returns `true` the registry is `write_atomic`ed and chmodded
-/// `0600` on Unix; when it returns `false` nothing is written. Returns what
+/// `mutate` returns `true` the registry is replaced and chmodded `0600` on
+/// Unix (`write_atomic`); on Windows the same bytes go through
+/// `io::replace_renaming` because `write_atomic` stays unsupported. When it
+/// returns `false` nothing is written. Returns what
 /// `mutate` returned.
 ///
 /// Does not `create_dir_all` the daemon home and does not print: the caller
@@ -108,14 +112,18 @@ pub fn update_registry(
     }
 
     let serialized = toml::to_string(&registry).map_err(io::Error::other)?;
-    write_atomic(&registry_path, serialized.as_bytes())?;
-    // Defense-in-depth: registry.toml lists every registered project root.
-    // 0600 even though ~/.agent/ is already 0700. Unix-only; Windows perms are
-    // deferred to v0.1.1 / DR-121.
+    // Unix keeps the parent-directory fsync in `write_atomic` and chmod 0600.
+    // Windows cannot call `write_atomic` (that would also unlock the dream
+    // cycle). `replace_renaming` is the registry-only temp-file rename.
     #[cfg(unix)]
     {
+        write_atomic(&registry_path, serialized.as_bytes())?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&registry_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        crate::io::replace_renaming(&registry_path, serialized.as_bytes())?;
     }
     Ok(true)
 }

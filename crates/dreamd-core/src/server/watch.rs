@@ -68,7 +68,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
-use crate::config::{load_config, DreamCycleMode};
+use crate::config::{load_config, DreamCycleMode, AUTO_MODE_UNSUPPORTED};
 use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::build_router;
 use crate::server::http::AppState;
@@ -184,15 +184,11 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     let agent_root = AgentRoot::discover(cwd)
         .map_err(|_| WatchError::NoProjectRoot(cwd.display().to_string()))?;
 
-    // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto in v0.1).
+    // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto).
     let config =
         load_config(agent_root.project_root()).map_err(|e| WatchError::Config(e.to_string()))?;
     if config.dream_cycle_mode == DreamCycleMode::Auto {
-        return Err(WatchError::DreamMode(
-            "dream_cycle_mode = \"auto\" is not supported in v0.1 \
-             (LLM mode ships in v0.1.1)"
-                .into(),
-        ));
+        return Err(WatchError::DreamMode(AUTO_MODE_UNSUPPORTED.into()));
     }
 
     // 2.5. Recover any stale dream-cycle WAL before opening indexes or coordinators.
@@ -342,17 +338,12 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     let agent_root = AgentRoot::discover(cwd)
         .map_err(|_| WatchError::NoProjectRoot(cwd.display().to_string()))?;
 
-    // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto in
-    //    v0.1) — the same refusal as Unix, because the guard is about the
-    //    v0.1 feature set, not about the transport.
+    // 2. Load config + WEG-66 startup guard (rejects DreamCycleMode::Auto).
+    //    The same refusal as Unix: the guard is about the mode, not the transport.
     let config =
         load_config(agent_root.project_root()).map_err(|e| WatchError::Config(e.to_string()))?;
     if config.dream_cycle_mode == DreamCycleMode::Auto {
-        return Err(WatchError::DreamMode(
-            "dream_cycle_mode = \"auto\" is not supported in v0.1 \
-             (LLM mode ships in v0.1.1)"
-                .into(),
-        ));
+        return Err(WatchError::DreamMode(AUTO_MODE_UNSUPPORTED.into()));
     }
 
     // 2.5. Recover any stale dream-cycle WAL before opening coordinators. The
@@ -1376,10 +1367,12 @@ mod tests {
         )
         .expect("write config");
         let result = run_watch(dir.path(), WatchListen::default()).await;
-        assert!(
-            matches!(result, Err(WatchError::DreamMode(_))),
-            "expected DreamMode error, got: {result:?}",
-        );
+        match result {
+            Err(WatchError::DreamMode(msg)) => {
+                assert_eq!(msg, crate::config::AUTO_MODE_UNSUPPORTED);
+            }
+            other => panic!("expected DreamMode error, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

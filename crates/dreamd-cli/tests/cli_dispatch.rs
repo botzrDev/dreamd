@@ -83,10 +83,7 @@ fn dream_auto_exits_two() {
 
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("--auto is not supported"),
-        "got: {stderr}"
-    );
+    assert!(stderr.contains("--auto is not supported"), "got: {stderr}");
 }
 
 #[test]

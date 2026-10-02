@@ -9,6 +9,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixed
 
 - Public pages and a few printed strings now match the 1.0.0 tree. `SPEC.md` describes prefix clustering, a cycle timestamp on `last_updated`, and single-writer append. The HTTP stability note no longer points at v0.2. Windows health is described as a watermark read. The WasTrue section is a scaffold. `dream`, `init`, and `migrate` help, the auto-mode errors, the npm Windows error, and the `WORKSPACE.md` scaffold line no longer cite v0.1 or v0.2.
+- `dreamd watch` prints the same auto-mode sentence as `dreamd dream`. The config template comment matches `docs/configuration.md`. `dreamd mcp` on Windows says to start `dreamd watch` first. `dreamd uninstall` and `dreamd update` on Windows say they do not stop the daemon. `SPEC.md` says the reference reader stores `evt_` plus 26 Crockford characters and skips other id spellings, including UUIDv7.
+- Windows `dreamd init` registers the project: `registry.toml` is locked with `File::lock` and replaced by a temp-file rename. `io::write_atomic` stays unsupported, so the dream cycle and the Tantivy index still do not run. `dreamd memory checkout` and `bisect` refuse a live Windows daemon (a loopback connect to `server.json`) and still refuse a Unix socket file that merely exists.
+- The published GitHub `v1.0.0` binaries and the npm `dreamd-mcp@1.0.0` tarball still print the older v0.1 / v0.2 sentences (`watch` auto mode, `--auto`, `WORKSPACE.md`, the Windows MCP and shim errors). This tree does not rebuild those artifacts.
 
 ## [1.0.0] - 2026-10-02
 

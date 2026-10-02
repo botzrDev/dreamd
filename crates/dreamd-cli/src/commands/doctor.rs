@@ -83,10 +83,7 @@ pub fn run(
             writeln!(out, "dream_cycle_mode: manual")?;
         }
         DreamCycleMode::Auto => {
-            writeln!(
-                out,
-                "dream_cycle_mode: auto  [WARNING: not supported]"
-            )?;
+            writeln!(out, "dream_cycle_mode: auto  [WARNING: not supported]")?;
             all_ok = false;
         }
     }

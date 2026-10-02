@@ -17,7 +17,7 @@ Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.cursor/mcp.j
 npx -y dreamd-mcp watch &
 ```
 
-`watch` runs in the foreground; the `&` backgrounds it in that shell, and it stops when the shell exits. Without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls.
+`watch` runs in the foreground; the `&` backgrounds it in that shell, and it stops when the shell exits. On Linux and macOS, without a daemon, MCP runs in-process. That works for single queries but can struggle on rapid consecutive `search_nodes` calls. On Windows there is no in-process server: start `dreamd watch` first or `dreamd mcp` exits 2.
 
 ## 3. MCP config
 
@@ -37,7 +37,7 @@ Copy [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) to y
 
 Open a new agent session. Confirm `dreamd` in the MCP tools list with `append_node` and `search_nodes`.
 
-Stderr from the MCP server should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is running. If no daemon is running there is no default-stderr fallback line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`).
+Stderr from the MCP server should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is running. On Linux and macOS, if no daemon is running there is no default-stderr fallback line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`). On Windows, `dreamd mcp` exits 2 until `dreamd watch` is up.
 
 ## 6. Verify
 

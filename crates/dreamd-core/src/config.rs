@@ -34,7 +34,7 @@ pub struct Config {
     pub redaction: bool,
     /// Log level filter for the daemon. `trace | debug | info | warn | error`.
     pub log_level: String,
-    /// DR-315 — dream-cycle scheduling mode. v0.1 is manual-only.
+    /// Dream-cycle scheduling mode. 1.0.0 is manual-only; `"auto"` is rejected.
     pub dream_cycle_mode: DreamCycleMode,
     /// LLM provider id (`"anthropic"` | `"openai"`). Read by [`crate::llm`]
     /// (AILAB-204). Empty — the default — lets genai infer the provider from
@@ -91,6 +91,13 @@ impl From<figment::Error> for ConfigError {
     }
 }
 
+/// Sentence printed when `dream_cycle_mode = "auto"`. An LLM dream cycle is
+/// opt-in (`dreamd dream` with a key). It is not this mode.
+pub const AUTO_MODE_UNSUPPORTED: &str = "\
+dream_cycle_mode = auto is not supported; \
+set dream_cycle_mode = \"manual\" in config.toml. \
+Cycles run only when you invoke them.";
+
 /// Commented-out template written by `dreamd init` (D1 of WEG-14.v2) to
 /// `<project>/.agent/.dreamd/config.toml`. Every key disabled by default;
 /// origin DR called out inline so editors don't have to grep.
@@ -99,7 +106,7 @@ pub const CONFIG_TEMPLATE: &str = "\
 
 # redaction = true              # redact secrets/PII on POST /api/v1/learn (DR-111)
 # log_level = \"info\"            # trace | debug | info | warn | error
-# dream_cycle_mode = \"manual\"   # \"manual\" | \"auto\" — v0.1 is manual-only (DR-315)
+# dream_cycle_mode = \"manual\"   # \"manual\" | \"auto\" — manual only; auto is rejected
 
 # --- LLM keys: read by the dream cycle (AILAB-204) ---
 # provider = \"\"                 # \"anthropic\" | \"openai\"; empty infers from model

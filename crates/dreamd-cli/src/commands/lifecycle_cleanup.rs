@@ -49,8 +49,8 @@ pub struct StopReport {
     /// Whether a stop was attempted at all (`false` on non-unix platforms).
     ///
     /// Stays `true` when the pass ran but signalled nothing — including the
-    /// unresolvable-scope case. `update.rs` prints "automatic stop is
-    /// unix-only in v0.1" on `!attempted`, which would be a false statement
+    /// unresolvable-scope case. `update.rs` prints "this command does not stop
+    /// them on Windows" on `!attempted`, which would be a false statement
     /// on a unix box that simply had nothing attributable to stop.
     pub attempted: bool,
     /// Whether at least one in-scope `dreamd mcp` / `dreamd watch` process was
@@ -159,15 +159,14 @@ pub fn stop_local_servers(scope: &StopScope<'_>, err: &mut dyn Write) -> StopRep
     stop_scoped(Path::new(PROC_ROOT), scope, &mut kill, err)
 }
 
-/// Non-unix: no-op. Process stop is unix-only in v0.1 — Windows detached
-/// lifecycle is AILAB-203's scope. `scope` is accepted so both arms share one
-/// signature for `cli.rs`.
+/// Non-unix: no-op. This command does not signal processes on Windows.
+/// `scope` is accepted so both arms share one signature for `cli.rs`.
 #[cfg(not(unix))]
 pub fn stop_local_servers(scope: &StopScope<'_>, err: &mut dyn Write) -> StopReport {
     let _ = scope;
     let _ = writeln!(
         err,
-        "dreamd: note — stopping dreamd mcp/watch processes is unix-only in v0.1; stop them manually."
+        "dreamd: note — this command does not stop dreamd mcp/watch on Windows; stop the daemon yourself (Ctrl-C, or `schtasks /End /TN dev.dreamd.dreamd`)."
     );
     StopReport {
         attempted: false,
@@ -1407,8 +1406,8 @@ mod tests {
 
     /// With neither scope field resolved every match would have to be taken on
     /// faith — the machine-global behaviour AILAB-584 removed. Stop nothing,
-    /// warn, and keep `attempted: true`: `update.rs` prints "automatic stop is
-    /// unix-only in v0.1" on `!attempted`, which would be a lie on unix.
+    /// warn, and keep `attempted: true`: `update.rs` prints "this command does
+    /// not stop them on Windows" on `!attempted`, which would be a lie on unix.
     ///
     /// The candidate is still enumerated and spared *by name*, so `spared` is
     /// set: returning early with `spared: false` would make `update.rs` print

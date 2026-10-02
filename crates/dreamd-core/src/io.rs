@@ -4,7 +4,10 @@
 //! it replaces `LESSONS.md`, `PREFERENCES.md`, `DECISIONS.md`, and similar
 //! semantic-layer files. It writes to `<path>.tmp`, `sync_data`s the bytes,
 //! renames into place, then `sync_all`s the parent directory so the rename
-//! itself survives crash. Windows lands in v0.1.1 — see `docs/windows.md`.
+//! itself survives crash. On Windows [`write_atomic`] stays
+//! [`io::ErrorKind::Unsupported`] — see `docs/windows.md`. `registry.toml` is
+//! the exception: a temp-file rename used only for that file, and it does not
+//! make the dream cycle durable.
 //!
 //! Single-writer assumption holds: every mutation in v0.1 funnels through the
 //! `MemoryCoordinator` (ARCHITECTURE.md "Load-bearing engineering decisions" §1), so
@@ -19,6 +22,13 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
+/// User-visible reason [`write_atomic`] returns [`io::ErrorKind::Unsupported`]
+/// on Windows. The dream cycle and the Tantivy index both go through that
+/// function, so this sentence is what a Windows caller sees.
+pub const WRITE_ATOMIC_UNSUPPORTED: &str = "\
+atomic file replacement is unavailable on Windows; the dream cycle and the \
+Tantivy index cannot run (see docs/windows.md)";
+
 /// Replace `path` with `contents` atomically.
 ///
 /// On any failure between `.tmp` creation and `rename` into place, the `.tmp`
@@ -32,7 +42,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = (path, contents);
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "atomic write on Windows lands in v0.1.1; see docs/windows.md",
+            WRITE_ATOMIC_UNSUPPORTED,
         ));
     }
     #[cfg(not(windows))]
@@ -56,7 +66,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// is untouched on error and the `.tmp` survives as a recovery signal.
 ///
 /// Returns [`io::ErrorKind::Unsupported`] on Windows (hook ignored), mirroring
-/// [`write_atomic`]; Windows durable writes land in v0.1.1 (see `docs/windows.md`).
+/// [`write_atomic`]. See `docs/windows.md`.
 pub(crate) fn write_atomic_with_hook(
     path: &Path,
     contents: &[u8],
@@ -67,7 +77,7 @@ pub(crate) fn write_atomic_with_hook(
         let _ = (path, contents, hook);
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "atomic write on Windows lands in v0.1.1; see docs/windows.md",
+            WRITE_ATOMIC_UNSUPPORTED,
         ));
     }
     #[cfg(not(windows))]
@@ -90,21 +100,49 @@ pub(crate) fn write_atomic_with_hook(
     }
 }
 
+/// Replace `path` by writing a sibling temp file and renaming it over `path`.
+///
+/// This is the Windows writer for `registry.toml` only. [`write_atomic`] stays
+/// unsupported there so a dream-cycle replace cannot succeed by accident.
+/// `rename` on Windows replaces an existing file; it is not the POSIX
+/// parent-directory `fsync` that [`write_atomic`] does on Unix.
+///
+/// Compiled into Unix test builds so the rename can be checked without a
+/// Windows host. Production Unix registry writes still use [`write_atomic`].
+#[cfg(any(test, not(unix)))]
+pub(crate) fn replace_renaming(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_data()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// An owned exclusive advisory lock, held for as long as this value lives.
 ///
-/// Dropping the guard releases the lock (`flock(LOCK_UN)` via `nix`'s `Flock`
-/// destructor, and again implicitly when the descriptor closes). The lockfile
-/// itself is **never unlinked**. `flock` is advisory and attached to the open
-/// file description, not to the path: unlinking would let a process that
-/// already opened the old inode keep a lock that a later process — which
-/// re-`create`s the path and gets a fresh inode — cannot see, so both would
-/// enter the critical section at once. A stale zero-byte `*.lock` neighbour is
-/// the intended steady state, the same convention the Tantivy index lock
-/// follows (`tantivy-lock-file-no-rm-on-startup`).
+/// Dropping the guard unlocks and closes the file. The lockfile itself is
+/// **never unlinked**. The lock is advisory and attached to the open file,
+/// not to the path: unlinking would let a process that already opened the old
+/// file keep a lock that a later process — which re-creates the path and gets
+/// a fresh file — cannot see, so both would enter the critical section at
+/// once. A stale zero-byte `*.lock` neighbour is the intended steady state,
+/// the same convention the Tantivy index lock follows
+/// (`tantivy-lock-file-no-rm-on-startup`).
+///
+/// Unix takes `flock`; Windows takes `LockFileEx`. Both go through
+/// [`File::lock`](File::lock), which has been in std since 1.89.
 #[derive(Debug)]
 pub struct ExclusiveLock {
-    #[cfg(unix)]
-    _flock: nix::fcntl::Flock<File>,
+    file: File,
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 /// Take a blocking exclusive advisory lock on `path`, creating the lockfile if
@@ -121,44 +159,22 @@ pub struct ExclusiveLock {
 /// lock.
 ///
 /// The lockfile is never removed; see [`ExclusiveLock`] for why.
-///
-/// Returns [`io::ErrorKind::Unsupported`] on Windows; see `docs/windows.md`.
 pub fn lock_exclusive(path: &Path) -> io::Result<ExclusiveLock> {
-    // `nix` is a `cfg(unix)` dependency (see dreamd-core/Cargo.toml), so the
-    // gate here is `unix` rather than `not(windows)`; Windows still lands in
-    // the `Unsupported` arm exactly like `write_atomic`.
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "advisory file locking on Windows lands in v0.1.1; see docs/windows.md",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use nix::fcntl::{Flock, FlockArg};
-
-        // `create(true)` needs `write(true)`; `read(true)` keeps the descriptor
-        // usable if a caller ever wants to stamp diagnostics into the lockfile.
-        // `truncate(false)` is deliberate: the lockfile's *identity* (its inode)
-        // is the lock, and a contender that arrives while the holder is inside
-        // the critical section must not have its file mutated out from under it.
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)?;
-        // Blocking: a concurrent writer should wait its turn, not fail.
-        let flock = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_file, errno)| {
-            io::Error::new(
-                io::Error::from(errno).kind(),
-                format!("flock {}: {errno}", path.display()),
-            )
-        })?;
-        Ok(ExclusiveLock { _flock: flock })
-    }
+    // `create(true)` needs `write(true)`; `read(true)` keeps the descriptor
+    // usable if a caller ever wants to stamp diagnostics into the lockfile.
+    // `truncate(false)` is deliberate: the lockfile's identity is the lock,
+    // and a contender that arrives while the holder is inside the critical
+    // section must not have its file mutated out from under it.
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    // Blocking: a concurrent writer should wait its turn, not fail.
+    file.lock()
+        .map_err(|e| io::Error::new(e.kind(), format!("lock {}: {e}", path.display())))?;
+    Ok(ExclusiveLock { file })
 }
 
 #[cfg(test)]
@@ -266,11 +282,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn atomic_write_unsupported_message_names_the_real_limit() {
+        assert!(
+            !WRITE_ATOMIC_UNSUPPORTED.contains("v0.1"),
+            "{WRITE_ATOMIC_UNSUPPORTED}"
+        );
+        assert!(WRITE_ATOMIC_UNSUPPORTED.contains("docs/windows.md"));
+    }
+
+    #[test]
+    fn replace_renaming_replaces_the_target_and_removes_the_temp() {
+        let dir = unique_tmpdir("replace-renaming");
+        let _g = DirGuard(dir.clone());
+        let target = dir.join("registry.toml");
+        fs::write(&target, b"old\n").unwrap();
+
+        replace_renaming(&target, b"projects = []\n").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"projects = []\n");
+        assert!(!dir.join("registry.tmp").exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_stub_returns_unsupported() {
         let err = write_atomic(Path::new("ignored"), b"data")
-            .expect_err("write_atomic must error on Windows in v0.1");
+            .expect_err("write_atomic must error on Windows");
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(err.to_string(), WRITE_ATOMIC_UNSUPPORTED);
     }
 }

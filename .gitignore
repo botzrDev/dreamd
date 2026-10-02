@@ -23,3 +23,4 @@ packages/dreamd-mcp/package-lock.json
 
 __pycache__/
 .ruff_cache/
+/.agent/.dreamd/

@@ -16,7 +16,7 @@ never pretty-printed, one whole record per `\n`-terminated line:
 | Field | Type | What a writer must get right |
 |---|---|---|
 | `schema_version` | string | Exactly `"1.0.0"`. This is the record schema, versioned independently of the SPEC (currently v0.1). |
-| `id` | string | Lexically sortable by creation time — ULID or UUIDv7. Assigned by the writer. |
+| `id` | string | Lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with an explicit UTC offset. |
 | `source_harness` | string | Lowercase `[a-z0-9_-]+` naming your harness. `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue` are reserved for their owners. dreamd stores the value you send as-is; it does not check the pattern or the reserved names. |
 | `skill_action` | string | Cluster key: `[a-z0-9_]` segments joined by `::`, ≤ 256 bytes. dreamd lowercases it and turns spaces into `_`, then rejects dots, hyphens and slashes. The cycle counts every `::` prefix and promotes the deepest one that clears the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. |

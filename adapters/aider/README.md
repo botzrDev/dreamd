@@ -16,7 +16,7 @@
    ```bash
    npx -y dreamd-mcp watch
    ```
-   Leave it running (it stays in the foreground; use a second terminal). An MCP session from another harness (Claude Code, Cursor, Cline) is **not** a substitute: without `dreamd watch` those sessions run in-process and open no socket for `curl` to reach. Once `watch` is up, they and Aider share the one daemon and the one `.agent/` folder.
+   Leave it running (it stays in the foreground; use a second terminal). An MCP session from another harness (Claude Code, Cursor, Cline) is **not** a substitute: on Linux and macOS, without `dreamd watch` those sessions run in-process and open no socket for `curl` to reach. On Windows they exit 2 until `dreamd watch` is up. Once `watch` is up, they and Aider share the one daemon and the one `.agent/` folder.
 
 3. **Paste the CONVENTIONS template**
    Copy [`CONVENTIONS.md.template`](./CONVENTIONS.md.template) into your project's `CONVENTIONS.md` (or append it to an existing one). Aider does not pick the file up on its own: start it with `aider --read CONVENTIONS.md`, or add `read: CONVENTIONS.md` to `.aider.conf.yml`.

@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::{ArgAction, Args, Parser, Subcommand};
 
 use dreamd_core::collector::RecallExclusion;
-use dreamd_core::config::{load_config, Config, DreamCycleMode};
+use dreamd_core::config::{load_config, Config, DreamCycleMode, AUTO_MODE_UNSUPPORTED};
 
 use crate::commands;
 use crate::commands::version::VERSION_SHORT;
@@ -599,7 +599,7 @@ pub fn render_man_page() -> std::io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Guard that rejects `Auto` dream-cycle mode at v0.1.
+/// Guard that rejects `Auto` dream-cycle mode.
 ///
 /// Returns `Ok(())` for `Manual` mode; `Err(message)` for `Auto` mode.
 /// The caller is responsible for printing the error and calling
@@ -607,10 +607,7 @@ pub fn render_man_page() -> std::io::Result<Vec<u8>> {
 /// unit-tested without spawning a subprocess.
 pub fn check_dream_mode(config: &Config) -> Result<(), String> {
     if config.dream_cycle_mode == DreamCycleMode::Auto {
-        return Err("dream_cycle_mode = auto is not supported; \
-             set dream_cycle_mode = \"manual\" in config.toml. \
-             Cycles run only when you invoke them."
-            .to_string());
+        return Err(AUTO_MODE_UNSUPPORTED.to_string());
     }
     Ok(())
 }
@@ -1164,9 +1161,20 @@ fn run_salience_drift(args: SalienceDriftArgs) -> ExitCode {
     }
 }
 
-/// The daemon UDS path checkout refuses on, when a home directory resolves.
+/// The daemon address checkout refuses on, when a home directory resolves.
+/// Unix is the UDS path (an exists-check, including a stale socket). Windows
+/// is `server.json`, which the memory command probes with a loopback connect.
 fn daemon_socket() -> Option<PathBuf> {
-    home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).socket_path())
+    let home = home_dir()?;
+    let daemon = dreamd_core::layout::DaemonHome::new(home.join(".agent"));
+    #[cfg(unix)]
+    {
+        Some(daemon.socket_path())
+    }
+    #[cfg(not(unix))]
+    {
+        Some(daemon.server_json())
+    }
 }
 
 /// `dreamd memory …` (BZR-150, bisect BZR-153, diff BZR-156). Never opens a Tantivy index;

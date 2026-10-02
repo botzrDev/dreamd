@@ -12,13 +12,23 @@ Linux and macOS.
 **Windows durable writes are not in 1.0.0.** The atomic-write path
 returns [`std::io::ErrorKind::Unsupported`] on Windows rather than silently
 falling back to a non-atomic write that could corrupt the store on a crash.
+The error says atomic file replacement is unavailable, and names the dream
+cycle and the Tantivy index.
+
+`registry.toml` is the exception. `dreamd init` registers a project on Windows
+by locking `registry.toml.lock` with `std::fs::File::lock` and replacing
+`registry.toml` through a temporary file and `rename`. That writer is not
+`io::write_atomic`, the file is not chmod `0600`, and a successful registration
+does not make the dream cycle or the index available. A second `dreamd init`,
+when `.agent/` already exists, still leaves the store as-is and does not
+register the project. Learn answers `404` (`agent root not registered`) until
+the root is in the registry.
 
 Native Windows was out of scope for v0.1. v0.1.1 added compile, `dreamd service
 install` (logon task + `auth.json`), and `dreamd watch` over loopback TCP with
-a bearer token. 1.0.0 changes none of that: `io::write_atomic` is still
-`ErrorKind::Unsupported`, so the dream cycle and the Tantivy index do not work
-there. For a store you can consolidate and search, use WSL2 or a Linux/macOS
-host.
+a bearer token. `io::write_atomic` is still `ErrorKind::Unsupported`, so the
+dream cycle and the Tantivy index do not work there. For a store you can
+consolidate and search, use WSL2 or a Linux/macOS host.
 
 **There is no prebuilt Windows binary on the npm path.** The `dreamd-mcp` shim
 ships Linux x86_64 and macOS binaries only; on native Windows
@@ -90,8 +100,9 @@ of the two files.
 bearer when `server.json` is live — it parses, and `127.0.0.1:<port>` accepts a
 connection — and exits **2** otherwise. There is deliberately no in-process
 fallback: a coordinator booted inside `mcp` would accept `append_node` writes it
-cannot durably persist, which is why AILAB-174 deleted that branch. Start
-`dreamd watch` first (or let the logon task start it), then point your harness
+cannot durably persist, which is why AILAB-174 deleted that branch. When
+there is no daemon, the error says to start `dreamd watch` before `dreamd mcp`.
+Start `dreamd watch` first (or let the logon task start it), then point your harness
 at that binary — `"command": "dreamd", "args": ["mcp"]` — rather than
 at `npx -y dreamd-mcp`, which has no Windows binary to run. (The shim's
 dev override, `DREAMD_BIN` plus `DREAMD_BIN_ALLOW_UNVERIFIED=1`, is checked
@@ -100,10 +111,13 @@ form.)
 
 ## Which commands see the daemon
 
-`dreamd status`, `dreamd archive` and `dreamd forget` probe the live daemon the
-Windows way: read `server.json`, then try a TCP connect to `127.0.0.1:<port>`.
-So `status` reports a running Windows daemon, and `archive` / `forget` refuse to
-rewrite a store underneath one — which is the point of that guard.
+`dreamd status`, `dreamd archive`, `dreamd forget`, and `dreamd memory checkout`
+/ `bisect` probe the live daemon the Windows way: read `server.json`, then try
+a TCP connect to `127.0.0.1:<port>`. So `status` reports a running Windows
+daemon, and `archive`, `forget`, `checkout`, and `bisect` refuse to rewrite a
+store underneath one. A `server.json` left behind after the process is gone
+does not count as live. On Linux and macOS, `checkout` and `bisect` still
+refuse when the socket file exists, including a stale socket.
 
 `dreamd uninstall` and `dreamd update` do **not**. Their liveness guard still
 answers `false` on Windows, so both behave as "no daemon running" even while a

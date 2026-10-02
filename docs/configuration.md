@@ -38,7 +38,7 @@ This is the exact template written by `dreamd init` (`CONFIG_TEMPLATE`):
 
 # redaction = true              # redact secrets/PII on POST /api/v1/learn (DR-111)
 # log_level = "info"            # trace | debug | info | warn | error
-# dream_cycle_mode = "manual"   # "manual" | "auto" — v0.1 is manual-only (DR-315)
+# dream_cycle_mode = "manual"   # "manual" | "auto" — manual only; auto is rejected
 
 # --- LLM keys: read by the dream cycle (AILAB-204) ---
 # provider = ""                 # "anthropic" | "openai"; empty infers from model

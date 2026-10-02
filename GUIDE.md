@@ -177,7 +177,7 @@ Terminal 3 — MCP bridges to the daemon automatically:
 npx -y dreamd-mcp
 ```
 
-Stderr should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is reachable. If no daemon is running, MCP falls back to in-process with no default-stderr line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`).
+Stderr should show `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)` when the daemon is reachable. On Linux and macOS, if no daemon is running, MCP falls back to in-process with no default-stderr line (`DREAMD_LOG=debug` logs `daemon not found … running in-process`). On Windows there is no in-process server: start `dreamd watch` first or `dreamd mcp` exits 2.
 
 To have the daemon start at login instead of in a terminal, `dreamd service install` writes a per-user systemd unit (Linux) or LaunchAgent (macOS) that supervises this same foreground `watch` — no `sudo`, no second logger. See [docs/install.md](./docs/install.md).
 

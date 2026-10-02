@@ -230,7 +230,9 @@ thinks, not what the daemon did: a `start` whose `watch` exited can leave
 the API is answering — `dreamd status` is the daemon-liveness question. The
 dream cycle and the Tantivy index remain unavailable on Windows because
 `io::write_atomic` is still unsupported there, so for a store you can
-consolidate and search, use WSL2 — see [windows.md](./windows.md).
+consolidate and search, use WSL2 — see [windows.md](./windows.md). `dreamd init`
+does register the project on Windows, which is what `POST /api/v1/learn` needs;
+a second init, when `.agent/` already exists, still does not register.
 
 ## Restart is a bounce, not a reinstall
 

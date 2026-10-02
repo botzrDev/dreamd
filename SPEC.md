@@ -57,7 +57,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 | Field | Type | Notes |
 |---|---|---|
 | `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1. |
-| `id` | string | MUST be lexically sortable by creation time. ULID and UUIDv7 are the recommended formats. Assigned by the writer. |
+| `id` | string | MUST be lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
 | `source_harness` | string | Writers SHOULD send a lowercase ASCII identifier matching `[a-z0-9_-]+`. These names are reserved for their owners by convention: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. The reference implementation stores the string it is given. It does not check the pattern and it does not map a name to an owner. |
 | `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation counts every `::` prefix and promotes the deepest prefix whose recurrence meets the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. Each event is claimed by one promoted cluster. |

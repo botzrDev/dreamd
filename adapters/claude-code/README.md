@@ -34,7 +34,7 @@ The block in `.mcp.json.example`:
 
 ## 3. Start the daemon (multi-agent setups)
 
-For a single agent, the in-process MCP server is sufficient. If **several agents write to the same project simultaneously**, start one shared daemon:
+For a single agent on Linux or macOS, the in-process MCP server is sufficient. On Windows, start `dreamd watch` first; there is no in-process server. If **several agents write to the same project simultaneously**, start one shared daemon:
 
 ```bash
 npx -y dreamd-mcp watch

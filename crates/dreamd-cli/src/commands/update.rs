@@ -254,7 +254,7 @@ pub fn run(
             }
             (false, false, true) => "no local `dreamd mcp` / `dreamd watch` processes were running",
             (false, false, false) => {
-                "stop local `dreamd mcp` / `dreamd watch` yourself — automatic stop is unix-only in v0.1"
+                "stop local `dreamd mcp` / `dreamd watch` yourself — this command does not stop them on Windows"
             }
         };
         write_contract(out, "restart contract:", step_one)?;
