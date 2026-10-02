@@ -26,6 +26,8 @@ Security fixes land on `main` and the latest release.
 | `main` | Yes |
 | Anything else | No |
 
+`1.0.x` is the current release. `0.1.1` stays on this table. Fixes land on `main` and the latest release.
+
 ## Threat model (summary)
 
 The reference implementation is local-first and single-tenant. It assumes:
@@ -36,9 +38,9 @@ The reference implementation is local-first and single-tenant. It assumes:
 
 The daemon enforces:
 
-- **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected.
+- **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected. The daemon log `~/.agent/dreamd.log` is a different file: it is created as mode `0o666` before the process umask (typically `0644`) and truncated each time `dreamd watch` starts.
 
-- **`personal/` LLM exclusion.** `.agent/personal/` is never included in the dream-cycle composition prompt unless the operator passes `dreamd dream --share-personal` (or sends `x-dreamd-share-personal: 1` to `POST /api/v1/dream`). Consent is **per call**: there is no config key, no environment variable, and no sticky state — a cycle that was not asked, on that invocation, to share the personal layer does not read it. See [Personal-layer consent](#personal-layer-consent-v01) below.
+- **`personal/` LLM exclusion.** `.agent/personal/` is never included in the dream-cycle composition prompt unless the operator passes `dreamd dream --share-personal` (or sends `x-dreamd-share-personal: 1` to `POST /api/v1/dream`). Consent is **per call**: there is no config key, no environment variable, and no sticky state — a cycle that was not asked, on that invocation, to share the personal layer does not read it. See [Personal-layer consent](#personal-layer-consent) below.
 - **LLM cost cap** ($0.10/cycle by default, `cost_cap_usd`) enforced *before* the request, with deterministic fallback.
 
 **Shipped in v0.1.1:**
@@ -50,9 +52,9 @@ The daemon enforces:
 - **TCP binding to non-localhost** is refused unless `dreamd watch --insecure` is passed (test environments only). `--bind <IP[:port]>` picks the TCP address; a non-loopback one without `--insecure` is refused before anything binds, and every start with `--insecure` logs a warning. Unix `dreamd watch` still has no TCP listener: `watch --bind` / `watch --insecure` exit 2 there. `--insecure` does not skip the bearer token or the `auth.json` requirement, and `~/.agent/server.json` still names a loopback host, so local clients (`dreamd status`, MCP) only ever dial loopback.
 - **`dreamd mcp --bind` (AILAB-206)** is the one TCP listener on Unix. It is compiled only into builds with the non-default `mcp-http` cargo feature, so prebuilt release binaries have no TCP listener on Unix at all. It serves opt-in Streamable HTTP MCP at `/mcp`, loopback by default through the same bind gate (non-loopback needs `--insecure`). It has **no bearer token** and no `auth.json` — any local process can reach a loopback bind, which is weaker than stdio or the `0600` + `SO_PEERCRED` socket — and it does not write `server.json`. Default `dreamd mcp` stays stdio. See [docs/mcp-transports.md](docs/mcp-transports.md).
 
-### Same-user-cross-project surface (accepted for v0.1)
+### Same-user-cross-project surface
 
-Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS, any process running as the user can target any registered project. Peer-credential auth verifies **same user**, not same project. If code runs as the user, it can already read project files directly. A later release may add per-project tokens or per-project sockets; nothing is scheduled.
+Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS, any process running as the user can target any registered project. Peer-credential auth verifies **same user**, not same project. If code runs as the user, it can already read project files directly. This has been the routing model since v0.1 and is unchanged in 1.0.0. A later release may add per-project tokens or per-project sockets; nothing is scheduled.
 
 ## Lesson-injection surface
 
@@ -69,7 +71,7 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 
 Two things outside that sentence do use the network. The `npx -y dreamd-mcp` shim downloads the prebuilt binary from this repository's GitHub releases and verifies its SHA-256 before running it. And a binary you build yourself with the non-default `vectors` cargo feature downloads an embedding model when you run `dreamd vectors enable`; the prebuilt binaries are built without that feature, and the command exits 2 on them without touching the network.
 
-### Personal-layer consent (v0.1)
+### Personal-layer consent
 
 `.agent/personal/` is excluded from that request **by default and by construction**. The composition prompt is built from the promoted cluster alone; the function that builds it is never handed the store, so it cannot reach `personal/` whatever the operator has put there.
 

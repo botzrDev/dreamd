@@ -29,9 +29,10 @@ read and write via MCP, without any of them needing to know the others exist.
 - Not a replacement for AGENTS.md or SKILL.md. Those are human-authored project rules;
   `.agent/` is machine-written runtime memory. They complement each other.
 - Not a Python SDK. No Python required. Distribution is npm (`npx`) and Rust (`cargo`).
-- Not competing with Mem0, Letta, or Zep. Those are SDKs you embed in one agent you
-  control. dreamd is a memory layer multiple existing agents share via MCP — a
-  different problem entirely. None of them has a cross-harness story.
+- Not an embedded memory SDK. Mem0, Letta, and Zep are libraries you put inside
+  one agent you control. dreamd is a folder several existing agents share through
+  MCP. Mem0 also speaks MCP; Letta Code is harness-native. The cell-by-cell
+  comparison is docs/compared.md.
 
 ## Install
 
@@ -41,8 +42,10 @@ read and write via MCP, without any of them needing to know the others exist.
   npx -y dreamd-mcp         # start the MCP server (stdio)
 
 Supported: Linux x86_64, macOS x86_64/aarch64 (the prebuilt binaries the npm shim
-downloads). Windows is watch + learn only (loopback TCP + bearer), from a source
-build; dream cycle and Tantivy index need Unix atomic writes. Node >= 18 required.
+downloads). The shim has no Windows binary. A dreamd.exe from source, or from a
+GitHub release's windows-x86_64.tar.gz when that release has one, does watch and
+learn over loopback TCP with a bearer token. The dream cycle and the Tantivy
+index need Unix atomic writes. Node >= 18 required.
 
 Version note: this describes 1.0.0, published on GitHub as `v1.0.0` and on npm
 as `dreamd-mcp` 1.0.0. `blame`, `salience-drift`, `memory`, `forget`,

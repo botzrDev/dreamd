@@ -19,7 +19,7 @@ never pretty-printed, one whole record per `\n`-terminated line:
 | `id` | string | Lexically sortable by creation time — ULID or UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with an explicit UTC offset. |
 | `source_harness` | string | Lowercase `[a-z0-9_-]+` naming your harness. `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue` are reserved for their owners. dreamd stores the value you send as-is; it does not check the pattern or the reserved names. |
-| `skill_action` | string | Cluster key: `[a-z0-9_]` segments joined by `::`, ≤ 256 bytes. dreamd lowercases it and turns spaces into `_`, then rejects dots, hyphens and slashes. SPEC says the dream cycle clusters on exact match; dreamd also counts every `::` prefix, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. |
+| `skill_action` | string | Cluster key: `[a-z0-9_]` segments joined by `::`, ≤ 256 bytes. dreamd lowercases it and turns spaces into `_`, then rejects dots, hyphens and slashes. The cycle counts every `::` prefix and promotes the deepest one that clears the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. |
 | `content` | string | The lesson, in natural language. Keep it under 4 KiB; a reader accepts up to 64 KiB. dreamd rejects an append whose whole serialized line exceeds 4096 bytes (HTTP 413). |
 | `pain` / `importance` | number | 0.0–10.0 each. Roughly: routine success ≈ 2, recoverable failure ≈ 5, hard failure ≈ 7, security-relevant ≈ 8–10. |
 | `pinned` | boolean | `false` unless the event must survive pruning. Do not unset a `true` another writer set. |
@@ -81,10 +81,10 @@ every cluster event the model drew on. dreamd pins every cited event.
 The opening tag carries `id` (the exemplar event) and `cluster` (the full
 `skill_action`); the closing tag sits on its own line right after the body. If a
 cycle promotes nothing, `LESSONS.md` is absent — an empty-frontmatter
-placeholder is invalid, and a file left by an earlier cycle is removed. Running
-the cycle twice on identical input produces byte-identical output. In dreamd
-that holds for the deterministic body at a fixed clock: `last_updated` is the
-time the cycle ran, so two runs a second apart differ on that one line.
+placeholder is invalid, and a file left by an earlier cycle is removed. The
+lesson body is a function of the input. `last_updated` is the time the cycle
+ran, so two runs a second apart differ on that line. At a fixed clock the
+deterministic body matches.
 
 ## `personal/` and consent
 

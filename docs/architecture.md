@@ -322,8 +322,8 @@ deterministic-only pairing of select-then-write; the production path is
 dream` (`Command::Dream` in `cli.rs`) and `POST /api/v1/dream`
 (`server/http/router.rs`). **There is no scheduler** — nothing runs unless a
 user or an agent asks for it, so do not read "nightly cycle" into any part of
-this design. `--auto` is a hidden flag that still exits 2 with a "not yet
-supported" message. `--dry` previews: it prints the `LESSONS.md` the cycle
+this design. `--auto` is a hidden flag that exits 2. Auto mode is not
+supported. `--dry` previews: it prints the `LESSONS.md` the cycle
 would write and writes nothing, skipping the daemon proxy because a
 `POST /api/v1/dream` is itself a write (AILAB-341). `--no-llm` is forwarded
 through the proxy as a header. `--no-commit` skips the git step **and** the
@@ -530,23 +530,22 @@ summarises both rather than restating them.
 
 ## API stability
 
-**`/api/v1/*` is not a stable interface in v0.1.** Breaking changes to request
-shapes, response shapes, and status codes are acceptable **between v0.1.x
-releases**, provided each one lands with a `CHANGELOG.md` callout. The intent
-is to stabilise the HTTP surface at **v0.2**. Integrators building against v0.1
-should pin an exact version and read the changelog before upgrading. The
-endpoint list — `learn`, `recall`, `preferences`, `health`, `dream`,
-`observability/salience`, and the `migrate` 501 stub — lives in
-[`http-api.md`](http-api.md) and is not duplicated here.
+**`/api/v1` is the HTTP surface that shipped in 1.0.0.** That release did not
+publish a separate stability guarantee for it. Request shapes, response shapes,
+and status codes can still change; each breaking change is called out in
+[`CHANGELOG.md`](../CHANGELOG.md). Pin an exact version and read the changelog
+before upgrading. The endpoint list — `learn`, `recall`, `preferences`,
+`health`, `dream`, `observability/salience`, and the `migrate` 501 stub — lives
+in [`http-api.md`](http-api.md) and is not duplicated here.
 
-**This is the deliberate opposite of the on-disk contract.**
-[`../SPEC.md`](../SPEC.md) freezes the on-disk contract for v0.1: folder
-layout, the episodic node schema (`schema_version` `"1.0.0"`), the salience
-formula, and the dream-cycle output shape — breaking any of those requires SPEC
-v0.2+ and a documented migration path (`SPEC.md` §Versioning). That freeze says
-**nothing about the HTTP API**; SPEC explicitly places transport (stdio, HTTP,
-Unix socket, MCP) out of scope. The durable artifact is the contract; the
-socket is an implementation detail of one reader of it.
+**The on-disk contract is the other promise.**
+[`../SPEC.md`](../SPEC.md) v0.1 freezes folder layout, the episodic node schema
+(`schema_version` `"1.0.0"`), the salience formula, and the dream-cycle output
+shape. Breaking any of those requires SPEC v0.2+ and a documented migration
+path (`SPEC.md` §Versioning). That freeze says nothing about the HTTP API; SPEC
+places transport (stdio, HTTP, Unix socket, MCP) out of scope. The durable
+artifact is the contract; the socket is an implementation detail of one reader
+of it.
 
 The practical consequence: a consumer that reads `.agent/` off disk is
 insulated from everything this section permits. A consumer that speaks HTTP is
@@ -690,7 +689,9 @@ Two layers:
   (`init`, `status`, `doctor`, `dream`, `reset`, `mcp`, bare `--version`, …)
   passes `None` and is console-only on stderr. The gate is
   `cli::wants_daemon_log` (AILAB-184). The reason is the next sentence: the
-  daemon's file is **truncated at startup** — there is no log rotation — so a short-lived one-shot that opened the same path would erase a
+  daemon's file is **truncated at startup** — there is no log rotation — and it
+  is created as mode `0o666` before the process umask, so a typical umask of
+  `022` leaves it `0644`. The socket is `0600`. A short-lived one-shot that opened the same path would erase a
   running daemon's accumulated log while writing nothing of its own into it.
   `mcp` is long-running but excluded too: IDEs spawn several concurrently, and
   they would truncate each other. Written through a non-blocking appender

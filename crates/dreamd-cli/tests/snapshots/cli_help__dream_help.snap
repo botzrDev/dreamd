@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"dream\")"
 ---
-Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
+Run a dream cycle: write LESSONS.md and prune decayed episodic events. Uses a configured LLM, or the deterministic exemplar when there is no key
 
 Usage: dream [OPTIONS]
 
@@ -11,7 +11,7 @@ Options:
           Dry run: print the LESSONS.md this cycle would write, without writing anything. Skips the daemon proxy; --no-commit is ignored
 
       --no-commit
-          Skip the autobiography commit. The cycle still runs and writes to disk; only the git2 commit step is skipped. Useful in CI
+          Skip the git commit and the daemon. The cycle runs in this process. Do not use it while dreamd watch is serving this project
 
       --no-llm
           Force deterministic mode even when an API key is present

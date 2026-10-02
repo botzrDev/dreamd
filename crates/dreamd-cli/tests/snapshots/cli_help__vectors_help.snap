@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"vectors\")"
 ---
-Download the optional embedding model (BZR-181). Recall is unchanged.
+Download the optional embedding model. Recall is unchanged.
 
 The default binary is built without the `vectors` feature: `enable` says so and exits 2. A build with `--features vectors` downloads BAAI/bge-small-en-v1.5 into the daemon home (~/.agent/models).
 

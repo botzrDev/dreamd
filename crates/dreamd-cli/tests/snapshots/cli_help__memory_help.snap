@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"memory\")"
 ---
-Name memory snapshots as branches and check them out (BZR-150).
+Name memory snapshots as branches and check them out.
 
 Refs live under .agent/.dreamd/branches/. Checkout replaces the live memory files and refuses while `dreamd watch` is running.
 

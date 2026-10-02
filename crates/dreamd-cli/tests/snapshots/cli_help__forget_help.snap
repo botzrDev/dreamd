@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"forget\")"
 ---
-Remove one episodic event and the lesson state that names it (BZR-151).
+Remove one episodic event and the lesson state that names it.
 
 Stop a live `dreamd watch` first; the command refuses while the daemon is running.
 

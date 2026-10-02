@@ -79,9 +79,7 @@ redaction = false
 | Value | Meaning |
 |---|---|
 | `manual` | Dream cycles run only when invoked (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. |
-| `auto` | Not supported in 1.0.0. `dreamd watch` and `dreamd mcp` exit 1 if this value is set, `dreamd dream` exits 2, and `dreamd doctor` prints a `WARNING` on its `dream_cycle_mode:` line. `dreamd mcp --manual-only` overrides the config value for that one server. |
-
-The error text these commands print still says "not supported at v0.1" and "ships at v0.1.1"; that wording is stale. Auto mode is not in 1.0.0.
+| `auto` | Not supported. `dreamd watch` and `dreamd mcp` exit 1 if this value is set, `dreamd dream --auto` exits 2, and `dreamd doctor` prints a `WARNING` on its `dream_cycle_mode:` line. `dreamd mcp --manual-only` overrides the config value for that one server. |
 
 ---
 

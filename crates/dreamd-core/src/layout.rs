@@ -399,7 +399,7 @@ pub const GITIGNORE_SNIPPET: &str = "/.agent/.dreamd/\n";
 /// Byte-exact contents of `working/WORKSPACE.md` as scaffolded by `dreamd init`
 /// and re-written by `dreamd reset workspace` (DR-105 / DR-113). One definition
 /// of "fresh workspace" — reset equals init for this file.
-pub const DEFAULT_WORKSPACE_MD: &str = "Reserved for agent scratch state. The dream cycle does not currently read or write this file. See ROADMAP.md for v0.2 plans.\n";
+pub const DEFAULT_WORKSPACE_MD: &str = "Reserved for agent scratch state. The dream cycle does not read or write this file.\n";
 
 #[cfg(test)]
 mod tests {

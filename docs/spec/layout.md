@@ -27,7 +27,9 @@ promotes a cluster writes `semantic/LESSONS.md` and, beside it,
 leaves to the implementation. `personal/` starts empty; dreamd reads
 `personal/PREFERENCES.md` for `GET /api/v1/preferences` if you create it. If
 startup recovery ever finds a malformed line in the log, it moves that line to
-`episodic/.corrupt-<YYYY-MM-DD>.jsonl` beside it.
+`episodic/.corrupt-<YYYY-MM-DD>.jsonl` beside it. That quarantine file, like
+`semantic/recurrence_counts.json`, sits in the committed tree. `dreamd init`
+gitignores `/.agent/.dreamd/` only.
 
 All four are plain UTF-8 text. `personal/` is the one directory with a hard
 privacy rule attached: its contents MUST NOT reach any LLM, local or remote,
@@ -40,7 +42,8 @@ exactly the one cycle it is passed to and is never persisted.
 
 An implementation may keep indexes, snapshots, and write-ahead logs under a
 hidden subfolder named for itself — `.<impl>/` — and that state MUST be
-gitignored. dreamd uses `<project>/.agent/.dreamd/`, and `dreamd init` writes
+gitignored. The recurrence sidecar and the quarantine files are not in that
+folder. dreamd uses `<project>/.agent/.dreamd/`, and `dreamd init` writes
 the ignore rule (`/.agent/.dreamd/`) for you:
 
 ```
@@ -99,8 +102,9 @@ would let a repo's git history leak the auth token. `dreamd service uninstall
 ## dreamd's extras
 
 Everything dreamd adds beyond the four directories is either under the hidden
-`.dreamd/` folder above or is the one checked-in sidecar,
-`semantic/recurrence_counts.json`. None of it is part of the spec's required
+`.dreamd/` folder above or is a checked-in sidecar:
+`semantic/recurrence_counts.json`, and after recovery
+`episodic/.corrupt-<YYYY-MM-DD>.jsonl`. None of it is part of the spec's required
 layout, a second implementation is free to ignore all of it, and a conformance
 claim must not depend on it.
 

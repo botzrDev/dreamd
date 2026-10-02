@@ -8,14 +8,14 @@ Usage: dreamd [COMMAND]
 
 Commands:
   archive         Maintain the on-disk memory log. Today: unpin entries with --force-unpin
-  blame           Show which stored memories drove a query's recall ranking (BZR-193)
+  blame           Show which stored memories drove a query's recall ranking
   doctor          Run health checks and print status (dream-cycle mode, etc.)
-  dream           Run the deterministic dream cycle: promote top cluster to LESSONS.md, prune decayed episodic events
-  forget          Remove one episodic event and the lesson state that names it (BZR-151)
-  init            Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor
+  dream           Run a dream cycle: write LESSONS.md and prune decayed episodic events. Uses a configured LLM, or the deterministic exemplar when there is no key
+  forget          Remove one episodic event and the lesson state that names it
+  init            Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged and is not registered
   mcp             Start the MCP server (bridges to daemon if running, otherwise in-process)
-  memory          Name memory snapshots as branches and check them out (BZR-150)
-  migrate         Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
+  memory          Name memory snapshots as branches and check them out
+  migrate         Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no-op
   recall          Search stored memories by query, ranked by relevance and importance (markdown table)
   score           List the top-N stored memories by importance, without a search query
   salience-drift  Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago
@@ -26,7 +26,7 @@ Commands:
   uninstall       Stop local dreamd servers, unregister this project, and clear caches
   update          Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
   watch           Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
-  vectors         Download the optional embedding model (BZR-181). Recall is unchanged
+  vectors         Download the optional embedding model. Recall is unchanged
   version         Print structured version information (semver, commit, build date, target, schema)
   help            Print this message or the help of the given subcommand(s)
 

@@ -40,12 +40,11 @@ pub struct DreamArgs {
     /// anything. Skips the daemon proxy; --no-commit is ignored.
     #[arg(long)]
     pub dry: bool,
-    /// Schedule automatic dream cycles.
-    /// Not yet supported at v0.1; ships v0.1.1.
+    /// Not supported. Cycles run only when invoked.
     #[arg(long, hide = true)]
     pub auto: bool,
-    /// Skip the autobiography commit. The cycle still runs and writes to disk;
-    /// only the git2 commit step is skipped. Useful in CI.
+    /// Skip the git commit and the daemon. The cycle runs in this process.
+    /// Do not use it while dreamd watch is serving this project.
     #[arg(long)]
     pub no_commit: bool,
     /// Force deterministic mode even when an API key is present.
@@ -129,28 +128,30 @@ pub struct DoctorArgs {
 pub enum Command {
     /// Maintain the on-disk memory log. Today: unpin entries with --force-unpin.
     Archive(ArchiveArgs),
-    /// Show which stored memories drove a query's recall ranking (BZR-193).
+    /// Show which stored memories drove a query's recall ranking.
     Blame(BlameArgs),
     /// Run health checks and print status (dream-cycle mode, etc.).
     Doctor(DoctorArgs),
-    /// Run the deterministic dream cycle: promote top cluster to LESSONS.md,
-    /// prune decayed episodic events.
+    /// Run a dream cycle: write LESSONS.md and prune decayed episodic events.
+    /// Uses a configured LLM, or the deterministic exemplar when there is no key.
     Dream(DreamArgs),
-    /// Remove one episodic event and the lesson state that names it (BZR-151).
+    /// Remove one episodic event and the lesson state that names it.
     ///
     /// Stop a live `dreamd watch` first; the command refuses while the daemon
     /// is running.
     Forget(ForgetArgs),
-    /// Scaffold per-project .agent/ store and register it with the daemon. Requires a project-root sentinel in cwd or an ancestor.
+    /// Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged and is not registered.
+    ///
+    /// Requires a project-root sentinel in cwd or an ancestor.
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),
-    /// Name memory snapshots as branches and check them out (BZR-150).
+    /// Name memory snapshots as branches and check them out.
     ///
     /// Refs live under .agent/.dreamd/branches/. Checkout replaces the live
     /// memory files and refuses while `dreamd watch` is running.
     Memory(MemoryArgs),
-    /// Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op).
+    /// Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no-op.
     Migrate(MigrateArgs),
     /// Search stored memories by query, ranked by relevance and importance (markdown table).
     Recall(RecallArgs),
@@ -180,7 +181,7 @@ pub enum Command {
     Update(UpdateArgs),
     /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
     Watch(WatchArgs),
-    /// Download the optional embedding model (BZR-181). Recall is unchanged.
+    /// Download the optional embedding model. Recall is unchanged.
     ///
     /// The default binary is built without the `vectors` feature: `enable`
     /// says so and exits 2. A build with `--features vectors` downloads
@@ -606,9 +607,9 @@ pub fn render_man_page() -> std::io::Result<Vec<u8>> {
 /// unit-tested without spawning a subprocess.
 pub fn check_dream_mode(config: &Config) -> Result<(), String> {
     if config.dream_cycle_mode == DreamCycleMode::Auto {
-        return Err("dream_cycle_mode = auto is not supported at v0.1; \
+        return Err("dream_cycle_mode = auto is not supported; \
              set dream_cycle_mode = \"manual\" in config.toml. \
-             Auto mode ships at v0.1.1."
+             Cycles run only when you invoke them."
             .to_string());
     }
     Ok(())
@@ -893,9 +894,9 @@ fn run_dream(args: DreamArgs) -> ExitCode {
     }
     if args.auto {
         eprintln!(
-            "dreamd: --auto is not yet supported at v0.1; \
-             set dream_cycle_mode = \"manual\" in config.toml. \
-             Auto mode ships at v0.1.1."
+            "dreamd: --auto is not supported. \
+             Set dream_cycle_mode = \"manual\" in config.toml. \
+             Cycles run only when you invoke them."
         );
         return ExitCode::from(2);
     }

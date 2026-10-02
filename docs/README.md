@@ -55,7 +55,7 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | Document | Audience | Purpose |
 |---|---|---|
 | [marketing.md](./marketing.md) | Evaluators, press | Product story, positioning, the "moment it earns its name" demo |
-| [compared.md](./compared.md) | Evaluators, HN | Comparison vs Mem0 / Letta Code / MCP-ref / Cline Memory Bank (written as of v0.1.1) |
+| [compared.md](./compared.md) | Evaluators, HN | Comparison vs Mem0 / Letta Code / MCP-ref / Cline Memory Bank (dreamd column re-checked for 1.0.0; competitor cells dated in the table) |
 | [../ROADMAP.md](../ROADMAP.md) | Evaluators, contributors | Direction: what shipped and what is next, without dates |
 
 ## Architecture deep-dives

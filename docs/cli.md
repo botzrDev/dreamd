@@ -10,7 +10,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 
 | Command | What it does | Detail |
 |---|---|---|
-| `init` | Scaffold `.agent/` and register the project | [GUIDE.md](../GUIDE.md) §1 |
+| `init` | Scaffold `.agent/` and register the project. An existing `.agent/` is left as-is and is not registered | [GUIDE.md](../GUIDE.md) §1 |
 | `setup` | `init`, plus harness MCP config and next steps | [below](#setup) |
 | `watch` | Foreground daemon until SIGINT/SIGTERM | [http-api.md](./http-api.md), [install.md](./install.md) |
 | `mcp` | MCP server, stdio by default | [mcp-transports.md](./mcp-transports.md) |

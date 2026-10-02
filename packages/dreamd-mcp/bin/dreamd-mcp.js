@@ -291,9 +291,10 @@ async function main() {
   if (!target) {
     if (process.platform === 'win32') {
       process.stderr.write(
-        `dreamd does not support native Windows in v0.1 (planned for v0.1.1).\n` +
-          `Use WSL2 (Ubuntu) or a Linux/macOS host instead.\n` +
-          `Prebuilt binaries ship for linux-x64, darwin-x64, and darwin-arm64 only.\n`
+        `This npm package has no Windows binary.\n` +
+          `A dreamd.exe built from source, or taken from a GitHub release windows-x86_64.tar.gz when that release has one, can watch and learn over loopback.\n` +
+          `The dream cycle and the Tantivy index stay Unix-only. For the full product, use WSL2 or a Linux/macOS host.\n` +
+          `Prebuilt shim binaries ship for linux-x64, darwin-x64, and darwin-arm64 only.\n`
       );
     } else {
       process.stderr.write(

@@ -95,8 +95,8 @@ relearning. These names are locked; do not rename them or document aliases. See
 
 `append_node` requires a `skill_action` cluster key of the form
 `language::domain::specific` — `[a-z0-9_]` segments joined by `::`, lowercase,
-≤ 256 bytes. Dots, hyphens, and slashes are rejected; the dream cycle clusters on
-exact match.
+≤ 256 bytes. Dots, hyphens, and slashes are rejected. The dream cycle counts
+every `::` prefix and promotes the deepest one that clears the threshold.
 
 - Good: `rust::error_handling::axum_rejection`
 - Bad: `rust/error-handling` (slashes and hyphens are rejected)

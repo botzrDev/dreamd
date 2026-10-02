@@ -206,9 +206,9 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ---
 
-## WasTrue benchmark (Oct 2026)
+## WasTrue benchmark
 
-A separate, reproducible eval measuring whether memory systems correctly update superseded facts. dreamd is one row in the table, published regardless of placement. Conflict of interest is disclosed; configs use each maintainer's documented defaults; raw outputs are committed for audit. Methodology: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
+A separate eval of whether memory systems update a fact that later changes. The harness in this repository is a scaffold, and a results table is not published here. Publishing that table is listed under Next above. Methodology for the scaffold: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
 
 ---
 

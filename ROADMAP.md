@@ -15,11 +15,12 @@ hit first. The day-to-day view lives in the issue tracker; this is the shape.
 - **MCP server** (`search_nodes` / `append_node`) plus an **HTTP-over-UDS API**
   for direct integration.
 - **Deterministic dream cycle** — clustering and consolidation of raw episodic
-  events into promoted lessons, reproducible from the same inputs.
-- **Crash-safe durable writes** — atomic append with torn-tail recovery, on
-  Linux and macOS.
-- Every single-repo feature is **free and Apache-2.0**. If you only ever run out
-  of one repo, you never pay.
+  events into promoted lessons. `last_updated` in `LESSONS.md` is the time of
+  that run, so two runs differ by that timestamp.
+- **Crash-safe durable writes** — a single writer appends each JSONL line and
+  recovers a torn tail, on Linux and macOS.
+- The core is **Apache-2.0** and self-hosted. Premium features may ship later.
+  Running one repo does not require an account.
 
 ## Shipped — v0.1.1
 

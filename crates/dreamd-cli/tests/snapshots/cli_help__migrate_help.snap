@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"migrate\")"
 ---
-Migrate the durable store between episodic schema versions (v0.1: 1.0.0 → 1.0.0 no-op)
+Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no-op
 
 Usage: migrate --from <FROM> --to <TO>
 

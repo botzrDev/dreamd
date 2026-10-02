@@ -6,7 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-01
+### Fixed
+
+- Public pages and a few printed strings now match the 1.0.0 tree. `SPEC.md` describes prefix clustering, a cycle timestamp on `last_updated`, and single-writer append. The HTTP stability note no longer points at v0.2. Windows health is described as a watermark read. The WasTrue section is a scaffold. `dream`, `init`, and `migrate` help, the auto-mode errors, the npm Windows error, and the `WORKSPACE.md` scaffold line no longer cite v0.1 or v0.2.
+
+## [1.0.0] - 2026-10-02
 
 ### Highlights
 

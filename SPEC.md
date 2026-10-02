@@ -1,6 +1,6 @@
 # `.agent/` — Portable Memory for AI Coding Agents
 
-**Status:** v0.1 · 2026-08-09
+**Status:** v0.1 · 2026-10-02
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
@@ -59,8 +59,8 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 | `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1. |
 | `id` | string | MUST be lexically sortable by creation time. ULID and UUIDv7 are the recommended formats. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
-| `source_harness` | string | Lowercase ASCII identifier matching `[a-z0-9_-]+`. Implementations MAY use any value; the following are reserved and MUST resolve to their canonical owner: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. New reserved values are added via RFC. |
-| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The dream cycle clusters on exact match. |
+| `source_harness` | string | Writers SHOULD send a lowercase ASCII identifier matching `[a-z0-9_-]+`. These names are reserved for their owners by convention: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. The reference implementation stores the string it is given. It does not check the pattern and it does not map a name to an owner. |
+| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation counts every `::` prefix and promotes the deepest prefix whose recurrence meets the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. Each event is claimed by one promoted cluster. |
 | `content` | string | Lesson body. Markdown allowed. Writers SHOULD keep `content` under 4 KiB; readers MUST accept up to 64 KiB. |
 | `pain` | number | 0.0–10.0. Severity of the moment that produced this entry. See rubric below. |
 | `importance` | number | 0.0–10.0. Strategic weight. See rubric below. |
@@ -70,7 +70,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `client_dedup_key` | string | Idempotency key; implementations MAY use it to drop duplicate appends. |
+| `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop duplicate appends. The reference implementation accepts it per request (MCP `append_node`, or the `X-Client-Dedup-Key` header) and does not write it into the JSONL line. The drop lasts for the life of that writer process. |
 
 `recurrence` is **not** an event field. It is a per-cluster count (events sharing a `skill_action`) computed by the dream cycle and stored separately by the implementation.
 
@@ -108,16 +108,15 @@ The *dream cycle* is the consolidation pass that turns `episodic/` into `semanti
 
 ```mermaid
 flowchart TD
-    A[Read AGENT_LEARNINGS.jsonl] --> B[Cluster by skill_action]
-    B --> C{recurrence ≥ threshold?}
-    C -->|yes| D[Promote to LESSONS.md]
-    C -->|no| E[Skip promotion]
-    D --> F[Pin exemplar events]
-    E --> G[Decay pruner]
-    F --> G
+    A[Read AGENT_LEARNINGS.jsonl] --> B[Cluster by skill_action prefix]
+    B --> R[Write recurrence_counts.json]
+    R --> C{deepest prefix recurrence ≥ threshold?}
+    C -->|yes| D[Promote to LESSONS.md and pin exemplars]
+    C -->|no| E[Remove LESSONS.md if present]
+    D --> G[Decay pruner]
+    E --> G
     G --> H[Archive stale unpinned to snapshots/]
-    H --> I[Update recurrence_counts.json]
-    I --> J[WAL commit + cleanup]
+    H --> J[WAL commit + cleanup]
 ```
 
 **Promotion.** A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
@@ -141,13 +140,13 @@ The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the
 
 **Distillation modes.** An implementation MAY use an LLM to author the lesson body. An implementation MUST also support a deterministic, network-free fallback. In deterministic mode the reference implementation writes **one** lesson: the `content` of the exemplar from the highest-`salience_sum` promoted cluster. The exemplar is the event with highest query-time salience, then highest `pain`, then highest `importance`, then lowest `id`. Implementations MAY use richer deterministic strategies (extractive summarization, template merging) provided they remain pure functions of the input.
 
-**Idempotency.** Running the cycle twice on identical input — including `pinned` state set by previous runs — MUST produce byte-identical `LESSONS.md` output. Two consecutive no-promotion cycles over the same input MUST likewise agree: the first leaves the file absent (removing one if present) and the second is a no-op.
+**Idempotency.** The lesson body, `cluster_key`, `prompt_version`, and lesson id are a function of the input, including `pinned` state set by previous runs. `last_updated` is the timestamp of the cycle run, so two runs are not byte-identical. At a fixed clock the deterministic body matches. Two consecutive no-promotion cycles over the same input MUST agree on absence: the first leaves the file absent (removing one if present) and the second is a no-op.
 
-**Pruning.** The dream cycle MAY prune unpinned episodic events whose salience falls below an implementation-defined threshold. Pruned events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted, retaining the ability to reverse a prune. Pinned events MUST NOT be pruned.
+**Pruning.** An implementation MAY archive unpinned episodic events. The reference implementation archives an event when it is unpinned and older than 90 days. It also evaluates a salience floor of 2.0, which does not currently spare any event the age gate would archive, because past 90 days the recency term alone sits below that floor. Archived events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted. Pinned events MUST NOT be pruned.
 
 ## Concurrency and file operations
 
-Writers MUST use OS-atomic append when writing to `episodic/AGENT_LEARNINGS.jsonl` (`O_APPEND` on POSIX; equivalent atomic-append behavior on Windows). Each JSONL line MUST be written in a single append call and MUST end with a single `\n`.
+Each JSONL line MUST be written in a single call and MUST end with a single `\n`. The reference implementation is single-writer: it opens the file read/write, seeks to the end, and does not use `O_APPEND`, so torn-tail recovery can truncate. A second writer is outside that contract. An implementation that allows concurrent appends MUST use OS-atomic append (`O_APPEND` on POSIX, or the equivalent on Windows).
 
 The spec does not require file locking. Implementations that need stronger guarantees MAY layer locking on top, but lock files MUST live under the implementation's hidden subfolder (`.<impl>/`) and MUST NOT block readers that ignore them.
 

@@ -73,9 +73,12 @@ JSONL append never touches `write_atomic` — so learnings do land durably in
 returns **500** naming the reason (`dream cycle is unavailable on this platform:
 atomic file replacement is unsupported`), because consolidation, decay, the
 `LESSONS.md` rewrite and the recurrence sidecar all replace files atomically.
-`GET /api/v1/recall` and `GET /api/v1/health` are index-backed and can fail for
-the same reason. A valid token gets you past the auth layer; it is not a promise
-of a `200`.
+`GET /api/v1/recall` opens the index and returns **500** when that open fails.
+`GET /api/v1/health` does not open Tantivy. It compares the JSONL tail to
+`index_progress.json` and returns **200** when that read succeeds. `stale` is
+true when the log has events past the watermark, including when the watermark
+file is absent and the log is not empty. A valid token gets you past the auth
+layer. A `200` from health is not a promise that recall works.
 
 See [http-api.md](./http-api.md) for the transport tables, the exact middleware
 verdicts, and a PowerShell smoke test that reads the port and the token back out

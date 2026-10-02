@@ -1,6 +1,6 @@
 # dreamd — Agent Memory Skill
 
-**Works with:** Claude Code, Cursor, Cline, OpenCode, Codex CLI, Gemini CLI, Copilot agent mode, Roo Code, Goose — any MCP-aware harness.
+**Works with:** Claude Code, Cursor, and Cline have adapter docs in this repo. Any MCP client can call the two tools below.
 
 dreamd gives you persistent memory across every coding agent you use. What Claude Code learns in one session, Cursor already knows the next. Memory lives in `.agent/` in your repo, checked into git, readable as plain text.
 
@@ -29,7 +29,7 @@ A node you just appended becomes searchable after the next index commit (up to 5
 | `query` | string | yes      | —       |
 | `k`     | number | no       | 5       |
 
-Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter.
+Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Use plain words. A colon is query syntax, and a `skill_action` pasted as the query (for example `rust::error`) fails the search.
 
 Each result carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can see each hit's cluster and which tool taught it.
 
@@ -77,21 +77,20 @@ Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d
 
 ## `source_harness` values
 
-`source_harness` is a free-form string — the server validates presence only (omitting it causes a deserialization error). The values below are the naming convention used by dreamd. Use them consistently so the dream cycle clusters correctly.
+`source_harness` is a free-form string. The server stores what you send and checks only that the field is present (omitting it causes a deserialization error). Clustering uses `skill_action`, not this field. The names below are the convention. Adapter docs in this repo exist for Claude Code, Cursor, and Cline. Aider has HTTP notes. The other rows are names you may send.
 
-| Agent         | Value         | Status   |
-| ------------- | ------------- | -------- |
-| Claude Code   | `claude-code` | verified |
-| Cursor        | `cursor`      | expected |
-| Cline         | `cline`       | expected |
-| OpenCode      | `opencode`    | expected |
-| Codex CLI     | `codex`       | expected |
-| Gemini CLI    | `gemini-cli`  | expected |
-| Copilot agent | `copilot`     | expected |
-| Roo Code      | `roo-code`    | expected |
-| Goose         | `goose`       | expected |
-
-"Verified" = tested end-to-end with 20/20 compliant keys. "Expected" = should work per MCP spec; not yet independently validated.
+| Agent         | Value         | In this repo |
+| ------------- | ------------- | ------------ |
+| Claude Code   | `claude-code` | adapter      |
+| Cursor        | `cursor`      | adapter      |
+| Cline         | `cline`       | adapter      |
+| Aider         | `aider`       | HTTP notes   |
+| OpenCode      | `opencode`    | name only    |
+| Codex CLI     | `codex`       | name only    |
+| Gemini CLI    | `gemini-cli`  | name only    |
+| Copilot agent | `copilot`     | name only    |
+| Roo Code      | `roo-code`    | name only    |
+| Goose         | `goose`       | name only    |
 
 ---
 
