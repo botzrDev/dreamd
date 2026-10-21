@@ -6,12 +6,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-21
+
+### Security
+
+- Dependency updates for new RustSec advisories, `Cargo.lock` only: `rustls` 0.23.46 (RUSTSEC-2026-0346, 0347, 0348, 0349), `rustls-webpki` 0.103.16 (RUSTSEC-2026-0382), `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0383), `webpki-roots` 1.0.10 (RUSTSEC-2026-0381), `quinn-proto` 0.11.19 (RUSTSEC-2026-0338, 0340, 0343).
+
+### Changed
+
+- `dreamd setup` ends its success card with one line naming the repository: `Source, docs, issues: https://github.com/botzrDev/dreamd`.
+- The npm package `dreamd-mcp` describes what dreamd does instead of calling itself a shim, adds `keywords`, `homepage` and `bugs`, and its README opens with a repository link.
+- The README's sample transcript is replaced by a live recording (`docs/assets/demo.gif`, tape in `docs/assets/demo.tape`): Claude Code saves a lesson, OpenCode recalls it. The dreamOS pointer paragraph moved to a "Where dreamd fits" section near the end, text unchanged.
+
 ### Fixed
 
 - Public pages and a few printed strings now match the 1.0.0 tree. `SPEC.md` describes prefix clustering, a cycle timestamp on `last_updated`, and single-writer append. The HTTP stability note no longer points at v0.2. Windows health is described as a watermark read. The WasTrue section is a scaffold. `dream`, `init`, and `migrate` help, the auto-mode errors, the npm Windows error, and the `WORKSPACE.md` scaffold line no longer cite v0.1 or v0.2.
 - `dreamd watch` prints the same auto-mode sentence as `dreamd dream`. The config template comment matches `docs/configuration.md`. `dreamd mcp` on Windows says to start `dreamd watch` first. `dreamd uninstall` and `dreamd update` on Windows say they do not stop the daemon. `SPEC.md` says the reference reader stores `evt_` plus 26 Crockford characters and skips other id spellings, including UUIDv7.
 - Windows `dreamd init` registers the project: `registry.toml` is locked with `File::lock` and replaced by a temp-file rename. `io::write_atomic` stays unsupported, so the dream cycle and the Tantivy index still do not run. `dreamd memory checkout` and `bisect` refuse a live Windows daemon (a loopback connect to `server.json`) and still refuse a Unix socket file that merely exists.
-- The published GitHub `v1.0.0` binaries and the npm `dreamd-mcp@1.0.0` tarball still print the older v0.1 / v0.2 sentences (`watch` auto mode, `--auto`, `WORKSPACE.md`, the Windows MCP and shim errors). This tree does not rebuild those artifacts.
+- The GitHub `v1.0.0` binaries and the npm `dreamd-mcp@1.0.0` tarball still print the older v0.1 / v0.2 sentences (`watch` auto mode, `--auto`, `WORKSPACE.md`, the Windows MCP and shim errors). The 1.0.1 binaries and npm package are built from this tree and carry the corrected strings.
 
 ## [1.0.0] - 2026-10-02
 
@@ -285,7 +297,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/botzrDev/dreamd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/botzrDev/dreamd/compare/v0.1.1...v1.0.0
 [0.2.0-alpha.1]: https://github.com/botzrDev/dreamd/compare/v0.1.1...2e34181
 [0.1.1]: https://github.com/botzrDev/dreamd/compare/v0.1.0...v0.1.1
