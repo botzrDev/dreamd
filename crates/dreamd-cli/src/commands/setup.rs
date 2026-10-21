@@ -755,6 +755,13 @@ fn write_success_card(
             "        Re-run with --no-write-mcp to skip config writes entirely."
         )?;
     }
+    // npx users never pass through GitHub; this is the one place the CLI
+    // names where the source lives. Information only, no ask.
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  Source, docs, issues: https://github.com/botzrDev/dreamd"
+    )?;
     Ok(())
 }
 
@@ -1021,7 +1028,9 @@ mod tests {
              You should see it call search_nodes.\n\
              \n  \
              Undo: remove the \"dreamd\" block from .mcp.json.\n        \
-             Re-run with --no-write-mcp to skip config writes entirely.\n",
+             Re-run with --no-write-mcp to skip config writes entirely.\n\
+             \n  \
+             Source, docs, issues: https://github.com/botzrDev/dreamd\n",
             "AILAB-548 §1 card copy is frozen"
         );
     }
@@ -1042,7 +1051,9 @@ mod tests {
              {\"mcpServers\":{\"dreamd\":{\"command\":\"npx\",\"args\":[\"-y\",\"dreamd-mcp\"]}}}\n        \
              then reload your harness and ask your agent:\n        \
              \"What has dreamd remembered about this codebase?\"\n        \
-             You should see it call search_nodes.\n",
+             You should see it call search_nodes.\n\
+             \n  \
+             Source, docs, issues: https://github.com/botzrDev/dreamd\n",
             "AILAB-548 §1 card copy is frozen"
         );
     }

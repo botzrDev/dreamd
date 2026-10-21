@@ -2,7 +2,25 @@
   "name": "dreamd-mcp",
   "mcpName": "io.github.botzrDev/dreamd",
   "version": "1.0.0",
-  "description": "npx shim for dreamd MCP server — downloads the right prebuilt Rust binary for your OS/arch",
+  "description": "Local-first memory for AI coding agents. One .agent/ folder shared by Claude Code, Cursor and Cline over MCP. Plain files, no vector DB.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "memory",
+    "agent-memory",
+    "ai-agents",
+    "coding-agents",
+    "claude-code",
+    "cursor",
+    "cline",
+    "local-first",
+    "llm"
+  ],
+  "homepage": "https://github.com/botzrDev/dreamd#readme",
+  "bugs": {
+    "url": "https://github.com/botzrDev/dreamd/issues"
+  },
   "bin": {
     "dreamd-mcp": "bin/dreamd-mcp.js"
   },
