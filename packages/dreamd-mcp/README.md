@@ -1,6 +1,10 @@
 # dreamd-mcp
 
-Node shim for the [dreamd](https://github.com/botzrDev/dreamd) MCP server. Downloads the right prebuilt binary for your OS/arch and starts the MCP server over stdio.
+Local-first memory for AI coding agents. One `.agent/` folder in your repo, shared by Claude Code, Cursor and Cline over MCP. What one agent learns, the next already knows. Plain files you can `cat`, `grep` and `git diff`.
+
+Source, docs and issues: **[github.com/botzrDev/dreamd](https://github.com/botzrDev/dreamd)**
+
+This package is the Node shim for the dreamd MCP server. It downloads the right prebuilt binary for your OS/arch and starts the MCP server over stdio.
 
 ## Install
 
