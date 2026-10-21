@@ -24,19 +24,9 @@ npx -y dreamd-mcp         # MCP server (stdio) — what the harness spawns
 
 ## The moment it earns its name
 
-```text
-~/project $ npx -y dreamd-mcp setup
+![Claude Code saves a lesson to dreamd; OpenCode, in a fresh session, finds it with search_nodes](docs/assets/demo.gif)
 
-# Claude Code, Tuesday:
-you   > axum keeps blowing up when I unwrap in route handlers
-claude> filed under rust::error_handling::axum_rejection
-
-# Cursor, Friday, fresh session:
-you   > why is this build failing?
-cursor> You're unwrapping in a route handler. dreamd has a
-        lesson from Tuesday: axum needs IntoResponse on
-        custom Error types. Try `?` and a typed error.
-```
+Recorded live, sped up 1.5x: Claude Code writes the lesson, OpenCode reads it back through the same `.agent/` folder. Tape: [docs/assets/demo.tape](docs/assets/demo.tape).
 
 No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
 
