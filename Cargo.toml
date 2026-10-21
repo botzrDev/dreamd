@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# Stable release. Recall is still BM25 × salience. This tag is 1.0.0.
-version = "1.0.0"
+# Patch release: dependency security fixes and npm/README discoverability. Recall is still BM25 × salience. This tag is 1.0.1.
+version = "1.0.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"
