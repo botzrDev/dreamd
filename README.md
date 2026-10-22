@@ -82,7 +82,7 @@ npx -y dreamd-mcp doctor
 
 The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` if you want the `dreamd` binary. The shim forwards only some subcommands (`npx -y dreamd-mcp --help` lists them); `recall`, `score`, `status`, `archive`, and `migrate` need the `dreamd` binary.
 
-Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md)
+Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md) · [Cline](./adapters/cline/README.md)
 
 ---
 
