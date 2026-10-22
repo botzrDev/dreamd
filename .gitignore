@@ -24,3 +24,6 @@ packages/dreamd-mcp/package-lock.json
 __pycache__/
 .ruff_cache/
 /.agent/.dreamd/
+
+# mcp-publisher login tokens (written next to server.json; never commit)
+.mcpregistry_*_token

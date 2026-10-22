@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.0.1-brightgreen.svg)](#status)
 
 **The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
@@ -151,6 +151,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | **v0.1.0** (2026-08-05) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
 | **v0.1.1** (2026-09-14) | LLM dream cycle, `LESSONS.md` semantic layer (still BM25 × salience, not embeddings), Windows watch+learn, `dreamd service` on Linux / macOS / Windows |
 | **v1.0.0** (2026-10-02) | Stable release of the tree since v0.1.1: `dreamd memory` branches / diff / bisect, provenance ledger + `doctor --provenance`, `dreamd forget`, `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations on HTTP recall. Recall is still BM25 × salience |
+| **v1.0.1** (2026-10-21) | Patch: dependency security fixes (`rustls`, `rustls-webpki`, `webpki-roots`, `quinn-proto`) and printed strings that match the 1.0.0 tree. No recall change |
 | **Next** | Windows atomic writes (dream cycle + index), vector recall, WasTrue benchmark publish |
 
 ---
@@ -182,7 +183,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v1.0.0 is released** (GitHub tag `v1.0.0`, 2026-10-02; npm `dreamd-mcp` 1.0.0 on `latest` and `next`). The tag adds no behavior of its own ([CHANGELOG.md](./CHANGELOG.md)). The MCP Registry entry `io.github.botzrDev/dreamd` is a separate human publish ([RELEASING.md](./RELEASING.md)). Commands marked "new in 1.0.0" above need 1.0.0 or later. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `blame`, `score`, `salience-drift`, `memory`, `forget`, `archive`, `migrate`, `reset workspace`, `vectors`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). `vectors enable` exits 2 on the default build and does not change recall. Linux, macOS, and partial Windows (watch + learn; no dream cycle or index). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
+**v1.0.1 is released** (GitHub tag `v1.0.1`, 2026-10-21; npm `dreamd-mcp` 1.0.1 on `latest` and `next`). It is a patch release: dependency security fixes and corrected printed strings, no new commands ([CHANGELOG.md](./CHANGELOG.md)). The MCP Registry entry `io.github.botzrDev/dreamd` is a separate human publish ([RELEASING.md](./RELEASING.md)). Commands marked "new in 1.0.0" above need 1.0.0 or later. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `blame`, `score`, `salience-drift`, `memory`, `forget`, `archive`, `migrate`, `reset workspace`, `vectors`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). `vectors enable` exits 2 on the default build and does not change recall. Linux, macOS, and partial Windows (watch + learn; no dream cycle or index). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
