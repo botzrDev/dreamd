@@ -5,6 +5,8 @@
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
 [![Status](https://img.shields.io/badge/version-1.0.1-brightgreen.svg)](#status)
 
+[![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
+
 **The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
 
 Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MCP-aware harnesses share it. What one agent learns, the next already knows. You can `cat`, `grep`, and `git diff` every byte. Durable appends go through MCP / the daemon so the writer stays single-writer.
