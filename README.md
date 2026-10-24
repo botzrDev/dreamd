@@ -201,6 +201,12 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 A separate eval of whether memory systems update a fact that later changes. The harness in this repository is a scaffold, and a results table is not published here. Publishing that table is listed under Next above. Methodology for the scaffold: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
 
+## Coding recall oracle
+
+Tokens are whitespace-separated words. Each chunk is packed whole, stopping before the next chunk would exceed the budget. Stuffing keeps the newest distractors. Dreamd is one `dreamd dream --no-llm`, then `k=32` recall packed to the same budget.
+
+`python3 scripts/benchmark/coding_oracle.py` printed dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
+
 ---
 
 ## Platforms

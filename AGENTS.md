@@ -129,7 +129,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-24
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -142,11 +142,53 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
 **Memory location:** `AGENTS.md` (this file) — drift catalog section below, plus the build-order section
 **Main branch:** `main`
-**Linear:** team **Botzr-Research**. Shipped board is project **dreamd-eng** (`P-BZR-1`); it has no open issues. The unfinished spine is **Backlog** on project **R&D** (`P-BZR-79`). Order is the section below.
+**Linear:** team **Botzr-Research**. Live work is project **dreamd-hardening** (`P-BZR-93`, created 2026-10-24); order is the build-order section below. Shipped history is project **dreamd-eng** (`P-BZR-1`, Completed). Project **R&D** (`P-BZR-79`) was canceled and trashed on 2026-10-21; do not file there.
+
+---
+
+## Build order — dreamd-hardening (2026-10-24)
+
+The response to the 2026-10-24 architecture audit of `c241538`. Linear project **dreamd-hardening** (`P-BZR-93`). Each issue is `blockedBy` the one above it. **Do not start a ticket until every ticket above it has landed.** One ticket at a time. The user runs commits. Each ticket's contract is its `assignments/BZR-<n>.v2.md`, written just in time against the live tree; the Linear acceptance criteria are a summary. The PM keeps the plan at `~/.claude/plans/plan-out-the-response-groovy-otter.md`.
+
+Locked 2026-10-24:
+- Recall `recurrence` is the all-time subtree count: live episodic events whose `skill_action` equals the doc's key or extends it with `::`. Promotion stays windowed.
+- Delete library-only code now. Deprecate shipped CLI surfaces in 1.x and remove them at 2.0.
+- `dream --no-commit` against a live writer refuses; it is not proxied.
+- Recurrence moves to a Tantivy `Warmer`; the index schema stays `index/1.3`.
+
+**Milestone 1.0.1 data integrity**
+
+1. **BZR-1230** — store invariant checker (`invariants::check_store`) plus ignored red tests that reproduce the audit defects. Spec: `assignments/BZR-1230.v2.md`.
+2. **BZR-1231** — delete the unsent `MemoryCoordinatorMsg::Forget` path.
+3. **BZR-1232** — project writer lock and one acquisition sequence for every writer (lock → reset stale `in_progress` → WAL recover → index → coordinator). Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` as a second writer, recovery that only watch runs, and idle eviction of the in-process MCP index.
+4. **BZR-1233** — append fd with `O_APPEND`, a stat check around each append, reopen on every cycle exit path, and a monotonic `IdMinter`. `Ord` on `EventId`.
+5. **BZR-1234** — raw-line log rewrites. Unchanged lines stay byte-identical (`x_` fields survive), skipped lines are kept, and the pin pass is a no-op when nothing changes. Decay archive is idempotent.
+6. **BZR-1235** — skip-only open-time recovery. No in-place rewrite and no `.corrupt-*` sidecar. A valid final record without `\n` gets the newline instead of a truncate.
+7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender.
+8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
+9. **BZR-1238** — 1.0.1 release prep. Tag and publish stay human steps.
+
+**Milestone 1.1.0 structure**
+
+10. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
+11. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
+12. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
+13. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
+14. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
+15. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
+16. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
+
+**Milestone 2.0 removal**
+
+17. **BZR-1246** — remove the deprecated surfaces. Not scheduled.
+
+**Not in the order:** **BZR-1247** is a design issue for one runtime topology (MCP host election). It needs the AILAB-210 founder decision first. Do not implement it.
 
 ---
 
 ## Remaining build order — 2026-09-24
+
+**Complete.** Every item below is on `main`. The live order is the dreamd-hardening section above. This section stays as the record of what shipped and where.
 
 Locked 2026-09-24 for the finish race. Re-checked against `origin/main` (`2e34181`) and Linear on 2026-09-30. Items 1–27 are on `origin/main`. Linear marks the late ones Done on **dreamd-eng** (`P-BZR-1`): 158 was already Done; 151, 188, 181, 182, 177, and 157 moved from R&D Backlog to dreamd-eng Done on 2026-09-30. The dreamd issues still Backlog on **R&D** (`P-BZR-79`) are 149, 152, 207, and 210, and they are not claimable. One ticket at a time per agent. The user runs commits. The August 27 queue numbers are not the order. Live issue ids are `BZR-<n>` on team **Botzr-Research**.
 
@@ -588,7 +630,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** dreamd issue ids are `BZR-<n>` on team **Botzr-Research** (same numbers as the retired `AILAB-<n>` ids). Shipped work stays on project **dreamd-eng** (`P-BZR-1`). The unfinished spine is project **R&D** (`P-BZR-79`). There is no team named `Botzr-AI-Labs` or `dreamd-eng`. `list_issues(team: "dreamd-eng")`, `list_issues(team: "Botzr-AI-Labs")`, and `list_issues(project: "dreamd-eng", state: "backlog")` return empty.
 - **Why:** 2026-08-27 look-ahead: querying team `dreamd-eng` found zero issues while the project still held them. 2026-09-24: the team list no longer contains `Botzr-AI-Labs`; the project moved to `Botzr-Research`. 2026-09-26: R&D was created and the open spine (827 through 157, plus 207, 210, 149, 152) was moved onto it. dreamd-eng then has only Done, Canceled, and Duplicate, and its milestone bars read 100% because those issues left. The project description body still says RFC-011 is proposed; BZR-1075 accepted it the same day.
-- **How to apply:** For the next ticket, filter `project: R&D` (id `362958e6-8f75-4493-830a-21f3f8a1ba79` — the name `R&D` matches more than one project). For history, filter `project: dreamd-eng`. Read `BZR-<n>` as the live id. An empty dreamd-eng backlog is the move, not a finished product. Build order is `remaining-build-order-2026-09-24`, not the August queue numbers, and not dreamd-eng milestone progress.
+- **How to apply:** For the next ticket, filter `project: dreamd-hardening` (`P-BZR-93`). R&D (`P-BZR-79`) was canceled and trashed on 2026-10-21; do not file there or read it as the spine. For history, filter `project: dreamd-eng` (Completed). Read `BZR-<n>` as the live id. The build order is the dreamd-hardening section of this file, not the August queue numbers, and not milestone progress.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `remaining-build-order-2026-09-24`
 
 ### ailab-210-ac-is-pre-watch-architecture
@@ -785,7 +827,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### remaining-build-order-2026-09-24
 
-- **Rule:** The finish order is the section `Remaining build order — 2026-09-24` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
+- **Rule:** The 2026-09-24 finish order is complete; the live order is the section `Build order — dreamd-hardening (2026-10-24)` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a Linear **Backlog** status as proof the ticket is unshipped.
 - **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
 - **How to apply:** Claim one ticket from that section. One writer per file. 187 through 146, including the BZR-156 command, are on `main` at or before `13ae1ca`. `provenance::verify` is on `main` at `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main`. The stripped default binary on `f786bff` is 20,674,976 bytes. Tag `v1.0.0` is `dacd95d`; `origin/main` is `0064355`. There is no next implement ticket. Do not cut another tag or publish npm from an agent session. 207, 210, 149, and 152 are not claimable implement tickets. dreamd-eng milestone bars at 100% do not mean those tickets shipped. Leftovers after the 1.0.0 docs pass have no tickets; the list is `context/audits/v1.0.0-docs-audit-remaining-2026-10-02.md`.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `linear-project-is-dreamd-eng-on-botzr-research`, `nfr-2-stripped-binary-is-20mb`, `vectors-feature-stays-out-of-the-default-binary`, `ailab-210-ac-is-pre-watch-architecture`
@@ -887,3 +929,23 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** On 2026-10-01 the finish list was empty and `context/planning/future-directions.md` still described identity, hypergraph, CRDT, and cryptographic deletion as later phases. The user chose to ship 1.0 from the tree on `main` (`2e34181`) rather than finish that document. There is no `v0.2.0-alpha.1` tag. `2e34181` has no Actions run. `release.yml` marks a tag as a prerelease only when the name contains `-`, so `v1.0.0` publishes as stable. The release notes are only the `## [1.0.0]` block.
 - **How to apply:** The bump is `bb84721`. Tag `v1.0.0` is `dacd95d` (published 2026-10-02, stable). Manifest shas are filled (`42e8e62`). npm `dreamd-mcp` 1.0.0 is on `latest` and `next`. Do not queue the bump again. Do not implement Windows `write_atomic`, wire `rrf::fuse` into recall, or bump `SPEC.md`. Do not `git tag`, `git push`, or `npm publish` from an agent session.
 - **Cross-refs:** `alpha-tag-is-the-version-bump-not-the-publish`, `changelog-historical-entries-stay-put`, `vectors-feature-stays-out-of-the-default-binary`, `remaining-build-order-2026-09-24`
+
+### architecture-claims-false-until-dreamd-hardening
+
+- **Rule:** Until the named ticket lands, do not cite these ARCHITECTURE.md claims as facts:
+  - "`add_document` is idempotent; replay re-does at most one commit window" (§4). False until BZR-1236.
+  - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). False until BZR-1239.
+  - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). False until BZR-1242.
+  - The coordinator is the only writer (§1, "Architectural conventions"). False until BZR-1232.
+- **Why:** The 2026-10-24 audit reproduced four defects on `c241538`:
+  - A `git merge` with the JSONL held open swaps the inode, and later appends land in the orphan.
+  - Replay after a lost watermark returns the same `event_id` twice.
+  - A sidecar keyed `rust::eh` with count 4 leaves the docs at recurrence 2.
+  - `Ulid::new()` gives about 50% adjacent inversions within one millisecond.
+
+  Mapping the code for the response turned up more: per-request WAL recovery for non-boot projects, a stale fd after a failed cycle, the pin pass dropping `x_` fields, and unlocked concurrent ledger appenders.
+- **How to apply:**
+  - Each claim becomes true when its ticket lands, and that ticket rewrites the ARCHITECTURE sentence in the same commit.
+  - Each defect has an ignored test (`#[ignore = "BZR-<n>: …"]`) from BZR-1230. Un-ignore it in the fixing ticket; it must fail before the fix and pass after.
+  - Do not "fix" a test by weakening its assertion.
+- **Cross-refs:** `remaining-build-order-2026-09-24`, `indexer-shed-is-not-replay-healed`, `replay-open-is-an-index-doc-writer`, `ailab-163-excise-skips-not-suffix`, `wal-guarded-replace-owns-tmp-path`

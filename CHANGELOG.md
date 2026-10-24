@@ -6,6 +6,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+- Coding recall oracle (`python3 scripts/benchmark/coding_oracle.py`) scores a frozen 12-episode fixture after one `dreamd dream --no-llm`, packing `k=32` recall to the same whitespace-token budget: dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
+
 ## [1.0.1] - 2026-10-21
 
 ### Security

@@ -23,4 +23,8 @@ The bake-off design note is a private Linear document. It is not in this reposit
 
 ## Recall latency summary
 
-The other two files here are unrelated to WasTrue. `recall_summary.py` runs the Criterion recall bench (`cargo bench -p dreamd-core --bench recall`) and prints sample P50/P99 per corpus size; `--summarize DIR` reads existing samples without running cargo. Usage and method are in [`docs/benchmarks.md`](../../docs/benchmarks.md). Its unit tests are `python3 scripts/benchmark/test_recall_summary.py`.
+`recall_summary.py` runs the Criterion recall bench (`cargo bench -p dreamd-core --bench recall`) and prints sample P50/P99 per corpus size; `--summarize DIR` reads existing samples without running cargo. Usage and method are in [`docs/benchmarks.md`](../../docs/benchmarks.md). Its unit tests are `python3 scripts/benchmark/test_recall_summary.py`.
+
+## Coding recall oracle
+
+`python3 scripts/benchmark/coding_oracle.py --check` checks the frozen fixture and does not start a daemon. `python3 scripts/benchmark/coding_oracle.py` prints the live score. The published counts are in the repository [README](../../README.md) under Coding recall oracle.

@@ -1,0 +1,450 @@
+{
+  "budget_tokens": 36,
+  "needle_age_sec": 3456000,
+  "episodes": [
+    {
+      "id": "ep01",
+      "query": "rustc e0308 mismatch integer",
+      "marker": "ndlm01x",
+      "needle": {
+        "skill_action": "ep01_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "rustc e0308 mismatch integer ndlm01x rejected assignment between string slice during compile"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep01_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "rustc e0308 mismatch integer noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep01_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep01_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep01_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep02",
+      "query": "cargo offline vendor fetch",
+      "marker": "ndlm02x",
+      "needle": {
+        "skill_action": "ep02_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "cargo offline vendor fetch ndlm02x skipped network during crate resolution on laptop"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep02_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "cargo offline vendor fetch noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep02_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep02_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep02_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep03",
+      "query": "axum default limit bytes",
+      "marker": "ndlm03x",
+      "needle": {
+        "skill_action": "ep03_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "axum default limit bytes ndlm03x payload cap stays two megabytes unless raised"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep03_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "axum default limit bytes noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep03_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep03_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep03_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep04",
+      "query": "toolchain toml channel pin",
+      "marker": "ndlm04x",
+      "needle": {
+        "skill_action": "ep04_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "toolchain toml channel pin ndlm04x nightly date recorded under repo root directory"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep04_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "toolchain toml channel pin noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep04_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep04_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep04_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep05",
+      "query": "clippy pedantic unwrap lint",
+      "marker": "ndlm05x",
+      "needle": {
+        "skill_action": "ep05_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "clippy pedantic unwrap lint ndlm05x warning cleared before review on library crate"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep05_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "clippy pedantic unwrap lint noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep05_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep05_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep05_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep06",
+      "query": "serde rename deny unknown",
+      "marker": "ndlm06x",
+      "needle": {
+        "skill_action": "ep06_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "serde rename deny unknown ndlm06x struct fields must match incoming payload keys"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep06_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "serde rename deny unknown noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep06_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep06_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep06_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep07",
+      "query": "tokio worker threads flavor",
+      "marker": "ndlm07x",
+      "needle": {
+        "skill_action": "ep07_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "tokio worker threads flavor ndlm07x multi thread runtime chosen for blocking pool"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep07_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "tokio worker threads flavor noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep07_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep07_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep07_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep08",
+      "query": "git autocrlf input setting",
+      "marker": "ndlm08x",
+      "needle": {
+        "skill_action": "ep08_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "git autocrlf input setting ndlm08x checkout keeps lf inside working tree always"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep08_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "git autocrlf input setting noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep08_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep08_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep08_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep09",
+      "query": "tantivy schema text field",
+      "marker": "ndlm09x",
+      "needle": {
+        "skill_action": "ep09_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "tantivy schema text field ndlm09x indexed body stored for later lexical lookup"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep09_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "tantivy schema text field noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep09_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep09_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep09_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep10",
+      "query": "reqwest timeout connect seconds",
+      "marker": "ndlm10x",
+      "needle": {
+        "skill_action": "ep10_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "reqwest timeout connect seconds ndlm10x client waits five before failing open request"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep10_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "reqwest timeout connect seconds noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep10_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep10_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep10_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep11",
+      "query": "rustfmt edition style file",
+      "marker": "ndlm11x",
+      "needle": {
+        "skill_action": "ep11_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "rustfmt edition style file ndlm11x nightly formatting rules checked into repo tree"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep11_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "rustfmt edition style file noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep11_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep11_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep11_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    },
+    {
+      "id": "ep12",
+      "query": "dockerfile alpine builder stage",
+      "marker": "ndlm12x",
+      "needle": {
+        "skill_action": "ep12_needle",
+        "pain": 10,
+        "importance": 10,
+        "content": "dockerfile alpine builder stage ndlm12x final image copies binary from earlier layer"
+      },
+      "distractors": [
+        {
+          "skill_action": "ep12_d0",
+          "pain": 1,
+          "importance": 1,
+          "content": "dockerfile alpine builder stage noted while formatting whitespace yesterday"
+        },
+        {
+          "skill_action": "ep12_d1",
+          "pain": 1,
+          "importance": 1,
+          "content": "warm local disk keeps object files beside the build"
+        },
+        {
+          "skill_action": "ep12_d2",
+          "pain": 1,
+          "importance": 1,
+          "content": "team agreed cache stays on this workstation after review"
+        },
+        {
+          "skill_action": "ep12_d3",
+          "pain": 1,
+          "importance": 1,
+          "content": "reading docs left unchanged since spring cleanup finished early"
+        }
+      ]
+    }
+  ]
+}

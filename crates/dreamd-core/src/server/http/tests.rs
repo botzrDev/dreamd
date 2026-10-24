@@ -1862,6 +1862,26 @@ async fn lazy_resolve_recovers_mid_cycle_wal_on_project_b() {
     assert_eq!(recovered["last_dream_cycle_status"], "failed");
 }
 
+/// A WAL opened after B's coordinator is live belongs to a running cycle, not
+/// a crashed one. A later request for B must not recover it away.
+#[tokio::test]
+#[ignore = "BZR-1232: per-request recovery deletes a live cycle's WAL"]
+async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    state
+        .resolve_supervisor(&canonical_b)
+        .expect("first resolve starts B");
+    let root_b = AgentRoot::new(&canonical_b);
+    crate::wal::begin_cycle(&root_b, 0).expect("B's running cycle opens its WAL");
+    state
+        .resolve_supervisor(&canonical_b)
+        .expect("second resolve reuses B");
+    assert!(
+        root_b.wal_path().exists(),
+        "a request must not run recovery on a project whose coordinator is live"
+    );
+}
+
 /// Headline AC: a `POST /learn` for project B appends to B's JSONL, leaves
 /// the boot project A's JSONL untouched, and recall(B) surfaces it.
 /// Before WEG-272 the append misfiled into A's JSONL (the live data-loss

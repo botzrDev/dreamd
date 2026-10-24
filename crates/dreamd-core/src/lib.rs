@@ -31,6 +31,7 @@ pub mod episodic;
 pub mod forget;
 pub mod index;
 pub mod ingress;
+pub mod invariants;
 pub mod io;
 pub mod layout;
 pub mod lessons;
