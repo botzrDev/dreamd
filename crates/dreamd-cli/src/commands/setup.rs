@@ -266,6 +266,7 @@ pub fn run(
             )?;
         }
         wire_mcp(req, &project_root, out, err)?;
+        write_habit_plan(req, out)?;
         writeln!(out, "dry-run: no changes made")?;
         // A dry run is a plan, not a completed setup — the success card would
         // be a lie here, so the plan keeps the next-steps list.
@@ -275,9 +276,35 @@ pub fn run(
         // privacy disclosure are exactly what a first-run user needs to see.
         init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
         let wired = wire_mcp(req, &project_root, out, err)?;
+        install_habit(&project_root, req.harness)?;
+        // After the config is on disk, and before `watch` takes the log: a
+        // sentence typed here is appended through the coordinator, then the
+        // card tells them the words to ask next. `--yes` never reads stdin.
+        let lesson = if req.yes {
+            None
+        } else {
+            out.flush()?;
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            match prompt_first_lesson(&mut input, err)? {
+                Some(sentence) => {
+                    match record_first_lesson(&project_root, req.daemon_home, &sentence) {
+                        Ok(recorded) => Some(recorded),
+                        Err(e) => {
+                            writeln!(
+                            err,
+                            "dreamd: could not store that sentence ({e}) — setup is otherwise complete."
+                        )?;
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        };
         let daemon_live = start_watch_and_probe(req, &project_root, err)?;
         report_doctor(req.cwd, out)?;
-        write_success_card(&wired, req.harness, daemon_live, out)?;
+        write_success_card(&wired, req.harness, daemon_live, lesson.as_ref(), out)?;
     }
 
     Ok(())
@@ -690,6 +717,7 @@ fn write_success_card(
     wired: &[&'static str],
     harness: Harness,
     daemon_live: bool,
+    lesson: Option<&RecordedLesson>,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
     // Blank line first: the card must not run into init's scaffold output.
@@ -735,13 +763,29 @@ fn write_success_card(
             harness.display_name()
         )?;
     }
-    // Byte-identical to adapters/cursor/README.md §6 — one verify sentence
-    // across the docs and the CLI.
-    writeln!(
-        out,
-        "        \"What has dreamd remembered about this codebase?\""
-    )?;
-    writeln!(out, "        You should see it call search_nodes.")?;
+    if let Some(lesson) = lesson {
+        // Their words, not the generic verify sentence: the next search has
+        // to share tokens with the line we just stored.
+        writeln!(out, "        {}", lesson.sentence)?;
+        writeln!(
+            out,
+            "        It should quote that sentence and {}.",
+            lesson.event_id
+        )?;
+        writeln!(out, "        You should see it call search_nodes.")?;
+        writeln!(
+            out,
+            "        If the next chat quotes it, reply with that id."
+        )?;
+    } else {
+        // Byte-identical to adapters/cursor/README.md §6 — one verify sentence
+        // across the docs and the CLI, when setup stored no sentence.
+        writeln!(
+            out,
+            "        \"What has dreamd remembered about this codebase?\""
+        )?;
+        writeln!(out, "        You should see it call search_nodes.")?;
+    }
 
     if !wired.is_empty() {
         writeln!(out)?;
@@ -801,6 +845,285 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
         out,
         "  {verify_step}. reload your harness, then ask your agent to call search_nodes"
     )
+}
+
+/// Clustering key for the one sentence `setup` stores. Language-first, so it
+/// matches the dream-cycle key shape, and fixed so a later search can name it.
+const FIRST_LESSON_SKILL: &str = "setup::first_lesson";
+
+/// The Cursor rule `setup` writes. The adapter file is the source, so a manual
+/// copy and a setup write cannot drift.
+const CURSOR_RECALL_RULE: &str =
+    include_str!("../../../../adapters/cursor/.cursor/rules/dreamd-recall.mdc");
+
+const CLAUDE_BLOCK_START: &str = "<!-- dreamd:start -->";
+const CLAUDE_BLOCK_END: &str = "<!-- dreamd:end -->";
+
+/// Body of the marked `CLAUDE.md` block. `source_harness` is Claude Code's
+/// reserved value; the Cursor rule names `"cursor"` instead.
+const CLAUDE_BLOCK_BODY: &str = "\
+At the start of a task, call `search_nodes` with the user's request as the query.
+
+If a hit overlaps the task, quote one line of its content and its event id in the reply. If the search is empty, say nothing about memory.
+
+When the user corrects you or states a decision, call `append_node` with those same words in `content`, `source_harness` set to \"claude-code\", and a `skill_action` of lowercase segments joined by `::`.
+";
+
+/// A sentence `setup` stored, and the id the coordinator minted for it.
+struct RecordedLesson {
+    sentence: String,
+    event_id: String,
+}
+
+/// `(claude, cursor)` — which habit files this harness owns.
+fn habit_targets(harness: Harness) -> (bool, bool) {
+    match harness {
+        Harness::Claude => (true, false),
+        Harness::Cursor => (false, true),
+        Harness::Both => (true, true),
+        Harness::None => (false, false),
+    }
+}
+
+fn claude_block() -> String {
+    format!("{CLAUDE_BLOCK_START}\n{CLAUDE_BLOCK_BODY}{CLAUDE_BLOCK_END}\n")
+}
+
+/// Insert or replace the marked block, leaving every other byte of `existing`
+/// in place. A missing file is the empty string.
+fn merge_claude_md(existing: &str) -> String {
+    let block = claude_block();
+    if let (Some(start), Some(end)) = (
+        existing.find(CLAUDE_BLOCK_START),
+        existing.find(CLAUDE_BLOCK_END),
+    ) {
+        if end >= start {
+            let mut after = end + CLAUDE_BLOCK_END.len();
+            if existing[after..].starts_with('\n') {
+                after += 1;
+            }
+            let mut out = String::new();
+            out.push_str(&existing[..start]);
+            out.push_str(&block);
+            out.push_str(&existing[after..]);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            return out;
+        }
+    }
+    if existing.is_empty() {
+        return block;
+    }
+    let mut out = existing.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&block);
+    out
+}
+
+fn write_habit_plan(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
+    let (claude, cursor) = habit_targets(req.harness);
+    if claude {
+        writeln!(out, "dry-run: would merge a dreamd block into CLAUDE.md")?;
+    }
+    if cursor {
+        writeln!(out, "dry-run: would write .cursor/rules/dreamd-recall.mdc")?;
+    }
+    Ok(())
+}
+
+/// Write the habit files for `harness`. Claude gets a marked `CLAUDE.md` block;
+/// Cursor gets the always-on rule. `--harness none` writes neither.
+fn install_habit(project_root: &Path, harness: Harness) -> std::io::Result<()> {
+    let (claude, cursor) = habit_targets(harness);
+    if claude {
+        let path = project_root.join("CLAUDE.md");
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        std::fs::write(&path, merge_claude_md(&existing))?;
+    }
+    if cursor {
+        let dir = project_root.join(".cursor").join("rules");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("dreamd-recall.mdc"), CURSOR_RECALL_RULE)?;
+    }
+    Ok(())
+}
+
+fn write_first_lesson_prompt(err: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(err)?;
+    writeln!(
+        err,
+        "  What should the next agent in this repo already know?"
+    )?;
+    writeln!(err, "  One sentence. Press Enter to skip.")?;
+    write!(err, "  > ")?;
+    err.flush()
+}
+
+/// One sentence, or `None` when they skip (blank line, EOF, or an unreadable
+/// line). There is no re-ask: any other line is the sentence.
+pub(crate) fn prompt_first_lesson(
+    input: &mut dyn BufRead,
+    err: &mut dyn Write,
+) -> std::io::Result<Option<String>> {
+    write_first_lesson_prompt(err)?;
+    let answer = read_answer(input);
+    if answer.is_empty() || answer == UNREADABLE_ANSWER {
+        return Ok(None);
+    }
+    Ok(Some(answer))
+}
+
+/// Store `sentence` and return the id the coordinator minted.
+///
+/// A live daemon owns the log, so the append goes through it. Otherwise a
+/// short-lived coordinator writes the line and shuts down before `watch`
+/// opens the same file. The returned sentence is the redacted text that
+/// landed, which is what the card tells them to ask.
+fn record_first_lesson(
+    project_root: &Path,
+    daemon_home: &Path,
+    sentence: &str,
+) -> Result<RecordedLesson, String> {
+    let redaction = dreamd_core::config::load_config(project_root)
+        .map(|config| config.redaction)
+        .unwrap_or(true);
+    let stored = dreamd_core::redaction::redact(sentence, redaction);
+    if stored.trim().is_empty() {
+        return Err("the sentence was empty after redaction".to_string());
+    }
+    let event_id = if open_daemon_store(daemon_home, project_root).is_some() {
+        append_via_daemon(daemon_home, project_root, &stored)?
+    } else {
+        append_in_process(project_root, &stored)?
+    };
+    Ok(RecordedLesson {
+        sentence: stored,
+        event_id,
+    })
+}
+
+fn learning_for(stored: &str) -> Result<dreamd_protocol::AgentLearning, String> {
+    dreamd_core::ingress::LearnIngress::build_agent_learning(
+        stored,
+        "setup",
+        FIRST_LESSON_SKILL,
+        None,
+        None,
+        // `stored` is already redacted. A second pass would be a no-op on
+        // ordinary text and a second mask on a value redaction already replaced.
+        false,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn append_in_process(project_root: &Path, stored: &str) -> Result<String, String> {
+    let learning = learning_for(stored)?;
+    let root = AgentRoot::new(project_root);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let supervisor = dreamd_core::server::Supervisor::start(
+            &root,
+            dreamd_core::server::COORDINATOR_CHANNEL_CAPACITY,
+            #[cfg(unix)]
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let tx = supervisor.sender();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        tx.send(
+            dreamd_core::coordinator::MemoryCoordinatorMsg::AppendLearning {
+                learning,
+                client_dedup_key: None,
+                response_tx: resp_tx,
+            },
+        )
+        .await
+        .map_err(|_| "coordinator unavailable".to_string())?;
+        // `shutdown` sends on the supervisor's own sender. This clone has to
+        // be gone first, or the actor can observe it after `Shutdown`.
+        drop(tx);
+        let outcome = resp_rx
+            .await
+            .map_err(|_| "coordinator dropped".to_string())?
+            .map_err(|e| e.to_string())?;
+        supervisor.shutdown().await;
+        Ok(outcome.id.as_str().to_string())
+    })
+}
+
+fn append_via_daemon(
+    daemon_home: &Path,
+    project_root: &Path,
+    stored: &str,
+) -> Result<String, String> {
+    let store = open_daemon_store(daemon_home, project_root)
+        .ok_or_else(|| "daemon is not reachable".to_string())?;
+    let req = dreamd_core::memory_store::AppendRequest {
+        content: stored.to_string(),
+        source_harness: "setup".to_string(),
+        skill_action: FIRST_LESSON_SKILL.to_string(),
+        pain: None,
+        importance: None,
+        client_dedup_key: None,
+        pinned: false,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let response = dreamd_core::memory_store::MemoryStore::append(&store, req)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(response.id)
+    })
+}
+
+/// A daemon that is actually accepting connections, or `None` so the caller
+/// opens its own coordinator. Unix uses the same socket the success card
+/// probes. Off Unix the card has no UDS path; this probe is the loopback
+/// listener `server.json` names, so a running `watch` stays the only writer.
+fn open_daemon_store(
+    daemon_home: &Path,
+    project_root: &Path,
+) -> Option<dreamd_core::memory_store::DaemonStore> {
+    let header = std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(unix)]
+    {
+        let _ = daemon_home;
+        let path = resolve_socket()?;
+        if !socket_is_live(&path) {
+            return None;
+        }
+        Some(dreamd_core::memory_store::DaemonStore::uds(path, header))
+    }
+    #[cfg(not(unix))]
+    {
+        let home = DaemonHome::new(daemon_home);
+        let server_json = home.server_json();
+        if !dreamd_core::daemon_client::tcp_daemon_is_live(&server_json) {
+            return None;
+        }
+        let endpoint = dreamd_core::daemon_client::read_server_json(&server_json).ok()?;
+        let token = dreamd_core::daemon_client::read_auth_token(&home.auth_json()).ok()?;
+        Some(dreamd_core::memory_store::DaemonStore::tcp(
+            endpoint, token, header,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1004,7 +1327,7 @@ mod tests {
     /// Render the card into a String. Pure — no filesystem, no daemon.
     fn card(wired: &[&'static str], harness: Harness, daemon_live: bool) -> String {
         let mut out = Vec::new();
-        write_success_card(wired, harness, daemon_live, &mut out)
+        write_success_card(wired, harness, daemon_live, None, &mut out)
             .expect("card writing must not fail on an in-memory io");
         String::from_utf8(out).expect("card copy is utf-8")
     }
@@ -1150,5 +1473,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn first_lesson_prompt_keeps_the_sentence_and_skip_is_blank() {
+        let (sentence, printed) = ask(prompt_first_lesson, "axum handlers need IntoResponse\n");
+        assert_eq!(sentence.as_deref(), Some("axum handlers need IntoResponse"));
+        assert!(
+            printed.contains("What should the next agent in this repo already know?"),
+            "got: {printed:?}"
+        );
+        let (skipped, _) = ask(prompt_first_lesson, "\n");
+        assert_eq!(skipped, None, "Enter skips the sentence");
+        let (eof, _) = ask(prompt_first_lesson, "");
+        assert_eq!(eof, None, "EOF skips the sentence");
+    }
+
+    #[test]
+    fn card_with_a_lesson_names_the_sentence_and_the_id() {
+        let lesson = RecordedLesson {
+            sentence: "axum handlers need IntoResponse".to_string(),
+            event_id: "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+        };
+        let mut out = Vec::new();
+        write_success_card(
+            &[".mcp.json"],
+            Harness::Claude,
+            false,
+            Some(&lesson),
+            &mut out,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("axum handlers need IntoResponse"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("It should quote that sentence and evt_01ARZ3NDEKTSV4RRFFQ69G5FAV."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("search_nodes"), "{rendered}");
+        assert!(
+            !rendered.contains("What has dreamd remembered"),
+            "a stored sentence replaces the generic verify line; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn merge_claude_md_replaces_a_marked_block_and_keeps_the_rest() {
+        let existing = "intro\n\n<!-- dreamd:start -->\nold\n<!-- dreamd:end -->\n\noutro\n";
+        let merged = merge_claude_md(existing);
+        assert!(merged.starts_with("intro\n\n<!-- dreamd:start -->\n"));
+        assert!(merged.contains("source_harness` set to \"claude-code\""));
+        assert!(!merged.contains("old"));
+        assert!(merged.ends_with("outro\n"), "got: {merged:?}");
+        let fresh = merge_claude_md("");
+        assert!(fresh.starts_with("<!-- dreamd:start -->\n"));
+        assert!(fresh.ends_with("<!-- dreamd:end -->\n"));
+    }
+
+    #[test]
+    fn install_habit_writes_the_files_the_harness_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        install_habit(dir.path(), Harness::Both).unwrap();
+        let rule =
+            std::fs::read_to_string(dir.path().join(".cursor/rules/dreamd-recall.mdc")).unwrap();
+        assert!(rule.contains("alwaysApply: true"), "{rule}");
+        assert!(rule.contains("search_nodes"), "{rule}");
+        let claude = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(claude.contains("<!-- dreamd:start -->"), "{claude}");
+        assert!(claude.contains("claude-code"), "{claude}");
+
+        let only = tempfile::tempdir().unwrap();
+        install_habit(only.path(), Harness::None).unwrap();
+        assert!(!only.path().join("CLAUDE.md").exists());
+        assert!(!only.path().join(".cursor/rules/dreamd-recall.mdc").exists());
+    }
+
+    #[test]
+    fn first_lesson_appends_through_the_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let id = append_in_process(dir.path(), "axum handlers need IntoResponse")
+            .expect("coordinator append");
+        assert!(id.starts_with("evt_"), "{id}");
+        assert_ne!(id, "evt_00000000000000000000000000");
+        let log = std::fs::read_to_string(dir.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl"))
+            .unwrap();
+        assert!(log.contains("axum handlers need IntoResponse"), "{log}");
+        assert!(log.contains("setup::first_lesson"), "{log}");
+        assert!(log.contains("\"source_harness\":\"setup\""), "{log}");
+        assert!(log.ends_with('\n'));
     }
 }

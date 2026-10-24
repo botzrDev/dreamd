@@ -186,6 +186,42 @@ fn non_tty_dry_run_without_yes_exits_two() {
 }
 
 #[test]
+fn yes_installs_the_habit_for_the_harness() {
+    let (project, home) = project_and_home();
+
+    let out = run_setup(project.path(), home.path(), &["--yes", "--harness", "both"]);
+
+    assert_ok(&out);
+    let claude = std::fs::read_to_string(project.path().join("CLAUDE.md"))
+        .expect("setup must merge a CLAUDE.md block");
+    assert!(
+        claude.contains("<!-- dreamd:start -->") && claude.contains("<!-- dreamd:end -->"),
+        "the Claude block must be marked; got: {claude}"
+    );
+    assert!(
+        claude.contains("search_nodes") && claude.contains("claude-code"),
+        "the Claude block must name the tools and the harness; got: {claude}"
+    );
+    let rule = std::fs::read_to_string(project.path().join(".cursor/rules/dreamd-recall.mdc"))
+        .expect("setup must write the Cursor rule");
+    assert!(
+        rule.contains("alwaysApply: true"),
+        "the rule must apply on every task; got: {rule}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("What should the next agent"),
+        "--yes must not ask for a sentence; got: {stderr}"
+    );
+    let log = std::fs::read_to_string(project.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl"))
+        .unwrap_or_default();
+    assert!(
+        !log.contains("setup::first_lesson"),
+        "--yes must not store a sentence; got: {log}"
+    );
+}
+
+#[test]
 fn success_card_names_search_nodes_and_remembered() {
     let (project, home) = project_and_home();
 

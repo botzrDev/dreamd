@@ -86,6 +86,17 @@ fn non_interactive_setup_scaffolds_agent_dir() {
         !project.path().join(".cursor/mcp.json").exists(),
         "--no-write-mcp must skip .cursor/mcp.json"
     );
+    assert!(
+        !project.path().join("CLAUDE.md").exists(),
+        "--harness none must not write CLAUDE.md"
+    );
+    assert!(
+        !project
+            .path()
+            .join(".cursor/rules/dreamd-recall.mdc")
+            .exists(),
+        "--harness none must not write the Cursor rule"
+    );
 
     let stdout = stdout_of(&out);
     assert!(
@@ -152,6 +163,10 @@ fn dry_run_writes_nothing() {
         "dry-run must not write .mcp.json"
     );
     assert!(
+        !project.path().join("CLAUDE.md").exists(),
+        "dry-run must not write CLAUDE.md"
+    );
+    assert!(
         !home.path().join(".agent/registry.toml").exists(),
         "dry-run must not register the project"
     );
@@ -159,6 +174,10 @@ fn dry_run_writes_nothing() {
     assert!(
         stdout.contains("dry-run"),
         "dry-run must label its plan; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("dry-run: would merge a dreamd block into CLAUDE.md"),
+        "dry-run must name the Claude habit file; got: {stdout:?}"
     );
 }
 

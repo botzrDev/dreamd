@@ -151,14 +151,14 @@ impl McpRunError {
 /// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
 /// generated `Tool.description` equals this const so the copies cannot drift.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words: a colon is query syntax, and a skill_action pasted as the query fails.";
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails.";
 
 /// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
 /// the real write target: `append_node` appends an episodic event to
 /// `AGENT_LEARNINGS.jsonl`; `.agent/semantic/LESSONS.md` is written by the
 /// dream cycle, never by this tool.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. One precise event beats several vague ones.";
+const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones.";
 
 /// Parameters for the `search_nodes` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -346,7 +346,7 @@ impl MemoryMcpServer {
     /// never opens an index per call (WEG-252).
     #[cfg(unix)]
     #[tool(
-        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words: a colon is query syntax, and a skill_action pasted as the query fails."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails."
     )]
     async fn search_nodes(
         &self,
@@ -377,7 +377,7 @@ impl MemoryMcpServer {
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search memory (events + lessons) -- use when: recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words: a colon is query syntax, and a skill_action pasted as the query fails."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails."
     )]
     async fn search_nodes(
         &self,
@@ -396,7 +396,7 @@ impl MemoryMcpServer {
     /// `AGENT_LEARNINGS.jsonl` only -- `.agent/semantic/LESSONS.md` is the
     /// dream cycle's output, not this tool's.
     #[tool(
-        description = "Append a raw episodic event -- use when: note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. One precise event beats several vague ones."
+        description = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones."
     )]
     async fn append_node(
         &self,
@@ -434,12 +434,15 @@ impl ServerHandler for MemoryMcpServer {
                 r#"dreamd memory server -- search and append agent memory (events + lessons).
 
 WHEN TO CALL search_nodes
+- At the start of the current task, with the user's request as the query
 - Session start on any domain you have worked in before (language, framework, project area)
 - Before reasoning from scratch on a topic; you may already have a relevant note
 - Use 2-4 keywords matching the current task
 - Hits may be raw events (source=episodic) or consolidated lessons (source=semantic); there is no layer filter
+- If a hit overlaps the task, quote one line and its id. If the search is empty, say nothing about memory
 
 WHEN TO CALL append_node
+- When the user corrects you or states a decision; put those same words in content
 - End of session: capture discoveries, constraints, and non-obvious patterns
 - Mid-session: anything that would have saved 10+ minutes if known at the start
 - One precise node beats several vague ones
@@ -786,6 +789,7 @@ mod tests {
             "did we discuss",
             "what did we decide",
             "previously decided",
+            "current task",
         ] {
             assert!(
                 SEARCH_NODES_DESCRIPTION.contains(needle),
@@ -807,6 +811,14 @@ mod tests {
         assert!(
             APPEND_NODE_DESCRIPTION.contains("not LESSONS.md"),
             "APPEND_NODE_DESCRIPTION must disclaim LESSONS.md: {APPEND_NODE_DESCRIPTION}"
+        );
+        assert!(
+            APPEND_NODE_DESCRIPTION.contains("corrects"),
+            "APPEND_NODE_DESCRIPTION must invite a correction: {APPEND_NODE_DESCRIPTION}"
+        );
+        assert!(
+            APPEND_NODE_DESCRIPTION.contains("decision"),
+            "APPEND_NODE_DESCRIPTION must invite a decision: {APPEND_NODE_DESCRIPTION}"
         );
         for forbidden in ["Writes LESSONS.md", "to LESSONS.md", "into LESSONS.md"] {
             assert!(

@@ -29,9 +29,9 @@ npx -y dreamd-mcp watch &
 
 Or: Cursor Settings → Tools & Integrations → add MCP server.
 
-## 4. Agent rule (optional)
+## 4. Agent rule
 
-Copy [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) to your project's `.cursor/rules/`. Cursor offers it when context matches.
+`setup --harness cursor` (and `--harness both`) writes [`.cursor/rules/dreamd-recall.mdc`](./.cursor/rules/dreamd-recall.mdc) into the project. The rule applies on every task. Copy it by hand only if that write was skipped.
 
 ## 5. Reload Cursor
 
