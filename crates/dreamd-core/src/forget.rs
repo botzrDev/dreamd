@@ -1,4 +1,4 @@
-//! Forget cascade (BZR-158): remove one episodic event and the derived state
+//! Forget cascade: remove one episodic event and the derived state
 //! that names it.
 //!
 //! [`cascade`] runs under the dream-cycle WAL but is not a dream cycle. It
@@ -7,15 +7,15 @@
 //! lesson that remains. It never decays other rows, never re-selects a lesson,
 //! and never copies the forgotten row into `snapshots/`.
 //!
-//! The JSONL has one writer, so production calls go through
-//! [`MemoryCoordinatorMsg::Forget`](crate::coordinator::MemoryCoordinatorMsg::Forget),
-//! which reopens the append fd and tells the live indexer to drop the document.
-//! This module does not touch the index.
+//! The JSONL has one writer. `dreamd forget` runs [`cascade`] in-process and
+//! refuses while a daemon probes live, so no coordinator holds the append fd
+//! during the rewrite. This module does not touch the index; the CLI refreshes
+//! an existing index afterwards.
 //!
 //! Existing ledger lines are left in place. A forgotten id's old edge stays in
 //! the file, and `provenance::verify` reports it as an orphan.
 //!
-//! `dreamd forget` (BZR-151) is the CLI. It calls [`cascade`] when no daemon is
+//! `dreamd forget` is the CLI. It calls [`cascade`] when no daemon is
 //! live, or [`preview`] for `--dry-run`. `--proof` writes a forget receipt
 //! ([`render_receipt`], `forget-receipt/1.0`). The signed membership proof in
 //! `docs/provenance.md` is still absent.

@@ -111,8 +111,8 @@ bump, a Cargo path entry, and a CI matrix dimension. The default answer to
 
 State management is an actor model. A single `MemoryCoordinator` tokio task
 owns the mutable handle to `AGENT_LEARNINGS.jsonl`. API handlers, the
-in-process MCP store, and the dream-cycle and forget paths send messages
-(`AppendLearning`, `RunDreamCycle`, `Forget`, `Shutdown`) over a
+in-process MCP store, and the dream-cycle path send messages
+(`AppendLearning`, `RunDreamCycle`, `Shutdown`) over a
 `tokio::sync::mpsc` channel; only the coordinator writes. The one exception is
 a CLI command run with no daemon (`dreamd dream`, `dreamd forget`,
 `dreamd archive`, `dreamd memory checkout`): it rewrites the files in-process,
@@ -162,7 +162,7 @@ dominates the benefit at our target write rates.
 
 The message enum `MemoryCoordinatorMsg` is `#[non_exhaustive]` so additions
 stay non-breaking for downstream `match` consumers. Its variants today are
-`AppendLearning`, `RunDreamCycle`, `Forget` (BZR-158), and `Shutdown`.
+`AppendLearning`, `RunDreamCycle`, and `Shutdown`.
 
 ## Indexing and salience
 
@@ -637,7 +637,8 @@ not beside it. `POST /api/v1/dream` sends `MemoryCoordinatorMsg::RunDreamCycle`
 over the same mpsc channel as appends; the actor loop dispatches it
 to `handle_run_dream_cycle`, which calls `run_filesystem_phases`
 (consolidation → decay, inside one WAL envelope, including any LLM call).
-`MemoryCoordinatorMsg::Forget` follows the same pattern for `forget::cascade`.
+`dreamd forget` does not go through the coordinator: it runs `forget::cascade`
+in-process and refuses while a daemon is live.
 
 The reason is fd ownership (WEG-271). Both consolidation and decay can replace
 `AGENT_LEARNINGS.jsonl` by atomic rename, which orphans the coordinator's long-lived

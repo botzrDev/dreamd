@@ -150,7 +150,7 @@ Before any destructive op (replacing `LESSONS.md`, pruning JSONL), write `dream_
 
 `dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases` — the single WAL envelope), then the index and autobiography phases. Inside the envelope, in order: `begin_cycle`, a pre-mutation autosnap of the live files into `.dreamd/branches/` (`snapshot::create_autosnap`), consolidation (including the optional LLM call that composes the lesson body — awaited inside the envelope, with a deterministic fallback), decay, `provenance::record_cycle`, `commit_cycle`. Each `ReplaceSemanticMemory` / `PruneEpisodicMemory` intent is recorded by `wal::guarded_replace` between the temp file's fsync and its rename, so an intent always names a temp that exists. Because the in-process CLI path now runs the same guard, a `state.json` left at `in_progress` refuses `dreamd dream` too; `recover_on_startup` clears it only when the WAL file is still on disk.
 
-`dreamd forget` / `MemoryCoordinatorMsg::Forget` (`forget::cascade`) reuses the same WAL to remove one event and the lesson state that names it; it does not run the dream cycle.
+`dreamd forget` (`forget::cascade`) reuses the same WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
 
 **Scope:** WAL protects JSONL, `LESSONS.md`, and recurrence sidecar writes only. Tantivy index mutations are **not** WAL-protected.
 

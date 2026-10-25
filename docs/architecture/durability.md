@@ -26,10 +26,11 @@ guarantee — there is no `Mutex<File>` wrapper because there is no second handl
 to compete with. Concurrent third-party writers are explicitly unsupported
 (`ARCHITECTURE.md` §1).
 
-The same actor also runs the two operations that replace the file by atomic
-rename — the dream cycle's filesystem phases (`RunDreamCycle`) and the forget
-cascade (`Forget`) — and reopens its fd afterward, so an append never lands on
-an orphaned inode.
+The same actor also runs the dream cycle's filesystem phases (`RunDreamCycle`),
+which replace the file by atomic rename, and reopens its fd afterward, so an
+append never lands on an orphaned inode. `dreamd forget` also replaces the file,
+but it runs in-process and refuses while a daemon is live, so no coordinator
+holds the fd.
 
 ## EventId
 

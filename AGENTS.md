@@ -113,7 +113,7 @@ Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle
 
 Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
 
-On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`.
+On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carries workspace version `1.0.1` from `f2638c7`. The npm dist-tags after 1.0.1 have not been re-checked here.
 
 Still out of scope: vector/embedding recall, hybrid retrieval, Windows `write_atomic` (dream cycle and index), Homebrew install, animated GIF, auto dream cycle.
 
@@ -155,28 +155,26 @@ Locked 2026-10-24:
 - Delete library-only code now. Deprecate shipped CLI surfaces in 1.x and remove them at 2.0.
 - `dream --no-commit` against a live writer refuses; it is not proxied.
 - Recurrence moves to a Tantivy `Warmer`; the index schema stays `index/1.3`.
+- Everything here ships as **1.1.0**. v1.0.1 already shipped the rustls RustSec bump (tag `00e682d`, 2026-10-21), so there is no separate patch release for these fixes. BZR-1238 is the 1.1.0 release prep and comes last.
 
-**Milestone 1.0.1 data integrity**
+**Milestone 1.1.0 data integrity + structure** (data integrity first, then structure)
 
-1. **BZR-1230** — store invariant checker (`invariants::check_store`) plus ignored red tests that reproduce the audit defects. Spec: `assignments/BZR-1230.v2.md`.
-2. **BZR-1231** — delete the unsent `MemoryCoordinatorMsg::Forget` path.
+1. **BZR-1230** — on `main` (`573f4f3`, in a commit shared with the coding recall oracle). Store invariant checker (`invariants::check_store`) plus 9 ignored red tests that reproduce the audit defects (`tests/bzr1230_audit_defects.rs` and one in `server/http/tests.rs`). `LessonsUnreadable` is reported with or without an index. Spec: `assignments/BZR-1230.v2.md`.
+2. **BZR-1231** — signed off 2026-10-25; lands in the commit after `573f4f3`. Deleted `MemoryCoordinatorMsg::Forget`, `handle_forget`, `forget_index_phases` and `CoordinatorError::Forget`, with the one test that sent the message. Corrected the docs that called it the production route (`forget.rs`, ARCHITECTURE §3, `docs/architecture.md`, `docs/architecture/durability.md`). `dreamd forget` is unchanged: in-process, and it refuses while a daemon is live. Spec: `assignments/BZR-1231.v2.md`.
 3. **BZR-1232** — project writer lock and one acquisition sequence for every writer (lock → reset stale `in_progress` → WAL recover → index → coordinator). Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` as a second writer, recovery that only watch runs, and idle eviction of the in-process MCP index.
 4. **BZR-1233** — append fd with `O_APPEND`, a stat check around each append, reopen on every cycle exit path, and a monotonic `IdMinter`. `Ord` on `EventId`.
 5. **BZR-1234** — raw-line log rewrites. Unchanged lines stay byte-identical (`x_` fields survive), skipped lines are kept, and the pin pass is a no-op when nothing changes. Decay archive is idempotent.
 6. **BZR-1235** — skip-only open-time recovery. No in-place rewrite and no `.corrupt-*` sidecar. A valid final record without `\n` gets the newline instead of a truncate.
 7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender.
 8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
-9. **BZR-1238** — 1.0.1 release prep. Tag and publish stay human steps.
-
-**Milestone 1.1.0 structure**
-
-10. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
-11. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
-12. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
-13. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
-14. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
-15. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
-16. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
+9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
+10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
+11. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
+12. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
+13. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
+14. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
+15. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
+16. **BZR-1238** — 1.1.0 release prep: CHANGELOG, version bump, end-to-end smoke, no `BZR-12…` ignores left. Tag and publish stay human steps.
 
 **Milestone 2.0 removal**
 
@@ -216,7 +214,7 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 18. **BZR-154** — on `main` (`adb7a40`, same commit as BZR-173). Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
 19. **BZR-155** — on `main` (`260f37d`). Provenance recording. Leaf hash is SHA-256 of the event id's UTF-8 bytes. `index_doc` is appended from `commit_and_persist` and from `TantivyIndexHandle::open`. The learn path does not open the ledger. No `embedding` edge.
 20. **BZR-148** — on `main`. `provenance::verify` is `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (on `origin/main`). The flag prints that report and fails the run on orphans, missing edges, or corrupt lines. `skipped_unknown_kind` is printed and does not fail the check. `--repair` stays the Tantivy rebuild. Spec: `assignments/BZR-148.cli.v2.md` (local; `assignments/` is gitignored). Linear: Done on dreamd-eng.
-21. **BZR-158** — on `origin/main` (`e656211`). `forget::cascade` removes one live event under the dream-cycle WAL, drops or unlinks the lesson that names it, and leaves old ledger lines in place. `MemoryCoordinatorMsg::Forget` reopens the append fd on every path except a clean missing id, then sends the existing index messages. Spec: `assignments/BZR-158.v2.md`. Linear: Done on dreamd-eng (2026-09-30).
+21. **BZR-158** — on `origin/main` (`e656211`). `forget::cascade` removes one live event under the dream-cycle WAL, drops or unlinks the lesson that names it, and leaves old ledger lines in place. The coordinator message `MemoryCoordinatorMsg::Forget` that shipped with it had no production sender and was removed in BZR-1231. Spec: `assignments/BZR-158.v2.md`. Linear: Done on dreamd-eng (2026-09-30).
 22. **BZR-151** — on `origin/main` (`29ffdba`). `dreamd forget <id>` calls `forget::cascade`, refuses while the daemon probes live, and `--dry-run` writes nothing. `--proof` writes a `forget-receipt/1.0` file. Spec: `assignments/BZR-151.v2.md`. Linear: Done on dreamd-eng (2026-09-30).
 23. **BZR-188** — on `origin/main` (`40ff05a`). Feature `vectors` is off by default (`fastembed` 5.17.4, Apache-2.0). `#[cfg(feature = "vectors")] pub mod vectors` names `BAAI/bge-small-en-v1.5` and does not call `TextEmbedding::try_new`. Spec: `assignments/BZR-188.v2.md`. Linear: Done on dreamd-eng (2026-09-30).
 24. **BZR-181** — on `origin/main` (`f786bff`). `dreamd vectors enable` downloads the model only on a `--features vectors` build and exits 2 on the default binary. `dreamd version` / `--version` report `vectors:on` or `vectors:off`. Stripped default `dreamd` is 20,674,976 bytes. The feature build is 46,589,208 bytes and is informational (`size-report-vectors`). Spec: `assignments/BZR-181.v2.md`. Linear: Done on dreamd-eng (2026-09-30).
@@ -899,7 +897,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `forget::cascade` removes one event from the live JSONL under the open dream-cycle WAL. It does not call `filesystem_phases`, `select_lesson_or_retire`, or `run_decay_pruner`.
 - **Why:** BZR-158's Linear AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: `recover_if_needed` only deletes uncommitted temps.
-- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. Recount with `run_cluster_engine`. Leave old ledger lines in place. The coordinator reopens the append fd on every path except a clean missing id, including a cascade error after the JSONL rename, then sends the existing `PruneDecayedEvents`, `ApplyRecurrenceSidecar`, and `IndexSemanticLessons` messages. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
+- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. Recount with `run_cluster_engine`. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
 - **Cross-refs:** `coordinator-not-mutex-file`, `delete-term-must-target-a-unique-field`, `provenance-verify-does-not-rewrite-the-ledger`, `select-lesson-or-retire-unlinks`, `remaining-build-order-2026-09-24`, `forget-proof-is-a-receipt-not-a-signed-membership-proof`
 
 ### forget-proof-is-a-receipt-not-a-signed-membership-proof
@@ -949,3 +947,17 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Each defect has an ignored test (`#[ignore = "BZR-<n>: …"]`) from BZR-1230. Un-ignore it in the fixing ticket; it must fail before the fix and pass after.
   - Do not "fix" a test by weakening its assertion.
 - **Cross-refs:** `remaining-build-order-2026-09-24`, `indexer-shed-is-not-replay-healed`, `replay-open-is-an-index-doc-writer`, `ailab-163-excise-skips-not-suffix`, `wal-guarded-replace-owns-tmp-path`
+
+### deleted-variant-grep-needs-the-bare-name
+
+- **Rule:** When a ticket deletes an enum variant, message or function, the pre-flight and the §4 zero-hit grep search for the bare name inside backticks (`` `Forget` ``) across `ARCHITECTURE.md`, `docs/` and `docs/architecture/`, not only the qualified path (`MemoryCoordinatorMsg::Forget`).
+- **Why:** BZR-1231's spec searched qualified names and found three doc sentences. Prose lists name variants bare, so three more stale mentions survived:
+  - `docs/architecture.md:115` and `:165` (message lists);
+  - `docs/architecture/durability.md:31`.
+
+  The dev flagged two. The PM's bare-word search found the third.
+- **How to apply:**
+  - Grep the backticked bare name as well as the path.
+  - Check each hit by eye: unbackticked prose such as "Forget, branches, provenance" in `docs/architecture.md:41` is a module heading, not the variant.
+  - Same family as `spec-deadlock-fixture-names-must-match-the-tree` (the grep has to search the names the tree actually uses).
+- **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `rustdoc-trips-word-grep-that-meant-call-sites`
