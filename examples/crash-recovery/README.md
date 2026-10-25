@@ -18,7 +18,7 @@ This mirrors the `recover_incomplete_deletes_tmp_and_marks_failed` test in `crat
 
 ## Recovery path
 
-1. **Detect** — `recover_on_startup()` sees `dream_in_progress.wal` on `dreamd watch` startup (boot project) or on first request to a lazy-loaded project.
+1. **Detect** — `recover_on_startup()` sees `dream_in_progress.wal` when a writer takes the project writer lock: `dreamd watch` startup (boot project), the first request to a lazy-loaded project, an in-process `dreamd mcp`, or a CLI writer such as `dreamd dream --no-commit`.
 2. **Clean** — Delete temp files referenced by WAL intents (the `.jsonl.tmp` file).
 3. **Finalize** — Remove the WAL; set `state.json` → `last_dream_cycle_status: "failed"`.
 4. **Repair the log** — When the coordinator opens the episodic log, it keeps every well-formed record. A malformed line that ends in a newline is moved to a sidecar, `.agent/episodic/.corrupt-<YYYY-MM-DD>.jsonl`, and logged at WARN. A torn final fragment with no trailing newline is truncated in place. The broken third line in this fixture does end in a newline, so it takes the sidecar path.

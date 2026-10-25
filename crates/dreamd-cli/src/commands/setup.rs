@@ -1025,8 +1025,13 @@ fn learning_for(stored: &str) -> Result<dreamd_protocol::AgentLearning, String> 
 }
 
 fn append_in_process(project_root: &Path, stored: &str) -> Result<String, String> {
+    use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
     let learning = learning_for(stored)?;
     let root = AgentRoot::new(project_root);
+    // Refuses while `dreamd watch` or an in-process `dreamd mcp` writes this
+    // project; held until the coordinator has shut down.
+    let lock = WriterLock::acquire(&root, WriterKind::Setup).map_err(|e| e.to_string())?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1034,6 +1039,7 @@ fn append_in_process(project_root: &Path, stored: &str) -> Result<String, String
     rt.block_on(async {
         let supervisor = dreamd_core::server::Supervisor::start(
             &root,
+            &lock,
             dreamd_core::server::COORDINATOR_CHANNEL_CAPACITY,
             #[cfg(unix)]
             None,
@@ -1555,6 +1561,9 @@ mod tests {
     fn first_lesson_appends_through_the_coordinator() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
+        // `dreamd setup` scaffolds with `init` before the first lesson; the
+        // project writer lock never creates a missing `.agent/`.
+        std::fs::create_dir(dir.path().join(".agent")).unwrap();
         let id = append_in_process(dir.path(), "axum handlers need IntoResponse")
             .expect("coordinator append");
         assert!(id.starts_with("evt_"), "{id}");

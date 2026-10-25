@@ -11,9 +11,13 @@
 //! Checkout replaces the live memory files, so it refuses while a daemon holds
 //! the episodic log open. On Unix that is "the socket file exists", including
 //! a stale socket. On Windows the address is `server.json` and the refusal is
-//! a live loopback connect; a leftover `server.json` is not a refusal. Branch,
-//! branches, and delete do not check. Bisect checks out through the same
-//! function, so it refuses the same way. Diff only reads objects and refs.
+//! a live loopback connect; a leftover `server.json` is not a refusal. Behind
+//! that check, checkout takes the project writer lock, which refuses any other
+//! writer whatever socket path it uses. Branch, branches, and delete do not
+//! check. Bisect checks out through the same function, so it refuses the same
+//! way; it holds the lock for one step at a time and never while a `--run`
+//! script runs, so the script can call `dreamd`. Diff only reads objects and
+//! refs.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,6 +25,7 @@ use std::path::{Path, PathBuf};
 use dreamd_core::bisect::{self, BisectError, BisectOutcome};
 use dreamd_core::memory_diff::{self, DiffError, FileChange, MemoryDiff};
 use dreamd_core::snapshot::{self, SnapshotError};
+use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 
 #[derive(Debug)]
@@ -42,6 +47,9 @@ pub enum MemoryError {
     /// Windows `dreamd watch` answered a loopback connect. Checkout would
     /// replace a log that daemon still has open.
     DaemonListening(PathBuf),
+    /// The project writer lock is held by another writer, or recovery under
+    /// it failed.
+    WriterLock(WriterLockError),
 }
 
 impl From<std::io::Error> for MemoryError {
@@ -68,6 +76,12 @@ impl From<DiffError> for MemoryError {
     }
 }
 
+impl From<WriterLockError> for MemoryError {
+    fn from(e: WriterLockError) -> Self {
+        Self::WriterLock(e)
+    }
+}
+
 impl std::fmt::Display for MemoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -84,6 +98,7 @@ impl std::fmt::Display for MemoryError {
                  stop it before checkout (it holds the live episodic log open)",
                 path.display()
             ),
+            Self::WriterLock(e) => write!(f, "{e}"),
         }
     }
 }
@@ -155,6 +170,7 @@ pub fn run_checkout(
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
     let socket = guard_checkout(daemon_socket)?;
+    let _lock = WriterLock::acquire(&root, WriterKind::Checkout)?;
     let id = snapshot::checkout(&root, name, socket)?;
     writeln!(out, "{id}")?;
     Ok(())
@@ -206,7 +222,10 @@ fn auto_test_loop(
     loop {
         let good = run_script(cwd, script)?;
         let socket = guard_checkout(daemon_socket)?;
+        let lock = WriterLock::acquire(root, WriterKind::Bisect)?;
         let outcome = bisect::bisect_mark(root, good, socket)?;
+        // Released before the next script runs.
+        drop(lock);
         print_outcome(out, &outcome)?;
         if matches!(outcome, BisectOutcome::Found { .. }) {
             return Ok(());
@@ -227,7 +246,10 @@ pub fn run_bisect_start(
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
     let socket = guard_checkout(daemon_socket)?;
+    let lock = WriterLock::acquire(&root, WriterKind::Bisect)?;
     let outcome = bisect::bisect_start(&root, good, bad, socket)?;
+    // Released before `auto_test_loop` runs the first script.
+    drop(lock);
     print_outcome(out, &outcome)?;
     match (auto_test, &outcome) {
         (Some(script), BisectOutcome::Checkout { .. }) => {
@@ -247,6 +269,7 @@ pub fn run_bisect_mark(
 ) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
     let socket = guard_checkout(daemon_socket)?;
+    let _lock = WriterLock::acquire(&root, WriterKind::Bisect)?;
     let outcome = bisect::bisect_mark(&root, mark_good, socket)?;
     print_outcome(out, &outcome)?;
     Ok(())
@@ -264,6 +287,7 @@ pub fn run_bisect_run(
     bisect::ensure_in_progress(&root)?;
     let good = run_script(cwd, script)?;
     let socket = guard_checkout(daemon_socket)?;
+    let _lock = WriterLock::acquire(&root, WriterKind::Bisect)?;
     let outcome = bisect::bisect_mark(&root, good, socket)?;
     print_outcome(out, &outcome)?;
     Ok(())
@@ -499,6 +523,62 @@ mod tests {
         let listing = String::from_utf8(out).unwrap();
         assert!(listing.starts_with("* a\n"), "{listing}");
         assert!(!listing.contains(" b\n"), "{listing}");
+    }
+
+    /// Checkout replaces the live files. While `dreamd watch` holds the
+    /// project it must refuse even with no socket path to probe.
+    #[test]
+    fn checkout_refuses_while_watch_holds_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_jsonl().parent().unwrap()).unwrap();
+        std::fs::write(root.episodic_jsonl(), b"{\"x\":1}\n").unwrap();
+        run_branch(dir.path(), "a", 1_790_690_580, &mut Vec::new()).unwrap();
+        std::fs::write(root.episodic_jsonl(), b"{\"x\":2}\n").unwrap();
+        let before = crate::commands::store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let err = run_checkout(dir.path(), "a", None, &mut Vec::new()).unwrap_err();
+
+        assert!(matches!(err, MemoryError::WriterLock(_)), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains(&format!("pid {} (watch)", std::process::id())),
+            "{err}"
+        );
+        assert_eq!(crate::commands::store_bytes(&root), before);
+    }
+
+    /// Bisect checks out the midpoint. While `dreamd watch` holds the project
+    /// it must refuse even with no socket path to probe, and start nothing.
+    #[test]
+    fn bisect_start_refuses_while_watch_holds_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, names) = three_snaps(dir.path());
+        let before = crate::commands::store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let err = run_bisect_start(
+            dir.path(),
+            &names[0],
+            &names[2],
+            None,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, MemoryError::WriterLock(_)), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains(&format!("pid {} (watch)", std::process::id())),
+            "{err}"
+        );
+        assert_eq!(crate::commands::store_bytes(&root), before);
+        assert!(matches!(
+            bisect::ensure_in_progress(&root),
+            Err(BisectError::NotInProgress)
+        ));
     }
 
     /// Three autosnaps over distinct JSONL bytes; returns the ref names.

@@ -14,15 +14,15 @@
 //! ```text
 //! run_watch
 //!  ├─ #[cfg(unix)] run_watch_uds
+//!  │   ├─ WriterLock (boot project, held until exit)
 //!  │   ├─ Supervisor (boot project) ──► MemoryCoordinator actor
 //!  │   │     └─ indexer_tx ──► TantivyIndexHandle (pinned "primary")
-//!  │   ├─ AppState.supervisor_map ──► lazy per-project Supervisors (WEG-272)
-//!  │   ├─ AppState.index_map ──► lazy Tantivy handles for non-boot projects
+//!  │   ├─ AppState.runtimes ──► lazy per-project lock + index + Supervisor (WEG-272)
 //!  │   └─ serve_uds ──► HTTP router (peer UID + X-Agent-Root middleware)
 //!  └─ #[cfg(not(unix))] run_watch_loopback
+//!      ├─ WriterLock (boot project, held until exit)
 //!      ├─ Supervisor (boot project) ──► MemoryCoordinator actor (no indexer_tx)
-//!      ├─ AppState.supervisor_map ──► lazy per-project Supervisors (WEG-272)
-//!      ├─ AppState.index_map ──► empty; nothing on this path opens Tantivy
+//!      ├─ AppState.runtimes ──► lazy per-project lock + Supervisor (no index)
 //!      └─ serve_tcp ──► HTTP router (bearer + X-Agent-Root middleware)
 //! ```
 //!
@@ -72,17 +72,17 @@ use crate::config::{load_config, DreamCycleMode, AUTO_MODE_UNSUPPORTED};
 use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::build_router;
 use crate::server::http::AppState;
-use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
-// `TantivyIndexHandle` is cfg-free here because it is still the `index_map` and
-// `drain_daemon` type parameter on every target; only `DEFAULT_COMMIT_CADENCE`
-// and the `open` call that consumes it are Unix-only.
+// `TantivyIndexHandle` is cfg-free here because it is still the `drain_daemon`
+// type parameter on every target; only `DEFAULT_COMMIT_CADENCE` and the `open`
+// call that consumes it are Unix-only.
 use crate::server::tantivy_handle::TantivyIndexHandle;
 #[cfg(unix)]
 use crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE;
 // `uds_server` itself is `#[cfg(unix)]`; both items name a `UnixListener`.
 #[cfg(unix)]
 use crate::server::uds_server::{bind_api_socket, serve_uds};
+use crate::writer_lock::{WriterKind, WriterLock, WriterLockError};
 
 /// Failure modes surfaced by [`run_watch`].
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +101,10 @@ pub enum WatchError {
     Index(#[from] crate::server::index_map::IndexError),
     #[error("wal recovery: {0}")]
     Wal(#[from] crate::wal::WalError),
+    /// The project writer lock was refused (another dreamd writes this
+    /// project), or recovery under it failed. A runtime start failure, exit 1.
+    #[error("{0}")]
+    WriterLock(#[from] WriterLockError),
     /// `~/.agent/auth.json` is missing, unreadable, or not the AILAB-203 wire
     /// shape (loopback-TCP targets only). A start failure rather than a warning:
     /// the bearer token is that listener's only auth, so booting without it
@@ -176,8 +180,9 @@ pub async fn run_watch(cwd: &Path, listen: WatchListen) -> Result<(), WatchError
 /// and block until SIGINT/SIGTERM. The Unix half of [`run_watch`].
 ///
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard →
-/// WAL recovery → boot Supervisor → compose AppState → bind socket → serve
-/// until a shutdown signal (SIGINT/SIGTERM), then unlink the socket.
+/// project writer lock (which runs WAL recovery) → open the index → boot
+/// Supervisor → compose AppState → bind socket → serve until a shutdown signal
+/// (SIGINT/SIGTERM), then unlink the socket, drain, and release the lock.
 #[cfg(unix)]
 async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // 1. Discover project root from cwd.
@@ -191,8 +196,11 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
         return Err(WatchError::DreamMode(AUTO_MODE_UNSUPPORTED.into()));
     }
 
-    // 2.5. Recover any stale dream-cycle WAL before opening indexes or coordinators.
-    crate::wal::recover_on_startup(&agent_root)?;
+    // 2.5. Take the project writer lock. It resets a stale `in_progress` and
+    //      recovers any stale dream-cycle WAL before indexes or coordinators
+    //      open, and refuses while another dreamd writes this project. Held to
+    //      the end of this function, past the drain.
+    let writer_lock = WriterLock::acquire(&agent_root, WriterKind::Watch)?;
 
     // 3. Open the project index up front and wire it as the coordinator's live
     //    indexer (the "Option B" hand-off documented in tantivy_handle.rs). The
@@ -200,10 +208,12 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     //    appends write — one handle, one Tantivy writer (WEG-264 Defect 2).
     let primary_handle = Arc::new(TantivyIndexHandle::open(
         &agent_root,
+        &writer_lock,
         DEFAULT_COMMIT_CADENCE,
     )?);
     let supervisor = Supervisor::start(
         &agent_root,
+        &writer_lock,
         COORDINATOR_CHANNEL_CAPACITY,
         Some(primary_handle.sender()),
     )?;
@@ -218,13 +228,12 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     })?;
     let daemon_home = DaemonHome::new(home.join(".agent"));
     let registry_path = daemon_home.registry_toml();
-    let index_map = ProjectIndexMap::<TantivyIndexHandle>::new(ProjectIndexMapConfig::default());
     let daemon_uid = nix::unistd::Uid::current().as_raw();
     // Pin under the canonical project root: `resolve_project` canonicalizes
     // every X-Agent-Root lookup, so recall/dream must match on the same form.
     let primary_root = std::fs::canonicalize(agent_root.project_root())
         .unwrap_or_else(|_| agent_root.project_root().to_path_buf());
-    let state = AppState::new(registry_path, supervisor, config, index_map, daemon_uid)
+    let state = AppState::new(registry_path, supervisor, config, daemon_uid)
         .with_primary(primary_root, primary_handle);
     // Retain shutdown handles BEFORE `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
@@ -282,6 +291,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // the JSONL append is already durable, so a lost final commit costs a
     // rebuild on next open, not data.
     let _ = with_drain_timeout(DRAIN_TIMEOUT, drain_daemon(drain_supervisor, drain_index)).await;
+    drop(writer_lock);
 
     outcome.map_err(WatchError::from)
 }
@@ -290,9 +300,9 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 /// port at `~/.agent/server.json`, and block until Ctrl-C. The off-Unix half of
 /// [`run_watch`] (AILAB-192).
 ///
-/// The sequence is: discover AgentRoot → load config + WEG-66 guard → WAL
-/// recovery → resolve the daemon home → require `~/.agent/auth.json` → boot
-/// Supervisor (no indexer) → compose AppState → [`bind_listen`] (`127.0.0.1:0`
+/// The sequence is: discover AgentRoot → load config + WEG-66 guard → project
+/// writer lock (which runs WAL recovery) → resolve the daemon home → require
+/// `~/.agent/auth.json` → boot Supervisor (no indexer) → compose AppState → [`bind_listen`] (`127.0.0.1:0`
 /// unless `listen` says otherwise, AILAB-197) → publish `server.json` → serve
 /// until Ctrl-C → unlink `server.json` → drain.
 ///
@@ -301,9 +311,9 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 /// * **No Tantivy.** [`TantivyIndexHandle::open`] is never called here. It writes
 ///   the index manifest through [`io::write_atomic`](crate::io::write_atomic), which is
 ///   `ErrorKind::Unsupported` off Unix, so opening the index would fail the boot
-///   outright rather than degrade it. `AppState` therefore gets a fresh empty
-///   `ProjectIndexMap` and no pinned primary, the coordinator is started with no
-///   `indexer_tx`, and the shutdown drain gets `None` for the index. JSONL
+///   outright rather than degrade it. `AppState` therefore gets no pinned
+///   primary, the coordinator is started with no `indexer_tx`, and the
+///   shutdown drain gets `None` for the index. JSONL
 ///   appends are durable; index-backed recall and the dream cycle are not
 ///   available on this target (`docs/windows.md`).
 /// * **`auth.json` is read, never written.** The bearer token is minted by
@@ -346,13 +356,14 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
         return Err(WatchError::DreamMode(AUTO_MODE_UNSUPPORTED.into()));
     }
 
-    // 2.5. Recover any stale dream-cycle WAL before opening coordinators. The
+    // 2.5. Take the project writer lock, which resets a stale `in_progress`
+    //      and recovers any stale dream-cycle WAL before coordinators open. The
     //      error is propagated rather than logged and swallowed: recovery
     //      restores a store whose consolidation was interrupted mid-cycle, and
     //      on this target it can legitimately fail (`write_atomic` is
     //      `Unsupported`), so continuing past it would serve a half-applied
-    //      store as if it were intact.
-    crate::wal::recover_on_startup(&agent_root)?;
+    //      store as if it were intact. Held to the end of this function.
+    let writer_lock = WriterLock::acquire(&agent_root, WriterKind::Watch)?;
 
     // 3. Resolve the daemon home through `layout::home_dir()`, exactly as the
     //    Unix arm and the CLI do (BZR-168): `HOME`, else `USERPROFILE`, empty
@@ -384,6 +395,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    way no Tantivy handle is opened anywhere on this path.
     let supervisor = Supervisor::start(
         &agent_root,
+        &writer_lock,
         COORDINATOR_CHANNEL_CAPACITY,
         #[cfg(unix)]
         None,
@@ -392,19 +404,12 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     // 6. Compose AppState. `daemon_uid` is 0 and never read: `peer_uid_middleware`
     //    is not mounted on this router (TCP carries no peer credential), and
     //    `nix` is a `cfg(unix)` dependency, so `Uid::current()` does not even
-    //    exist here to ask. `index_map` starts empty and stays empty — nothing
-    //    on this path opens a handle — and there is no `with_primary`.
+    //    exist here to ask. A lazily opened project runtime has no index on
+    //    this target, and there is no `with_primary`.
     //    `with_auth_json` is mandatory rather than optional: `auth_json: None`
     //    is fail-closed, and a router built without it 401s every request.
-    let index_map = ProjectIndexMap::<TantivyIndexHandle>::new(ProjectIndexMapConfig::default());
-    let state = AppState::new(
-        daemon_home.registry_toml(),
-        supervisor,
-        config,
-        index_map,
-        0,
-    )
-    .with_auth_json(daemon_home.auth_json());
+    let state = AppState::new(daemon_home.registry_toml(), supervisor, config, 0)
+        .with_auth_json(daemon_home.auth_json());
     // Retain the shutdown handle BEFORE `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
     // connection tasks, so there would be nothing left here to drain. There is
@@ -465,6 +470,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //     durable only once the coordinator has processed them, so returning
     //     without draining would drop whatever it still had queued.
     let _ = with_drain_timeout(DRAIN_TIMEOUT, drain_daemon(drain_supervisor, None)).await;
+    drop(writer_lock);
 
     outcome.map_err(WatchError::from)
 }
@@ -732,6 +738,13 @@ mod tests {
     use dreamd_protocol::{AgentLearning, EventId};
     #[cfg(unix)]
     use tokio::sync::oneshot;
+
+    /// One project writer token per root per test; every open and start on
+    /// that root in the test borrows it.
+    #[cfg(unix)]
+    fn writer_lock(agent_root: &AgentRoot) -> WriterLock {
+        WriterLock::acquire(agent_root, WriterKind::Watch).expect("project writer lock")
+    }
 
     #[cfg(unix)]
     fn sample_learning() -> AgentLearning {
@@ -1199,11 +1212,14 @@ mod tests {
         let agent_root = AgentRoot::new(dir.path());
         std::fs::create_dir_all(agent_root.episodic_dir()).expect("episodic dir");
 
+        let lock = writer_lock(&agent_root);
         let handle = Arc::new(
-            TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open index"),
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
+                .expect("open index"),
         );
         let supervisor = Arc::new(
-            Supervisor::start(&agent_root, 8, Some(handle.sender())).expect("start supervisor"),
+            Supervisor::start(&agent_root, &lock, 8, Some(handle.sender()))
+                .expect("start supervisor"),
         );
 
         // Stand-ins for the clones `build_router` moved into `AppState`; they
@@ -1276,11 +1292,14 @@ mod tests {
         let agent_root = AgentRoot::new(dir.path());
         std::fs::create_dir_all(agent_root.episodic_dir()).expect("episodic dir");
 
+        let lock = writer_lock(&agent_root);
         let handle = Arc::new(
-            TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open index"),
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
+                .expect("open index"),
         );
         let supervisor = Arc::new(
-            Supervisor::start(&agent_root, 8, Some(handle.sender())).expect("start supervisor"),
+            Supervisor::start(&agent_root, &lock, 8, Some(handle.sender()))
+                .expect("start supervisor"),
         );
 
         let client_tx = supervisor.sender();
@@ -1332,7 +1351,8 @@ mod tests {
         let agent_root = AgentRoot::new(dir.path());
         std::fs::create_dir_all(agent_root.episodic_dir()).expect("episodic dir");
 
-        let supervisor = Arc::new(Supervisor::start(&agent_root, 8, None).expect("start"));
+        let lock = writer_lock(&agent_root);
+        let supervisor = Arc::new(Supervisor::start(&agent_root, &lock, 8, None).expect("start"));
         let client_tx = supervisor.sender();
         let (resp_tx, resp_rx) = oneshot::channel();
         client_tx

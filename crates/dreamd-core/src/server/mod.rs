@@ -21,8 +21,9 @@
 //!
 //! Submodule layout:
 //!   * [`project_resource_map`] — shared lazy-open LRU + idle-eviction container
-//!     (cap 10, 30 min idle) keyed on project root. Index and supervisor maps
-//!     are thin adapters over this module.
+//!     (cap 10, 30 min idle) keyed on project root.
+//!   * [`project_runtime`] — one project's writer lock, index and coordinator,
+//!     opened together; the daemon's per-project map holds these.
 //!   * [`index_map`] — `IndexHandle` trait + `ProjectIndexMap<H>` adapter.
 //!     Production writes use [`tantivy_handle`] (WEG-42); `TestIndexHandle`
 //!     remains for eviction + shutdown-drain tests without a live index.
@@ -55,7 +56,7 @@ pub mod index_map;
 pub mod indexer_actor;
 pub mod lifecycle;
 pub mod project_resource_map;
-pub mod supervisor_map;
+pub mod project_runtime;
 pub mod tantivy_handle;
 // AILAB-192: both files also carry a file-level `#![cfg(unix)]`, which is what
 // actually removes them off-target. The gate is restated on the declaration so
@@ -73,7 +74,7 @@ pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,
 };
 pub use project_resource_map::{ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig};
-pub use supervisor_map::{SupervisorMap, SupervisorMapConfig};
+pub use project_runtime::ProjectRuntime;
 pub use tantivy_handle::{
     assess_index_freshness, read_semantic_pass_record, IndexFreshness, IndexerMsg,
     SemanticPassRecord, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME,

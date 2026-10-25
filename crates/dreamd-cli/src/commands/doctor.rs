@@ -682,7 +682,8 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
 /// (which repair only ever reads). Fails closed when a live daemon is
-/// detected — wiping the cache underneath its writer would race it.
+/// detected — wiping the cache underneath its writer would race it — and when
+/// the project writer lock is held by any other writer.
 #[cfg(unix)]
 fn run_repair(
     agent_root: &AgentRoot,
@@ -694,6 +695,7 @@ fn run_repair(
         is_daemon_socket_live, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME,
         INDEX_PROGRESS_FILENAME,
     };
+    use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 
     if let Some(sock) = socket {
         if is_daemon_socket_live(sock) {
@@ -706,6 +708,23 @@ fn run_repair(
             return Ok(false);
         }
     }
+
+    // Held through the unlink, the wipe and the rebuild. Every writer of this
+    // project takes it, so the wipe cannot run under one.
+    let lock = match WriterLock::acquire(agent_root, WriterKind::Repair) {
+        Ok(lock) => lock,
+        Err(e @ WriterLockError::Busy { .. }) => {
+            writeln!(
+                err,
+                "dreamd: error — doctor --repair refused: {e}. Stop it first, then re-run."
+            )?;
+            return Ok(false);
+        }
+        Err(e) => {
+            writeln!(err, "dreamd: error — doctor --repair refused: {e}")?;
+            return Ok(false);
+        }
+    };
 
     let mut actions: Vec<String> = Vec::new();
 
@@ -789,7 +808,7 @@ fn run_repair(
     };
     let reopened = {
         let _guard = rt.enter();
-        TantivyIndexHandle::open(agent_root, DEFAULT_COMMIT_CADENCE)
+        TantivyIndexHandle::open(agent_root, &lock, DEFAULT_COMMIT_CADENCE)
     };
     match reopened {
         Ok(handle) => {
@@ -1715,6 +1734,55 @@ mod tests {
             "no index wipe may happen before the refusal"
         );
         assert!(sock.exists(), "a live socket must never be unlinked");
+    }
+
+    /// The wipe must never run under another writer. While `dreamd watch`
+    /// holds the project, `--repair` refuses even with no socket to probe.
+    #[cfg(unix)]
+    #[test]
+    fn repair_refuses_while_watch_holds_the_project() {
+        use dreamd_core::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("repair-held");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        {
+            let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE)
+                    .unwrap()
+                    .shutdown()
+                    .await
+                    .unwrap();
+            });
+        }
+        let before = crate::commands::store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, _output, err) = run_with(&cfg, &root, None, None, flags);
+
+        assert!(
+            !ok,
+            "repair must fail closed while another writer holds the project"
+        );
+        assert!(
+            err.contains(&format!(
+                "dreamd: error — doctor --repair refused: project writer lock is held by pid {} \
+                 (watch). Stop it first, then re-run.",
+                std::process::id()
+            )),
+            "{err:?}"
+        );
+        assert_eq!(crate::commands::store_bytes(&root), before);
     }
 
     /// `$DREAMD_SOCK` pointed at a regular file: the liveness probe reports

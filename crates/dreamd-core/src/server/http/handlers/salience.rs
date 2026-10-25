@@ -24,7 +24,7 @@ pub(crate) async fn get_salience(
 ) -> axum::response::Response {
     let now_sec = chrono::Utc::now().timestamp();
 
-    // Same reader resolution as `get_recall`: clone out so the index_map mutex
+    // Same reader resolution as `get_recall`: clone out so the `runtimes` mutex
     // is not held across the scan.
     let reader =
         match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {

@@ -9,9 +9,9 @@ use super::{build_router, AppState, PeerUid};
 use crate::config::Config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::layout::AgentRoot;
-use crate::server::index_map::ProjectIndexMapConfig;
 use crate::server::lifecycle::Supervisor;
-use crate::server::{ProjectIndexMap, SupervisorMap};
+use crate::server::ProjectResourceMap;
+use crate::writer_lock::{WriterKind, WriterLock};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Utc};
@@ -24,36 +24,52 @@ const SAMPLE_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 fn make_test_state(registry_path: PathBuf) -> AppState {
     let (supervisor, _rx) = Supervisor::for_backpressure_test();
     let config = Config::default();
-    let index_map = ProjectIndexMap::new(ProjectIndexMapConfig::default());
     AppState {
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(config),
-        index_map: Arc::new(Mutex::new(index_map)),
+        runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
-        supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
         // bearer layer and this path is never read here.
         auth_json: None,
     }
 }
 
+/// One project writer token per root per test; every open and start on that
+/// root in the test borrows it.
+fn writer_lock(agent_root: &AgentRoot) -> WriterLock {
+    WriterLock::acquire(agent_root, WriterKind::Watch).expect("project writer lock")
+}
+
 /// State backed by a real `MemoryCoordinator` for tests that need actual
-/// append semantics (durability, dedup, 413 rejection).
+/// append semantics (durability, dedup, 413 rejection). Booted the way
+/// `run_watch` boots its project: `.agent/` exists, the project writer lock,
+/// the index pinned as `primary`, and a coordinator wired to it. The lock lives
+/// on in the index and coordinator tasks.
 fn make_real_state(project_dir: &std::path::Path, registry_path: PathBuf) -> AppState {
-    let agent_root = AgentRoot::new(project_dir);
-    let supervisor = Supervisor::start(&agent_root, 8, None).expect("start supervisor for test");
+    let canonical = std::fs::canonicalize(project_dir).expect("canonicalize project dir");
+    let agent_root = AgentRoot::new(&canonical);
+    std::fs::create_dir_all(agent_root.episodic_dir()).expect("episodic dir");
+    let lock = writer_lock(&agent_root);
+    let primary = Arc::new(
+        crate::server::TantivyIndexHandle::open(
+            &agent_root,
+            &lock,
+            crate::server::DEFAULT_COMMIT_CADENCE,
+        )
+        .expect("open primary index for test"),
+    );
+    let supervisor = Supervisor::start(&agent_root, &lock, 8, Some(primary.sender()))
+        .expect("start supervisor for test");
     AppState {
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
-        index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
-            ProjectIndexMapConfig::default(),
-        ))),
+        runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
-        primary: None,
-        supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
+        primary: Some((canonical, primary)),
         // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
         // bearer layer and this path is never read here.
         auth_json: None,
@@ -456,12 +472,9 @@ async fn learn_channel_full_returns_503() {
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
-        index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
-            ProjectIndexMapConfig::default(),
-        ))),
+        runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
-        supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
         // bearer layer and this path is never read here.
         auth_json: None,
@@ -955,6 +968,9 @@ async fn recall_empty_index_returns_empty_results() {
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
 
+    // An initialized project: the index opens under the project writer lock,
+    // which never scaffolds a missing `.agent/`.
+    std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
     let state = make_test_state(registry_path);
     let router = build_router(state);
 
@@ -985,6 +1001,9 @@ async fn salience_report_empty_index_writes_today_snapshot() {
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
 
+    // An initialized project: the index opens under the project writer lock,
+    // which never scaffolds a missing `.agent/`.
+    std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
     let state = make_test_state(registry_path);
     let router = build_router(state);
 
@@ -1024,6 +1043,9 @@ async fn recall_returns_200_for_registered_root() {
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
 
+    // An initialized project: the index opens under the project writer lock,
+    // which never scaffolds a missing `.agent/`.
+    std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
     let state = make_test_state(registry_path);
     let router = build_router(state);
 
@@ -1192,12 +1214,9 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
         registry_path,
         supervisor: Arc::new(Supervisor::for_backpressure_test().0),
         config: Arc::new(Config::default()),
-        index_map: Arc::new(Mutex::new(ProjectIndexMap::new(
-            ProjectIndexMapConfig::default(),
-        ))),
+        runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: wrong_uid,
         primary: None,
-        supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
         // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
         // bearer layer and this path is never read here.
         auth_json: None,
@@ -1465,16 +1484,24 @@ async fn dream_in_progress_returns_409() {
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
 
-    // Write state.json with "in_progress" status to simulate a running cycle.
     let agent_root = AgentRoot::new(dir.path());
     std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+    let state = make_test_state(registry_path);
+    // The project's writer is live first: its runtime holds the project writer
+    // lock, so the status below belongs to a running cycle, not a stale one
+    // (taking the lock resets a stale `in_progress` with no WAL).
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    state
+        .with_index_handle(&canonical, |_| ())
+        .expect("open the project's runtime");
+
+    // Write state.json with "in_progress" status to simulate a running cycle.
     std::fs::write(
         agent_root.state_json(),
         b"{\"schema_version\":\"1.0\",\"last_dream_cycle_status\":\"in_progress\"}\n",
     )
     .unwrap();
 
-    let state = make_test_state(registry_path);
     let router = build_router(state);
 
     let req = with_peer_uid(
@@ -1669,12 +1696,13 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
 
     // Cadence far past the test's lifetime: the ticker never commits, so the
     // explicit `flush` below is the only commit.
+    let lock = writer_lock(&agent_root);
     let primary = Arc::new(
-        TantivyIndexHandle::open(&agent_root, Duration::from_secs(3600))
+        TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600))
             .expect("open primary handle"),
     );
     // Coordinator is wired to the SAME handle's indexer.
-    let supervisor = Supervisor::start(&agent_root, 8, Some(primary.sender()))
+    let supervisor = Supervisor::start(&agent_root, &lock, 8, Some(primary.sender()))
         .expect("start supervisor with indexer");
 
     let registry_path = dir.path().join("registry.toml");
@@ -1683,7 +1711,6 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
         registry_path,
         supervisor,
         Config::default(),
-        ProjectIndexMap::new(ProjectIndexMapConfig::default()),
         nix::unistd::Uid::current().as_raw(),
     )
     .with_primary(canonical_root.clone(), Arc::clone(&primary));
@@ -1749,8 +1776,9 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
 
 /// Build a daemon-shaped state with TWO registered projects: the pinned
 /// boot project A (real coordinator + pinned primary index, short commit
-/// cadence) and a second project B reachable only via `supervisor_map`
-/// routing. Mirrors how `run_watch` composes the daemon. Returns
+/// cadence) and a second project B reachable only via `runtimes`
+/// routing. Mirrors how `run_watch` composes the daemon. Both projects have a
+/// `.agent/`, as `dreamd init` leaves them. Returns
 /// `(dir_a, dir_b, canonical_a, canonical_b, state)`; keep both dirs alive.
 fn make_routing_state() -> (
     tempfile::TempDir,
@@ -1777,21 +1805,25 @@ fn make_routing_state() -> (
     );
     std::fs::write(&registry_path, body).unwrap();
 
+    std::fs::create_dir_all(AgentRoot::new(canonical_b.clone()).agent_dir()).unwrap();
+
     // Boot project A: pinned primary handle (short cadence so the daemon's
-    // own recall path stays fast) + a real coordinator wired to it.
+    // own recall path stays fast) + a real coordinator wired to it, under A's
+    // project writer lock.
     let agent_root_a = AgentRoot::new(canonical_a.clone());
+    std::fs::create_dir_all(agent_root_a.agent_dir()).unwrap();
+    let lock_a = writer_lock(&agent_root_a);
     let primary = Arc::new(
-        TantivyIndexHandle::open(&agent_root_a, Duration::from_millis(100))
+        TantivyIndexHandle::open(&agent_root_a, &lock_a, Duration::from_millis(100))
             .expect("open primary handle for A"),
     );
-    let supervisor =
-        Supervisor::start(&agent_root_a, 8, Some(primary.sender())).expect("start A coordinator");
+    let supervisor = Supervisor::start(&agent_root_a, &lock_a, 8, Some(primary.sender()))
+        .expect("start A coordinator");
 
     let state = AppState::new(
         registry_path,
         supervisor,
         Config::default(),
-        ProjectIndexMap::new(ProjectIndexMapConfig::default()),
         nix::unistd::Uid::current().as_raw(),
     )
     .with_primary(canonical_a.clone(), primary);
@@ -1865,7 +1897,6 @@ async fn lazy_resolve_recovers_mid_cycle_wal_on_project_b() {
 /// A WAL opened after B's coordinator is live belongs to a running cycle, not
 /// a crashed one. A later request for B must not recover it away.
 #[tokio::test]
-#[ignore = "BZR-1232: per-request recovery deletes a live cycle's WAL"]
 async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
     let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
     state
@@ -1880,6 +1911,26 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
         root_b.wal_path().exists(),
         "a request must not run recovery on a project whose coordinator is live"
     );
+}
+
+/// A live non-boot root resolves to the SAME coordinator on every request:
+/// two coordinators on one JSONL corrupt it (DR-103).
+#[tokio::test]
+async fn resolve_supervisor_returns_the_same_arc_for_a_live_root() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+
+    let first = state
+        .resolve_supervisor(&canonical_b)
+        .expect("first resolve starts B");
+    let second = state
+        .resolve_supervisor(&canonical_b)
+        .expect("second resolve reuses B");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "a live root must return the SAME Arc — two coordinators on one JSONL corrupt it (DR-103)"
+    );
+    assert_eq!(state.runtimes.lock().unwrap().len(), 1);
 }
 
 /// Headline AC: a `POST /learn` for project B appends to B's JSONL, leaves
@@ -1963,7 +2014,7 @@ async fn learn_routes_to_owning_project_not_boot() {
 
 /// A `POST /learn` for the pinned boot project A still routes to the boot
 /// coordinator (`state.supervisor`) and lands in A's JSONL — and must NOT
-/// spin up a `supervisor_map` entry. This preserves the single-coordinator
+/// open a `runtimes` entry. This preserves the single-coordinator
 /// behaviour every pre-WEG-272 test relied on.
 #[tokio::test]
 async fn learn_to_boot_root_uses_primary_supervisor() {
@@ -1997,9 +2048,9 @@ async fn learn_to_boot_root_uses_primary_supervisor() {
     // The boot project uses state.supervisor — routing must NOT create a
     // per-root coordinator for it.
     assert_eq!(
-        state.supervisor_map.lock().unwrap().len(),
+        state.runtimes.lock().unwrap().len(),
         0,
-        "boot-project routing must not populate supervisor_map"
+        "boot-project routing must not populate runtimes"
     );
 }
 

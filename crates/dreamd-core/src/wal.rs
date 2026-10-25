@@ -274,9 +274,11 @@ pub fn recover_if_needed(
     })
 }
 
-/// Check for a stale WAL on daemon startup and run recovery with logging.
+/// Check for a stale WAL and run recovery with logging.
 ///
-/// Called from `run_watch` and lazy per-project open before any store access.
+/// Called only by [`WriterLock::acquire`](crate::writer_lock::WriterLock::acquire),
+/// after the project writer lock is held and before any store access, so a
+/// WAL it finds cannot belong to a cycle that is still running.
 pub fn recover_on_startup(agent_root: &AgentRoot) -> Result<RecoveryOutcome, WalError> {
     let now_sec = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

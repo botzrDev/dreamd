@@ -33,6 +33,7 @@ use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::tantivy_handle::IndexerMsg;
+use crate::writer_lock::WriterLock;
 
 /// Default bound for the coordinator mpsc channel (architecture decision C14).
 /// Revisit after load-testing in DR-208 / DR-808.
@@ -73,6 +74,9 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("index manifest check failed: {0}")]
     ManifestCheck(#[from] crate::index::ManifestVersionError),
+    /// The token passed to [`Supervisor::start`] does not cover the project.
+    #[error("{0}")]
+    WriterLock(String),
 }
 
 /// Wiring config for the writer-process. `agent_root` selects the per-project
@@ -152,11 +156,22 @@ impl Supervisor {
     /// this signature accept a channel it cannot forward. Same pattern, same
     /// reason, as
     /// [`MemoryCoordinator::open`](crate::coordinator::MemoryCoordinator::open).
+    ///
+    /// `lock` must cover `agent_root`. The coordinator task keeps a clone of it,
+    /// so the project writer lock outlives an evicted supervisor until the
+    /// coordinator has drained its inbox and closed the JSONL.
     pub fn start(
         agent_root: &AgentRoot,
+        lock: &WriterLock,
         channel_capacity: usize,
         #[cfg(unix)] indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
     ) -> Result<Self, ServerError> {
+        if !lock.covers(agent_root) {
+            return Err(ServerError::WriterLock(format!(
+                "the project writer lock held by this process does not cover {}",
+                agent_root.project_root().display()
+            )));
+        }
         let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
         match check_manifest_version(&manifest_path)? {
             ManifestCheckOutcome::Absent => {
@@ -185,7 +200,11 @@ impl Supervisor {
             indexer_tx,
         )
         .map_err(ServerError::Coordinator)?;
-        let handle = tokio::spawn(coordinator.run());
+        let lock = lock.clone();
+        let handle = tokio::spawn(async move {
+            let _lock = lock;
+            coordinator.run().await
+        });
         Ok(Self { tx, handle })
     }
 
@@ -383,6 +402,7 @@ pub fn detach_double_fork() -> Result<bool, ServerError> {
 mod tests {
     use super::*;
     use crate::coordinator::MemoryCoordinatorMsg;
+    use crate::writer_lock::WriterKind;
     use chrono::{DateTime, Utc};
     use dreamd_protocol::{AgentLearning, EventId};
     use std::path::PathBuf;
@@ -390,6 +410,12 @@ mod tests {
     use tokio::sync::oneshot;
 
     const SAMPLE_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    /// One project writer token per root per test; every open and start on
+    /// that root in the test borrows it.
+    fn writer_lock(agent_root: &AgentRoot) -> WriterLock {
+        WriterLock::acquire(agent_root, WriterKind::Watch).expect("project writer lock")
+    }
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -433,7 +459,8 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor = Supervisor::start(&agent_root, 8, None).expect("start supervisor");
+        let lock = writer_lock(&agent_root);
+        let supervisor = Supervisor::start(&agent_root, &lock, 8, None).expect("start supervisor");
         let client_tx = supervisor.sender();
 
         // Queue an append from a "client" sender, then drop it so the
@@ -491,8 +518,10 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor =
-            std::sync::Arc::new(Supervisor::start(&agent_root, 8, None).expect("start supervisor"));
+        let lock = writer_lock(&agent_root);
+        let supervisor = std::sync::Arc::new(
+            Supervisor::start(&agent_root, &lock, 8, None).expect("start supervisor"),
+        );
         // A second Arc owner, standing in for the clone `build_router` moved
         // into `AppState`.
         let state_arc = std::sync::Arc::clone(&supervisor);
@@ -558,7 +587,8 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor = Supervisor::start(&agent_root, 4, None).expect("start supervisor");
+        let lock = writer_lock(&agent_root);
+        let supervisor = Supervisor::start(&agent_root, &lock, 4, None).expect("start supervisor");
         supervisor.drain().await;
         supervisor.drain().await;
 
@@ -572,7 +602,8 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let supervisor = Supervisor::start(&agent_root, 4, None).expect("start supervisor");
+        let lock = writer_lock(&agent_root);
+        let supervisor = Supervisor::start(&agent_root, &lock, 4, None).expect("start supervisor");
         let stale_tx = supervisor.sender();
         supervisor.shutdown().await;
 

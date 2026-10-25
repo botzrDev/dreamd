@@ -54,6 +54,7 @@ pub use salience::{salience_with_context, RecurrenceContext};
 #[cfg(test)]
 mod test_support;
 pub mod wal;
+pub mod writer_lock;
 
 pub use collector::{recall, score_by_salience, RecallResult, SalienceCollector};
 pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry};

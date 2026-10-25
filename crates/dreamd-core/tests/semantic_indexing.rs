@@ -31,6 +31,7 @@ use dreamd_core::lessons::{write_lessons_file, Lesson, LessonsFile};
 use dreamd_core::server::tantivy_handle::{
     read_semantic_pass_record, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, SEMANTIC_PASS_FILENAME,
 };
+use dreamd_core::writer_lock::{WriterKind, WriterLock};
 use dreamd_protocol::{AgentLearning, EventId};
 
 /// Fixed query-time clock — no wall-clock reads, same invariant as `recall`.
@@ -103,8 +104,11 @@ fn write_lessons(root: &AgentRoot, cluster_key: &str, lessons: Vec<Lesson>) {
     .expect("write LESSONS.md");
 }
 
+/// The handle's indexer task keeps the token, so the project stays locked
+/// until the handle is shut down.
 fn open(root: &AgentRoot) -> TantivyIndexHandle {
-    TantivyIndexHandle::open(root, DEFAULT_COMMIT_CADENCE).expect("open index handle")
+    let lock = WriterLock::acquire(root, WriterKind::Watch).expect("project writer lock");
+    TantivyIndexHandle::open(root, &lock, DEFAULT_COMMIT_CADENCE).expect("open index handle")
 }
 
 /// Reload the handle's reader, then run a salience-scored recall against it.

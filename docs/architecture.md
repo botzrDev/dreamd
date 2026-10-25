@@ -67,7 +67,8 @@ before:
   - `crates/dreamd-core/src/server/index_map.rs` — `IndexHandle` trait,
     `IndexError`, and `ProjectIndexMap<H>` (LRU cap 10, idle eviction 30 min;
     the policy itself lives in `project_resource_map.rs` and is shared with
-    `supervisor_map.rs`) with `TestIndexHandle`.
+    the daemon's per-project map of `project_runtime.rs` entries) with
+    `TestIndexHandle`.
   - `crates/dreamd-core/src/server/tantivy_handle.rs` — the Tantivy-backed
     `TantivyIndexHandle` (`open` / `flush` / `shutdown` / `close`) and the
     startup replay. The indexer task is `server/indexer_actor.rs`; the
@@ -327,9 +328,9 @@ supported. `--dry` previews: it prints the `LESSONS.md` the cycle
 would write and writes nothing, skipping the daemon proxy because a
 `POST /api/v1/dream` is itself a write (AILAB-341). `--no-llm` is forwarded
 through the proxy as a header. `--no-commit` skips the git step **and** the
-daemon proxy: the cycle runs in-process, so do not use it for a project a
-running `dreamd watch` is serving — it rewrites the JSONL under the daemon,
-and its index phase fails on the writer lock the daemon holds.
+daemon proxy: the cycle runs in this process and takes the project writer lock
+first, so it refuses while `dreamd watch` or an in-process `dreamd mcp` holds
+the project.
 
 A real cycle also does two things that are not phases of their own, both
 inside the WAL envelope: `snapshot::create_autosnap` saves a pre-mutation copy
@@ -500,15 +501,16 @@ file outlived it: state goes to `complete`, the WAL is deleted, and the outcome
 is `CommittedButUnclean`. Otherwise each intent's temp file and
 its `.tmp` neighbour are deleted, the WAL is deleted, state is set to
 **`failed`**, and the outcome is `Recovered`.
-`recover_on_startup` runs from `run_watch` and from the lazy
-per-project open, before any store access. A concurrent trigger is refused
-rather than queued: `dream_cycle::ensure_not_in_progress` yields
-`DreamCycleError::InProgress` when `state.json` says `in_progress`, which the
-HTTP layer maps to 409 and the in-process CLI reports as an error (both paths
-share the guard since BZR-172). Recovery keys off the WAL **file**: with no WAL
-on disk it returns `Clean` and does not rewrite the status, so a `state.json`
-stuck at `in_progress` with no WAL is an operator cleanup, not something a
-`dreamd watch` restart clears.
+`recover_on_startup` has one caller, `WriterLock::acquire`. It therefore runs
+in every process that takes the project writer lock (`run_watch`, the daemon's
+lazy per-project open, in-process `dreamd mcp`, and the CLI writers), before
+any store access. Just before it, `acquire` resets a `state.json` left at
+`in_progress` with no WAL to `failed`: the lock was free, so no cycle can be
+running. Inside the lock holder, a concurrent trigger is refused rather than
+queued: `dream_cycle::ensure_not_in_progress` yields
+`DreamCycleError::InProgress` when `state.json` says `in_progress`, and the
+HTTP layer maps that to 409. The lock refuses a second process before it gets
+that far.
 
 **Two carve-outs that must not be overstated:**
 

@@ -13,7 +13,8 @@ Commands below use the cargo-installed `dreamd` binary. On the npm path the shim
 | stderr | Cause |
 |---|---|
 | `dreamd watch: supervisor: UDS bind failed: socket already bound by another writer-process` | Another `dreamd watch` (yours, or the one `dreamd service install` supervises) is already serving `~/.agent/dreamd.sock`. There is one daemon per user. |
-| `dreamd watch: index: index error: tantivy: Failed to acquire Lockfile: LockBusy. …` | Another process holds this project's index writer — a second `dreamd watch` started from the same project, or a standalone in-process `dreamd mcp` that a harness spawned before the daemon was up. |
+| `dreamd watch: project writer lock is held by pid N (kind)` | Another dreamd process writes this project, and `kind` says which: `watch` (a second `dreamd watch` started from the same project), `mcp` (a standalone in-process `dreamd mcp` that a harness spawned before the daemon was up), or a CLI writer that is still running (`dream`, `forget`, `archive`, `checkout`, `bisect`, `repair`, `setup`). `N` is its pid. |
+| `dreamd watch: the index writer lock is held by a dreamd process that predates the project writer lock (1.0.x); stop it first` | A dreamd from before the project writer lock (1.0.x) is writing this project. It holds only the index lock, so its pid is not known. |
 | `dreamd watch: supervisor: UDS bind failed: UDS bind failed: path must be shorter than SUN_LEN` | `$HOME/.agent/dreamd.sock` is longer than a Unix socket path may be (under 108 bytes on Linux, 104 on macOS). Typical in deeply nested sandbox or CI homes. |
 
 **Fix:**
@@ -24,8 +25,11 @@ pgrep -a dreamd
 dreamd status                 # "daemon: running" means the socket answers
 
 # Already-bound: use the running daemon, or stop it first (Ctrl-C / SIGTERM, or `dreamd service restart`).
-# LockBusy: close the harness session(s) holding an in-process `dreamd mcp`, start `dreamd watch`,
-#           then reload the harness so its MCP server bridges to the daemon.
+# Writer lock held by pid N (mcp): close the harness session(s) holding that in-process
+#           `dreamd mcp`, start `dreamd watch`, then reload the harness so its MCP server
+#           bridges to the daemon. Any other kind: wait for pid N to finish, or stop it.
+# Older dreamd (1.0.x): stop that process (`pgrep -a dreamd`) and upgrade the harnesses that
+#           spawn it, then start `dreamd watch`.
 # SUN_LEN: run under a shorter $HOME.
 ```
 
@@ -80,7 +84,7 @@ npx -y dreamd-mcp doctor   # dream-cycle mode + index health; with the daemon st
 
 Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `failed`. See [examples/crash-recovery/](../examples/crash-recovery/).
 
-Recovery keys off the WAL file (`.agent/.dreamd/dream_in_progress.wal`) and runs when `dreamd watch` starts. `dreamd dream` does not run it: while `state.json` still says `in_progress`, a cycle is refused — `dreamd: dream cycle error: dream cycle already in progress`, exit 1, without a daemon; HTTP 409 with one. If the WAL is still on disk, start `dreamd watch` once to recover, then re-run the cycle. If the status is stuck at `in_progress` with **no** WAL file, a `watch` start does not clear it: stop the daemon and set `"last_dream_cycle_status"` in `.agent/.dreamd/state.json` back to `"failed"` by hand.
+Recovery keys off the WAL file (`.agent/.dreamd/dream_in_progress.wal`). It runs whenever a process takes the project writer lock: `dreamd watch` at start, an in-process `dreamd mcp`, and the CLI writers (`dreamd dream` without a daemon or with `--no-commit`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`). Taking the lock also resets a `state.json` left at `in_progress` with no WAL to `failed`. An interrupted cycle therefore needs no hand edit: the next writer recovers it and then runs. While a cycle is live, a second one is refused: HTTP 409 through the daemon, or the writer-lock refusal (`project writer lock is held by pid N (kind)`, exit 1) from the CLI.
 
 **Prevention:** Don't run overlapping dream cycles (HTTP 409 guards concurrent cycles). Use one daemon writer per machine.
 
@@ -107,11 +111,11 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 
 ## `dreamd dream --no-commit` while `watch` is running
 
-**Symptom:** `dreamd dream --no-commit` exits 1 with Tantivy `LockBusy` while `dreamd watch` is up.
+**Symptom:** `dreamd dream --no-commit` exits 1 with `dreamd: dream cycle error: project writer lock is held by pid N (watch)` while `dreamd watch` is up. Nothing was written.
 
-**Cause:** `--no-commit` skips the git commit and also skips the daemon proxy, so the cycle runs in this process and writes the log the daemon already has open.
+**Cause:** `--no-commit` skips the git commit and also skips the daemon proxy, so the cycle runs in this process. It takes the project writer lock first and found another writer holding it: `dreamd watch`, or an in-process `dreamd mcp` (`(mcp)`).
 
-**Fix:** Stop `dreamd watch`, then run the cycle. Or omit `--no-commit` and let the running daemon run it (`dream cycle complete (via daemon)`). Do not treat the `LockBusy` exit as a clean no-op.
+**Fix:** Stop `dreamd watch`, then run the cycle. Or omit `--no-commit` and let the running daemon run it (`dream cycle complete (via daemon)`).
 
 ---
 

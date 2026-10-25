@@ -64,6 +64,11 @@ pub enum IndexError {
     /// task joins, runtime construction.
     #[error("index error: {0}")]
     Other(String),
+    /// The project writer lock was refused, or the token passed in does not
+    /// cover this project. The payload is the
+    /// [`WriterLockError`](crate::writer_lock::WriterLockError) `Display`.
+    #[error("{0}")]
+    WriterLock(String),
 }
 
 impl IndexError {
@@ -201,6 +206,12 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
     /// `idle_timeout`. Returns the number of entries evicted.
     pub fn evict_idle(&mut self) -> usize {
         self.inner.evict_idle()
+    }
+
+    /// Test-only: the idle pass with an explicit timeout.
+    #[cfg(test)]
+    pub(crate) fn evict_idle_after(&mut self, idle_timeout: std::time::Duration) -> usize {
+        self.inner.evict_idle_after(idle_timeout)
     }
 
     /// Close every open handle. Errors from individual closes are swallowed

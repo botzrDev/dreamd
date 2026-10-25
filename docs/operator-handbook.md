@@ -66,10 +66,13 @@ no lesson cites.
 ### Stop the daemon first
 
 `dreamd archive` rewrites `AGENT_LEARNINGS.jsonl` in place (atomic temp + rename).
-The daemon is the store's single writer: while it is running it holds an open file
+The process holding the project writer lock is the store's single writer: while
+the daemon is running it holds an open file
 descriptor on the log and appends by byte offset. If you rewrite the log
 underneath a live daemon, it keeps writing to the old file and your unpin is
-silently lost.
+silently lost. If an in-process `dreamd mcp` holds the lock instead, the
+command refuses the same way: `dreamd: error — project writer lock is held by
+pid N (mcp)`, exit 1.
 
 So the command **refuses to run while the daemon is live**:
 

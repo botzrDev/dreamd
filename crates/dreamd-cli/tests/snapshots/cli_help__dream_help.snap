@@ -11,7 +11,7 @@ Options:
           Dry run: print the LESSONS.md this cycle would write, without writing anything. Skips the daemon proxy; --no-commit is ignored
 
       --no-commit
-          Skip the git commit and the daemon. The cycle runs in this process. Do not use it while dreamd watch is serving this project
+          Skip the git commit and the daemon. The cycle runs in this process and refuses while dreamd watch or dreamd mcp holds this project
 
       --no-llm
           Force deterministic mode even when an API key is present

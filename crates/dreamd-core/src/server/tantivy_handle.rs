@@ -67,6 +67,7 @@ use crate::server::indexer_actor::{
     add_document, index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist,
     DEFAULT_INDEXER_CHANNEL_CAPACITY,
 };
+use crate::writer_lock::WriterLock;
 
 // BZR-170: freshness and the indexer actor moved to sibling modules. Re-export
 // their public surface so `crate::server::tantivy_handle::…` paths (including
@@ -107,7 +108,22 @@ impl TantivyIndexHandle {
     /// writes `<agent_root>/.agent/.dreamd/index_manifest.json` with the
     /// binary's current `SCHEMA_VERSION`. Spawns the indexer task on the
     /// current tokio runtime and runs the startup replay before returning.
-    pub fn open(agent_root: &AgentRoot, commit_cadence: Duration) -> Result<Self, IndexError> {
+    ///
+    /// `lock` must cover `agent_root`: nothing here, including the schema
+    /// wipe, runs without the project writer lock. The indexer task keeps a
+    /// clone of it, so the lock outlives a handle whose task was aborted until
+    /// that task, and its `IndexWriter`, are gone.
+    pub fn open(
+        agent_root: &AgentRoot,
+        lock: &WriterLock,
+        commit_cadence: Duration,
+    ) -> Result<Self, IndexError> {
+        if !lock.covers(agent_root) {
+            return Err(IndexError::WriterLock(format!(
+                "the project writer lock held by this process does not cover {}",
+                agent_root.project_root().display()
+            )));
+        }
         let dreamd_dir = agent_root.dreamd_dir();
         std::fs::create_dir_all(&dreamd_dir).map_err(io_to_index)?;
 
@@ -220,18 +236,24 @@ impl TantivyIndexHandle {
         let _ = &mut clusters;
 
         let (tx, rx) = mpsc::channel::<IndexerMsg>(DEFAULT_INDEXER_CHANNEL_CAPACITY);
-        let join = tokio::spawn(run_indexer(
-            writer,
-            fields,
-            rx,
-            commit_cadence,
-            clusters,
-            IndexerPersist {
-                progress_path,
-                ledger_path: agent_root.provenance_ledger(),
-            },
-            latest_committed,
-        ));
+        let persist = IndexerPersist {
+            progress_path,
+            ledger_path: agent_root.provenance_ledger(),
+        };
+        let lock = lock.clone();
+        let join = tokio::spawn(async move {
+            let _lock = lock;
+            run_indexer(
+                writer,
+                fields,
+                rx,
+                commit_cadence,
+                clusters,
+                persist,
+                latest_committed,
+            )
+            .await
+        });
 
         Ok(Self {
             last_used: Mutex::new(Instant::now()),
@@ -509,6 +531,7 @@ mod tests {
         cluster_member_count, semantic_event_id, write_semantic_pass_record, SemanticPassOutcome,
     };
     use crate::test_support::{unique_tmpdir, DirGuard};
+    use crate::writer_lock::WriterKind;
     use chrono::{DateTime, Utc};
     use std::io::Write;
     use std::path::PathBuf;
@@ -516,6 +539,12 @@ mod tests {
     use tantivy::ReloadPolicy;
 
     const SAMPLE_ULID_BASE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA";
+
+    /// One project writer token per root per test; every open and start on
+    /// that root in the test borrows it.
+    fn writer_lock(agent_root: &AgentRoot) -> WriterLock {
+        WriterLock::acquire(agent_root, WriterKind::Watch).expect("project writer lock")
+    }
 
     fn make_event_id(suffix_char: char) -> EventId {
         // 26-char Crockford ULID, last char varies for ordering tests.
@@ -618,7 +647,8 @@ mod tests {
         std::fs::write(index_dir.join(".tantivy-writer.lock"), b"").unwrap();
         std::fs::write(index_dir.join(".tantivy-meta.lock"), b"").unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
             .expect("open succeeds despite leftover lock files");
         handle.shutdown().await.expect("shutdown");
 
@@ -644,7 +674,9 @@ mod tests {
         ];
         prime_jsonl(&dir, &learnings);
 
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
         handle.shutdown().await.expect("shutdown");
 
         let values = read_recurrence_values(&agent_root);
@@ -680,7 +712,9 @@ mod tests {
         };
         write_progress(&dreamd_dir.join(INDEX_PROGRESS_FILENAME), &progress).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
         handle.shutdown().await.expect("shutdown");
 
         let values = read_recurrence_values(&agent_root);
@@ -699,7 +733,9 @@ mod tests {
         // No JSONL primed — start clean.
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
         for c in ['0', '1', '2'] {
@@ -733,7 +769,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
         // First append: doc gets recurrence=1.
@@ -780,7 +818,9 @@ mod tests {
         let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
 
         // Long cadence so the cadence ticker won't fire during the test.
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         // Empty JSONL, no replay events committed → no progress file yet.
         assert!(
             !progress_path.exists(),
@@ -818,7 +858,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let id = make_event_id('Z');
         handle
             .sender()
@@ -847,8 +889,9 @@ mod tests {
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
         let manifest_path = agent_root.dreamd_dir().join(INDEX_MANIFEST_FILENAME);
 
-        let h1 =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("first open");
+        let lock = writer_lock(&agent_root);
+        let h1 = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("first open");
         h1.shutdown().await.expect("shutdown 1");
         let mtime1 = std::fs::metadata(&manifest_path)
             .expect("manifest present after first open")
@@ -857,8 +900,8 @@ mod tests {
 
         // Sleep enough that any rewrite would have a distinguishably-newer mtime.
         std::thread::sleep(Duration::from_millis(50));
-        let h2 =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("second open");
+        let h2 = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("second open");
         h2.shutdown().await.expect("shutdown 2");
         let mtime2 = std::fs::metadata(&manifest_path)
             .unwrap()
@@ -877,8 +920,9 @@ mod tests {
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
         let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
 
+        let lock = writer_lock(&agent_root);
         let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_millis(50)).expect("open");
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_millis(50)).expect("open");
         let id = make_event_id('Q');
         handle
             .sender()
@@ -923,7 +967,9 @@ mod tests {
         bytes.push_str(&tail);
         std::fs::write(&jsonl_path, bytes.as_bytes()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         handle.shutdown().await.expect("shutdown");
 
         assert_eq!(
@@ -950,7 +996,9 @@ mod tests {
         bytes.push('\n');
         std::fs::write(&jsonl_path, bytes.as_bytes()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         handle.shutdown().await.expect("shutdown");
 
         assert_eq!(
@@ -1242,7 +1290,9 @@ mod tests {
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
         // 60s cadence — only the shutdown-drain path can produce the commit.
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
         for c in ['0', '1', '2'] {
             let id = make_event_id(c);
@@ -1272,8 +1322,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle =
-            TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open handle");
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
+            .expect("open handle");
         // Confirm reader() returns without panic and produces a usable searcher.
         let _searcher = handle.reader().searcher();
         handle.shutdown().await.expect("shutdown");
@@ -1307,7 +1358,9 @@ mod tests {
 
         // A *new* process opens the handle and queries immediately — no
         // explicit flush, no manual reader.reload().
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
         let count = handle
             .reader()
             .searcher()
@@ -1344,7 +1397,9 @@ mod tests {
         // The sidecar path is under semantic/; create the dir explicitly.
         std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
         // Append 3 "deploy" events — steady-state counter gives recurrence 1, 2, 3.
@@ -1426,7 +1481,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
         // Append 5 events.
@@ -1514,7 +1571,8 @@ mod tests {
         )
         .unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, DEFAULT_COMMIT_CADENCE)
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
             .expect("open after migration");
 
         let (_, fields) = build_schema();
@@ -1562,7 +1620,8 @@ mod tests {
         let h_a_present = {
             let h = map
                 .get_or_open(root_a.project_root(), |_| {
-                    TantivyIndexHandle::open(&root_a, Duration::from_secs(60))
+                    let lock_root_a = writer_lock(&root_a);
+                    TantivyIndexHandle::open(&root_a, &lock_root_a, Duration::from_secs(60))
                 })
                 .expect("open A");
             h.touch();
@@ -1572,7 +1631,8 @@ mod tests {
 
         let _ = map
             .get_or_open(root_b.project_root(), |_| {
-                TantivyIndexHandle::open(&root_b, Duration::from_secs(60))
+                let lock_root_b = writer_lock(&root_b);
+                TantivyIndexHandle::open(&root_b, &lock_root_b, Duration::from_secs(60))
             })
             .expect("open B");
         assert_eq!(map.len(), 2, "below capacity, no eviction");
@@ -1596,7 +1656,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let sender = handle.sender();
         assert!(tokio::runtime::Handle::try_current().is_ok());
 
@@ -1621,8 +1683,9 @@ mod tests {
 
         // Index event A through the normal open path.
         prime_jsonl(&dir, &[sample_learning(id_a.clone(), "rust.test", "first")]);
-        let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open baseline");
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("open baseline");
         handle.shutdown().await.expect("shutdown baseline");
 
         // Simulate crash after JSONL sync_data but before indexer caught up:
@@ -1642,8 +1705,8 @@ mod tests {
         assert!(before.stale, "pre-replay must be stale: {before:?}");
         assert_eq!(before.unindexed_count, 1);
 
-        let handle2 =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open replay");
+        let handle2 = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("open replay");
         handle2.shutdown().await.expect("shutdown replay");
 
         let after = assess_index_freshness(&agent_root).expect("assess after");
@@ -1666,7 +1729,9 @@ mod tests {
         let id_b = make_event_id('B');
 
         prime_jsonl(&dir, &[sample_learning(id_a.clone(), "rust.test", "first")]);
-        let handle = TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open");
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         handle.shutdown().await.expect("shutdown");
 
         let ledger = agent_root.provenance_ledger();
@@ -1680,8 +1745,8 @@ mod tests {
 
         // Watermark lost after the edge was written: replay re-indexes A.
         std::fs::remove_file(agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME)).unwrap();
-        let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("replay A");
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("replay A");
         handle.shutdown().await.expect("shutdown replay A");
         let lines = std::fs::read_to_string(&ledger).unwrap();
         assert_eq!(
@@ -1699,8 +1764,8 @@ mod tests {
             .unwrap()
             .write_all(extra.as_bytes())
             .unwrap();
-        let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("replay B");
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("replay B");
         handle.shutdown().await.expect("shutdown replay B");
         let lines = std::fs::read_to_string(&ledger).unwrap();
         assert_eq!(lines.matches("\"kind\":\"index_doc\"").count(), 2);
@@ -1737,8 +1802,9 @@ mod tests {
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
 
-        let handle =
-            TantivyIndexHandle::open(&agent_root, Duration::from_secs(60)).expect("open index");
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
+            .expect("open index");
         let real_tx = handle.sender();
 
         // Capacity 1, pre-filled — the coordinator's `send` blocks for a slot.

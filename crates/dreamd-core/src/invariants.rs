@@ -284,9 +284,13 @@ mod tests {
         fs::write(root.lessons_md(), render_lessons_file(&file)).unwrap();
     }
 
+    /// The handle's indexer task keeps the token, so the project stays locked
+    /// until the handle is shut down.
     #[cfg(unix)]
     fn open(root: &AgentRoot) -> crate::server::TantivyIndexHandle {
-        crate::server::TantivyIndexHandle::open(root, crate::server::DEFAULT_COMMIT_CADENCE)
+        use crate::writer_lock::{WriterKind, WriterLock};
+        let lock = WriterLock::acquire(root, WriterKind::Watch).expect("project writer lock");
+        crate::server::TantivyIndexHandle::open(root, &lock, crate::server::DEFAULT_COMMIT_CADENCE)
             .expect("open index handle")
     }
 

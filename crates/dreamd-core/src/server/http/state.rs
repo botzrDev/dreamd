@@ -1,17 +1,13 @@
 //! `AppState` — shared Axum state and WEG-272 multi-project routing.
-//!
-//! Lock order is always `supervisor_map` AFTER `index_map`: resolve the indexer
-//! `Sender` first (releasing `index_map`'s lock) and only then lock
-//! `supervisor_map`. No other path locks `index_map` while holding
-//! `supervisor_map`, so there is no deadlock.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::Config;
-use crate::server::index_map::IndexError;
-use crate::server::supervisor_map::SupervisorMap;
-use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
+use crate::server::{
+    IndexError, ProjectResourceMap, ProjectRuntime, Supervisor, TantivyIndexHandle,
+};
+use crate::writer_lock::WriterKind;
 
 /// Shared application state cloned into every Axum request via
 /// `State<AppState>`. All fields behind `Arc` so cloning is cheap.
@@ -26,11 +22,12 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 ///
 /// `config` — layered runtime config loaded at startup.
 ///
-/// `index_map` — lazy-opened per-project Tantivy handles. `Mutex` (not
-/// `RwLock`) because every lookup is `&mut self` even for reads (it mutates LRU
-/// ordering) — as true of `ProjectIndexMap::get_handle` as it was of
-/// `get_or_open`. Opening a handle does NOT happen under this lock; see
-/// [`AppState::with_index_handle`] (AILAB-186).
+/// `runtimes` — lazily-opened, LRU + idle-evicting [`ProjectRuntime`]s for
+/// every registered root that is not the pinned boot project. Each holds the
+/// project writer lock, the project's index (Unix) and its coordinator wired to
+/// that index, so the three open and evict as one entry. `Mutex` (not
+/// `RwLock`) because every lookup mutates LRU ordering. Opening a runtime does
+/// NOT happen under this lock; see [`AppState::with_runtime`] (AILAB-186).
 ///
 /// `daemon_uid` — UID of the process that started the daemon. Used by
 /// `peer_uid_middleware` (WEG-72 / DR-407) to reject connections from other
@@ -38,17 +35,10 @@ use crate::server::{ProjectIndexMap, Supervisor, TantivyIndexHandle};
 ///
 /// `primary` — the pinned per-project Tantivy handle for the daemon's booted
 /// project (WEG-264 Defect 2). When set, recall and dream for this exact
-/// (canonicalized) project root use this handle instead of `index_map`, so the
+/// (canonicalized) project root use this handle instead of `runtimes`, so the
 /// coordinator's live appends and the recall reader share **one** index — and
 /// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
 /// Never evicted. `None` outside the daemon (in-process MCP fallback, tests).
-///
-/// `supervisor_map` — lazily-started, LRU + idle-evicting per-project
-/// coordinators for every registered root that is NOT the pinned boot project
-/// (WEG-272). `resolve_supervisor` consults this so a `POST /learn` /
-/// `POST /dream` for project B appends to B's JSONL instead of misfiling into
-/// the boot project's. Only engaged when `primary` is `Some` (the daemon);
-/// `None`/Phase-1/test states route everything to `supervisor`.
 ///
 /// `auth_json` — path to `~/.agent/auth.json`, the AILAB-203 bearer token file
 /// that `bearer_auth_middleware` re-reads on every request (AILAB-192). `None`
@@ -66,14 +56,12 @@ pub struct AppState {
     pub supervisor: Arc<Supervisor>,
     /// Layered runtime config loaded at daemon start.
     pub config: Arc<Config>,
-    /// Lazy per-project Tantivy handles (LRU + idle eviction).
-    pub index_map: Arc<Mutex<ProjectIndexMap<TantivyIndexHandle>>>,
+    /// Lazy per-project lock + index + coordinator (LRU + idle eviction).
+    pub runtimes: Arc<Mutex<ProjectResourceMap<ProjectRuntime>>>,
     /// Daemon process UID for `peer_uid_middleware` (WEG-72).
     pub daemon_uid: u32,
     /// Pinned boot-project index handle; `None` in in-process / test setups.
     pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
-    /// Per-root coordinators for non-boot projects (WEG-272).
-    pub supervisor_map: Arc<Mutex<SupervisorMap>>,
     /// Path to `~/.agent/auth.json` for `bearer_auth_middleware` (AILAB-192).
     /// `None` on Unix (peer UID is the auth) and fail-closed off Unix.
     pub auth_json: Option<PathBuf>,
@@ -84,17 +72,15 @@ impl AppState {
         registry_path: PathBuf,
         supervisor: Supervisor,
         config: Config,
-        index_map: ProjectIndexMap<TantivyIndexHandle>,
         daemon_uid: u32,
     ) -> Self {
         Self {
             registry_path,
             supervisor: Arc::new(supervisor),
             config: Arc::new(config),
-            index_map: Arc::new(Mutex::new(index_map)),
+            runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
             daemon_uid,
             primary: None,
-            supervisor_map: Arc::new(Mutex::new(SupervisorMap::with_defaults())),
             auth_json: None,
         }
     }
@@ -120,38 +106,80 @@ impl AppState {
         self
     }
 
-    /// Lock `index_map`, mapping poisoning onto [`IndexError`]. Exists so every
-    /// guard in [`Self::with_index_handle`] is one line and its scope is
+    /// Lock `runtimes`, mapping poisoning onto [`IndexError`]. Exists so every
+    /// guard in [`Self::with_runtime`] is one line and its scope is
     /// unmistakable.
-    fn lock_index_map(
+    fn lock_runtimes(
         &self,
-    ) -> Result<MutexGuard<'_, ProjectIndexMap<TantivyIndexHandle>>, IndexError> {
-        self.index_map.lock().map_err(|_| IndexError::LockPoisoned)
+    ) -> Result<MutexGuard<'_, ProjectResourceMap<ProjectRuntime>>, IndexError> {
+        self.runtimes.lock().map_err(|_| IndexError::LockPoisoned)
+    }
+
+    /// Resolve the live [`ProjectRuntime`] for `root` and run `f` against it.
+    ///
+    /// A hit is touched and `f` runs under the `runtimes` mutex. On a miss the
+    /// mutex is **released before** [`ProjectRuntime::open`] runs, then re-taken
+    /// to publish the result (AILAB-186). `open` takes the project writer lock,
+    /// runs WAL recovery, replays the entire JSONL into the index, issues a
+    /// Tantivy commit, allocates a 50 MB `IndexWriter` and starts a coordinator;
+    /// holding the map lock across that blocked every *other* project's requests
+    /// for its duration.
+    ///
+    /// That window is racy by construction — two first-touches of one root can
+    /// both try to open. The project writer lock refuses the second, and
+    /// [`ProjectResourceMap::insert_or_adopt`] settles any pair that both
+    /// opened: the runtime already in the map wins and the loser is released,
+    /// never leaked. If our own open *fails*, the map is re-checked before the
+    /// error is surfaced, so a caller that lost the race to a concurrent opener
+    /// still gets the winner's runtime.
+    ///
+    /// Recovery runs only here, on the open. A request for a project whose
+    /// runtime is live never recovers it, because a WAL on a live project
+    /// belongs to a cycle that is running.
+    ///
+    /// `f` does cheap, non-blocking work only — clone what it needs and return
+    /// it; never hold the returned value's work across the `runtimes` mutex.
+    fn with_runtime<T>(
+        &self,
+        root: &Path,
+        f: impl FnOnce(&ProjectRuntime) -> T,
+    ) -> Result<T, IndexError> {
+        // Hit path. The guard dies at this block's closing brace.
+        {
+            let mut map = self.lock_runtimes()?;
+            if let Some(runtime) = map.get_mut(root) {
+                return Ok(f(runtime));
+            }
+        }
+
+        // No lock is held from here to the re-lock below — the open is the only
+        // thing between them.
+        let opened =
+            match ProjectRuntime::open(&crate::layout::AgentRoot::new(root), WriterKind::Watch) {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    let mut map = self.lock_runtimes()?;
+                    return match map.get_mut(root) {
+                        Some(runtime) => Ok(f(runtime)),
+                        None => Err(e),
+                    };
+                }
+            };
+
+        let mut map = self.lock_runtimes()?;
+        Ok(f(map.insert_or_adopt(root, opened)))
     }
 
     /// Resolve the live index handle for `root` and run `f` against it.
     ///
     /// If `root` is the daemon's pinned primary project, `f` runs against that
     /// shared handle (no lock, never evicted — the coordinator feeds it and
-    /// recall reads it). Otherwise `index_map` is consulted under its mutex, and
-    /// on a miss the mutex is **released before** `TantivyIndexHandle::open`
-    /// runs, then re-taken to publish the result (AILAB-186). `open` replays the
-    /// entire JSONL, issues a Tantivy commit, and allocates a 50 MB
-    /// `IndexWriter`; holding the map lock across that blocked every *other*
-    /// project's requests for its duration.
+    /// recall reads it). Otherwise `f` runs against the index of `root`'s
+    /// [`ProjectRuntime`], opened on a miss by [`Self::with_runtime`].
     ///
-    /// That window is racy by construction — two first-touches of one root can
-    /// both open. [`ProjectIndexMap::insert_or_adopt`] settles it: the handle
-    /// already in the map wins and the loser is closed, never leaked. If our own
-    /// open instead *fails* (Tantivy's writer lock is per-directory and
-    /// non-blocking, so a concurrent opener can take it), the map is re-checked
-    /// before the error is surfaced — under the old single-lock shape that
-    /// caller would have blocked and then found the winner's handle, and this
-    /// keeps that outcome.
-    ///
-    /// `f` does cheap, non-blocking work only — clone the `IndexReader` or the
-    /// indexer `Sender` and return it; never hold the returned value's work
-    /// across the `index_map` mutex.
+    /// Off Unix a runtime has no index (`TantivyIndexHandle::open` writes
+    /// through `io::write_atomic`, which is `Unsupported` there), so a
+    /// non-primary root is an error.
     pub(crate) fn with_index_handle<T>(
         &self,
         root: &Path,
@@ -163,32 +191,18 @@ impl AppState {
             }
         }
 
-        // Hit path. The guard dies at this block's closing brace.
+        #[cfg(unix)]
         {
-            let mut map = self.lock_index_map()?;
-            if let Some(handle) = map.get_handle(root) {
-                return Ok(f(handle));
-            }
+            self.with_runtime(root, |runtime| f(runtime.index()))
         }
-
-        // No lock is held from here to the re-lock below — the open is the only
-        // thing between them.
-        let opened = match TantivyIndexHandle::open(
-            &crate::layout::AgentRoot::new(root),
-            crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE,
-        ) {
-            Ok(handle) => handle,
-            Err(e) => {
-                let mut map = self.lock_index_map()?;
-                return match map.get_handle(root) {
-                    Some(handle) => Ok(f(handle)),
-                    None => Err(e),
-                };
-            }
-        };
-
-        let mut map = self.lock_index_map()?;
-        Ok(f(map.insert_or_adopt(root, opened)))
+        #[cfg(not(unix))]
+        {
+            let _ = f;
+            Err(IndexError::Io(format!(
+                "no index for {} on this target",
+                root.display()
+            )))
+        }
     }
 
     /// Resolve the coordinator that owns `root` (WEG-272).
@@ -196,9 +210,9 @@ impl AppState {
     /// * `primary` is `None` (in-process MCP fallback / tests, single project) → the boot
     ///   `state.supervisor`. Preserves every existing single-coordinator test.
     /// * `root` IS the pinned boot project → the boot `state.supervisor`.
-    /// * otherwise → a lazily-started, idle-reaped per-root coordinator from
-    ///   `supervisor_map`, wired to that root's index handle so its appends
-    ///   index into the same handle recall and dream read.
+    /// * otherwise → the coordinator of `root`'s [`ProjectRuntime`], opened on a
+    ///   miss, wired to that root's index so its appends index into the same
+    ///   handle recall and dream read.
     ///
     /// Returns the SAME `Arc<Supervisor>` for repeated calls on one live root,
     /// so two writers never open the same `AGENT_LEARNINGS.jsonl` (DR-103).
@@ -213,38 +227,6 @@ impl AppState {
             Some(_) => {}
         }
 
-        // Non-boot root: recover any stale WAL before opening indexes or coordinators.
-        let agent_root = crate::layout::AgentRoot::new(root);
-        crate::wal::recover_on_startup(&agent_root).map_err(|e| IndexError::Wal(format!("{e}")))?;
-
-        // Wire the per-root coordinator to the per-root indexer (the same handle
-        // recall/dream use) so its appends become searchable. Resolve + release
-        // index_map's lock BEFORE locking supervisor_map.
-        //
-        // AILAB-192: off Unix there is no indexer to wire, and this line is not
-        // merely unnecessary there — it is actively harmful to run.
-        // `with_index_handle` opens `TantivyIndexHandle` on a miss, and `open`
-        // calls `write_manifest_if_absent` → `io::write_atomic`, which is
-        // `ErrorKind::Unsupported` off Unix. Keeping the call and discarding its
-        // result would turn every non-boot-project request into a 500 on a
-        // platform where JSONL appends themselves are fine.
-        #[cfg(unix)]
-        let indexer_tx = self.with_index_handle(root, |h| h.sender())?;
-
-        let mut map = self
-            .supervisor_map
-            .lock()
-            .map_err(|_| IndexError::LockPoisoned)?;
-        map.get_or_start(root, || {
-            Supervisor::start(
-                &agent_root,
-                crate::server::COORDINATOR_CHANNEL_CAPACITY,
-                // `Supervisor::start`'s third parameter is `#[cfg(unix)]`, so
-                // the argument list has to be gated to match its arity.
-                #[cfg(unix)]
-                Some(indexer_tx),
-            )
-        })
-        .map_err(|e| IndexError::Supervisor(format!("{e}")))
+        self.with_runtime(root, |runtime| Arc::clone(runtime.supervisor()))
     }
 }

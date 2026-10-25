@@ -20,7 +20,10 @@
 
 All appends to a project's log funnel through that project's
 `MemoryCoordinator` actor (`crates/dreamd-core/src/coordinator.rs`) — one actor
-per project root; the daemon keeps them in a `SupervisorMap`. The actor owns
+per project root, started only by the process holding that project's writer
+lock (`.agent/.dreamd/writer.lock`). The daemon keeps its boot project's actor
+for its lifetime and every other project's in a `ProjectRuntime`, together with
+that project's index and lock. The actor owns
 the `File` handle directly; `&mut self` on the run loop is the exclusivity
 guarantee — there is no `Mutex<File>` wrapper because there is no second handle
 to compete with. Concurrent third-party writers are explicitly unsupported

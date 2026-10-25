@@ -72,9 +72,10 @@ pub(crate) async fn get_recall(
 
     // Resolve the reader for this project: the pinned primary handle when this
     // is the daemon's booted project (so recall sees the coordinator's live
-    // appends — WEG-264 Defect 2), else a lazily-opened index_map handle.
-    // IndexReader is Clone (Arc-backed); we clone it so the index_map mutex is
-    // never held across the Tantivy search.
+    // appends — WEG-264 Defect 2), else the index of the project's
+    // lazily-opened runtime (`AppState::runtimes`). IndexReader is Clone
+    // (Arc-backed); we clone it so the `runtimes` mutex is never held across
+    // the Tantivy search.
     let reader =
         match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {
             Ok(r) => r,

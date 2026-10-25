@@ -20,6 +20,7 @@ use dreamd_core::invariants::check_store;
 use dreamd_core::layout::AgentRoot;
 use dreamd_core::salience::salience;
 use dreamd_core::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_PROGRESS_FILENAME};
+use dreamd_core::writer_lock::{WriterKind, WriterLock};
 use dreamd_protocol::{AgentLearning, EventId};
 use tokio::sync::{mpsc, oneshot};
 
@@ -74,8 +75,13 @@ async fn shutdown(tx: &mpsc::Sender<MemoryCoordinatorMsg>) {
         .expect("coordinator acknowledged shutdown");
 }
 
+/// Opens the way a writer does after `dreamd init`: `.agent/` exists, then the
+/// project writer lock, then the index. The handle's indexer task keeps the
+/// token, so the project stays locked until the handle is shut down.
 fn open(root: &AgentRoot) -> TantivyIndexHandle {
-    TantivyIndexHandle::open(root, DEFAULT_COMMIT_CADENCE).expect("open index handle")
+    fs::create_dir_all(root.agent_dir()).unwrap();
+    let lock = WriterLock::acquire(root, WriterKind::Watch).expect("project writer lock");
+    TantivyIndexHandle::open(root, &lock, DEFAULT_COMMIT_CADENCE).expect("open index handle")
 }
 
 /// Three fresh `rust::eh` events, enough to promote, with `"x_note":"keep"`

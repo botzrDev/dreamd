@@ -69,8 +69,11 @@ All commits require DCO sign-off: `git commit -s`.
 ## Architectural conventions — read before making changes
 
 **Single-writer, append-only episodic log.**
-`episodic/AGENT_LEARNINGS.jsonl` is append-only. The coordinator actor holds the write
-lock. Do not write to it from outside the coordinator.
+`episodic/AGENT_LEARNINGS.jsonl` is append-only. Every process that writes a project's
+store first takes the project writer lock (`.agent/.dreamd/writer.lock`,
+`writer_lock::WriterLock::acquire`). Inside the holder, appends go through the
+coordinator actor. The CLI rewrites (`forget`, `archive`, `memory checkout`) run
+in-process under the lock. Do not touch the store without the lock.
 
 **EventId is daemon-minted.**
 `AgentLearning.id` is an `evt_`-prefixed Crockford base32 ULID minted by the coordinator.
@@ -86,7 +89,9 @@ This is computed from Tantivy fastfields on recall. It is not stored or indexed.
 
 **Dream cycle is WAL-protected.**
 Before any destructive op (replacing LESSONS.md, pruning JSONL), write
-`dream_in_progress.wal`. On startup, if WAL exists, run compensating cleanup.
+`dream_in_progress.wal`. When a process takes the project writer lock, if the WAL
+exists, run compensating cleanup (`wal::recover_on_startup`; its one caller is
+`WriterLock::acquire`).
 `.agent/` must be either pre- or post-cycle, never mid-cycle.
 
 **`unsafe` policy.**
@@ -161,7 +166,7 @@ Locked 2026-10-24:
 
 1. **BZR-1230** — on `main` (`573f4f3`, in a commit shared with the coding recall oracle). Store invariant checker (`invariants::check_store`) plus 9 ignored red tests that reproduce the audit defects (`tests/bzr1230_audit_defects.rs` and one in `server/http/tests.rs`). `LessonsUnreadable` is reported with or without an index. Spec: `assignments/BZR-1230.v2.md`.
 2. **BZR-1231** — signed off 2026-10-25; lands in the commit after `573f4f3`. Deleted `MemoryCoordinatorMsg::Forget`, `handle_forget`, `forget_index_phases` and `CoordinatorError::Forget`, with the one test that sent the message. Corrected the docs that called it the production route (`forget.rs`, ARCHITECTURE §3, `docs/architecture.md`, `docs/architecture/durability.md`). `dreamd forget` is unchanged: in-process, and it refuses while a daemon is live. Spec: `assignments/BZR-1231.v2.md`.
-3. **BZR-1232** — project writer lock and one acquisition sequence for every writer (lock → reset stale `in_progress` → WAL recover → index → coordinator). Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` as a second writer, recovery that only watch runs, and idle eviction of the in-process MCP index.
+3. **BZR-1232** — signed off 2026-10-25; lands in the commit after `06c82eb`. Project writer lock (`writer_lock.rs`, `.agent/.dreamd/writer.lock`, std `File::try_lock`, stamp `{"pid","kind"}`) and one acquisition sequence for every writer (lock → legacy index-lock probe → reset stale `in_progress` → WAL recover → index → coordinator). `server/project_runtime.rs` replaces the daemon's `index_map` / `supervisor_map` fields with one `AppState::runtimes` map; `supervisor_map.rs` is deleted. Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` and `DREAMD_SOCK`-elsewhere CLI writers as second writers, recovery that only watch runs, and idle eviction of the in-process MCP index. Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238): a registered root with no `.agent/` now gets HTTP 500 instead of a silently scaffolded store, and the CLI writers refuse while an in-process `dreamd mcp` holds the lock. The `cfg(not(unix))` lock paths were never compiled; about seven of the new tests will fail on the (already red, continue-on-error) Windows job. Spec: `assignments/BZR-1232.v2.md` (Amendment 1 fixed four stale docs).
 4. **BZR-1233** — append fd with `O_APPEND`, a stat check around each append, reopen on every cycle exit path, and a monotonic `IdMinter`. `Ord` on `EventId`.
 5. **BZR-1234** — raw-line log rewrites. Unchanged lines stay byte-identical (`x_` fields survive), skipped lines are kept, and the pin pass is a no-op when nothing changes. Decay archive is idempotent.
 6. **BZR-1235** — skip-only open-time recovery. No in-place rewrite and no `.corrupt-*` sidecar. A valid final record without `\n` gets the newline instead of a truncate.
@@ -196,7 +201,7 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 
 1. **BZR-187** — on `main` (`fe331bd`). `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Documented in `docs/http-api.md`. Does not call `MigrationRegistry` and does not `.bak` the store.
 2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
-3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). HTTP opens the index sender before dispatch.
+3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). BZR-1232 superseded that: taking the project writer lock resets a no-WAL `in_progress` and runs recovery in every writer. HTTP opens the index sender before dispatch.
 4. **BZR-168** — on `main` (`979ddc3`, with BZR-172). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs:649`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
 5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
 6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
@@ -425,7 +430,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** SIGTERM + socket unlink shipped in AILAB-301 / WEG-268. The remaining AILAB-162 hole was the post-`select!` coordinator/indexer drain (the comment that named it WEG-283). That drain is now in the working tree: unlink first, then `drain_daemon` (coordinator `Shutdown`, then index `try_unwrap`→`shutdown` or `flush`). Do not re-queue "add SIGTERM".
 - **Why:** 2026-08-18 look-ahead almost re-queued SIGTERM over `weg268_sigterm_socket`. The drain itself shipped unbounded (Shutdown can sit behind `RunDreamCycle`). Bounding that drain is **AILAB-748**, not AILAB-210 — 210 is Mode-X client refcount / idle-exit (Backlog). Do not conflate the two grace windows.
-- **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown `supervisor_map`. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
+- **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown evicted map entries: `ProjectRuntime::release` (BZR-1232; `supervisor_map` is gone) drops the supervisor and `try_unwrap`→`close`s the index synchronously, and the tasks' lock clones keep the project held until both tasks end. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `no-hoisted-stdio-lock-across-tantivy`, `indexer-shed-is-not-replay-healed`, AILAB-748
 
 ### indexerror-lives-in-index-map
@@ -839,10 +844,10 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### in-process-dream-now-honors-the-409-guard
 
-- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. A `state.json` left at `in_progress` refuses the CLI cycle. `dreamd watch` clears that only when `dream_in_progress.wal` is still on disk (`recover_if_needed` returns `Clean` when the WAL is absent and does not rewrite the status).
-- **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. The sequencer made the HTTP 409 rule apply to the CLI too.
-- **How to apply:** Do not remove the guard from `run_in_process` to "restore" the overwrite. A stuck status with no WAL is an operator cleanup (`state.json`), not a watch boot.
-- **Cross-refs:** `remaining-build-order-2026-09-24`
+- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. Since BZR-1232 a stale `in_progress` never reaches that guard: `WriterLock::acquire` resets it to `failed` when there is no WAL and runs `wal::recover_on_startup` when there is one. The guard now fires only for a cycle that is live inside the lock holder (HTTP 409 through the daemon).
+- **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. BZR-172 made the 409 rule apply to the CLI, which left a no-WAL `in_progress` as a hand edit of `state.json`. BZR-1232 moved the reset into lock acquisition: a free lock proves no cycle is running.
+- **How to apply:** Do not remove the guard from `run_in_process`. Do not add a second stale-status reset outside `acquire`, and do not tell operators to hand-edit `state.json` (the 2026-10-25 docs amendment removed that advice). `ForgetCliError::InProgress` is effectively unreachable from the CLI; its test is a mapping unit test.
+- **Cross-refs:** `remaining-build-order-2026-09-24`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
 
 ### home-dir-does-not-consult-the-password-database
 
@@ -934,7 +939,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - "`add_document` is idempotent; replay re-does at most one commit window" (§4). False until BZR-1236.
   - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). False until BZR-1239.
   - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). False until BZR-1242.
-  - The coordinator is the only writer (§1, "Architectural conventions"). False until BZR-1232.
+  - The coordinator is the only writer (§1, "Architectural conventions"). Resolved by BZR-1232: §1 now says only a process holding the project writer lock starts a coordinator. Cite the new sentence.
 - **Why:** The 2026-10-24 audit reproduced four defects on `c241538`:
   - A `git merge` with the JSONL held open swaps the inode, and later appends land in the orphan.
   - Replay after a lost watermark returns the same `event_id` twice.
@@ -961,3 +966,30 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Check each hit by eye: unbackticked prose such as "Forget, branches, provenance" in `docs/architecture.md:41` is a module heading, not the variant.
   - Same family as `spec-deadlock-fixture-names-must-match-the-tree` (the grep has to search the names the tree actually uses).
 - **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `rustdoc-trips-word-grep-that-meant-call-sites`
+
+### behaviour-change-needs-a-grep-for-the-old-behaviour
+
+- **Rule:** When a ticket changes a behaviour, the pre-flight searches the docs for the old behaviour's *consequences*, not only the sentences the AC names. That means its error strings, its workarounds ("by hand", "does not clear"), the functions it replaced, and where it said something runs.
+- **Why:** BZR-1232 moved WAL recovery into `WriterLock::acquire` and made every writer reset a stale `in_progress`. The spec's doc table was built from the AC's claims, so four stale descriptions survived and needed an amendment:
+  - `docs/troubleshooting.md:87`, which told operators to hand-edit `state.json`;
+  - `docs/architecture.md:504-512` ("an operator cleanup");
+  - `examples/crash-recovery/README.md:21` (recovery runs only at watch start or on a lazy open);
+  - two handler comments naming the deleted `index_map` (`recall.rs`, `salience.rs`).
+- **How to apply:**
+  - List the old behaviour's observable effects, then grep `docs/`, `examples/`, `README.md`, `GUIDE.md` and comments next to the changed call sites for each one.
+  - A §4 grep scoped to one file (`state.rs`) does not prove a removed name is gone from its neighbours.
+- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`
+
+### banned-crate-grep-needs-a-word-boundary
+
+- **Rule:** A §4 grep that bans a crate path must anchor it. `grep -E 'nix::'` matches `std::os::unix::fs`, because `unix::` contains `nix::`. Use `'\bnix::'` (GNU grep) or `'(^|[^[:alnum:]_])nix::'`.
+- **Why:** BZR-1232 §4 grep 5 printed `writer_lock.rs:252: use std::os::unix::fs::MetadataExt;`. That import is the spec's own (dev, ino) check, not the banned `nix` crate.
+- **How to apply:** Dry-run every banned-token grep against the §3 snippets before queuing (`guards-vs-mandates-same-line`). Treat an unanchored hit like this as a spec bug, not a dev failure.
+- **Cross-refs:** `spec-grep-status-word-hits-interpolation`, `guards-vs-mandates-same-line`, `spec-grep-rg-e-is-encoding`
+
+### un-ignore-ac-can-name-tests-never-written
+
+- **Rule:** When a Linear AC says "un-ignore the tests for V1, V3, …", grep for the ignores that actually exist before writing the spec. Any defect without a test is new work: the ticket writes that test and proves it red before the fix.
+- **Why:** BZR-1232's AC listed V1, V3, V8, V14 and V16. BZR-1230 had shipped one ignored test for those, V1 (`http/tests.rs`), and had moved V16 to BZR-1232 itself. A spec that only said "un-ignore" would have left four defects untested.
+- **How to apply:** `grep -rn 'ignore = "BZR-<n>' crates/` gives the real list. Each test the spec adds gets a mutation check in the report-back: break one part of the fix and name the test that fails.
+- **Cross-refs:** `architecture-claims-false-until-dreamd-hardening`, `linear-todo-can-already-be-on-main`

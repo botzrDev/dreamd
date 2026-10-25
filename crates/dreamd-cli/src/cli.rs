@@ -43,8 +43,8 @@ pub struct DreamArgs {
     /// Not supported. Cycles run only when invoked.
     #[arg(long, hide = true)]
     pub auto: bool,
-    /// Skip the git commit and the daemon. The cycle runs in this process.
-    /// Do not use it while dreamd watch is serving this project.
+    /// Skip the git commit and the daemon. The cycle runs in this process and
+    /// refuses while dreamd watch or dreamd mcp holds this project.
     #[arg(long)]
     pub no_commit: bool,
     /// Force deterministic mode even when an API key is present.
@@ -729,6 +729,7 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
         | Err(commands::archive::ArchiveError::IdAndAll) => ExitCode::from(2),
         // Runtime failures — the store/log or a live daemon got in the way.
         Err(commands::archive::ArchiveError::DaemonRunning)
+        | Err(commands::archive::ArchiveError::WriterLock(_))
         | Err(commands::archive::ArchiveError::UnknownId(_)) => ExitCode::from(1),
         Err(commands::archive::ArchiveError::Episodic(e)) => {
             eprintln!("dreamd: error — {e}");

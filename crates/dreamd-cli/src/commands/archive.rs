@@ -23,12 +23,15 @@
 //! only correct implementation of "clears the pin flag". The probe is a bounded
 //! connect on whichever transport this target uses: UDS
 //! (`is_daemon_socket_live`) on Unix, a loopback TCP connect to the address in
-//! `~/.agent/server.json` (`tcp_daemon_is_live`) off it (AILAB-192).
+//! `~/.agent/server.json` (`tcp_daemon_is_live`) off it (AILAB-192). Behind the
+//! probe the command takes the project writer lock, which also refuses an
+//! in-process `dreamd mcp` or a daemon the probe cannot see.
 
 use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::episodic::{self, EpisodicError};
+use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 
 #[derive(Debug)]
@@ -37,6 +40,9 @@ pub enum ArchiveError {
     NotFound,
     /// The daemon is live; a rewrite underneath it would be lost.
     DaemonRunning,
+    /// The project writer lock is held by another writer, or recovery under
+    /// it failed.
+    WriterLock(WriterLockError),
     /// `archive` invoked without `--force-unpin` (the only op today).
     ForceUnpinRequired,
     /// `--force-unpin` with neither an event id nor `--all`.
@@ -68,6 +74,7 @@ impl std::fmt::Display for ArchiveError {
         match self {
             Self::NotFound => write!(f, "no .agent/ directory found"),
             Self::DaemonRunning => write!(f, "daemon is running; stop it first"),
+            Self::WriterLock(e) => write!(f, "{e}"),
             Self::ForceUnpinRequired => {
                 write!(
                     f,
@@ -175,6 +182,15 @@ pub fn run(
         }
     }
 
+    // Held through the read and the rewrite.
+    let _lock = match WriterLock::acquire(&root, WriterKind::Archive) {
+        Ok(lock) => lock,
+        Err(e) => {
+            writeln!(err, "dreamd: error — {e}")?;
+            return Err(ArchiveError::WriterLock(e));
+        }
+    };
+
     let jsonl = root.episodic_jsonl();
     let mut events = episodic::read_all(&jsonl)?;
 
@@ -273,6 +289,40 @@ mod tests {
             .find(|e| e.id.as_str() == target)
             .expect("entry present")
             .pinned
+    }
+
+    /// A force-unpin rewrites the log. While `dreamd watch` holds the
+    /// project it must refuse, whatever socket path the probe looked at.
+    #[cfg(unix)]
+    #[test]
+    fn force_unpin_refuses_while_watch_holds_the_project() {
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let (tmp, _jsonl) = seed(&[
+            learning('A', true),
+            learning('B', true),
+            learning('C', true),
+        ]);
+        let root = AgentRoot::new(tmp.path());
+        dreamd_core::dream_cycle::run_in_process(tmp.path(), NOW_SEC, true, true, false)
+            .expect("seed cycle");
+        let before = crate::commands::store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let r = run(tmp.path(), None, true, None, true, &mut out, &mut err);
+
+        let e = r.unwrap_err();
+        assert!(matches!(e, ArchiveError::WriterLock(_)), "got {e:?}");
+        let holder = format!("pid {} (watch)", std::process::id());
+        assert!(e.to_string().contains(&holder), "{e}");
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains(&holder),
+            "stderr must name the holder; got {err:?}"
+        );
+        assert_eq!(crate::commands::store_bytes(&root), before);
     }
 
     #[test]

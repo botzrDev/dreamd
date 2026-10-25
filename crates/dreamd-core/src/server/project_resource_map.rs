@@ -3,8 +3,8 @@
 //! [`ProjectResourceMap`] holds the eviction policy (default cap 10, 30 min idle)
 //! in one place. Per-resource lifecycle — how to read `last_used`, touch on access,
 //! and release on eviction — lives in [`ProjectMapResource`] implementations:
-//! index handles via [`crate::server::index_map`], coordinators via
-//! [`crate::server::supervisor_map`].
+//! index handles via [`crate::server::index_map`], a project's whole writer
+//! runtime via [`crate::server::project_runtime`].
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -113,8 +113,8 @@ impl<R: ProjectMapResource> ProjectResourceMap<R> {
     ///
     /// **The incumbent always wins.** Once a resource is in the map it may
     /// already have handed pieces of itself to live requests — that is exactly
-    /// what `AppState::with_index_handle`'s `f` does, and `supervisor_map`
-    /// caches coordinators wired to the index handle's indexer channel.
+    /// what `AppState::with_index_handle`'s `f` does, and a project runtime's
+    /// coordinator is wired to its index handle's indexer channel.
     /// Replacing it would strand every one of those. `resource` has been
     /// observed by nobody, so it is the safe one to discard — and it is
     /// [`released`](ProjectMapResource::release), never dropped on the floor:
@@ -156,7 +156,13 @@ impl<R: ProjectMapResource> ProjectResourceMap<R> {
     /// Walk all entries and release any whose `last_used()` is older than
     /// `idle_timeout`. Returns the number of entries evicted.
     pub fn evict_idle(&mut self) -> usize {
-        let cutoff = Instant::now().checked_sub(self.config.idle_timeout);
+        self.evict_idle_after(self.config.idle_timeout)
+    }
+
+    /// [`Self::evict_idle`] with an explicit timeout, so a test can run the
+    /// pass as if every entry had sat idle past the configured one.
+    pub(crate) fn evict_idle_after(&mut self, idle_timeout: Duration) -> usize {
+        let cutoff = Instant::now().checked_sub(idle_timeout);
         let Some(cutoff) = cutoff else {
             return 0;
         };

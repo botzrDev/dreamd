@@ -7,7 +7,9 @@
 //! **Daemon-coexistence guard:** a live daemon holds an append fd on the JSONL
 //! and the Tantivy writer lock. The cascade replaces the log by rename, so the
 //! command refuses while the daemon probes live, with the same probe as
-//! `dreamd archive`. `--dry-run` writes nothing and does not probe.
+//! `dreamd archive`, and then takes the project writer lock, which refuses
+//! every other writer (an in-process `dreamd mcp`, a daemon the probe cannot
+//! see). `--dry-run` writes nothing, does not probe and takes no lock.
 //!
 //! **Index:** after a removal, when `.agent/.dreamd/index` already exists, the
 //! command opens it and sends the three messages the coordinator sends after a
@@ -24,6 +26,7 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::forget::{self, ForgetError, ForgetReport};
+use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 use dreamd_protocol::EventId;
 
@@ -35,6 +38,9 @@ pub enum ForgetCliError {
     BadId(String),
     /// The daemon is live; a rewrite underneath it would be lost.
     DaemonRunning,
+    /// The project writer lock is held by another writer, or recovery under
+    /// it failed.
+    WriterLock(WriterLockError),
     /// `state.json` says a dream cycle is in progress.
     InProgress,
     /// Any other cascade failure.
@@ -66,6 +72,7 @@ impl std::fmt::Display for ForgetCliError {
             Self::NotFound => write!(f, "no .agent/ directory found"),
             Self::BadId(id) => write!(f, "{id:?} is not an event id"),
             Self::DaemonRunning => write!(f, "daemon is running; stop it first"),
+            Self::WriterLock(e) => write!(f, "{e}"),
             Self::InProgress => write!(f, "dream cycle already in progress"),
             Self::Forget(e) => write!(f, "{e}"),
             Self::Index(e) => write!(f, "index: {e}"),
@@ -147,6 +154,9 @@ pub fn run(
             return Err(ForgetCliError::DaemonRunning);
         }
     }
+    // Held through the cascade, the index refresh and the receipt.
+    let lock =
+        WriterLock::acquire(&root, WriterKind::Forget).map_err(ForgetCliError::WriterLock)?;
 
     let report = forget::cascade(&root, &event_id, now_sec)?;
     if !report.removed {
@@ -154,7 +164,7 @@ pub fn run(
         return Ok(());
     }
 
-    let index_err = refresh_index(&root, &event_id).err();
+    let index_err = refresh_index(&root, &lock, &event_id).err();
 
     let mut proof_err = None;
     let mut proof_written = None;
@@ -194,7 +204,11 @@ fn write_receipt(
 /// Send the coordinator's post-forget index messages to an existing index.
 /// An absent index directory is left absent.
 #[cfg(unix)]
-fn refresh_index(root: &AgentRoot, event_id: &EventId) -> Result<(), ForgetCliError> {
+fn refresh_index(
+    root: &AgentRoot,
+    lock: &WriterLock,
+    event_id: &EventId,
+) -> Result<(), ForgetCliError> {
     use dreamd_core::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME};
 
     if !root.dreamd_dir().join(INDEX_DIR_NAME).exists() {
@@ -205,7 +219,8 @@ fn refresh_index(root: &AgentRoot, event_id: &EventId) -> Result<(), ForgetCliEr
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let handle = TantivyIndexHandle::open(root, DEFAULT_COMMIT_CADENCE).map_err(index_err)?;
+        let handle =
+            TantivyIndexHandle::open(root, lock, DEFAULT_COMMIT_CADENCE).map_err(index_err)?;
         let phases = async {
             if root.semantic_dir().join("recurrence_counts.json").exists() {
                 handle.apply_recurrence_sidecar(root).await?;
@@ -222,7 +237,11 @@ fn refresh_index(root: &AgentRoot, event_id: &EventId) -> Result<(), ForgetCliEr
 }
 
 #[cfg(not(unix))]
-fn refresh_index(_root: &AgentRoot, _event_id: &EventId) -> Result<(), ForgetCliError> {
+fn refresh_index(
+    _root: &AgentRoot,
+    _lock: &WriterLock,
+    _event_id: &EventId,
+) -> Result<(), ForgetCliError> {
     Ok(())
 }
 
@@ -403,6 +422,33 @@ mod tests {
         assert_eq!(fs::read(&jsonl).unwrap(), before);
     }
 
+    /// `forget` replaces the log by rename. While `dreamd watch` holds the
+    /// project it must refuse, whatever socket path the probe looked at.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_while_watch_holds_the_project() {
+        let (tmp, root, _jsonl) = seed(&[
+            learning('A', "alpha"),
+            learning('B', "beta"),
+            learning('C', "gamma"),
+        ]);
+        dreamd_core::dream_cycle::run_in_process(tmp.path(), NOW_SEC, true, true, false)
+            .expect("seed cycle");
+        let before = crate::commands::store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let (r, _out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
+
+        let err = r.unwrap_err();
+        assert!(matches!(err, ForgetCliError::WriterLock(_)), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains(&format!("pid {} (watch)", std::process::id())),
+            "{err}"
+        );
+        assert_eq!(crate::commands::store_bytes(&root), before);
+    }
+
     #[test]
     fn absent_index_directory_stays_absent() {
         let (tmp, root, _jsonl) = seed(&[learning('A', "alpha"), learning('B', "beta")]);
@@ -417,15 +463,32 @@ mod tests {
 
     #[test]
     fn in_progress_status_maps_to_in_progress() {
-        let (tmp, root, _jsonl) = seed(&[learning('A', "alpha")]);
+        assert!(matches!(
+            ForgetCliError::from(ForgetError::InProgress),
+            ForgetCliError::InProgress
+        ));
+    }
+
+    /// An `in_progress` with no WAL is stale: no cycle can run without the
+    /// project writer lock, which `forget` holds. Taking the lock resets it,
+    /// and the forget runs.
+    #[test]
+    fn stale_in_progress_is_reset_and_the_forget_runs() {
+        let (tmp, root, jsonl) = seed(&[learning('A', "alpha"), learning('B', "beta")]);
         dreamd_core::daemon_state::update_daemon_state(&root, |s| {
             s.last_dream_cycle_status = "in_progress".to_string()
         })
         .unwrap();
 
-        let (r, _out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
+        let (r, out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
 
-        assert!(matches!(r, Err(ForgetCliError::InProgress)));
+        r.unwrap();
+        assert_eq!(out, "removed=true lesson=untouched\n");
+        assert_eq!(ids(&jsonl), vec![evt_id('B')]);
+        assert_ne!(
+            dreamd_core::wal::read_last_cycle_status(&root).unwrap(),
+            "in_progress"
+        );
     }
 
     #[cfg(unix)]
@@ -442,8 +505,10 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
+            // Released after the shutdown below, before `forget` takes it.
+            let lock = WriterLock::acquire(root, WriterKind::Watch).unwrap();
             rt.block_on(async {
-                let handle = TantivyIndexHandle::open(root, DEFAULT_COMMIT_CADENCE).unwrap();
+                let handle = TantivyIndexHandle::open(root, &lock, DEFAULT_COMMIT_CADENCE).unwrap();
                 handle.reader().reload().unwrap();
                 let (_schema, fields) = dreamd_core::index::build_schema();
                 let ids: Vec<String> = dreamd_core::recall(

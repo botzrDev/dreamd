@@ -5,8 +5,10 @@
 //! [`MemoryStore::append`]. Two adapters implement it:
 //!
 //! * [`InProcessStore`] — the Phase-1 path. Recall reads the project's Tantivy
-//!   index through the session's shared `ProjectIndexMap` (one handle per root,
-//!   never a per-call open; WEG-252). Append goes through
+//!   index through the handle pinned at construction — the one the coordinator
+//!   indexes into — or, with none pinned, the session's shared
+//!   `ProjectIndexMap` (one handle per root, never a per-call open; WEG-252).
+//!   Append goes through
 //!   [`LearnIngress::build_agent_learning`] and then `coordinator_tx.send().await`
 //!   with no timeout.
 //! * [`DaemonStore`] — the daemon proxy. HTTP-over-UDS on Unix (WEG-259),
@@ -45,6 +47,8 @@ use crate::daemon_client::{AuthToken, DaemonEndpoint};
 use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 #[cfg(unix)]
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+#[cfg(unix)]
+use crate::writer_lock::{WriterKind, WriterLock};
 
 /// The empty recall envelope, returned when there is nothing readable.
 const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
@@ -145,32 +149,41 @@ pub(crate) fn new_index_map() -> SharedIndexMap {
 pub struct InProcessStore {
     agent_root: Option<AgentRoot>,
     coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
+    /// The handle the coordinator indexes into, when there is one. Recall reads
+    /// it before `index_map` and it is never evicted — the `AppState::primary`
+    /// pattern.
+    #[cfg(unix)]
+    pinned: Option<Arc<TantivyIndexHandle>>,
     /// Shared with the owning MCP server. One IndexWriter per root per session
-    /// (WEG-252); never open an index per recall.
+    /// (WEG-252); never open an index per recall. Used only with no `pinned`.
     #[cfg(unix)]
     index_map: SharedIndexMap,
 }
 
 impl InProcessStore {
-    /// Build an in-process store. `index_map` is the MCP session's map; pass
-    /// one pre-seeded with a handle to share an `IndexWriter` with the
-    /// coordinator's indexer (watch / Phase-1 topology).
+    /// Build an in-process store. `pinned` is the handle the coordinator's
+    /// indexer writes to (`dreamd mcp`'s topology); with `None`, recall opens a
+    /// handle lazily in `index_map`, the MCP session's map.
     pub fn new(
         agent_root: Option<AgentRoot>,
         coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
+        #[cfg(unix)] pinned: Option<Arc<TantivyIndexHandle>>,
         #[cfg(unix)] index_map: SharedIndexMap,
     ) -> Self {
         Self {
             agent_root,
             coordinator_tx,
             #[cfg(unix)]
+            pinned,
+            #[cfg(unix)]
             index_map,
         }
     }
 
-    /// Synchronous half of Unix recall. The map lock is released before the
-    /// search runs (the reader is an `Arc`-backed clone), and never lives
-    /// across an `.await`.
+    /// Synchronous half of Unix recall. Reads the pinned handle when there is
+    /// one. Otherwise the map lock is released before the search runs (the
+    /// reader is an `Arc`-backed clone), and never lives across an `.await`; a
+    /// map miss takes its own project writer lock for the open.
     #[cfg(unix)]
     fn recall_local(
         &self,
@@ -178,17 +191,20 @@ impl InProcessStore {
         query: &str,
         k: u32,
     ) -> Result<String, MemoryStoreError> {
-        let reader = {
+        let reader = if let Some(handle) = &self.pinned {
+            handle.reader().clone()
+        } else {
             let mut map = self
                 .index_map
                 .lock()
                 .map_err(|_| MemoryStoreError::internal("index map lock poisoned"))?;
             let handle = map
                 .get_or_open(root.project_root(), |p| {
-                    TantivyIndexHandle::open(
-                        &AgentRoot::new(p.to_path_buf()),
-                        DEFAULT_COMMIT_CADENCE,
-                    )
+                    let root = AgentRoot::new(p.to_path_buf());
+                    let lock = WriterLock::acquire(&root, WriterKind::Mcp).map_err(|e| {
+                        crate::server::index_map::IndexError::WriterLock(e.to_string())
+                    })?;
+                    TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE)
                 })
                 .map_err(|e| MemoryStoreError::invalid(format!("index open failed: {e}")))?;
             handle.touch();

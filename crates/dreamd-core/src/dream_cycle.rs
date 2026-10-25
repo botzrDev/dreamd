@@ -56,6 +56,10 @@ pub enum DreamCycleError {
     /// dropped reply, or an error from the actor). The string is the message.
     #[error("{0}")]
     Coordinator(String),
+    /// The in-process cycle could not take the project writer lock: another
+    /// process writes this project, or recovery under the lock failed.
+    #[error("{0}")]
+    WriterLock(#[from] crate::writer_lock::WriterLockError),
 }
 
 /// Outcome of a full dream cycle (filesystem + post phases).
@@ -73,8 +77,9 @@ pub struct DreamCycleResult {
 pub enum IndexBackend {
     /// Reuse the daemon's live indexer channel (HTTP path).
     Sender(tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>),
-    /// Open a fresh handle for this operation (CLI in-process path).
-    FreshHandle,
+    /// Open a fresh handle for this operation under the caller's project
+    /// writer lock (CLI in-process path).
+    FreshHandle(crate::writer_lock::WriterLock),
     /// Skip index mutations (tests, or no index wired).
     Skip,
 }
@@ -504,6 +509,11 @@ where
 
 /// Full in-process cycle for the CLI (`--no-commit` or no daemon).
 ///
+/// Takes the project writer lock before anything else, so it refuses while
+/// `dreamd watch`, an in-process `dreamd mcp`, or another CLI writer holds the
+/// project, and writes nothing when it does. Taking the lock also resets a
+/// stale `in_progress` status and recovers a crashed cycle's WAL.
+///
 /// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
 /// filesystem phases are async too (they `await` the model call), so they share
 /// the runtime that already existed for the index phases — building a second one
@@ -516,6 +526,10 @@ pub fn run_in_process(
     share_personal: bool,
 ) -> Result<DreamCycleResult, DreamCycleError> {
     let agent_root = AgentRoot::new(project_root);
+    let lock = crate::writer_lock::WriterLock::acquire(
+        &agent_root,
+        crate::writer_lock::WriterKind::Dream,
+    )?;
     let root = &agent_root;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -523,19 +537,24 @@ pub fn run_in_process(
         .build()
         .expect("tokio runtime for dream cycle");
 
-    runtime.block_on(run_guarded_cycle(
+    let outcome = runtime.block_on(run_guarded_cycle(
         GuardedCycleOptions {
             agent_root: root,
             project_root,
             now_sec,
             commit_autobiography: !no_commit,
             #[cfg(unix)]
-            index: IndexBackend::FreshHandle,
+            index: IndexBackend::FreshHandle(lock.clone()),
         },
         |now_sec, cycle_date| async move {
             run_filesystem_phases(root, now_sec, &cycle_date, no_llm, share_personal).await
         },
-    ))
+    ));
+    // The indexer task holds a clone of the token; dropping the runtime ends
+    // that task, so the project stays locked until every task is gone.
+    drop(runtime);
+    drop(lock);
+    outcome
 }
 
 /// What `dreamd dream --dry` would have persisted, built without *writing*
@@ -677,10 +696,10 @@ async fn run_index_phases(
             index_semantic_lessons(agent_root, &sender).await?;
             Ok(())
         }
-        IndexBackend::FreshHandle => {
+        IndexBackend::FreshHandle(lock) => {
             use crate::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
-            let handle = TantivyIndexHandle::open(agent_root, DEFAULT_COMMIT_CADENCE)?;
+            let handle = TantivyIndexHandle::open(agent_root, &lock, DEFAULT_COMMIT_CADENCE)?;
             let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
             if sidecar_path.exists() {
                 handle.apply_recurrence_sidecar(agent_root).await?;
@@ -1609,6 +1628,74 @@ mod tests {
             !prompt.contains(crate::llm::PERSONAL_CONTEXT_HEADING),
             "an empty personal/ must not produce an empty block"
         );
+    }
+
+    /// The log, `state.json`, `LESSONS.md`, and every file under
+    /// `.dreamd/index/`; absent files are recorded as absent.
+    fn store_bytes(
+        root: &AgentRoot,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+        let mut paths = vec![root.episodic_jsonl(), root.state_json(), root.lessons_md()];
+        if let Ok(entries) = fs::read_dir(root.dreamd_dir().join(crate::server::INDEX_DIR_NAME)) {
+            paths.extend(entries.map(|e| e.unwrap().path()));
+        }
+        paths
+            .into_iter()
+            .map(|p| {
+                let bytes = fs::read(&p).ok();
+                (p, bytes)
+            })
+            .collect()
+    }
+
+    /// `dream --no-commit` runs in this process. While `dreamd watch` holds
+    /// the project it must refuse before it writes anything, instead of
+    /// rewriting the log under the daemon and failing only at the index.
+    #[cfg(unix)]
+    #[test]
+    fn in_process_cycle_refuses_while_watch_holds_the_project() {
+        use crate::writer_lock::{WriterKind, WriterLock};
+
+        let (_dir, root) = scaffold_fixture();
+        let project_root = root.project_root().to_path_buf();
+        run_in_process(&project_root, NOW_SEC, true, true, false).expect("first cycle");
+        let before = store_bytes(&root);
+
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let err = run_in_process(&project_root, NOW_SEC + 60, true, true, false).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains(&format!("pid {} (watch)", std::process::id())),
+            "the refusal must name the holder; got: {err}"
+        );
+        assert_eq!(store_bytes(&root), before, "a refused cycle writes nothing");
+    }
+
+    /// A crash mid-cycle leaves the WAL, its temp file and `in_progress`. The
+    /// next in-process cycle takes the project lock, which recovers that state,
+    /// and then completes on a healthy store.
+    #[cfg(unix)]
+    #[test]
+    fn in_process_cycle_completes_after_a_mid_cycle_crash() {
+        let (_dir, root) = scaffold_fixture();
+        let jsonl = root.episodic_jsonl();
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        wal::guarded_replace_crash_after_intent(
+            &root,
+            &jsonl,
+            b"partial write\n",
+            wal::GuardedReplaceKind::PruneEpisodicMemory,
+        )
+        .unwrap_err();
+        assert!(root.wal_path().exists() && jsonl.with_extension("tmp").exists());
+
+        run_in_process(root.project_root(), NOW_SEC, true, true, false)
+            .expect("the cycle after a crash completes");
+
+        let violations = crate::invariants::check_store(&root, None).unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
+        assert!(!jsonl.with_extension("tmp").exists());
     }
 
     #[test]

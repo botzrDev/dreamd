@@ -76,7 +76,7 @@ flowchart TB
 | `dreamd` (`dreamd-cli`) | CLI binary. Core loop: `init`, `mcp`, `watch`, `dream`, `recall`, `doctor`, `version`. Also `setup`, `status`, `score`, `blame`, `salience-drift`, `forget`, `memory`, `archive`, `migrate`, `reset`, `service`, `update`, `uninstall`, `vectors` (`dreamd --help` is the list). |
 | `packages/dreamd-mcp` | Node.js shim (`npx dreamd-mcp`) that downloads the prebuilt binary. |
 
-State management is an **actor model**: a single `MemoryCoordinator` task owns mutable state. Do not introduce parallel writers to JSONL or the index — every mutation goes through the coordinator. `&mut self` on the run loop is the exclusivity guarantee (no `Mutex<File>` inside the actor).
+State management is an **actor model**: a single `MemoryCoordinator` task owns mutable state, and only a process holding the project writer lock (`.agent/.dreamd/writer.lock`) starts one. Do not introduce parallel writers to JSONL or the index — every mutation goes through the coordinator. `&mut self` on the run loop is the exclusivity guarantee (no `Mutex<File>` inside the actor).
 
 ## Data flow: `append_node` → disk + index
 
@@ -118,6 +118,8 @@ sequenceDiagram
 
 All appends to `episodic/AGENT_LEARNINGS.jsonl` flow through one `MemoryCoordinator` actor.
 
+**Writer lock.** Every process that writes a project's store first takes `.agent/.dreamd/writer.lock`: `dreamd watch` for its boot project and each project it opens lazily, in-process `dreamd mcp`, `dreamd setup`'s first lesson, and the CLI writers (in-process `dream`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`) for one invocation. A second holder is refused with the first holder's pid and kind. Acquisition is one sequence: lock, reset a stale `in_progress` when there is no WAL, WAL recovery, then the index and the coordinator.
+
 Write order:
 
 1. Idempotency-LRU lookup
@@ -148,7 +150,7 @@ Indexing is incremental (5-second commit cadence), never a nightly rebuild.
 
 Before any destructive op (replacing `LESSONS.md`, pruning JSONL), write `dream_in_progress.wal` with `WalIntent` entries (`ReplaceSemanticMemory`, `PruneEpisodicMemory`, `Commit`). On startup, if the WAL exists, run compensating cleanup before serving traffic. `.agent/` must be either pre- or post-cycle, never mid-cycle.
 
-`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases` — the single WAL envelope), then the index and autobiography phases. Inside the envelope, in order: `begin_cycle`, a pre-mutation autosnap of the live files into `.dreamd/branches/` (`snapshot::create_autosnap`), consolidation (including the optional LLM call that composes the lesson body — awaited inside the envelope, with a deterministic fallback), decay, `provenance::record_cycle`, `commit_cycle`. Each `ReplaceSemanticMemory` / `PruneEpisodicMemory` intent is recorded by `wal::guarded_replace` between the temp file's fsync and its rename, so an intent always names a temp that exists. Because the in-process CLI path now runs the same guard, a `state.json` left at `in_progress` refuses `dreamd dream` too; `recover_on_startup` clears it only when the WAL file is still on disk.
+`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases` — the single WAL envelope), then the index and autobiography phases. Inside the envelope, in order: `begin_cycle`, a pre-mutation autosnap of the live files into `.dreamd/branches/` (`snapshot::create_autosnap`), consolidation (including the optional LLM call that composes the lesson body — awaited inside the envelope, with a deterministic fallback), decay, `provenance::record_cycle`, `commit_cycle`. Each `ReplaceSemanticMemory` / `PruneEpisodicMemory` intent is recorded by `wal::guarded_replace` between the temp file's fsync and its rename, so an intent always names a temp that exists. A `state.json` left at `in_progress` with no WAL is reset to `failed` when the next writer takes the project lock; with a WAL, that writer runs recovery.
 
 `dreamd forget` (`forget::cascade`) reuses the same WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
 
@@ -298,7 +300,7 @@ Requests that target a project store must include the `X-Agent-Root` header with
 
 ## MCP topology
 
-- **Phase 1 (standalone):** `dreamd mcp` / `npx dreamd-mcp` runs an in-process server when no daemon is reachable. Safe for single-agent or sequential use.
+- **Phase 1 (standalone):** `dreamd mcp` / `npx dreamd-mcp` runs an in-process server when no daemon is reachable. Safe for single-agent or sequential use; a second in-process server for the same project is refused by the project writer lock.
 - **Phase 2 (daemon bridge):** When `dreamd watch` is running, MCP auto-detects the UDS and routes through the shared daemon — the single serialized writer.
 
 For multiple agents writing to the same project simultaneously, run one `dreamd watch` (or `npx -y dreamd-mcp watch`) per machine.

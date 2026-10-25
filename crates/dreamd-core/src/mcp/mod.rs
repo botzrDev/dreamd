@@ -57,7 +57,9 @@ use crate::memory_store::{
 #[cfg(unix)]
 use crate::privacy::DR413_DISCLOSURE;
 #[cfg(unix)]
-use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+use crate::server::ProjectRuntime;
+#[cfg(unix)]
+use crate::writer_lock::WriterKind;
 // AILAB-206: `dreamd mcp --bind` options, and the gate they bind through.
 // Target-free — `server::watch` compiles on every target — but the gate itself
 // is only reachable when the `mcp-http` transport is compiled in.
@@ -67,7 +69,7 @@ use crate::server::{bind_listen, WatchError};
 use crate::AgentRoot;
 
 #[cfg(unix)]
-use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+use crate::server::tantivy_handle::TantivyIndexHandle;
 
 // Loopback-TCP daemon store (AILAB-192). Both types are cfg-free in
 // `daemon_client`; the import is gated because only `with_remote_tcp` names
@@ -224,11 +226,12 @@ pub struct MemoryMcpServer {
 
 #[tool_router]
 impl MemoryMcpServer {
-    /// Wrap an in-process store around `index_map`, keeping the test-only
-    /// handle on the same map.
+    /// Wrap an in-process store around `pinned` and `index_map`, keeping the
+    /// test-only handle on the same map.
     fn in_process(
         agent_root: Option<AgentRoot>,
         coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
+        #[cfg(unix)] pinned: Option<Arc<TantivyIndexHandle>>,
         #[cfg(unix)] index_map: SharedIndexMap,
     ) -> Self {
         Self {
@@ -238,6 +241,8 @@ impl MemoryMcpServer {
             store: Arc::new(InProcessStore::new(
                 agent_root,
                 coordinator_tx,
+                #[cfg(unix)]
+                pinned,
                 #[cfg(unix)]
                 index_map,
             )),
@@ -251,15 +256,20 @@ impl MemoryMcpServer {
             None,
             None,
             #[cfg(unix)]
+            None,
+            #[cfg(unix)]
             new_index_map(),
         )
     }
 
     /// Create a read-only in-process server bound to a specific agent root:
-    /// recall reads the index, append errors (no coordinator).
+    /// recall reads the index, append errors (no coordinator). The index opens
+    /// lazily in the session's map, under its own project writer lock.
     pub fn with_agent_root(root: AgentRoot) -> Self {
         Self::in_process(
             Some(root),
+            None,
+            #[cfg(unix)]
             None,
             #[cfg(unix)]
             new_index_map(),
@@ -267,32 +277,29 @@ impl MemoryMcpServer {
     }
 
     /// Create an in-process server bound to an agent root and a live
-    /// coordinator channel. Used when the daemon is not running.
+    /// coordinator channel, with no index of its own.
     pub fn with_coordinator(root: AgentRoot, tx: mpsc::Sender<MemoryCoordinatorMsg>) -> Self {
         Self::in_process(
             Some(root),
             Some(tx),
             #[cfg(unix)]
+            None,
+            #[cfg(unix)]
             new_index_map(),
         )
     }
 
-    /// Like [`Self::with_coordinator`], but pins a pre-opened index handle so
-    /// appends (via `indexer_tx` already wired into the coordinator) and
-    /// `search_nodes` share one `IndexWriter` (WEG-252 / watch topology).
+    /// Like [`Self::with_coordinator`], but pins the index handle the
+    /// coordinator's `indexer_tx` writes to, so appends and `search_nodes`
+    /// share one `IndexWriter` (WEG-252 / watch topology). The handle is never
+    /// evicted, unlike an entry in the lazy map.
     #[cfg(unix)]
     pub fn with_coordinator_and_index(
         root: AgentRoot,
         tx: mpsc::Sender<MemoryCoordinatorMsg>,
-        handle: TantivyIndexHandle,
-    ) -> Result<Self, crate::server::index_map::IndexError> {
-        let project_root = root.project_root().to_path_buf();
-        let index_map = new_index_map();
-        index_map
-            .lock()
-            .expect("fresh index map lock")
-            .get_or_open(&project_root, |_| Ok(handle))?;
-        Ok(Self::in_process(Some(root), Some(tx), index_map))
+        handle: Arc<TantivyIndexHandle>,
+    ) -> Self {
+        Self::in_process(Some(root), Some(tx), Some(handle), new_index_map())
     }
 
     /// Create a daemon-backed server: tool calls are proxied to the running
@@ -576,29 +583,25 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
     }
 
     // In-process MCP server over the chosen transport.
-    // When an agent root is found, boot a MemoryCoordinator via Supervisor so
-    // append_node dispatches durably. `supervisor` is bound here and must
-    // outlive the serve call; it drops after the transport returns (stdio:
-    // svc.waiting(); HTTP: the shutdown signal).
+    // When an agent root is found, open the project's runtime the way
+    // `run_watch` boots its project: the project writer lock (which recovers a
+    // crashed cycle), one Tantivy handle for live append indexing and
+    // search_nodes reuse (WEG-252), and a coordinator wired to it so
+    // append_node dispatches durably. The runtime outlives the serve call and
+    // is shut down after the transport returns (stdio: svc.waiting(); HTTP:
+    // the shutdown signal). A project another dreamd writes is refused here.
     match AgentRoot::discover(cwd) {
         Ok(root) => {
-            // Mirror `run_watch`: one Tantivy handle for live append indexing
-            // and search_nodes reuse (WEG-252). Without this hand-off, Phase-1
-            // MCP would open a fresh 50 MB IndexWriter on every recall.
-            let (supervisor, server) = {
-                let handle = TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE)
-                    .map_err(|e| McpRunError::Service(e.to_string()))?;
-                let supervisor =
-                    Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, Some(handle.sender()))
-                        .map_err(|e| McpRunError::Service(e.to_string()))?;
-                let tx = supervisor.sender();
-                let server = MemoryMcpServer::with_coordinator_and_index(root, tx, handle)
-                    .map_err(|e| McpRunError::Service(e.to_string()))?;
-                (supervisor, server)
-            };
-            transport.serve(server).await?;
-            // supervisor drops here, after serve completes
-            drop(supervisor);
+            let runtime = ProjectRuntime::open(&root, WriterKind::Mcp)
+                .map_err(|e| McpRunError::Service(e.to_string()))?;
+            let server = MemoryMcpServer::with_coordinator_and_index(
+                root,
+                runtime.supervisor().sender(),
+                Arc::clone(runtime.index()),
+            );
+            let served = transport.serve(server).await;
+            runtime.shutdown().await;
+            served?;
         }
         Err(_) => {
             transport.serve(MemoryMcpServer::new()).await?;
@@ -943,6 +946,14 @@ mod tests {
         root
     }
 
+    /// One project writer token per root per test; every open and start on
+    /// that root in the test borrows it.
+    #[cfg(unix)]
+    fn writer_lock(root: &AgentRoot) -> crate::writer_lock::WriterLock {
+        crate::writer_lock::WriterLock::acquire(root, WriterKind::Watch)
+            .expect("project writer lock")
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn search_nodes_empty_store_returns_empty() {
@@ -1020,8 +1031,9 @@ mod tests {
 
         // Seed two learnings via the indexer so they are committed before recall.
         {
-            let handle =
-                TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE).expect("open handle");
+            let lock = writer_lock(&root);
+            let handle = TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE)
+                .expect("open handle");
             let tx = handle.sender();
 
             for (suffix, content) in [
@@ -1092,6 +1104,82 @@ mod tests {
         );
     }
 
+    /// Built the way `run_mcp_server` builds it, the in-process server pins
+    /// the index its coordinator writes to. An idle pass over the session's
+    /// lazy map, as after 30 quiet minutes, must not take that index away:
+    /// an append made after it is still found by `search_nodes`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_eviction_keeps_the_index_the_coordinator_writes_to() {
+        use crate::server::tantivy_handle::IndexerMsg;
+        use crate::server::ProjectRuntime;
+        use rmcp::handler::server::wrapper::Parameters;
+        use tokio::sync::oneshot;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let runtime = ProjectRuntime::open(&root, WriterKind::Mcp).expect("open project runtime");
+        let server = MemoryMcpServer::with_coordinator_and_index(
+            root,
+            runtime.supervisor().sender(),
+            Arc::clone(runtime.index()),
+        );
+
+        server
+            .index_map
+            .lock()
+            .expect("index map lock")
+            .evict_idle_after(std::time::Duration::ZERO);
+
+        server
+            .append_node(Parameters(AppendNodeParams {
+                content: "quokka survives the idle pass".to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust::mcp".to_string(),
+                pain: Some(6.0),
+                importance: Some(7.0),
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok");
+        // The coordinator awaited its indexer send before replying, so this
+        // flush on the pinned handle commits the append.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        runtime
+            .index()
+            .sender()
+            .send(IndexerMsg::Flush { ack: ack_tx })
+            .await
+            .expect("send flush");
+        ack_rx.await.expect("flush ack").expect("flush ok");
+        runtime.index().reader().reload().expect("reload reader");
+
+        let result = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "quokka".to_string(),
+                k: Some(5),
+            }))
+            .await
+            .expect("search_nodes ok");
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content present");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+        assert!(
+            results.iter().any(|r| r["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("quokka survives")),
+            "the append must be found after the idle pass; got: {parsed:?}"
+        );
+
+        drop(server);
+        runtime.shutdown().await;
+    }
+
     #[tokio::test]
     async fn append_node_no_coordinator_returns_error() {
         use rmcp::handler::server::wrapper::Parameters;
@@ -1124,8 +1212,9 @@ mod tests {
         let root = setup_agent_root(dir.path());
         let jsonl_path = root.episodic_jsonl();
 
-        let supervisor =
-            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let lock = writer_lock(&root);
+        let supervisor = Supervisor::start(&root, &lock, COORDINATOR_CHANNEL_CAPACITY, None)
+            .expect("start supervisor");
         let tx = supervisor.sender();
         let server = MemoryMcpServer::with_coordinator(root, tx);
 
@@ -1181,8 +1270,9 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = setup_agent_root(dir.path());
-        let supervisor =
-            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let lock = writer_lock(&root);
+        let supervisor = Supervisor::start(&root, &lock, COORDINATOR_CHANNEL_CAPACITY, None)
+            .expect("start supervisor");
         let server = MemoryMcpServer::with_coordinator(root.clone(), supervisor.sender());
 
         let secret = "AKIAIOSFODNN7EXAMPLE";
@@ -1222,8 +1312,9 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = setup_agent_root(dir.path());
-        let supervisor =
-            Supervisor::start(&root, COORDINATOR_CHANNEL_CAPACITY, None).expect("start supervisor");
+        let lock = writer_lock(&root);
+        let supervisor = Supervisor::start(&root, &lock, COORDINATOR_CHANNEL_CAPACITY, None)
+            .expect("start supervisor");
         let server = MemoryMcpServer::with_coordinator(root, supervisor.sender());
 
         // Dotted skill_action — rejected by the tightened charset.
@@ -1332,12 +1423,12 @@ mod tests {
         with_coordinator: bool,
     ) {
         use crate::config::Config;
-        use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
         use crate::server::uds_server::{bind_api_socket, serve_uds};
-        use crate::server::{build_router, AppState};
+        use crate::server::{build_router, AppState, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 
         let supervisor = if with_coordinator {
-            Supervisor::start(agent_root, COORDINATOR_CHANNEL_CAPACITY, None)
+            let lock = writer_lock(agent_root);
+            Supervisor::start(agent_root, &lock, COORDINATOR_CHANNEL_CAPACITY, None)
                 .expect("start supervisor")
         } else {
             Supervisor::for_backpressure_test().0
@@ -1346,7 +1437,6 @@ mod tests {
             registry_path,
             supervisor,
             Config::default(),
-            ProjectIndexMap::new(ProjectIndexMapConfig::default()),
             nix::unistd::Uid::current().as_raw(),
         );
         let router = build_router(state);
@@ -1385,7 +1475,9 @@ mod tests {
         // Seed one learning into the on-disk Tantivy index, then release the
         // writer so the daemon's index_map can open its own handle.
         {
-            let handle = TantivyIndexHandle::open(&root, DEFAULT_COMMIT_CADENCE).expect("open");
+            let lock = writer_lock(&root);
+            let handle =
+                TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
             let tx = handle.sender();
             let id = EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FA0").expect("id");
             let learning = AgentLearning {

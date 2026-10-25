@@ -43,6 +43,8 @@ use dreamd_core::layout::AgentRoot;
 #[cfg(unix)]
 use dreamd_core::server::{bind_writer_socket, Supervisor};
 #[cfg(unix)]
+use dreamd_core::writer_lock::{WriterKind, WriterLock};
+#[cfg(unix)]
 use dreamd_protocol::{AgentLearning, EventId};
 #[cfg(unix)]
 use tokio::sync::oneshot;
@@ -86,7 +88,14 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     println!("BIND_OK");
     let _ = std::io::stdout().flush();
 
-    let supervisor = match Supervisor::start(&agent_root, 8, None) {
+    let lock = match WriterLock::acquire(&agent_root, WriterKind::Watch) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("writer: project writer lock refused: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let supervisor = match Supervisor::start(&agent_root, &lock, 8, None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("writer: supervisor start failed: {e}");
