@@ -243,7 +243,6 @@ async fn live_appended_docs_carry_the_subtree_recurrence() {
 /// The pin pass must leave a record it does not change byte-identical,
 /// including fields this binary does not know.
 #[test]
-#[ignore = "BZR-1234: pin pass drops x_ fields"]
 fn pin_pass_keeps_unknown_fields() {
     let dir = tempfile::tempdir().unwrap();
     let root = AgentRoot::new(dir.path());
@@ -260,7 +259,6 @@ fn pin_pass_keeps_unknown_fields() {
 
 /// The pin pass must keep a line the reader skips, not delete it.
 #[test]
-#[ignore = "BZR-1234: pin pass drops skipped lines"]
 fn pin_pass_keeps_skipped_lines() {
     const SKIPPED: &str = r#"{"not":"a learning"}"#;
     let dir = tempfile::tempdir().unwrap();

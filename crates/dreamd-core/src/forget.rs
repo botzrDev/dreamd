@@ -20,6 +20,7 @@
 //! ([`render_receipt`], `forget-receipt/1.0`). The signed membership proof in
 //! `docs/provenance.md` is still absent.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use chrono::DateTime;
@@ -114,8 +115,9 @@ pub fn cascade(
     now_sec: i64,
 ) -> Result<ForgetReport, ForgetError> {
     let jsonl = agent_root.episodic_jsonl();
-    let events = episodic::read_all(&jsonl)?;
-    if !events.iter().any(|ev| ev.id == *id) {
+    let raw = episodic::read_raw(&jsonl)?;
+    let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
+    if !records().any(|ev| ev.id == *id) {
         return Ok(ForgetReport {
             removed: false,
             lesson: LessonEffect::Untouched,
@@ -125,13 +127,14 @@ pub fn cascade(
     dream_cycle::ensure_not_in_progress(agent_root)?;
     wal::begin_cycle(agent_root, now_sec)?;
 
-    // Every other row, in read order, pinned or not.
-    let remaining: Vec<_> = events.into_iter().filter(|ev| ev.id != *id).collect();
-    episodic::rewrite_guarded(agent_root, &jsonl, &remaining)?;
+    // Every other line, in read order and byte for byte, pinned or not,
+    // including lines the reader skips.
+    let contents = episodic::patch_lines(&raw, &HashMap::new(), &HashSet::from([id.clone()]))?;
+    episodic::rewrite_guarded(agent_root, &jsonl, &contents)?;
 
     let lesson = cascade_lessons(agent_root, id.as_str(), now_sec)?;
 
-    if remaining.is_empty() {
+    if !records().any(|ev| ev.id != *id) {
         // `run_cluster_engine` returns early on an empty log without touching
         // the sidecar; a stale count for the forgotten event would survive.
         let sidecar = RecurrenceSidecar {
@@ -336,7 +339,11 @@ mod tests {
         let root = AgentRoot::new(&dir);
         fs::create_dir_all(root.episodic_dir()).unwrap();
         fs::create_dir_all(root.semantic_dir()).unwrap();
-        episodic::rewrite_atomic(&root.episodic_jsonl(), rows).unwrap();
+        let bytes: String = rows
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        episodic::rewrite_atomic(&root.episodic_jsonl(), bytes.as_bytes()).unwrap();
         (root, DirGuard(dir))
     }
 
@@ -643,5 +650,28 @@ mod tests {
         assert_eq!(orphans[0]["line"], 1);
         assert_eq!(orphans[0]["kind"], "lesson_citation");
         assert_eq!(orphans[0]["from"], eid('A').as_str());
+    }
+
+    /// BZR-1234: the forget rewrite keeps every other line's bytes, including
+    /// unknown members and lines the reader skips.
+    #[test]
+    fn cascade_keeps_unknown_fields_and_skipped_lines() {
+        const SKIPPED: &str = "{\"not\":\"a learning\"}\n";
+        let (root, _g) = setup("forget-bytes", &[]);
+        let a_json = serde_json::to_string(&learning('A', "alpha", false)).unwrap();
+        let a_line = format!("{{\"x_note\":\"keep\",{}\n", &a_json[1..]);
+        let b_line = format!(
+            "{}\n",
+            serde_json::to_string(&learning('B', "beta", false)).unwrap()
+        );
+        fs::write(root.episodic_jsonl(), format!("{a_line}{SKIPPED}{b_line}")).unwrap();
+
+        let report = cascade(&root, &eid('B'), NOW_SEC).unwrap();
+
+        assert!(report.removed);
+        assert_eq!(
+            fs::read_to_string(root.episodic_jsonl()).unwrap(),
+            format!("{a_line}{SKIPPED}")
+        );
     }
 }

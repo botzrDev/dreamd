@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, EventId};
 
 use crate::episodic::{self, EpisodicError};
 use crate::index::{ClusterCount, RecurrenceSidecar};
@@ -227,8 +227,10 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
 /// `citations` frontmatter (AILAB-200).
 ///
 /// Called by WEG-61 (DR-308) after [`write_selected_lesson`] has replaced
-/// `LESSONS.md`, while the orchestrator-owned dream-cycle WAL is still open. Returns `Ok` without
-/// mutations if `LESSONS.md` or the JSONL is absent.
+/// `LESSONS.md`, while the orchestrator-owned dream-cycle WAL is still open. Writes nothing
+/// (no rewrite, no WAL intent) when no record's `pinned` changes, including when `LESSONS.md`
+/// or the JSONL is absent. Every line it does not flip keeps its bytes
+/// ([`episodic::patch_lines`]).
 pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError> {
     let lessons_path = agent_root.lessons_md();
     let cited_ids: HashSet<String> = if lessons_path.exists() {
@@ -249,20 +251,25 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
     };
 
     let jsonl_path = agent_root.episodic_jsonl();
-    let mut events = episodic::read_all(&jsonl_path)?;
-    if events.is_empty() {
-        return Ok(());
-    }
+    let raw = episodic::read_raw(&jsonl_path)?;
 
-    for event in &mut events {
-        event.pinned = event.pinned || cited_ids.contains(event.id.as_str());
+    // Union, never clear: only an unpinned cited record flips.
+    let pins: HashMap<EventId, bool> = raw
+        .iter()
+        .filter_map(|line| line.parsed.as_ref())
+        .filter(|event| !event.pinned && cited_ids.contains(event.id.as_str()))
+        .map(|event| (event.id.clone(), true))
+        .collect();
+    if pins.is_empty() {
+        return Ok(());
     }
 
     // One call: the prune intent is recorded inside the atomic rewrite, between
     // the temp's fsync and the rename, naming the temp the write itself created
     // (AILAB-164). Recovery cleans up that temp on a mid-cycle crash. No WAL
     // open (no cycle) still rewrites the log.
-    episodic::rewrite_guarded(agent_root, &jsonl_path, &events)?;
+    let contents = episodic::patch_lines(&raw, &pins, &HashSet::new())?;
+    episodic::rewrite_guarded(agent_root, &jsonl_path, &contents)?;
     Ok(())
 }
 
@@ -996,6 +1003,65 @@ mod tests {
         assert!(
             updated[1].pinned,
             "id 1: no LESSONS.md, but external pin survives union"
+        );
+    }
+
+    /// BZR-1234: a second cycle with the same exemplar flips nothing, so the
+    /// pin pass must not rename the log or record a prune intent.
+    #[cfg(unix)]
+    #[test]
+    fn pin_pass_without_a_flip_leaves_the_log_alone() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = unique_tmpdir("pin-noflip");
+        let _g = DirGuard(dir.clone());
+        let root = AgentRoot::new(&dir);
+
+        let events = vec![
+            make_event(0, "rust::types", true),
+            make_event(1, "rust::types", false),
+        ];
+        write_jsonl(&root, &events);
+
+        let lessons_path = root.lessons_md();
+        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
+        write_lessons_file(
+            &lessons_path,
+            &LessonsFile {
+                last_updated: fixed_ts(),
+                prompt_version: "deterministic-only".to_string(),
+                cluster_key: "rust::types".to_string(),
+                citations: vec![],
+                lessons: vec![Lesson {
+                    id: test_id(0).as_str().to_string(),
+                    content: "exemplar".to_string(),
+                    pinned: false,
+                }],
+            },
+        )
+        .unwrap();
+        wal::begin_cycle(&root, NOW_SEC).unwrap();
+
+        let jsonl = root.episodic_jsonl();
+        let ino_before = fs::metadata(&jsonl).unwrap().ino();
+        let bytes_before = fs::read(&jsonl).unwrap();
+
+        apply_pin_unpin(&root).unwrap();
+
+        assert_eq!(
+            fs::metadata(&jsonl).unwrap().ino(),
+            ino_before,
+            "no flip must not rename the log"
+        );
+        assert_eq!(fs::read(&jsonl).unwrap(), bytes_before);
+        let wal: crate::wal::DreamWal =
+            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
+        assert!(
+            !wal.intents
+                .iter()
+                .any(|i| matches!(i, WalIntent::PruneEpisodicMemory { .. })),
+            "no flip must record no PruneEpisodicMemory intent; got {:?}",
+            wal.intents
         );
     }
 

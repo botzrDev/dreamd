@@ -280,7 +280,11 @@ mod tests {
         let root = AgentRoot::new(tmp.path());
         let jsonl = root.episodic_jsonl();
         fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
-        rewrite_atomic(&jsonl, records).unwrap();
+        let bytes: String = records
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        rewrite_atomic(&jsonl, bytes.as_bytes()).unwrap();
         (tmp, root, jsonl)
     }
 

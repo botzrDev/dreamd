@@ -420,7 +420,10 @@ your head:
   (`DECAY_AGE_THRESHOLD_SEC`, `decay.rs`) — age alone, not age plus
   interest. Pinned records are **never** archived (the first check in
   `should_decay`). Archived records are appended to
-  `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl`, never deleted.
+  `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl`, never deleted. Each archived
+  line is the log's line, byte for byte. A line whose id is already in that
+  day's file is not appended again, so re-running a cycle that crashed before
+  its log rewrite does not duplicate rows.
 - `DECAY_SALIENCE_THRESHOLD = 2.0` is evaluated in `should_decay`
   but **cannot currently discriminate**. The pruner scores
   through `RecurrenceContext::decay()`, hardcoded to recurrence `0`

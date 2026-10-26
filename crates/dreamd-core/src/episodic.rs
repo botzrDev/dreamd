@@ -19,15 +19,26 @@
 //! no mid-file skips is still truncated by `set_len` alone, with no sidecar.
 //! Never hard-error a torn tail; never silently swallow corruption.
 //!
+//! **Rewrites keep bytes.** [`read_raw`] returns every line with its exact
+//! bytes and, for a record, the parsed [`AgentLearning`]. [`patch_lines`]
+//! builds the new log from those lines. Lines it does not change, skipped lines
+//! and a torn final line are copied verbatim, so fields this binary does not
+//! know survive a rewrite (SPEC forward compatibility).
+//!
 //! Free-function module by design (matches `io.rs` / `wal.rs` / `lessons.rs`):
 //! the single mutable owner is already the coordinator actor, so no struct is
 //! introduced. Blocking `std::io` is intentional for v0.1 (DR: no `tokio::fs`).
 
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, EventId};
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+use serde_json::value::RawValue;
 
 use crate::layout::AgentRoot;
 
@@ -116,45 +127,82 @@ pub fn assess_log_health(path: &Path) -> Result<EpisodicLogHealth, EpisodicError
 fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64, Vec<ScanSkip>) {
     let mut out = Vec::new();
     let mut skips = Vec::new();
-    let (mut cursor, mut clean_len, mut line_number) = (0usize, 0u64, 1usize);
-    while cursor < bytes.len() {
-        let Some(rel_nl) = bytes[cursor..].iter().position(|b| *b == b'\n') else {
-            break; // torn tail at EOF — no trailing newline
-        };
-        let end = cursor + rel_nl;
-        let line_end = end + 1;
-        let slice = &bytes[cursor..end];
-        if slice.is_empty() {
-            skips.push(ScanSkip {
-                line_number,
-                reason: "blank line".to_string(),
-                raw: bytes[cursor..line_end].to_vec(),
-            });
-            clean_len = line_end as u64;
-            cursor = line_end;
-            line_number += 1;
-            continue;
-        }
-        match serde_json::from_slice::<AgentLearning>(slice) {
-            Ok(ev) => {
+    let mut clean_len = 0u64;
+    for (line_number, (span, kind)) in (1usize..).zip(lines(bytes)) {
+        match kind {
+            LineKind::Record(ev) => {
                 out.push(ev);
-                clean_len = line_end as u64;
-                cursor = line_end;
-                line_number += 1;
+                clean_len = span.end as u64;
             }
-            Err(e) => {
+            LineKind::Skipped(reason) => {
                 skips.push(ScanSkip {
                     line_number,
-                    reason: e.to_string(),
-                    raw: bytes[cursor..line_end].to_vec(),
+                    reason,
+                    raw: bytes[span.clone()].to_vec(),
                 });
-                clean_len = line_end as u64;
-                cursor = line_end;
-                line_number += 1;
+                clean_len = span.end as u64;
             }
+            LineKind::Torn => {}
         }
     }
     (out, clean_len, skips)
+}
+
+/// What one line of the log is, under the SPEC §88 policy.
+enum LineKind {
+    Record(AgentLearning),
+    /// A `\n`-terminated line that is blank or not a record; the reason.
+    Skipped(String),
+    /// Final bytes with no `\n`. Never a record, even when they parse.
+    Torn,
+}
+
+/// The one line loop. Yields each line's byte range (including its `\n`) and
+/// its kind, in file order.
+fn lines(bytes: &[u8]) -> impl Iterator<Item = (Range<usize>, LineKind)> + '_ {
+    let mut cursor = 0usize;
+    std::iter::from_fn(move || {
+        if cursor >= bytes.len() {
+            return None;
+        }
+        let start = cursor;
+        let Some(rel_nl) = bytes[start..].iter().position(|b| *b == b'\n') else {
+            cursor = bytes.len();
+            return Some((start..cursor, LineKind::Torn));
+        };
+        let end = start + rel_nl;
+        cursor = end + 1;
+        let slice = &bytes[start..end];
+        let kind = if slice.is_empty() {
+            LineKind::Skipped("blank line".to_string())
+        } else {
+            match serde_json::from_slice::<AgentLearning>(slice) {
+                Ok(ev) => LineKind::Record(ev),
+                Err(e) => LineKind::Skipped(e.to_string()),
+            }
+        };
+        Some((start..cursor, kind))
+    })
+}
+
+/// The `warn!` for one skipped line, shared by [`read_all`] and [`read_raw`].
+fn warn_skipped_line(path: &Path, line_number: usize, reason: &str) {
+    tracing::warn!(
+        path = %path.display(),
+        line = line_number,
+        reason = %reason,
+        "episodic log: skipping invalid line"
+    );
+}
+
+/// The `warn!` for a torn tail, shared by [`read_all`] and [`read_raw`].
+fn warn_torn_tail(path: &Path, dropped_bytes: u64, records: usize) {
+    tracing::warn!(
+        path = %path.display(),
+        dropped_bytes,
+        records,
+        "episodic log has a torn tail; returning clean prefix"
+    );
 }
 
 /// Read every well-formed record from the episodic log at `path`. An absent
@@ -171,22 +219,149 @@ pub fn read_all(path: &Path) -> Result<Vec<AgentLearning>, EpisodicError> {
     };
     let (records, clean_len, skips) = scan(&bytes);
     for skip in &skips {
-        tracing::warn!(
-            path = %path.display(),
-            line = skip.line_number,
-            reason = %skip.reason,
-            "episodic log: skipping invalid line"
-        );
+        warn_skipped_line(path, skip.line_number, &skip.reason);
     }
     if clean_len < bytes.len() as u64 {
-        tracing::warn!(
-            path = %path.display(),
-            dropped_bytes = bytes.len() as u64 - clean_len,
-            records = records.len(),
-            "episodic log has a torn tail; returning clean prefix"
-        );
+        warn_torn_tail(path, bytes.len() as u64 - clean_len, records.len());
     }
     Ok(records)
+}
+
+/// One line of the episodic log, with its exact bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawLine {
+    /// The line's bytes, including its `\n`. A torn final line has none.
+    pub bytes: Vec<u8>,
+    /// The record, when this is a line [`read_all`] returns.
+    pub parsed: Option<AgentLearning>,
+}
+
+impl RawLine {
+    fn new(bytes: &[u8], span: Range<usize>, kind: LineKind) -> Self {
+        RawLine {
+            bytes: bytes[span].to_vec(),
+            parsed: match kind {
+                LineKind::Record(ev) => Some(ev),
+                LineKind::Skipped(_) | LineKind::Torn => None,
+            },
+        }
+    }
+}
+
+/// Split `bytes` into lines. Concatenating every `bytes` gives the input back.
+pub fn raw_lines(bytes: &[u8]) -> Vec<RawLine> {
+    lines(bytes)
+        .map(|(span, kind)| RawLine::new(bytes, span, kind))
+        .collect()
+}
+
+/// [`raw_lines`] of the episodic log at `path`. An absent file is `Ok(empty)`.
+/// Logs the same warnings [`read_all`] logs for the same file: one per skipped
+/// line, and one for a torn tail.
+pub fn read_raw(path: &Path) -> Result<Vec<RawLine>, EpisodicError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(EpisodicError::Io(e)),
+    };
+    let mut out = Vec::new();
+    let mut records = 0usize;
+    for (line_number, (span, kind)) in (1usize..).zip(lines(&bytes)) {
+        match &kind {
+            LineKind::Record(_) => records += 1,
+            LineKind::Skipped(reason) => warn_skipped_line(path, line_number, reason),
+            LineKind::Torn => warn_torn_tail(path, span.len() as u64, records),
+        }
+        out.push(RawLine::new(&bytes, span, kind));
+    }
+    Ok(out)
+}
+
+/// Build a new log from `raw`.
+///
+/// * A line with no record is copied verbatim; a torn final line stays last.
+/// * A record whose id is in `drops` is left out.
+/// * A record whose id is in `pins` with a different `pinned` gets that value.
+///   Every other member keeps its position and its bytes.
+/// * Every other line is copied verbatim.
+pub fn patch_lines(
+    raw: &[RawLine],
+    pins: &HashMap<EventId, bool>,
+    drops: &HashSet<EventId>,
+) -> Result<Vec<u8>, EpisodicError> {
+    let mut out = Vec::with_capacity(raw.iter().map(|line| line.bytes.len()).sum());
+    for line in raw {
+        let Some(record) = &line.parsed else {
+            out.extend_from_slice(&line.bytes);
+            continue;
+        };
+        if drops.contains(&record.id) {
+            continue;
+        }
+        match pins.get(&record.id) {
+            Some(&pinned) if pinned != record.pinned => {
+                out.extend_from_slice(&set_pinned(&line.bytes, pinned)?);
+            }
+            _ => out.extend_from_slice(&line.bytes),
+        }
+    }
+    Ok(out)
+}
+
+/// A JSON object's members in file order, each value kept as its raw bytes.
+///
+/// serde_json's own map type has no `preserve_order` in this graph: it would
+/// sort the keys and reformat numbers (`6.50` → `6.5`).
+struct OrderedObject(Vec<(String, Box<RawValue>)>);
+
+impl<'de> Deserialize<'de> for OrderedObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MembersVisitor;
+
+        impl<'de> Visitor<'de> for MembersVisitor {
+            type Value = OrderedObject;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut members = Vec::new();
+                while let Some(member) = map.next_entry::<String, Box<RawValue>>()? {
+                    members.push(member);
+                }
+                Ok(OrderedObject(members))
+            }
+        }
+
+        deserializer.deserialize_map(MembersVisitor)
+    }
+}
+
+/// `line` with its `pinned` member set to `pinned`: replaced in place, or
+/// appended as the last member when absent. Every other member keeps its
+/// position and its value's bytes.
+fn set_pinned(line: &[u8], pinned: bool) -> Result<Vec<u8>, EpisodicError> {
+    let body = line.strip_suffix(b"\n").unwrap_or(line);
+    let OrderedObject(mut members) =
+        serde_json::from_slice(body).map_err(EpisodicError::Serialize)?;
+    let value = serde_json::value::to_raw_value(&pinned).map_err(EpisodicError::Serialize)?;
+    match members.iter_mut().find(|(k, _)| k == "pinned") {
+        Some((_, v)) => *v = value,
+        None => members.push(("pinned".to_string(), value)),
+    }
+    let mut out = Vec::with_capacity(line.len() + 16);
+    out.push(b'{');
+    for (i, (key, value)) in members.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        serde_json::to_writer(&mut out, key).map_err(EpisodicError::Serialize)?;
+        out.push(b':');
+        out.extend_from_slice(value.get().as_bytes());
+    }
+    out.extend_from_slice(b"}\n");
+    Ok(out)
 }
 
 /// Sidecar path for quarantined lines: sibling of the episodic log, named
@@ -318,21 +493,8 @@ pub fn append(file: &mut File, learning: &AgentLearning) -> Result<usize, Episod
     Ok(size)
 }
 
-/// Serialize `records` to the on-disk JSONL line stream shared by
-/// [`rewrite_atomic`] and [`rewrite_guarded`]. One serializer so the guarded and
-/// unguarded rewrites cannot drift into writing different bytes for the same
-/// records.
-fn serialize_records(records: &[AgentLearning]) -> Result<String, EpisodicError> {
-    let mut out = String::with_capacity(records.len() * 256);
-    for record in records {
-        out.push_str(&serde_json::to_string(record).map_err(EpisodicError::Serialize)?);
-        out.push('\n');
-    }
-    Ok(out)
-}
-
-/// Atomically rewrite the whole episodic log at `path` with `records`, with no
-/// WAL involvement.
+/// Atomically replace the whole episodic log at `path` with `contents`, the new
+/// file's bytes, with no WAL involvement.
 ///
 /// For one-shot rewrites outside a dream cycle — `dreamd archive --force-unpin` —
 /// where
@@ -342,29 +504,30 @@ fn serialize_records(records: &[AgentLearning]) -> Result<String, EpisodicError>
 ///
 /// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
 /// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
-pub fn rewrite_atomic(path: &Path, records: &[AgentLearning]) -> Result<(), EpisodicError> {
-    crate::io::write_atomic(path, serialize_records(records)?.as_bytes())?;
+pub fn rewrite_atomic(path: &Path, contents: &[u8]) -> Result<(), EpisodicError> {
+    crate::io::write_atomic(path, contents)?;
     Ok(())
 }
 
-/// [`rewrite_atomic`] under the dream-cycle WAL: the
+/// [`rewrite_atomic`] under the dream-cycle WAL: `contents` are the new file's
+/// bytes, and the
 /// [`PruneEpisodicMemory`](crate::wal::WalIntent::PruneEpisodicMemory) intent is
 /// appended between the temp's fsync and the rename, naming the temp
 /// [`wal::guarded_replace`](crate::wal::guarded_replace) just wrote.
 ///
-/// The pin pass and the decay pruner call this. Neither names a temp path, and
-/// neither passes a closure: the intent and the write are one call (AILAB-164).
-/// No-ops the intent — but still writes — when no cycle is open.
+/// The pin pass, the decay pruner and `forget::cascade` call this with
+/// [`patch_lines`] output. None of them names a temp path, and none passes a
+/// closure: the intent and the write are one call (AILAB-164). No-ops the
+/// intent — but still writes — when no cycle is open.
 pub fn rewrite_guarded(
     agent_root: &AgentRoot,
     path: &Path,
-    records: &[AgentLearning],
+    contents: &[u8],
 ) -> Result<(), EpisodicError> {
-    let out = serialize_records(records)?;
     crate::wal::guarded_replace(
         agent_root,
         path,
-        out.as_bytes(),
+        contents,
         crate::wal::GuardedReplaceKind::PruneEpisodicMemory,
     )
     .map_err(|e| match e {
@@ -862,5 +1025,190 @@ mod tests {
         assert_eq!(health.valid_record_count, 2);
         assert_eq!(health.malformed_line_count, 0);
         assert!(health.malformed_line_numbers.is_empty());
+    }
+
+    // ── BZR-1234: raw lines and byte-preserving patches ─────────────────────
+
+    const SKIPPED: &[u8] = b"{\"not\":\"a learning\"}\n";
+
+    /// `line` with `member` inserted as its first member.
+    fn with_first_member(line: &[u8], member: &str) -> Vec<u8> {
+        let mut out = b"{".to_vec();
+        out.extend_from_slice(member.as_bytes());
+        out.push(b',');
+        out.extend_from_slice(&line[1..]);
+        out
+    }
+
+    /// A record, a blank line, a skipped line, a record with an unknown
+    /// member, and a torn final fragment.
+    fn mixed_log() -> Vec<u8> {
+        let mut bytes = line_of(&make_learning('A', "first"));
+        bytes.push(b'\n');
+        bytes.extend_from_slice(SKIPPED);
+        bytes.extend_from_slice(&with_first_member(
+            &line_of(&make_learning('B', "second")),
+            r#""x_note":"keep""#,
+        ));
+        bytes.extend_from_slice(b"{\"partial");
+        bytes
+    }
+
+    fn pins_of(entries: &[(&AgentLearning, bool)]) -> HashMap<EventId, bool> {
+        entries
+            .iter()
+            .map(|(ev, pinned)| (ev.id.clone(), *pinned))
+            .collect()
+    }
+
+    #[test]
+    fn raw_lines_keep_every_byte_and_parse_only_records() {
+        let bytes = mixed_log();
+
+        let raw = raw_lines(&bytes);
+
+        let concat: Vec<u8> = raw.iter().flat_map(|l| l.bytes.clone()).collect();
+        assert_eq!(concat, bytes);
+        let parsed: Vec<usize> = raw
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.parsed.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(parsed, vec![0, 3], "exactly the two records parse");
+        assert_eq!(raw[0].parsed, Some(make_learning('A', "first")));
+        assert_eq!(raw[3].parsed, Some(make_learning('B', "second")));
+        assert_eq!(raw.last().unwrap().bytes, b"{\"partial");
+    }
+
+    #[test]
+    fn raw_lines_never_parse_a_torn_final_record() {
+        let mut bytes = line_of(&make_learning('A', "torn"));
+        bytes.pop();
+
+        let raw = raw_lines(&bytes);
+
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].bytes, bytes);
+        assert_eq!(raw[0].parsed, None, "a final line without \\n is torn");
+    }
+
+    #[test]
+    fn patch_with_no_pins_or_drops_returns_the_input() {
+        let bytes = mixed_log();
+
+        let out = patch_lines(&raw_lines(&bytes), &HashMap::new(), &HashSet::new()).unwrap();
+
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn pin_flip_of_a_canonical_line_matches_the_struct_serialization() {
+        let a = make_learning('A', "flip");
+        let mut a_pinned = a.clone();
+        a_pinned.pinned = true;
+
+        let out = patch_lines(
+            &raw_lines(&line_of(&a)),
+            &pins_of(&[(&a, true)]),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(out, line_of(&a_pinned));
+    }
+
+    #[test]
+    fn pin_flip_keeps_other_members_byte_for_byte() {
+        let line = "{\"schema_version\":\"1.0.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAA\",\
+                    \"timestamp\":\"2026-07-03T00:00:00Z\",\"x_note\":\"keep\",\"pain\":6.50,\
+                    \"importance\":6,\"pinned\":false,\"skill_action\":\"rust::episodic\",\
+                    \"source_harness\":\"test-harness\",\"content\":\"café\"}\n";
+        let raw = raw_lines(line.as_bytes());
+        let a = raw[0]
+            .parsed
+            .clone()
+            .expect("the hand-written line is a record");
+
+        let out = patch_lines(&raw, &pins_of(&[(&a, true)]), &HashSet::new()).unwrap();
+
+        let expected = line.replace("\"pinned\":false", "\"pinned\":true");
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    #[test]
+    fn pin_flip_appends_pinned_when_the_key_is_absent() {
+        let a = make_learning('A', "absent flag");
+        let line = String::from_utf8(line_of(&a))
+            .unwrap()
+            .replace(",\"pinned\":false", "");
+        assert!(!line.contains("\"pinned\""), "precondition: no pinned key");
+
+        let out = patch_lines(
+            &raw_lines(line.as_bytes()),
+            &pins_of(&[(&a, true)]),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let expected = line.replace("}\n", ",\"pinned\":true}\n");
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    #[test]
+    fn unpin_writes_false() {
+        let mut a = make_learning('A', "unpin");
+        a.pinned = true;
+        let line = String::from_utf8(line_of(&a)).unwrap();
+
+        let out = patch_lines(
+            &raw_lines(line.as_bytes()),
+            &pins_of(&[(&a, false)]),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let expected = line.replace("\"pinned\":true", "\"pinned\":false");
+        assert_ne!(expected, line);
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    #[test]
+    fn drop_removes_each_line_with_the_id_and_nothing_else() {
+        let a1 = make_learning('A', "first copy");
+        let a2 = make_learning('A', "second copy");
+        let b = make_learning('B', "kept");
+        let mut bytes = line_of(&a1);
+        bytes.extend_from_slice(&line_of(&b));
+        bytes.extend_from_slice(SKIPPED);
+        bytes.extend_from_slice(&line_of(&a2));
+
+        let out = patch_lines(
+            &raw_lines(&bytes),
+            &HashMap::new(),
+            &HashSet::from([a1.id.clone()]),
+        )
+        .unwrap();
+
+        let mut expected = line_of(&b);
+        expected.extend_from_slice(SKIPPED);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn drop_beats_pin() {
+        let a = make_learning('A', "dropped");
+        let b = make_learning('B', "kept");
+        let mut bytes = line_of(&a);
+        bytes.extend_from_slice(&line_of(&b));
+
+        let out = patch_lines(
+            &raw_lines(&bytes),
+            &pins_of(&[(&a, true)]),
+            &HashSet::from([a.id.clone()]),
+        )
+        .unwrap();
+
+        assert_eq!(out, line_of(&b));
     }
 }

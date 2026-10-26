@@ -9,9 +9,15 @@
 //! - `assess_bytes` never panics on any input.
 //! - `clean_len` invariant: torn tail (if any) contains no `\n`.
 //! - Mid-file `\n`-terminated garbage is counted as malformed, not ingested.
+//! - `raw_lines` keeps every byte and agrees with `assess_bytes`; `patch_lines`
+//!   with nothing to change is the identity (BZR-1234).
+
+use std::collections::{HashMap, HashSet};
 
 use chrono::DateTime;
-use dreamd_core::episodic::{assess_bytes, EpisodicLogHealth, MALFORMED_LINE_NUMBERS_CAP};
+use dreamd_core::episodic::{
+    assess_bytes, patch_lines, raw_lines, EpisodicLogHealth, MALFORMED_LINE_NUMBERS_CAP,
+};
 use dreamd_protocol::{AgentLearning, EventId};
 use proptest::prelude::*;
 
@@ -243,5 +249,43 @@ proptest! {
                 .collect();
             prop_assert_eq!(health.malformed_line_numbers, expected);
         }
+    }
+
+    /// Concatenating every line's bytes gives the input back, and only the
+    /// last line may lack its `\n`.
+    #[test]
+    fn raw_lines_concatenate_to_the_input(bytes in jsonl_bytes_strategy()) {
+        let raw = raw_lines(&bytes);
+        let concat: Vec<u8> = raw.iter().flat_map(|l| l.bytes.clone()).collect();
+        prop_assert_eq!(&concat, &bytes);
+        if let Some((_, init)) = raw.split_last() {
+            prop_assert!(init.iter().all(|l| l.bytes.ends_with(b"\n")));
+        }
+    }
+
+    /// `raw_lines` and `assess_bytes` classify every line the same way.
+    #[test]
+    fn raw_lines_agree_with_assess_bytes(bytes in jsonl_bytes_strategy()) {
+        let raw = raw_lines(&bytes);
+        let health = assess_bytes(&bytes);
+        let parsed = raw.iter().filter(|l| l.parsed.is_some()).count();
+        prop_assert_eq!(parsed, health.valid_record_count);
+        let skipped = raw
+            .iter()
+            .filter(|l| l.parsed.is_none() && l.bytes.ends_with(b"\n"))
+            .count();
+        prop_assert_eq!(skipped, health.malformed_line_count);
+        let torn = raw
+            .last()
+            .filter(|l| !l.bytes.ends_with(b"\n"))
+            .map_or(0, |l| l.bytes.len() as u64);
+        prop_assert_eq!(torn, health.torn_tail_bytes);
+    }
+
+    /// With nothing to pin or drop, the patch is the input, byte for byte.
+    #[test]
+    fn patch_with_nothing_is_the_identity(bytes in jsonl_bytes_strategy()) {
+        let out = patch_lines(&raw_lines(&bytes), &HashMap::new(), &HashSet::new()).unwrap();
+        prop_assert_eq!(out, bytes);
     }
 }

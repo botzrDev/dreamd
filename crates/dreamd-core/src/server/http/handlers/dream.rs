@@ -166,7 +166,7 @@ pub(crate) async fn post_dream(
 /// [`io::write_atomic`](crate::io::write_atomic), which is
 /// `ErrorKind::Unsupported` off Unix — the WAL guard (`wal::begin`/`commit`),
 /// the consolidation recurrence sidecar, the decay rewrite
-/// (`episodic::rewrite_atomic`), the `LESSONS.md` render, and the index progress
+/// (`episodic::rewrite_guarded`), the `LESSONS.md` render, and the index progress
 /// + manifest sidecars. Implementing a portable `write_atomic` is an explicit
 /// non-goal of AILAB-192, so there is no partial version of this route worth
 /// serving — the Unix body would die on `wal::begin`, before it consolidated

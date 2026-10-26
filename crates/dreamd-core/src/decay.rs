@@ -6,6 +6,7 @@
 //! WAL-guarded rename so a mid-cycle crash leaves `.agent/` in a recoverable
 //! state. Pinned records are never archived.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
@@ -109,15 +110,18 @@ impl From<EpisodicError> for DecayError {
 /// derives it from `now_sec` (avoids timezone ambiguity inside the fn).
 ///
 /// Write sequence:
-///   1. Read AGENT_LEARNINGS.jsonl via `episodic::read_all` (absent/empty/torn
-///      tail → clean prefix; empty → early return)
-///   2. Partition into decayed / kept (recurrence = 0; see constant note above)
-///   3. If decayed is empty → return early (no files touched)
+///   1. Read AGENT_LEARNINGS.jsonl via `episodic::read_raw` (absent → empty;
+///      every line keeps its bytes)
+///   2. Select the parsed records `should_decay` picks (recurrence = 0; see
+///      constant note above); their ids are the drops
+///   3. If nothing is selected → return early (no files touched)
 ///   4. fs::create_dir_all(snapshots_dir)
-///   5. Append decayed records to snapshot_file(cycle_date) — one JSONL line each
-///   6. File::open(snapshot_file)?.sync_data() — must complete before the destructive rewrite
-///   7. `episodic::rewrite_guarded` — temp write+fsync, WAL prune intent naming
-///      that temp (after tmp-fsync / before rename), rename, parent-dir fsync
+///   5. Append each dropped line's bytes to snapshot_file(cycle_date), skipping
+///      ids already parsed from that file, after ending a torn tail with `\n`
+///   6. sync_data the snapshot — must complete before the destructive rewrite
+///   7. `episodic::rewrite_guarded` with `episodic::patch_lines` output — temp
+///      write+fsync, WAL prune intent naming that temp (after tmp-fsync / before
+///      rename), rename, parent-dir fsync. Runs even when step 5 appended nothing
 ///   8. Return DecayResult { decayed_ids, kept_count }
 ///
 /// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
@@ -128,68 +132,79 @@ pub fn run_decay_pruner(
     cycle_date: &str,
 ) -> Result<DecayResult, DecayError> {
     // Step 1: read AGENT_LEARNINGS.jsonl through the shared episodic scan
-    // (WEG-378). Absent/empty/torn-tail all collapse to a clean prefix — the
-    // CLI `dreamd dream` path no longer aborts on a post-SIGKILL torn line.
+    // (WEG-378), keeping every line's bytes. A torn tail is never a record, so
+    // the CLI `dreamd dream` path does not abort on a post-SIGKILL torn line.
     let jsonl_path = agent_root.episodic_jsonl();
-    let all_events = episodic::read_all(&jsonl_path)?;
+    let raw = episodic::read_raw(&jsonl_path)?;
+    let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
 
-    if all_events.is_empty() {
-        return Ok(DecayResult {
-            decayed_ids: Vec::new(),
-            kept_count: 0,
-        });
-    }
-
-    // Step 2: partition into decayed / kept ([`RecurrenceContext::decay`]).
-    let mut decayed: Vec<AgentLearning> = Vec::new();
-    let mut kept: Vec<AgentLearning> = Vec::new();
-    for event in all_events {
-        if should_decay(now_sec, &event) {
-            decayed.push(event);
-        } else {
-            kept.push(event);
-        }
-    }
+    // Step 2: select the decayed records ([`RecurrenceContext::decay`]). A drop
+    // matches every line with that id.
+    let drops: HashSet<EventId> = records()
+        .filter(|event| should_decay(now_sec, event))
+        .map(|event| event.id.clone())
+        .collect();
+    let decayed_ids: Vec<EventId> = records()
+        .filter(|event| drops.contains(&event.id))
+        .map(|event| event.id.clone())
+        .collect();
+    let kept_count = records().count() - decayed_ids.len();
 
     // Step 3: if nothing decayed, return early — no files touched, no WAL.
-    if decayed.is_empty() {
+    if drops.is_empty() {
         return Ok(DecayResult {
-            decayed_ids: Vec::new(),
-            kept_count: kept.len(),
+            decayed_ids,
+            kept_count,
         });
     }
 
     let snapshots_dir = agent_root.snapshots_dir();
     fs::create_dir_all(&snapshots_dir)?;
 
-    // Step 5: append decayed records to snapshot_file — one JSONL line each.
+    // Step 5: append each dropped line's bytes to snapshot_file. Ids already in
+    // that file are skipped, so re-running a cycle that crashed before its log
+    // rewrite archives each row once.
     let snapshot_path = agent_root.snapshot_file(cycle_date);
+    let archived = episodic::read_raw(&snapshot_path)?;
+    let existing: HashSet<&EventId> = archived
+        .iter()
+        .filter_map(|line| line.parsed.as_ref())
+        .map(|event| &event.id)
+        .collect();
     {
         let mut snap_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&snapshot_path)?;
-        for record in &decayed {
-            let line = serde_json::to_string(record)
-                .map_err(|e| DecayError::Json { line: 0, source: e })?;
-            snap_file.write_all(line.as_bytes())?;
+        // A crash mid-append leaves a fragment with no `\n`. End it first, or
+        // the next row is glued onto it and never parses.
+        if archived
+            .last()
+            .is_some_and(|line| !line.bytes.ends_with(b"\n"))
+        {
             snap_file.write_all(b"\n")?;
+        }
+        for line in &raw {
+            let Some(event) = &line.parsed else { continue };
+            if drops.contains(&event.id) && !existing.contains(&event.id) {
+                snap_file.write_all(&line.bytes)?;
+            }
         }
         // Step 6: sync snapshot before the destructive rewrite.
         snap_file.sync_data()?;
     }
 
-    // Step 7: atomically rewrite the live JSONL with the kept records.
+    // Step 7: atomically rewrite the live JSONL without the dropped lines.
     // `episodic::rewrite_guarded` writes the temp, fsyncs it, records the WAL
     // prune intent naming that temp, then renames and parent-dir fsyncs. The
     // intent's path comes from the write, so this pruner never names a temp of
     // its own (AILAB-164).
-    episodic::rewrite_guarded(agent_root, &jsonl_path, &kept)?;
+    let contents = episodic::patch_lines(&raw, &HashMap::new(), &drops)?;
+    episodic::rewrite_guarded(agent_root, &jsonl_path, &contents)?;
 
-    let decayed_ids: Vec<EventId> = decayed.into_iter().map(|r| r.id).collect();
     Ok(DecayResult {
         decayed_ids,
-        kept_count: kept.len(),
+        kept_count,
     })
 }
 
@@ -416,5 +431,97 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, pinned_id);
+    }
+
+    // ── BZR-1234: byte-preserving rewrite and an idempotent archive ─────────
+
+    const SKIPPED: &[u8] = b"{\"not\":\"a learning\"}\n";
+    const DATE: &str = "2026-05-24";
+
+    /// `event`'s JSONL line with an unknown `x_note` member first.
+    fn line_with_x_note(event: &AgentLearning) -> Vec<u8> {
+        let line = serde_json::to_string(event).unwrap();
+        format!("{{\"x_note\":\"keep\",{}\n", &line[1..]).into_bytes()
+    }
+
+    fn line_of(event: &AgentLearning) -> Vec<u8> {
+        format!("{}\n", serde_json::to_string(event).unwrap()).into_bytes()
+    }
+
+    fn setup(label: &str, log: &[u8]) -> (AgentRoot, DirGuard) {
+        let dir = unique_tmpdir(label);
+        let root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        std::fs::create_dir_all(root.dreamd_dir()).unwrap();
+        std::fs::write(root.episodic_jsonl(), log).unwrap();
+        (root, DirGuard(dir))
+    }
+
+    #[test]
+    fn decay_keeps_unknown_fields_and_skipped_lines() {
+        let young = line_with_x_note(&make_learning(make_event_id('Y'), YOUNG_TS, false));
+        let old = line_with_x_note(&make_learning(make_event_id('D'), OLD_TS, false));
+        let log = [young.as_slice(), SKIPPED, old.as_slice()].concat();
+        let (root, _g) = setup("decay-bytes", &log);
+
+        let result = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+
+        assert_eq!(result.decayed_ids, vec![make_event_id('D')]);
+        assert_eq!(result.kept_count, 1);
+        assert_eq!(
+            std::fs::read(root.episodic_jsonl()).unwrap(),
+            [young.as_slice(), SKIPPED].concat(),
+            "the young line and the skipped line keep their bytes"
+        );
+        assert_eq!(
+            std::fs::read(root.snapshot_file(DATE)).unwrap(),
+            old,
+            "the archive holds the old line's bytes"
+        );
+    }
+
+    #[test]
+    fn decay_rerun_after_a_crash_before_the_rename_archives_once() {
+        let old_a = make_learning(make_event_id('A'), OLD_TS, false);
+        let old_b = make_learning(make_event_id('B'), OLD_TS, false);
+        let young = make_learning(make_event_id('Y'), YOUNG_TS, false);
+        let log = [line_of(&old_a), line_of(&young), line_of(&old_b)].concat();
+        let (root, _g) = setup("decay-rerun", &log);
+
+        let first = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        assert_eq!(first.decayed_ids.len(), 2);
+        // The archive was synced but the rename never landed.
+        std::fs::write(root.episodic_jsonl(), &log).unwrap();
+        let second = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        assert_eq!(second.decayed_ids, first.decayed_ids);
+
+        let archived = episodic::read_all(&root.snapshot_file(DATE)).unwrap();
+        for id in &first.decayed_ids {
+            let n = archived.iter().filter(|ev| ev.id == *id).count();
+            assert_eq!(n, 1, "{id} must be archived exactly once");
+        }
+        let live = episodic::read_all(&root.episodic_jsonl()).unwrap();
+        assert!(
+            live.iter().all(|ev| !first.decayed_ids.contains(&ev.id)),
+            "no decayed id may stay in the log"
+        );
+        assert_eq!(live, vec![young]);
+    }
+
+    #[test]
+    fn decay_archive_with_a_torn_tail_gets_a_newline_first() {
+        let old = make_learning(make_event_id('D'), OLD_TS, false);
+        let (root, _g) = setup("decay-torn-archive", &line_of(&old));
+        std::fs::create_dir_all(root.snapshots_dir()).unwrap();
+        std::fs::write(root.snapshot_file(DATE), b"{\"partial").unwrap();
+
+        run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+
+        let archive = root.snapshot_file(DATE);
+        assert_eq!(
+            std::fs::read(&archive).unwrap(),
+            [b"{\"partial\n".as_slice(), &line_of(&old)].concat()
+        );
+        assert_eq!(episodic::read_all(&archive).unwrap(), vec![old]);
     }
 }

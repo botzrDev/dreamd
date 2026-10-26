@@ -11,9 +11,10 @@
 //! read → mutate → rewrite path is the inverse of
 //! [`dreamd_core::consolidation::apply_pin_unpin`] — force-clear instead of
 //! union-set — and reuses the same [`dreamd_core::episodic`] I/O seam
-//! ([`read_all`](dreamd_core::episodic::read_all) +
+//! ([`read_raw`](dreamd_core::episodic::read_raw) +
+//! [`patch_lines`](dreamd_core::episodic::patch_lines) +
 //! [`rewrite_atomic`](dreamd_core::episodic::rewrite_atomic)) so no JSONL I/O is
-//! hand-rolled.
+//! hand-rolled and lines it does not unpin keep their bytes.
 //!
 //! **Daemon-coexistence guard (correctness, not scope):** a live daemon is the
 //! store's single writer. If we `rewrite_atomic` (temp + rename) underneath it,
@@ -27,12 +28,14 @@
 //! which also refuses an in-process `dreamd mcp` or a daemon the probe cannot
 //! see.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::episodic::{self, EpisodicError};
 use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
+use dreamd_protocol::EventId;
 
 #[derive(Debug)]
 pub enum ArchiveError {
@@ -192,34 +195,25 @@ pub fn run(
     };
 
     let jsonl = root.episodic_jsonl();
-    let mut events = episodic::read_all(&jsonl)?;
+    let raw = episodic::read_raw(&jsonl)?;
+    let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
+
+    if let Some(target) = id {
+        if !records().any(|e| e.id.as_str() == target) {
+            writeln!(err, "dreamd: error — no entry with id {target}")?;
+            return Err(ArchiveError::UnknownId(target.to_string()));
+        }
+    }
 
     // Collect the ids we actually flip true → false so the audit log and the
     // summary count only real state changes (idempotent clear of an already
-    // unpinned entry is a no-op, not an error).
+    // unpinned entry is a no-op, not an error). One id per pinned line. With
+    // no id, `all == true` here (validated above).
+    let mut pins: HashMap<EventId, bool> = HashMap::new();
     let mut cleared: Vec<String> = Vec::new();
-
-    if let Some(target) = id {
-        match events.iter_mut().find(|e| e.id.as_str() == target) {
-            None => {
-                writeln!(err, "dreamd: error — no entry with id {target}")?;
-                return Err(ArchiveError::UnknownId(target.to_string()));
-            }
-            Some(entry) => {
-                if entry.pinned {
-                    entry.pinned = false;
-                    cleared.push(target.to_string());
-                }
-            }
-        }
-    } else {
-        // `all == true` here (validated above).
-        for entry in events.iter_mut() {
-            if entry.pinned {
-                entry.pinned = false;
-                cleared.push(entry.id.as_str().to_string());
-            }
-        }
+    for entry in records().filter(|e| e.pinned && id.is_none_or(|t| e.id.as_str() == t)) {
+        pins.insert(entry.id.clone(), false);
+        cleared.push(entry.id.as_str().to_string());
     }
 
     // Audit trail: one WARN per cleared id.
@@ -231,7 +225,8 @@ pub fn run(
     // `rewrite_guarded`: a one-shot CLI rewrite has no open WAL for an intent to
     // land in (that seam is the daemon dream cycle's).
     if !cleared.is_empty() {
-        episodic::rewrite_atomic(&jsonl, &events)?;
+        let contents = episodic::patch_lines(&raw, &pins, &HashSet::new())?;
+        episodic::rewrite_atomic(&jsonl, &contents)?;
     }
 
     let n = cleared.len();
@@ -277,7 +272,11 @@ mod tests {
         let root = AgentRoot::new(tmp.path());
         let jsonl = root.episodic_jsonl();
         fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
-        rewrite_atomic(&jsonl, records).unwrap();
+        let bytes: String = records
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        rewrite_atomic(&jsonl, bytes.as_bytes()).unwrap();
         (tmp, jsonl)
     }
 
@@ -516,5 +515,41 @@ mod tests {
         let stderr = String::from_utf8(err).unwrap();
         assert!(stderr.contains("no .agent/ directory found"));
         assert!(stderr.contains("dreamd init"));
+    }
+
+    /// BZR-1234: force-unpin flips one member of one line. Every other byte,
+    /// unknown members and skipped lines included, is kept.
+    #[test]
+    fn force_unpin_keeps_unknown_fields_and_skipped_lines() {
+        const SKIPPED: &str = "{\"not\":\"a learning\"}\n";
+        let (tmp, jsonl) = seed(&[]);
+        let a_json = serde_json::to_string(&learning('A', true)).unwrap();
+        let a_line = format!("{{\"x_note\":\"keep\",{}\n", &a_json[1..]);
+        let b_line = format!(
+            "{}\n",
+            serde_json::to_string(&learning('B', false)).unwrap()
+        );
+        fs::write(&jsonl, format!("{a_line}{SKIPPED}{b_line}")).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            tmp.path(),
+            None,
+            true,
+            Some(&evt_id('A')),
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        let a_unpinned = a_line.replace("\"pinned\":true", "\"pinned\":false");
+        assert_ne!(a_unpinned, a_line);
+        assert_eq!(
+            fs::read_to_string(&jsonl).unwrap(),
+            format!("{a_unpinned}{SKIPPED}{b_line}")
+        );
+        assert!(String::from_utf8(out).unwrap().contains("1 entry unpinned"));
     }
 }

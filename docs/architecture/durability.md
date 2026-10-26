@@ -149,9 +149,13 @@ end. After either write the file is `sync_data`'d so the recovery itself is
 durable across a follow-up crash. The coordinator then closes that fd, opens
 its append fd with `O_APPEND`, and begins serving messages.
 
-Plain readers (`episodic::read_all`: the dream cycle, decay, the index replay,
+Plain readers (`episodic::read_all`: cluster selection, the index replay,
 `dreamd doctor`) apply the same scan but rewrite nothing: they skip a bad
-`\n`-terminated line and ignore a torn tail.
+`\n`-terminated line and ignore a torn tail. The four log rewrites (the pin
+pass, decay, `dreamd forget` and `dreamd archive --force-unpin`) read through
+`episodic::read_raw`, which applies the same scan and keeps each line's bytes.
+They write unchanged lines back byte-identical, keep skipped lines and a torn
+final line verbatim, and do not rewrite the file when nothing changes.
 
 This is what makes a `kill -9` mid-`write_all` safe: even if a partial buffer
 landed on disk, the next process start prunes it before any new append.
