@@ -147,8 +147,8 @@ pub fn run(
         return Ok(());
     }
 
-    // Refuse while a live daemon holds the log: the cascade's rename would
-    // leave the daemon appending to the old inode.
+    // Refuse while a live daemon holds the log: the cascade's rename would drop
+    // any append the daemon makes between the cascade's read and that rename.
     if let Some(sock) = socket {
         if daemon_liveness(sock) {
             return Err(ForgetCliError::DaemonRunning);

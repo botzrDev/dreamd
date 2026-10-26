@@ -235,18 +235,21 @@ fn append_quarantine(sidecar: &Path, skips: &[ScanSkip]) -> std::io::Result<()> 
 ///   because it was never a complete line.
 ///
 /// The rewrite is `seek(0)` → `write_all` → `set_len` → `sync_data` on the
-/// caller's own fd. It must never `rewrite_atomic` / `rewrite_guarded` / rename
-/// and swap inodes: the coordinator holds this fd across the call, so a fresh
-/// inode would leave every subsequent append writing into an unlinked file.
-/// Leaves `file`'s cursor unspecified; the caller re-seeks to end before
-/// appending.
-pub fn recover(file: &mut File, jsonl_path: &Path) -> std::io::Result<()> {
+/// caller's own fd, so `file` must not be opened with `O_APPEND`, which would
+/// send those writes to the end. The coordinator runs this on a plain
+/// read/write fd, closes it, and only then opens its append fd. Returns the
+/// records the scan kept.
+pub fn recover(file: &mut File, jsonl_path: &Path) -> std::io::Result<Vec<AgentLearning>> {
     recover_at(file, jsonl_path, chrono::Utc::now().date_naive())
 }
 
 /// [`recover`] with the sidecar's date injected, so tests get a deterministic
 /// filename instead of racing the wall clock across a UTC midnight.
-fn recover_at(file: &mut File, jsonl_path: &Path, date: chrono::NaiveDate) -> std::io::Result<()> {
+fn recover_at(
+    file: &mut File,
+    jsonl_path: &Path,
+    date: chrono::NaiveDate,
+) -> std::io::Result<Vec<AgentLearning>> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
@@ -280,7 +283,7 @@ fn recover_at(file: &mut File, jsonl_path: &Path, date: chrono::NaiveDate) -> st
             torn_tail_bytes = bytes.len() as u64 - clean_len,
             "episodic log: quarantined malformed lines and rewrote the clean record stream in place"
         );
-        return Ok(());
+        return Ok(records);
     }
 
     if clean_len < bytes.len() as u64 {
@@ -291,7 +294,7 @@ fn recover_at(file: &mut File, jsonl_path: &Path, date: chrono::NaiveDate) -> st
         file.set_len(clean_len)?;
         file.sync_data()?;
     }
-    Ok(())
+    Ok(records)
 }
 
 /// Coordinator-only durable append onto an open, end-positioned fd. Serializes

@@ -146,7 +146,7 @@ The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the
 
 ## Concurrency and file operations
 
-Each JSONL line MUST be written in a single call and MUST end with a single `\n`. The reference implementation is single-writer: it opens the file read/write, seeks to the end, and does not use `O_APPEND`, so torn-tail recovery can truncate. A second writer is outside that contract. An implementation that allows concurrent appends MUST use OS-atomic append (`O_APPEND` on POSIX, or the equivalent on Windows).
+Each JSONL line MUST be written in a single call and MUST end with a single `\n`. The reference implementation is single-writer. It runs torn-tail recovery on a plain read/write handle, closes it, then appends through a handle opened with `O_APPEND`; on POSIX it reopens the file when the file's device, inode or length changes between its appends. A second writer is outside that contract. An implementation that allows concurrent appends MUST use OS-atomic append (`O_APPEND` on POSIX, or the equivalent on Windows).
 
 The spec does not require file locking. Implementations that need stronger guarantees MAY layer locking on top, but lock files MUST live under the implementation's hidden subfolder (`.<impl>/`) and MUST NOT block readers that ignore them.
 

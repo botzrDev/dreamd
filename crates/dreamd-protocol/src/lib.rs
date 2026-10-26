@@ -22,8 +22,11 @@ const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// `dreamd-core` and rides in through `parse`. The newtype keeps malformed
 /// ids unrepresentable across the wire and on disk.
 ///
+/// Ordering is string order, which for canonical ULIDs is creation-time order,
+/// because the Crockford alphabet is in ASCII order.
+///
 /// [`parse`]: EventId::parse
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventId(String);
 
 /// Reason an [`EventId::parse`] call rejected its input.
@@ -247,6 +250,17 @@ mod tests {
         let bad = "\"evt_not-a-ulid\"";
         let r: Result<EventId, _> = serde_json::from_str(bad);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn event_id_order_is_ulid_order() {
+        let ids: Vec<EventId> = ["FA9", "FAA", "FAZ", "FB0"]
+            .iter()
+            .map(|tail| EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}")).unwrap())
+            .collect();
+        for pair in ids.windows(2) {
+            assert!(pair[0] < pair[1], "{} < {}", pair[0], pair[1]);
+        }
     }
 
     #[test]

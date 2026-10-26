@@ -645,9 +645,9 @@ in-process and refuses while a daemon is live.
 The reason is fd ownership (WEG-271). Both consolidation and decay can replace
 `AGENT_LEARNINGS.jsonl` by atomic rename, which orphans the coordinator's long-lived
 `File` — subsequent appends would land on an unlinked inode and be silently lost. Routing
-the cycle through the actor lets the handler reopen `self.file` and seek to the end
-as part of the same message, so there is no window in which the coordinator
-holds a stale fd. `now_sec` / `cycle_date` are supplied by the caller so the cycle stays
+the cycle through the actor lets the handler reopen `self.file` (with `O_APPEND`) as
+part of the same message, on every exit path, error included, so there is no window
+in which the coordinator holds a stale fd. `now_sec` / `cycle_date` are supplied by the caller so the cycle stays
 wall-clock-free and deterministic in tests (see the `RunDreamCycle` variant doc).
 
 Two consequences follow, and both are load-bearing:

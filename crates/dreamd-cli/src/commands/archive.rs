@@ -15,17 +15,17 @@
 //! [`rewrite_atomic`](dreamd_core::episodic::rewrite_atomic)) so no JSONL I/O is
 //! hand-rolled.
 //!
-//! **Daemon-coexistence guard (correctness, not scope):** a live single-writer
-//! daemon holds an open fd on the JSONL and appends by offset. If we
-//! `rewrite_atomic` (temp + rename) underneath it, the daemon keeps writing to
-//! the old inode and the unpin is silently lost. So we refuse when the daemon
-//! probes live and tell the operator to stop it first — a persisted clear is the
-//! only correct implementation of "clears the pin flag". The probe is a bounded
-//! connect on whichever transport this target uses: UDS
-//! (`is_daemon_socket_live`) on Unix, a loopback TCP connect to the address in
-//! `~/.agent/server.json` (`tcp_daemon_is_live`) off it (AILAB-192). Behind the
-//! probe the command takes the project writer lock, which also refuses an
-//! in-process `dreamd mcp` or a daemon the probe cannot see.
+//! **Daemon-coexistence guard (correctness, not scope):** a live daemon is the
+//! store's single writer. If we `rewrite_atomic` (temp + rename) underneath it,
+//! an append it makes between our read and our rename is lost. So we refuse
+//! when the daemon probes live and tell the operator to stop it first — a
+//! persisted clear is the only correct implementation of "clears the pin
+//! flag". The probe is a bounded connect on whichever transport this target
+//! uses: UDS (`is_daemon_socket_live`) on Unix, a loopback TCP connect to the
+//! address in `~/.agent/server.json` (`tcp_daemon_is_live`) off it
+//! (AILAB-192). Behind the probe the command takes the project writer lock,
+//! which also refuses an in-process `dreamd mcp` or a daemon the probe cannot
+//! see.
 
 use std::io::Write;
 use std::path::Path;
@@ -169,8 +169,8 @@ pub fn run(
         }
     };
 
-    // Refuse while a live daemon holds the log: its offset-append writes would
-    // survive our rename and clobber the unpin. Stop the daemon, then retry.
+    // Refuse while a live daemon holds the log: an append it makes between our
+    // read and our rename would be lost. Stop the daemon, then retry.
     if let Some(sock) = socket {
         if daemon_liveness(sock) {
             writeln!(

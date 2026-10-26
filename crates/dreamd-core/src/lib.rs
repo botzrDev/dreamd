@@ -29,6 +29,7 @@ pub mod dream_cycle;
 pub mod episodic;
 /// BZR-158 — remove one event and cascade to its derived state.
 pub mod forget;
+pub mod id_minter;
 pub mod index;
 pub mod ingress;
 pub mod invariants;

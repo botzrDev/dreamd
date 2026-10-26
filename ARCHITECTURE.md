@@ -123,11 +123,15 @@ All appends to `episodic/AGENT_LEARNINGS.jsonl` flow through one `MemoryCoordina
 Write order:
 
 1. Idempotency-LRU lookup
-2. Mint `EventId` (`evt_` + 26-char Crockford ULID in `dreamd-core`; inbound `id` is overwritten)
-3. Serialize with trailing `\n`
-4. Reject lines > 4 KiB (`PayloadTooLarge` → HTTP 413)
-5. Single `write_all` → `sync_data`
-6. LRU `put` only on success (insert-after-sync)
+2. Stat check (Unix): reopen the log if the path's device, inode or length differs from what the coordinator last wrote
+3. Mint `EventId` from the coordinator's `IdMinter` (`evt_` + 26-char Crockford ULID in `dreamd-core`, strictly increasing per coordinator; inbound `id` is overwritten)
+4. Serialize with trailing `\n`
+5. Reject lines > 4 KiB (`PayloadTooLarge` → HTTP 413)
+6. Single `write_all` → `sync_data` on the `O_APPEND` fd
+7. Stat check again (Unix): if the file was replaced, append the line again unless the new file already holds it
+8. LRU `put` only on success (insert-after-sync)
+
+**Append fd.** Open-time recovery runs on a plain read/write fd, which the coordinator closes before it opens the append fd with `O_APPEND`. A reopen after an outside change (a `git checkout`, `merge` or `pull` that replaced or edited the log) ends a foreign final line that lacks `\n`, raises the minter's floor to the largest id in the file, and logs a warning. The dream cycle reopens the fd on every exit path, error included. Windows has `O_APPEND` and no stat check. The minter is seeded from the largest ULID in the log; an id more than 24 h ahead of the clock does not seed it.
 
 `POST /api/v1/learn` returns 201 only after `sync_data` completes. Idempotency LRU is in-memory only (cap 1024, keyed by canonicalized agent-root path + `client_dedup_key`); restart clears it.
 

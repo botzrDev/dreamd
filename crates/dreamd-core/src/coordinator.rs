@@ -18,17 +18,19 @@
 //! or `spawn_blocking` without re-reading `docs/architecture/durability.md`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom};
+#[cfg(unix)]
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use dreamd_protocol::{AgentLearning, EventId, RECORD_SCHEMA_VERSION};
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
-use ulid::Ulid;
 
 use crate::episodic::{self, EpisodicError};
+use crate::id_minter::IdMinter;
 use crate::layout::AgentRoot;
 
 /// Hard cap on a single serialized JSONL line — the on-disk line-format limit
@@ -138,9 +140,14 @@ pub enum MemoryCoordinatorMsg {
 pub struct MemoryCoordinator {
     file: File,
     /// Path to `AGENT_LEARNINGS.jsonl`. Needed to reopen `file` after a dream
-    /// cycle replaces the file by atomic rename (WEG-271) — otherwise the fd
-    /// would point at an orphaned inode and subsequent appends would be lost.
+    /// cycle, or anything else, replaces the file (WEG-271).
     jsonl_path: PathBuf,
+    /// Issues this coordinator's event ids; seeded from the log at open.
+    minter: IdMinter,
+    /// Device, inode and length of the file `file` writes, as of its last
+    /// write. Compared with the path around every append.
+    #[cfg(unix)]
+    identity: LogIdentity,
     /// The project root this coordinator owns. The dream cycle (consolidation +
     /// decay) runs against this root. Distinct from `agent_root_key`, which is
     /// canonicalized for idempotency keying — do NOT use the key for the cycle.
@@ -193,18 +200,22 @@ impl MemoryCoordinator {
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(jsonl_path)?;
-
-        episodic::recover(&mut file, jsonl_path)?;
-        // Seek to end for subsequent appends. We deliberately do NOT open
-        // with `.append(true)` because the recovery path needs `set_len`
-        // and explicit positioning.
-        file.seek(SeekFrom::End(0))?;
+        // Recovery rewrites from offset 0, which `O_APPEND` would send to the
+        // end, so it runs on its own plain fd, closed at the end of this block.
+        // `set_len` alone would work on either.
+        let records = {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(jsonl_path)?;
+            episodic::recover(&mut file, jsonl_path)?
+        };
+        let minter = IdMinter::seeded(records.iter().map(|r| &r.id), SystemTime::now());
+        let file = open_append(jsonl_path)?;
+        #[cfg(unix)]
+        let identity = LogIdentity::of(&file.metadata()?);
 
         let agent_root_key =
             std::fs::canonicalize(agent_root).unwrap_or_else(|_| agent_root.to_path_buf());
@@ -213,6 +224,9 @@ impl MemoryCoordinator {
         Ok(Self {
             file,
             jsonl_path: jsonl_path.to_path_buf(),
+            minter,
+            #[cfg(unix)]
+            identity,
             agent_root: AgentRoot::new(agent_root),
             rx,
             agent_root_key,
@@ -279,11 +293,14 @@ impl MemoryCoordinator {
             }
         }
 
-        // Daemon-mint the EventId. The `ulid` crate emits canonical 26-char
-        // uppercase Crockford base32, so `EventId::parse` always succeeds.
-        let minted_raw = format!("evt_{}", Ulid::new());
-        let event_id =
-            EventId::parse(&minted_raw).expect("freshly minted ULID always parses as EventId");
+        // A `git checkout` or `merge` under a live daemon replaces the log.
+        // Write to the file at the path, not the replaced one.
+        #[cfg(unix)]
+        self.ensure_live_log()?;
+
+        // One clock read stamps the id and `timestamp`.
+        let now = SystemTime::now();
+        let event_id = self.minter.next_at(now);
         learning.id = event_id.clone();
 
         // Server-stamp schema_version on every durable write. Closes the HTTP
@@ -292,7 +309,7 @@ impl MemoryCoordinator {
         learning.schema_version = RECORD_SCHEMA_VERSION.to_string();
 
         // Server-stamp timestamp — same "daemon owns durable fields" rule as `id`.
-        let stamped = Utc::now();
+        let stamped: DateTime<Utc> = now.into();
         learning.timestamp = stamped;
 
         // skill_action is NOT re-validated here (ARCHITECTURE.md §9): ingress
@@ -304,7 +321,9 @@ impl MemoryCoordinator {
         // seam `episodic::append` (WEG-378); `PayloadTooLarge` maps to HTTP 413
         // via `From<EpisodicError>`. LRU insert stays below — only after a
         // durable write succeeds.
-        episodic::append(&mut self.file, &learning)?;
+        let written = episodic::append(&mut self.file, &learning)?;
+        #[cfg(unix)]
+        self.confirm_landed(&learning, written)?;
 
         // Cache insert ONLY after durable write succeeds. Insert-before
         // would poison the cache on write failure.
@@ -345,9 +364,10 @@ impl MemoryCoordinator {
     ///
     /// `run_deterministic_dream_cycle` (on cluster promotion) and
     /// `run_decay_pruner` (on prune) each replace `AGENT_LEARNINGS.jsonl` by
-    /// atomic rename, leaving `self.file` pointing at an orphaned inode. We
-    /// reopen unconditionally after both run so the next append lands on the
-    /// live inode regardless of whether either step actually rewrote the file.
+    /// atomic rename, leaving `self.file` pointing at an orphaned inode. It
+    /// reopens on every exit path, error included, so the next append lands on
+    /// the live inode whether or not either step rewrote the file and whether
+    /// or not the cycle succeeded.
     /// The cycle writes a well-formed file via atomic rename, so no
     /// `episodic::recover` scan is needed on reopen.
     async fn handle_run_dream_cycle(
@@ -357,7 +377,7 @@ impl MemoryCoordinator {
         no_llm: bool,
         share_personal: bool,
     ) -> Result<crate::decay::DecayResult, CoordinatorError> {
-        let decay = crate::dream_cycle::run_filesystem_phases(
+        let result = crate::dream_cycle::run_filesystem_phases(
             &self.agent_root,
             now_sec,
             cycle_date,
@@ -365,16 +385,95 @@ impl MemoryCoordinator {
             share_personal,
         )
         .await
-        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()));
+        // Every exit path reopens: a phase can fail after the pin pass or decay
+        // has already replaced the log by rename.
+        let reopened = self.reopen();
+        match (result, reopened) {
+            (Ok(decay), Ok(())) => Ok(decay),
+            (Ok(_), Err(e)) => Err(e.into()),
+            (Err(e), reopened) => {
+                if let Err(re) = reopened {
+                    tracing::warn!(
+                        error = %re,
+                        "could not reopen the episodic log after a failed dream cycle"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
 
-        self.file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.jsonl_path)?;
-        self.file.seek(SeekFrom::End(0))?;
-        Ok(decay)
+    /// Point `file` at whatever is at `jsonl_path` now.
+    fn reopen(&mut self) -> std::io::Result<()> {
+        self.file = open_append(&self.jsonl_path)?;
+        #[cfg(unix)]
+        {
+            self.identity = LogIdentity::of(&self.file.metadata()?);
+        }
+        Ok(())
+    }
+
+    /// Before a write: if the file at the path is not the one `file` last
+    /// wrote, reopen it.
+    #[cfg(unix)]
+    fn ensure_live_log(&mut self) -> Result<(), CoordinatorError> {
+        if LogIdentity::at(&self.jsonl_path)? != Some(self.identity) {
+            self.reopen_after_external_change()?;
+        }
+        Ok(())
+    }
+
+    /// After a write of `written` bytes: if the path no longer shows that
+    /// write, reopen it, and append `learning` again unless the file now at the
+    /// path already holds its id.
+    #[cfg(unix)]
+    fn confirm_landed(
+        &mut self,
+        learning: &AgentLearning,
+        written: usize,
+    ) -> Result<(), CoordinatorError> {
+        self.identity.len += written as u64;
+        if LogIdentity::at(&self.jsonl_path)? == Some(self.identity) {
+            return Ok(());
+        }
+        let records = self.reopen_after_external_change()?;
+        if !records.iter().any(|r| r.id == learning.id) {
+            let written = episodic::append(&mut self.file, learning)?;
+            self.identity.len += written as u64;
+        }
+        Ok(())
+    }
+
+    /// Something other than this coordinator replaced or edited the log.
+    /// Reopen it, end a foreign final line that lacks `\n`, and raise the
+    /// minter's floor to the file's largest id. Returns the file's records.
+    #[cfg(unix)]
+    fn reopen_after_external_change(&mut self) -> Result<Vec<AgentLearning>, CoordinatorError> {
+        use std::os::unix::fs::FileExt;
+
+        self.reopen()?;
+        let len = self.file.metadata()?.len();
+        if len > 0 {
+            let mut last = [0u8; 1];
+            self.file.read_exact_at(&mut last, len - 1)?;
+            if last[0] != b'\n' {
+                // End the foreign line, so the next append starts its own line
+                // instead of extending that one.
+                self.file.write_all(b"\n")?;
+                self.file.sync_data()?;
+            }
+        }
+        let records = episodic::read_all(&self.jsonl_path)?;
+        self.minter
+            .observe(records.iter().map(|r| &r.id), SystemTime::now());
+        self.identity = LogIdentity::of(&self.file.metadata()?);
+        tracing::warn!(
+            path = %self.jsonl_path.display(),
+            "episodic log changed outside the coordinator; reopened it"
+        );
+        // BZR-1236 queues `IndexerMsg::Resync` here.
+        Ok(records)
     }
 
     /// Hand one durable append to the indexer task, **awaiting** the send.
@@ -411,6 +510,46 @@ impl MemoryCoordinator {
                 "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
             );
             self.indexer_tx = None;
+        }
+    }
+}
+
+/// The append fd. `read` is for the tail check after an outside change; every
+/// write goes to the end of the file.
+fn open_append(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)
+}
+
+/// What the coordinator expects at `jsonl_path`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogIdentity {
+    dev: u64,
+    ino: u64,
+    len: u64,
+}
+
+#[cfg(unix)]
+impl LogIdentity {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+        }
+    }
+
+    /// `None` when nothing is at `path`.
+    fn at(path: &Path) -> std::io::Result<Option<Self>> {
+        match std::fs::metadata(path) {
+            Ok(meta) => Ok(Some(Self::of(&meta))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -651,5 +790,312 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fixed clock for the dream-cycle fixture; the coordinator restamps appends.
+    const CYCLE_NOW_SEC: i64 = 1_780_000_000;
+
+    fn learning_with(id: &EventId, skill: &str, content: &str, ts: i64) -> AgentLearning {
+        AgentLearning {
+            id: id.clone(),
+            timestamp: DateTime::from_timestamp(ts, 0).expect("valid timestamp"),
+            skill_action: skill.to_string(),
+            content: content.to_string(),
+            ..sample_learning()
+        }
+    }
+
+    fn jsonl_line(learning: &AgentLearning) -> String {
+        let mut line = serde_json::to_string(learning).expect("serialize learning");
+        line.push('\n');
+        line
+    }
+
+    /// An id `offset` from the wall clock, so the coordinator's own clock read
+    /// sits on the other side of it.
+    fn id_from_now(offset: std::time::Duration, ahead: bool) -> EventId {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as u64;
+        let delta = offset.as_millis() as u64;
+        let ms = if ahead {
+            now_ms + delta
+        } else {
+            now_ms - delta
+        };
+        EventId::parse(&format!("evt_{}", ulid::Ulid::from_parts(ms, 0))).unwrap()
+    }
+
+    fn open_coordinator(
+        root: &AgentRoot,
+    ) -> (MemoryCoordinator, mpsc::Sender<MemoryCoordinatorMsg>) {
+        let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        let c = MemoryCoordinator::open_at(
+            &root.episodic_jsonl(),
+            root.project_root(),
+            rx,
+            #[cfg(unix)]
+            None,
+        )
+        .expect("open coord");
+        (c, tx)
+    }
+
+    async fn append_via(
+        tx: &mpsc::Sender<MemoryCoordinatorMsg>,
+        learning: AgentLearning,
+    ) -> EventId {
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning,
+            client_dedup_key: None,
+            response_tx,
+        })
+        .await
+        .expect("send append");
+        response_rx
+            .await
+            .expect("oneshot recv")
+            .expect("append ok")
+            .id
+    }
+
+    /// Replace the log the way `git checkout` does: write a sibling, rename it over.
+    #[cfg(unix)]
+    fn replace_by_rename(jsonl: &Path, bytes: &[u8]) {
+        let sibling = jsonl.with_extension("checkout");
+        std::fs::write(&sibling, bytes).unwrap();
+        std::fs::rename(&sibling, jsonl).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn ino(meta: &std::fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+
+    #[test]
+    fn append_fd_writes_after_bytes_another_handle_appended() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let (mut c, _tx) = open_coordinator(&root);
+
+        let x = learning_with(
+            &id_from_now(std::time::Duration::from_secs(60), false),
+            "rust::other_handle",
+            "written by another handle",
+            CYCLE_NOW_SEC,
+        );
+        let mut other = OpenOptions::new()
+            .append(true)
+            .open(root.episodic_jsonl())
+            .unwrap();
+        other.write_all(jsonl_line(&x).as_bytes()).unwrap();
+        drop(other);
+
+        let y = learning_with(
+            &placeholder_id(),
+            "rust::coordinator",
+            "written by the coordinator fd",
+            CYCLE_NOW_SEC,
+        );
+        episodic::append(&mut c.file, &y).unwrap();
+
+        let body = std::fs::read_to_string(root.episodic_jsonl()).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "both lines must be in the file; file holds:\n{body}"
+        );
+        for line in lines {
+            let _: AgentLearning = serde_json::from_str(line).expect("each line parses");
+        }
+    }
+
+    #[tokio::test]
+    async fn minted_id_is_above_a_log_id_ahead_of_the_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let seeded = id_from_now(std::time::Duration::from_secs(3600), true);
+        std::fs::write(
+            root.episodic_jsonl(),
+            jsonl_line(&learning_with(
+                &seeded,
+                "rust::seed",
+                "an hour ahead",
+                CYCLE_NOW_SEC,
+            )),
+        )
+        .unwrap();
+
+        let (tx, handle) = spawn_coordinator(root.project_root(), &root.episodic_jsonl()).await;
+        let minted = append_via(&tx, sample_learning()).await;
+        shutdown(tx, handle).await;
+
+        assert!(
+            minted > seeded,
+            "{minted} must sort above the seeded {seeded}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_cycle_reopens_the_append_fd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        std::fs::create_dir_all(root.semantic_dir()).unwrap();
+        let mut body = String::new();
+        for (tail, hours, content) in [
+            ("FA0", 3, "unwrap panicked in the handler"),
+            ("FA1", 2, "unwrap panicked in the parser"),
+            ("FA2", 1, "unwrap panicked in the loader"),
+        ] {
+            let id = EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}")).unwrap();
+            body.push_str(&jsonl_line(&learning_with(
+                &id,
+                "rust::eh",
+                content,
+                CYCLE_NOW_SEC - hours * 3600,
+            )));
+        }
+        std::fs::write(root.episodic_jsonl(), body).unwrap();
+        // A regular file where the ledger's directory goes: `record_cycle` fails
+        // after the pin pass has already renamed the log.
+        std::fs::create_dir_all(root.dreamd_dir()).unwrap();
+        std::fs::write(root.provenance_dir(), b"not a directory").unwrap();
+
+        let (mut c, _tx) = open_coordinator(&root);
+        let before = ino(&c.file.metadata().unwrap());
+
+        let result = c
+            .handle_run_dream_cycle(CYCLE_NOW_SEC, "2026-05-28", true, false)
+            .await;
+        assert!(
+            result.is_err(),
+            "precondition: the cycle fails; got {result:?}"
+        );
+        let at_path = ino(&std::fs::metadata(root.episodic_jsonl()).unwrap());
+        assert_ne!(
+            at_path, before,
+            "precondition: the pin pass renamed the log"
+        );
+
+        assert_eq!(
+            ino(&c.file.metadata().unwrap()),
+            at_path,
+            "a failed cycle must still point the append fd at the file at the path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn outside_replace_with_a_torn_tail_gets_a_newline_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let jsonl = root.episodic_jsonl();
+        let (tx, handle) = spawn_coordinator(root.project_root(), &jsonl).await;
+
+        let valid = learning_with(&placeholder_id(), "git::merge", "merged in", CYCLE_NOW_SEC);
+        let mut replacement = jsonl_line(&valid);
+        replacement.push_str("{\"partial");
+        replace_by_rename(&jsonl, replacement.as_bytes());
+
+        let minted = append_via(&tx, sample_learning()).await;
+        shutdown(tx, handle).await;
+
+        let ids: Vec<EventId> = episodic::read_all(&jsonl)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![valid.id, minted]);
+        let body = std::fs::read_to_string(&jsonl).unwrap();
+        assert!(body.contains("{\"partial\n"), "file holds:\n{body}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn outside_replace_raises_the_minter_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let jsonl = root.episodic_jsonl();
+        let (tx, handle) = spawn_coordinator(root.project_root(), &jsonl).await;
+
+        let ahead = id_from_now(std::time::Duration::from_secs(3600), true);
+        replace_by_rename(
+            &jsonl,
+            jsonl_line(&learning_with(
+                &ahead,
+                "git::merge",
+                "an hour ahead",
+                CYCLE_NOW_SEC,
+            ))
+            .as_bytes(),
+        );
+
+        let minted = append_via(&tx, sample_learning()).await;
+        shutdown(tx, handle).await;
+
+        assert!(
+            minted > ahead,
+            "{minted} must sort above the merged-in {ahead}"
+        );
+    }
+
+    /// Seed one record, open, write `a` straight through the fd, then replace
+    /// the path with the seed bytes plus `extra`, and confirm.
+    #[cfg(unix)]
+    fn confirm_after_replace(include_a: bool) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let jsonl = root.episodic_jsonl();
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let seed = learning_with(
+            &id_from_now(std::time::Duration::from_secs(60), false),
+            "rust::seed",
+            "already there",
+            CYCLE_NOW_SEC,
+        );
+        std::fs::write(&jsonl, jsonl_line(&seed)).unwrap();
+        let (mut c, _tx) = open_coordinator(&root);
+
+        let saved = std::fs::read(&jsonl).unwrap();
+        let a = learning_with(
+            &placeholder_id(),
+            "rust::confirm",
+            "acked append",
+            CYCLE_NOW_SEC,
+        );
+        let w = episodic::append(&mut c.file, &a).unwrap();
+        let mut replacement = saved;
+        if include_a {
+            replacement.extend_from_slice(jsonl_line(&a).as_bytes());
+        }
+        replace_by_rename(&jsonl, &replacement);
+        c.confirm_landed(&a, w).unwrap();
+
+        episodic::read_all(&jsonl)
+            .unwrap()
+            .iter()
+            .filter(|r| r.id == a.id)
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_after_the_write_appends_the_line_again() {
+        assert_eq!(confirm_after_replace(false), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_after_the_write_does_not_duplicate_a_held_line() {
+        assert_eq!(confirm_after_replace(true), 1);
     }
 }

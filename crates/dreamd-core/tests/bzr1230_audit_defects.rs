@@ -135,7 +135,6 @@ fn run_cycle(project: &Path) {
 /// A `git checkout` replaces the log by rename. Appends after that must land
 /// in the file at the path, not in the replaced inode.
 #[tokio::test]
-#[ignore = "BZR-1233: append fd orphaned by inode swap"]
 async fn appends_survive_an_inode_swap_of_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let root = AgentRoot::new(dir.path());

@@ -30,10 +30,12 @@ to compete with. Concurrent third-party writers are explicitly unsupported
 (`ARCHITECTURE.md` §1).
 
 The same actor also runs the dream cycle's filesystem phases (`RunDreamCycle`),
-which replace the file by atomic rename, and reopens its fd afterward, so an
-append never lands on an orphaned inode. `dreamd forget` also replaces the file,
-but it runs in-process and refuses while a daemon is live, so no coordinator
-holds the fd.
+which replace the file by atomic rename, and reopens its fd on every exit path,
+error included. On Unix it also compares the path with its own fd before and
+after each append (steps 2 and 9 below), so a file something else replaced is
+reopened instead of written as an orphaned inode. `dreamd forget` also replaces
+the file, but it runs in-process and refuses while a daemon is live, so no
+coordinator holds the fd.
 
 ## EventId
 
@@ -58,37 +60,48 @@ For each `AppendLearning` message the coordinator runs the following steps
    look up `(canonicalized AgentRoot path, key)` in the in-memory LRU.
    On hit, return the cached `EventId` immediately — no second line is
    appended.
-2. **Mint `EventId` and stamp the daemon-owned fields.**
-   `format!("evt_{}", Ulid::new())`, then `EventId::parse(...)`. The expect is
-   sound: a freshly minted ULID is always valid. The coordinator also overwrites
-   `schema_version` (`RECORD_SCHEMA_VERSION`, `"1.0.0"`) and `timestamp`
-   (`Utc::now()`), so a client cannot persist its own values for any of the
-   three.
-3. **Serialize.** `serde_json::to_string(&learning)` (with the minted id
-   substituted into the struct). Steps 3–7 are `episodic::append`.
-4. **Ensure trailing `\n`.** If the serialized form does not end with
+2. **Stat check (Unix).** Compare the device, inode and length at the log's
+   path with what the coordinator last wrote. On a difference (a
+   `git checkout`, `merge` or `pull` replaced or edited the file), reopen the
+   path with `O_APPEND`, end a final line that lacks `\n`, raise the minter's
+   floor to the largest id in the file, and log a warning.
+3. **Mint `EventId` and stamp the daemon-owned fields.**
+   `IdMinter::next_at(now)` (`id_minter.rs`) returns the clock's ULID when the
+   clock is past the last id's millisecond, and the last id plus one
+   otherwise, so ids strictly increase within a millisecond and when the clock
+   steps back. It is seeded at open from the largest ULID in the log, skipping
+   ids more than 24 h ahead of the clock. The same clock read stamps
+   `timestamp`. The coordinator also overwrites `schema_version`
+   (`RECORD_SCHEMA_VERSION`, `"1.0.0"`), so a client cannot persist its own
+   values for any of the three.
+4. **Serialize.** `serde_json::to_string(&learning)` (with the minted id
+   substituted into the struct). Steps 4–8 are `episodic::append`.
+5. **Ensure trailing `\n`.** If the serialized form does not end with
    `\n`, append one. This guarantees every line is fully terminated, which
    is what the malformed-tail-skip recovery (below) relies on.
-5. **4 KiB cap check.** If the resulting byte length exceeds
+6. **4 KiB cap check.** If the resulting byte length exceeds
    `MAX_LEARNING_LINE_BYTES` (4096), return `CoordinatorError::PayloadTooLarge`
    without writing. The HTTP handler maps this to **413 Payload Too Large**.
    There is no sidecar storage for oversized payloads.
-6. **Single `write_all`.** One call for the whole buffer. `write_all` loops
+7. **Single `write_all`.** One call for the whole buffer. `write_all` loops
    over `write` until the buffer is drained, so it is not a single-syscall
    guarantee; at ≤4 KiB it is one `write` in practice, which minimises the
    window in which a kill could leave a torn line. A torn line that does land
    is removed by startup recovery (below).
-7. **`sync_data`.** Force the bytes to durable storage. The HTTP handler
+8. **`sync_data`.** Force the bytes to durable storage. The HTTP handler
    does not return `201` until this completes.
-8. **LRU insert.** Only on `sync_data` success and only if a
-   `client_dedup_key` was provided, insert `(root, key) -> EventId` into
-   the LRU. Insert-before-write would poison the cache on write failure
-   (a retry would see a phantom hit despite no durable bytes on disk).
-9. **Hand off to the indexer.** The coordinator awaits `send` of
-   `IndexerMsg::Append` on the indexer channel, then replies. This is index
-   freshness, not durability — the line is already on disk — but it is why a
-   full indexer channel shows up as append latency
-   (`ARCHITECTURE.md` §4).
+9. **Stat check again (Unix).** If the path no longer shows this write, reopen
+   it as in step 2, and append the line again unless the file now at the path
+   already holds its id.
+10. **LRU insert.** Only on `sync_data` success and only if a
+    `client_dedup_key` was provided, insert `(root, key) -> EventId` into
+    the LRU. Insert-before-write would poison the cache on write failure
+    (a retry would see a phantom hit despite no durable bytes on disk).
+11. **Hand off to the indexer.** The coordinator awaits `send` of
+    `IndexerMsg::Append` on the indexer channel, then replies. This is index
+    freshness, not durability — the line is already on disk — but it is why a
+    full indexer channel shows up as append latency
+    (`ARCHITECTURE.md` §4).
 
 ## Idempotency LRU
 
@@ -130,11 +143,11 @@ shared scan policy (`episodic::scan`, SPEC §"Corrupt input"). Three cases:
   the same rewrite. A `WARN` names the sidecar and the counts (AILAB-163).
 
 Recovery never truncates from the first bad line onward — that would discard
-good records after it — and never swaps the inode (no rename), because the
-coordinator holds this fd for every later append. After either write the file
-is `sync_data`'d so the recovery itself is durable across a follow-up crash.
-The file handle then seeks to end-of-file and the actor begins serving
-messages.
+good records after it. It runs on a plain read/write fd, because its in-place
+rewrite writes from offset 0 and `O_APPEND` would send those writes to the
+end. After either write the file is `sync_data`'d so the recovery itself is
+durable across a follow-up crash. The coordinator then closes that fd, opens
+its append fd with `O_APPEND`, and begins serving messages.
 
 Plain readers (`episodic::read_all`: the dream cycle, decay, the index replay,
 `dreamd doctor`) apply the same scan but rewrite nothing: they skip a bad
