@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use dreamd_core::dream_cycle::{self, cycle_date_from_now_sec};
 use dreamd_core::layout::AgentRoot;
+use dreamd_core::writer_lock::{WriterKind, WriterLock};
 
 /// Fixed reference clock. All age calculations resolve against this.
 /// Do NOT replace with Utc::now() — snapshot must be reproducible across machines.
@@ -37,6 +38,10 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
     // Create the dreamd dir (state.json lives here).
     fs::create_dir_all(root.dreamd_dir()).unwrap();
 
+    // The cycle's provenance edges go through the project writer lock's
+    // ledger. A fresh fixture has no WAL and no state.json to recover.
+    let lock = WriterLock::acquire(&root, WriterKind::Dream).expect("project writer lock");
+
     let cycle_date = cycle_date_from_now_sec(NOW_SEC);
     // `run_filesystem_phases` is async since AILAB-204 (the LLM call is awaited
     // inside the WAL envelope). `no_llm = true` keeps these snapshots pinned to
@@ -47,6 +52,7 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
         .expect("tokio runtime for snapshot cycle")
         .block_on(dream_cycle::run_filesystem_phases(
             &root,
+            lock.ledger(),
             NOW_SEC,
             &cycle_date,
             true,

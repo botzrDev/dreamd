@@ -34,7 +34,7 @@ use crate::index::RecurrenceSidecar;
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::lessons;
-use crate::provenance::{self, ProvenanceError};
+use crate::provenance::{self, Ledger, ProvenanceError};
 use crate::wal::{self, GuardedReplaceKind, WalError};
 
 /// What [`cascade`] did to `semantic/LESSONS.md`.
@@ -107,10 +107,13 @@ impl From<DreamCycleError> for ForgetError {
 /// startup recovery. The caller must reopen any append fd it holds on the
 /// JSONL, because the rewrite replaces the file by rename.
 ///
+/// `ledger` is the project writer lock's appender (`WriterLock::ledger`).
+///
 /// Returns [`io::ErrorKind::Unsupported`] (wrapped) on Windows, inherited from
 /// `write_atomic`.
 pub fn cascade(
     agent_root: &AgentRoot,
+    ledger: &Ledger,
     id: &EventId,
     now_sec: i64,
 ) -> Result<ForgetReport, ForgetError> {
@@ -153,7 +156,7 @@ pub fn cascade(
         consolidation::run_cluster_engine(agent_root, now_sec)?;
     }
 
-    provenance::record_cycle(agent_root)?;
+    provenance::record_cycle(agent_root, ledger)?;
     wal::commit_cycle(agent_root, now_sec)?;
 
     Ok(ForgetReport {
@@ -311,6 +314,7 @@ mod tests {
     use crate::daemon_state::update_daemon_state;
     use crate::lessons::{read_lessons_file, write_lessons_file, Lesson, LessonsFile};
     use crate::test_support::{unique_tmpdir, DirGuard};
+    use crate::writer_lock::{WriterKind, WriterLock};
 
     // 2026-07-03Z; event timestamps match so nothing is aged.
     const NOW_SEC: i64 = 1_751_500_800;
@@ -334,7 +338,10 @@ mod tests {
         }
     }
 
-    fn setup(label: &str, rows: &[AgentLearning]) -> (AgentRoot, DirGuard) {
+    /// A store holding `rows`, and the project writer lock on it. The lock is
+    /// taken here, before a test writes any state of its own, so taking it
+    /// recovers or resets nothing a test set up.
+    fn setup(label: &str, rows: &[AgentLearning]) -> (AgentRoot, WriterLock, DirGuard) {
         let dir = unique_tmpdir(label);
         let root = AgentRoot::new(&dir);
         fs::create_dir_all(root.episodic_dir()).unwrap();
@@ -344,7 +351,8 @@ mod tests {
             .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
             .collect();
         episodic::rewrite_atomic(&root.episodic_jsonl(), bytes.as_bytes()).unwrap();
-        (root, DirGuard(dir))
+        let lock = WriterLock::acquire(&root, WriterKind::Forget).unwrap();
+        (root, lock, DirGuard(dir))
     }
 
     fn seed_lessons(root: &AgentRoot, exemplar: char, content: &str, citations: &[char]) {
@@ -372,10 +380,10 @@ mod tests {
 
     #[test]
     fn missing_id_is_not_removed_and_opens_no_wal() {
-        let (root, _g) = setup("forget-missing", &[learning('A', "alpha", false)]);
+        let (root, lock, _g) = setup("forget-missing", &[learning('A', "alpha", false)]);
         let before = fs::read(root.episodic_jsonl()).unwrap();
 
-        let report = cascade(&root, &eid('Z'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('Z'), NOW_SEC).unwrap();
 
         assert_eq!(
             report,
@@ -391,12 +399,12 @@ mod tests {
 
     #[test]
     fn present_id_is_removed_and_neighbor_kept() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-present",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
 
-        let report = cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         assert!(report.removed);
         assert_eq!(report.lesson, LessonEffect::Untouched);
@@ -411,12 +419,12 @@ mod tests {
 
     #[test]
     fn pinned_id_is_removed() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-pinned",
             &[learning('A', "alpha", true), learning('B', "beta", false)],
         );
 
-        let report = cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         assert!(report.removed);
         assert_eq!(ids(&root), vec![eid('B').to_string()]);
@@ -424,7 +432,7 @@ mod tests {
 
     #[test]
     fn last_row_removed_writes_empty_sidecar() {
-        let (root, _g) = setup("forget-last", &[learning('A', "alpha", false)]);
+        let (root, lock, _g) = setup("forget-last", &[learning('A', "alpha", false)]);
         let sidecar = root.semantic_dir().join("recurrence_counts.json");
         fs::write(
             &sidecar,
@@ -432,7 +440,7 @@ mod tests {
         )
         .unwrap();
 
-        cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         assert!(ids(&root).is_empty());
         let parsed: RecurrenceSidecar =
@@ -443,7 +451,7 @@ mod tests {
 
     #[test]
     fn citation_that_is_not_the_exemplar_is_dropped() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-citation",
             &[
                 learning('A', "alpha", false),
@@ -452,7 +460,7 @@ mod tests {
         );
         seed_lessons(&root, 'B', "beta body", &['B', 'A']);
 
-        let report = cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         assert_eq!(report.lesson, LessonEffect::CitationDropped);
         let file = read_lessons_file(&root.lessons_md()).unwrap();
@@ -464,13 +472,13 @@ mod tests {
 
     #[test]
     fn exemplar_match_unlinks_lessons_md() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-exemplar",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
         seed_lessons(&root, 'A', "alpha", &['A']);
 
-        let report = cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         assert_eq!(report.lesson, LessonEffect::Unlinked);
         assert!(!root.lessons_md().exists());
@@ -478,7 +486,7 @@ mod tests {
 
     #[test]
     fn existing_ledger_line_for_removed_id_is_kept() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-ledger",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
@@ -491,7 +499,7 @@ mod tests {
         fs::create_dir_all(root.provenance_dir()).unwrap();
         fs::write(root.provenance_ledger(), &line).unwrap();
 
-        cascade(&root, &eid('A'), NOW_SEC).unwrap();
+        cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap();
 
         let ledger = fs::read_to_string(root.provenance_ledger()).unwrap();
         assert!(
@@ -502,7 +510,7 @@ mod tests {
 
     #[test]
     fn in_progress_status_refuses_before_any_rewrite() {
-        let (root, _g) = setup(
+        let (root, lock, _g) = setup(
             "forget-inprogress",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
@@ -512,7 +520,7 @@ mod tests {
         .unwrap();
         let before = fs::read(root.episodic_jsonl()).unwrap();
 
-        let err = cascade(&root, &eid('A'), NOW_SEC).unwrap_err();
+        let err = cascade(&root, lock.ledger(), &eid('A'), NOW_SEC).unwrap_err();
 
         assert!(matches!(err, ForgetError::InProgress), "{err}");
         assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), before);
@@ -521,7 +529,7 @@ mod tests {
 
     #[test]
     fn crash_after_intent_recovers_to_the_pre_forget_log() {
-        let (root, _g) = setup(
+        let (root, _lock, _g) = setup(
             "forget-crash",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
@@ -551,7 +559,7 @@ mod tests {
 
     #[test]
     fn preview_of_missing_id_writes_nothing() {
-        let (root, _g) = setup("forget-preview-missing", &[learning('A', "alpha", false)]);
+        let (root, _lock, _g) = setup("forget-preview-missing", &[learning('A', "alpha", false)]);
         let before = fs::read(root.episodic_jsonl()).unwrap();
 
         let report = preview(&root, &eid('Z')).unwrap();
@@ -569,7 +577,7 @@ mod tests {
 
     #[test]
     fn preview_of_cited_non_exemplar_reports_citation_dropped_and_writes_nothing() {
-        let (root, _g) = setup(
+        let (root, _lock, _g) = setup(
             "forget-preview-citation",
             &[learning('A', "alpha", false), learning('B', "beta", false)],
         );
@@ -593,7 +601,7 @@ mod tests {
 
     #[test]
     fn preview_of_present_id_while_in_progress_refuses() {
-        let (root, _g) = setup(
+        let (root, _lock, _g) = setup(
             "forget-preview-inprogress",
             &[learning('A', "alpha", false)],
         );
@@ -657,7 +665,7 @@ mod tests {
     #[test]
     fn cascade_keeps_unknown_fields_and_skipped_lines() {
         const SKIPPED: &str = "{\"not\":\"a learning\"}\n";
-        let (root, _g) = setup("forget-bytes", &[]);
+        let (root, lock, _g) = setup("forget-bytes", &[]);
         let a_json = serde_json::to_string(&learning('A', "alpha", false)).unwrap();
         let a_line = format!("{{\"x_note\":\"keep\",{}\n", &a_json[1..]);
         let b_line = format!(
@@ -666,7 +674,7 @@ mod tests {
         );
         fs::write(root.episodic_jsonl(), format!("{a_line}{SKIPPED}{b_line}")).unwrap();
 
-        let report = cascade(&root, &eid('B'), NOW_SEC).unwrap();
+        let report = cascade(&root, lock.ledger(), &eid('B'), NOW_SEC).unwrap();
 
         assert!(report.removed);
         assert_eq!(

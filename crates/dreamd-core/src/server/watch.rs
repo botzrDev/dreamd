@@ -685,7 +685,7 @@ where
 /// dropping the serve future does not cancel them; while any is still in
 /// flight the unwrap fails, and we fall back to [`TantivyIndexHandle::flush`],
 /// which rides the existing `IndexerMsg::Flush` path and awaits the same
-/// `commit_and_persist`. `IndexHandle::close` is deliberately not used on
+/// persist step. `IndexHandle::close` is deliberately not used on
 /// either arm: called from inside a runtime it `abort`s the indexer task and
 /// loses the in-flight batch.
 ///

@@ -71,9 +71,11 @@ before:
     `TestIndexHandle`.
   - `crates/dreamd-core/src/server/tantivy_handle.rs` — the Tantivy-backed
     `TantivyIndexHandle` (`open` / `flush` / `shutdown` / `close`) and the
-    startup replay. The indexer task is `server/indexer_actor.rs`; the
-    watermark and `assess_index_freshness` are `server/index_freshness.rs`
-    (BZR-170 split; `tantivy_handle` re-exports their public items).
+    open-time coverage pass. The indexer task is `server/indexer_actor.rs`; the
+    watermark and `assess_index_freshness` are `server/index_freshness.rs`; the
+    set difference between the log and the index (`cover`,
+    `assess_index_coverage`) is `server/index_coverage.rs` (BZR-170 split;
+    `tantivy_handle` re-exports the first two's public items).
   - `crates/dreamd-core/src/server/watch.rs` — `run_watch`: daemon boot,
     signal handling, and the bounded shutdown drain.
 
@@ -199,11 +201,12 @@ a pre-index state (`ManifestCheckOutcome::Absent`); the open writes one.
 A manifest version **older** than the binary (`NeedsMigration`) does not wait
 for a migration tool and does not merely warn — `TantivyIndexHandle::open`
 **rebuilds the derived index in place** (`server/tantivy_handle.rs`).
-It logs `"index schema outdated; rebuilding from JSONL"`, removes the index
-directory, the manifest, **and the progress watermark** — resetting the
-watermark is what forces a *full* replay rather than a tail replay — then
-re-indexes through `replay_two_pass`. The framing comment above that match
-gives the reason in one line: **the index is a rebuildable cache.**
+It logs `"index schema outdated; rebuilding from JSONL"` and removes the index
+directory, the manifest, and the progress watermark. The wiped index holds no
+ids, so the coverage pass that every open runs (the set difference between the
+log's ids and the indexed ones) re-indexes the whole log. The framing comment
+above that match gives the reason in one line: **the index is a rebuildable
+cache.**
 No `dreamd migrate` step is involved in this path. The same wipe-and-rebuild
 runs when Tantivy rejects the on-disk index with a schema error
 (`IndexError::SchemaIncompatible`, the only variant that gates a wipe).
@@ -601,8 +604,8 @@ tasks may still share — so production shutdown (SIGINT / SIGTERM) is
 without joining the task), then shut down or flush the primary index so the
 last uncommitted batch lands. The whole drain is bounded by `DRAIN_TIMEOUT`
 (30 s, AILAB-748). A drain that times out can skip the final index commit,
-which the next open's replay heals; it does not undo a JSONL line that was
-already acknowledged.
+which the next open's coverage pass heals; it does not undo a JSONL line that
+was already acknowledged.
 
 `detach_double_fork()` performs the canonical `fork → setsid → fork` daemon
 dance. The first fork escapes the parent's process group; `setsid` makes

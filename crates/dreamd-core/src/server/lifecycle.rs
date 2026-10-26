@@ -193,6 +193,7 @@ impl Supervisor {
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(channel_capacity);
         let coordinator = MemoryCoordinator::open(
             agent_root,
+            lock.ledger().clone(),
             rx,
             // Forwarded under the same gate the parameter carries, so the arity
             // matches `MemoryCoordinator::open` on both targets (AILAB-192).

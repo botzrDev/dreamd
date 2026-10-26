@@ -91,22 +91,31 @@ pub fn run(
     // AILAB-223 — hard integrity over the init-scaffolded subdirs.
     all_ok &= check_subdirs(agent_root, out)?;
 
-    // v0.1 index-vs-JSONL contract — on-disk watermark vs episodic tail.
+    // Index vs JSONL: the set difference between the log's ids and the
+    // committed index's (BZR-1236), read without a writer or the lock.
     #[cfg(unix)]
     {
-        match dreamd_core::server::assess_index_freshness(agent_root) {
-            Ok(freshness) if !freshness.stale => {
-                writeln!(out, "index_freshness: ok")?;
-            }
-            Ok(freshness) => {
+        match dreamd_core::server::assess_index_coverage(agent_root) {
+            Ok(coverage) if !coverage.present => {
                 writeln!(
                     out,
-                    "index_freshness: stale  [WARNING: {} unindexed event(s); \
-                     jsonl_tail={}; watermark={}; recall may miss recent events \
-                     until indexer commit or daemon restart replay]",
-                    freshness.unindexed_count,
-                    freshness.jsonl_tail_id.as_deref().unwrap_or("(none)"),
-                    freshness.last_indexed_id.as_deref().unwrap_or("(none)"),
+                    "index_freshness: no index yet  (the next writer open builds it)"
+                )?;
+            }
+            Ok(coverage)
+                if coverage.missing == 0
+                    && coverage.not_in_log == 0
+                    && coverage.duplicated == 0 =>
+            {
+                writeln!(out, "index_freshness: ok")?;
+            }
+            Ok(coverage) => {
+                writeln!(
+                    out,
+                    "index_freshness: stale  [WARNING: {} event(s) not indexed, \
+                     {} indexed event(s) not in the log, {} duplicated; the next \
+                     writer open re-covers the log, or run `dreamd doctor --repair`]",
+                    coverage.missing, coverage.not_in_log, coverage.duplicated,
                 )?;
                 all_ok = false;
             }
@@ -933,8 +942,8 @@ mod tests {
         }
     }
 
-    /// Seed the episodic log with `records` and set the index watermark to the
-    /// last record so `index_freshness` reads fresh on unix.
+    /// Seed the episodic log with `records`. There is no index, so
+    /// `index_freshness` reads `no index yet` on unix, which is not a warning.
     fn seed_events(root: &AgentRoot, records: &[AgentLearning]) {
         let mut body = String::new();
         for r in records {
@@ -942,13 +951,79 @@ mod tests {
             body.push('\n');
         }
         fs::write(root.episodic_jsonl(), body).unwrap();
-        if let Some(last) = records.last() {
-            fs::write(
-                root.dreamd_dir().join("index_progress.json"),
-                format!("{{\"last_indexed_id\":\"{}\"}}", last.id.as_str()),
-            )
-            .unwrap();
+    }
+
+    /// BZR-1236: the line reports the set difference. An event appended below
+    /// the watermark leaves the watermark check fresh; doctor still finds it.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_an_index_gap_the_watermark_hides() {
+        use dreamd_core::server::{assess_index_freshness, TantivyIndexHandle};
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("index-gap");
+        seed_events(
+            &root,
+            &[
+                learning('1', "rust::eh", "1.0.0"),
+                learning('2', "rust::eh", "1.0.0"),
+            ],
+        );
+        {
+            let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    TantivyIndexHandle::open(&root, &lock, std::time::Duration::from_secs(60))
+                        .unwrap()
+                        .shutdown()
+                        .await
+                        .unwrap();
+                });
         }
+        let mut line = serde_json::to_string(&learning('0', "rust::eh", "1.0.0")).unwrap();
+        line.push('\n');
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.episodic_jsonl())
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+        assert!(
+            !assess_index_freshness(&root).unwrap().stale,
+            "precondition: the watermark check calls this store fresh"
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert!(
+            output.contains(
+                "index_freshness: stale  [WARNING: 1 event(s) not indexed, 0 indexed \
+                 event(s) not in the log, 0 duplicated; the next writer open re-covers \
+                 the log, or run `dreamd doctor --repair`]\n"
+            ),
+            "got: {output:?}"
+        );
+        assert!(!ok, "an index gap must fail doctor; got: {output:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_no_index_yet_without_a_warning() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("no-index");
+        seed_events(&root, &[learning('0', "rust::eh", "1.0.0")]);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert!(
+            output.contains("index_freshness: no index yet  (the next writer open builds it)\n"),
+            "got: {output:?}"
+        );
+        assert!(ok, "no index yet is not a warning; got: {output:?}");
     }
 
     #[test]

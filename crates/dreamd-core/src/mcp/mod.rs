@@ -954,6 +954,23 @@ mod tests {
             .expect("project writer lock")
     }
 
+    /// Write `learning` to the episodic log, as the coordinator does before it
+    /// hands the indexer an `Append`. A seeded index then matches its log, and
+    /// the next open's coverage pass keeps the docs (BZR-1236).
+    #[cfg(unix)]
+    fn append_to_log(root: &AgentRoot, learning: &AgentLearning) {
+        use std::io::Write as _;
+        let mut line = serde_json::to_string(learning).expect("serialize learning");
+        line.push('\n');
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.episodic_jsonl())
+            .expect("open episodic log")
+            .write_all(line.as_bytes())
+            .expect("append to episodic log");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn search_nodes_empty_store_returns_empty() {
@@ -1055,6 +1072,7 @@ mod tests {
                     source_harness: "test-harness".to_string(),
                     content: content.to_string(),
                 };
+                append_to_log(&root, &learning);
                 tx.send(IndexerMsg::Append {
                     event_id: id,
                     learning,
@@ -1493,6 +1511,7 @@ mod tests {
                 source_harness: "test-harness".to_string(),
                 content: "rust async tokio channel".to_string(),
             };
+            append_to_log(&root, &learning);
             tx.send(IndexerMsg::Append {
                 event_id: id,
                 learning,

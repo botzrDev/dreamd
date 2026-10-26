@@ -158,7 +158,7 @@ pub fn run(
     let lock =
         WriterLock::acquire(&root, WriterKind::Forget).map_err(ForgetCliError::WriterLock)?;
 
-    let report = forget::cascade(&root, &event_id, now_sec)?;
+    let report = forget::cascade(&root, lock.ledger(), &event_id, now_sec)?;
     if !report.removed {
         writeln!(out, "removed=false lesson={}", report.lesson.as_str())?;
         return Ok(());

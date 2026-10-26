@@ -11,6 +11,8 @@
 //! `in_progress` status when there is no WAL, then WAL recovery. Only after
 //! that may the caller open the index and start the coordinator, and both of
 //! those take a `&WriterLock` so they cannot be reached without one.
+//! Acquisition also cuts a torn final line from the provenance ledger, and the
+//! token carries the project's one ledger appender ([`WriterLock::ledger`]).
 //!
 //! The lock is an advisory `flock` (Unix) / `LockFileEx` (Windows) through
 //! [`File::try_lock`]. It belongs to the open file description, so a second
@@ -32,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::daemon_state::update_daemon_state;
 use crate::layout::AgentRoot;
+use crate::provenance::Ledger;
 use crate::server::INDEX_DIR_NAME;
 use crate::wal::{self, WalError};
 
@@ -133,6 +136,7 @@ struct Inner {
     /// Canonicalized `.agent/` (raw if canonicalize failed).
     agent_dir: PathBuf,
     kind: WriterKind,
+    ledger: Ledger,
 }
 
 impl Drop for Inner {
@@ -189,12 +193,14 @@ impl WriterLock {
             );
         }
         wal::recover_on_startup(root)?;
+        let ledger = Ledger::open(root.provenance_ledger());
 
         Ok(Self {
             inner: Arc::new(Inner {
                 file,
                 agent_dir: canonical_or_raw(&agent_dir),
                 kind,
+                ledger,
             }),
         })
     }
@@ -207,6 +213,11 @@ impl WriterLock {
 
     pub fn kind(&self) -> WriterKind {
         self.inner.kind
+    }
+
+    /// The project's provenance appender. Every clone of this token shares it.
+    pub fn ledger(&self) -> &Ledger {
+        &self.inner.ledger
     }
 }
 
@@ -446,6 +457,43 @@ mod tests {
         assert!(!root.wal_path().exists(), "the WAL must be gone");
         assert!(!tmp.exists(), "the temp file must be gone");
         assert_eq!(status(&root), "failed");
+    }
+
+    /// Taking the lock cuts a final ledger line with no `\n`, keeps every
+    /// complete line, and leaves a missing ledger missing.
+    #[test]
+    fn acquire_cuts_a_torn_ledger_tail() {
+        const LINE: &[u8] = b"{\"schema_version\":\"provenance/1.0\",\"kind\":\"index_doc\",\"from\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"to\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}\n";
+        const FRAGMENT: &[u8] = b"{\"schema_version\":\"provenance/1.0\",\"kind\":\"ind";
+
+        let (root, _g) = store("wl-ledger-absent");
+        drop(WriterLock::acquire(&root, WriterKind::Watch).unwrap());
+        assert!(
+            !root.provenance_dir().exists(),
+            "acquire must not create the ledger"
+        );
+
+        for (label, before, after) in [
+            (
+                "wl-ledger-line-and-fragment",
+                [LINE, FRAGMENT].concat(),
+                LINE.to_vec(),
+            ),
+            ("wl-ledger-fragment-only", FRAGMENT.to_vec(), Vec::new()),
+        ] {
+            let (root, _g) = store(label);
+            fs::create_dir_all(root.provenance_dir()).unwrap();
+            fs::write(root.provenance_ledger(), &before).unwrap();
+
+            let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+
+            assert_eq!(
+                fs::read(root.provenance_ledger()).unwrap(),
+                after,
+                "{label}"
+            );
+            assert_eq!(lock.ledger().path(), root.provenance_ledger());
+        }
     }
 
     /// A pre-lock dreamd holds only Tantivy's writer lock. Before this lock

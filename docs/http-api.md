@@ -306,7 +306,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 `explain=1` adds `citations` for the hits that remain after `exclude`. Repeat `--data-urlencode "exclude=…"` for another id. There is no Windows curl in this section; the Windows recall smoke test is under [Transport](#windows).
 
-**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until startup replay. See [`GET /api/v1/health`](#get-apiv1health).
+**Read-after-write:** Newly appended learnings become searchable within one index commit cycle (5 seconds). A saturated coordinator → indexer channel no longer costs you the record — the coordinator awaits that send, so the update queues instead of being dropped and becomes searchable once the indexer drains. It does cost latency: while the coordinator is parked, in-flight learns wait in its own 256-slot channel with no per-request timeout, and only sustained overload past that inbox trips the 100 ms `COORDINATOR_SEND_TIMEOUT` into a `503` (HTTP only — the in-process `dreamd mcp` path has no such timeout and waits). If the daemon crashes between JSONL `sync_data` and the next Tantivy commit, recall may lag until the next coverage pass (the next open, or a resync). See [`GET /api/v1/health`](#get-apiv1health).
 
 ---
 
@@ -337,10 +337,10 @@ Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught 
 |---|---|
 | `stale` | `true` when JSONL has events strictly after `last_indexed_id` |
 | `jsonl_tail_id` | `id` of the last well-formed JSONL record, or `null` on an empty log |
-| `last_indexed_id` | Watermark from `index_progress.json`, or `null` if nothing has been indexed |
+| `last_indexed_id` | Largest event id the index has committed, from `index_progress.json`, or `null` if nothing has been indexed |
 | `unindexed_count` | JSONL events after the watermark |
 
-`stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. Staleness that outlives the backlog indicates a crash gap between JSONL `sync_data` and the next commit; that is what restart replay heals.
+`stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. Staleness that outlives the backlog indicates a crash gap between JSONL `sync_data` and the next commit; the next open's coverage pass, or a resync, heals it.
 
 #### curl example
 

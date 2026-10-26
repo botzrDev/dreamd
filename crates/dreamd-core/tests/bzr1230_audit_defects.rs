@@ -169,7 +169,6 @@ async fn appends_survive_an_inode_swap_of_the_log() {
 /// Losing `index_progress.json` makes the next open replay the whole log. The
 /// replay must not add a second document for an event already indexed.
 #[tokio::test]
-#[ignore = "BZR-1236: replay re-adds without delete_term"]
 async fn replay_after_lost_watermark_indexes_each_event_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = AgentRoot::new(dir.path());
@@ -193,6 +192,49 @@ async fn replay_after_lost_watermark_indexes_each_event_once() {
     assert!(
         violations.is_empty(),
         "replay without a watermark must leave one document per event; got {violations:?}"
+    );
+    h.shutdown().await.unwrap();
+}
+
+/// A merge can bring in an event whose id sorts below every id already
+/// indexed. The next open must index it.
+#[tokio::test]
+async fn open_indexes_an_event_merged_in_below_the_watermark() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = AgentRoot::new(dir.path());
+    fs::create_dir_all(root.episodic_dir()).unwrap();
+    let fa0 = ev(
+        "evt_01ARZ3NDEKTSV4RRFFQ69G5FA0",
+        "rust::eh",
+        "merged in from a branch",
+        NOW_SEC,
+    );
+    let fa1 = ev(
+        "evt_01ARZ3NDEKTSV4RRFFQ69G5FA1",
+        "rust::eh",
+        "indexed first",
+        NOW_SEC,
+    );
+    let fa2 = ev(
+        "evt_01ARZ3NDEKTSV4RRFFQ69G5FA2",
+        "rust::eh",
+        "indexed second",
+        NOW_SEC,
+    );
+    fs::write(root.episodic_jsonl(), [line(&fa1), line(&fa2)].concat()).unwrap();
+    open(&root).shutdown().await.unwrap();
+
+    fs::write(
+        root.episodic_jsonl(),
+        [line(&fa0), line(&fa1), line(&fa2)].concat(),
+    )
+    .unwrap();
+    let h = open(&root);
+
+    let violations = check_store(&root, Some(h.reader())).unwrap();
+    assert!(
+        violations.is_empty(),
+        "an event below the watermark must be indexed on the next open; got {violations:?}"
     );
     h.shutdown().await.unwrap();
 }

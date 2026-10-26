@@ -2,22 +2,25 @@
 //!
 //! Wires the episodic JSONL at `<agent_root>/.agent/episodic/AGENT_LEARNINGS.jsonl`
 //! into a per-project Tantivy index under `<agent_root>/.agent/.dreamd/index/`.
-//! On startup, a two-pass replay walks the JSONL: pass 1 builds the final
-//! `skill_action → recurrence` cluster counts; pass 2 indexes every event
-//! whose `EventId` is strictly greater (string-compared on the lexicographically
-//! sortable ULID) than the watermark in `index_progress.json`. From steady
-//! state forward, the indexer task receives `IndexerMsg::Append` from the
-//! `MemoryCoordinator` (WEG-7) after each successful `sync_data`, batches
-//! `add_document` calls, and commits on a wall-clock cadence
-//! ([`DEFAULT_COMMIT_CADENCE`], 5 seconds). The watermark is updated on disk
-//! after each successful Tantivy commit, never before.
 //!
-//! **Idempotent-replay prose (WEG-42 Lock 3, verbatim).**
+//! **Coverage pass (BZR-1236).** Every open compares the log with the index as
+//! sets of event ids ([`crate::server::index_coverage`]): it adds each log id
+//! with no alive document, re-adds each id with more than one, and deletes
+//! indexed ids the log does not hold (unless that would empty most of the
+//! index). No watermark decides what to index, so a lost `index_progress.json`
+//! re-adds nothing and an event merged in below the newest id is still indexed.
+//! A running indexer runs the same pass on `IndexerMsg::Resync`.
 //!
-//! > "On crash recovery, the batch since the last committed `last_indexed_id`
-//! > will be re-indexed. This is intentional — Tantivy commits are atomic
-//! > and `add_document` is idempotent for the same content. The replay
-//! > re-does at most one 5-second window."
+//! **Upsert.** Every episodic add deletes the `event_id` term first, so an id
+//! never has two alive documents, whichever path added it.
+//!
+//! **Steady state.** The indexer task receives `IndexerMsg::Append` from the
+//! `MemoryCoordinator` (WEG-7) after each successful `sync_data`, upserts it,
+//! and commits on a wall-clock cadence ([`DEFAULT_COMMIT_CADENCE`], 5 seconds).
+//!
+//! **One persist step.** Every commit, here and in the indexer task, is
+//! `IndexerPersist::commit`: Tantivy commit, then `index_doc` ledger edges for
+//! the ids it covered, then the watermark (the largest committed id) on disk.
 //!
 //! **Lock-file behavior.** The on-disk `.tantivy-writer.lock` /
 //! `.tantivy-meta.lock` files persist after SIGKILL but are not the gate —
@@ -34,38 +37,37 @@
 //! each actor with exactly one mutable resource.
 //!
 //! **Module split (BZR-170).** This file keeps the open/read handle:
-//! [`TantivyIndexHandle::open`] (manifest check, replay, reader), `flush`,
+//! [`TantivyIndexHandle::open`] (manifest check, coverage pass, reader), `flush`,
 //! `shutdown`, and `close`. The writer-owning task and its message enum live in
 //! [`crate::server::indexer_actor`]; the on-disk watermark and
 //! [`assess_index_freshness`] live in [`crate::server::index_freshness`]. Both
 //! are re-exported here so existing `tantivy_handle::…` imports still resolve.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use dreamd_protocol::{AgentLearning, EventId};
+use dreamd_protocol::EventId;
 use tantivy::directory::MmapDirectory;
-use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 
+#[cfg(unix)]
+use crate::coordinator::LogIdentity;
 use crate::index::{
     build_schema, check_manifest_version, IndexManifest, ManifestCheckOutcome,
     ManifestVersionError, INDEX_MANIFEST_FILENAME, SCHEMA_VERSION,
 };
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
-use crate::provenance::{append_edges, Kind};
-use crate::server::index_freshness::{
-    read_jsonl_events, read_progress, write_progress, IndexProgress,
-};
+use crate::server::index_coverage::cover;
+use crate::server::index_freshness::{read_jsonl_events, read_progress};
 use crate::server::index_map::{
     io_to_index, tantivy_io_to_index, tantivy_to_index, IndexError, IndexHandle,
 };
 use crate::server::indexer_actor::{
-    add_document, index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist,
-    DEFAULT_INDEXER_CHANNEL_CAPACITY,
+    count_clusters, index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist,
+    IndexerState, DEFAULT_INDEXER_CHANNEL_CAPACITY,
 };
 use crate::writer_lock::WriterLock;
 
@@ -106,8 +108,11 @@ impl TantivyIndexHandle {
     /// Open (or create) the per-project Tantivy index under
     /// `<agent_root>/.agent/.dreamd/index/`. On first open for a new project,
     /// writes `<agent_root>/.agent/.dreamd/index_manifest.json` with the
-    /// binary's current `SCHEMA_VERSION`. Spawns the indexer task on the
-    /// current tokio runtime and runs the startup replay before returning.
+    /// binary's current `SCHEMA_VERSION`. Runs the coverage pass and the
+    /// semantic pass, commits them through the persist step, then spawns the
+    /// indexer task on the current tokio runtime.
+    ///
+    /// The ledger edges go through `lock.ledger()`.
     ///
     /// `lock` must cover `agent_root`: nothing here, including the schema
     /// wipe, runs without the project writer lock. The indexer task keeps a
@@ -145,7 +150,8 @@ impl TantivyIndexHandle {
                 );
                 let _ = std::fs::remove_dir_all(&index_dir);
                 let _ = std::fs::remove_file(&manifest_path);
-                // Reset watermark so replay_two_pass re-indexes the full JSONL, not just the tail.
+                // The wiped index holds no ids, so the coverage pass below
+                // re-indexes the whole log; the watermark goes with it.
                 let _ = std::fs::remove_file(&progress_path);
                 std::fs::create_dir_all(&index_dir).map_err(io_to_index)?;
             }
@@ -165,94 +171,63 @@ impl TantivyIndexHandle {
         let mut writer: IndexWriter<TantivyDocument> =
             index.writer(WRITER_HEAP_BYTES).map_err(tantivy_to_index)?;
 
-        let progress = read_progress(&progress_path)?;
-        let last_indexed = progress.last_indexed_id.clone();
-        let (mut clusters, to_index) = replay_two_pass(&jsonl_path, last_indexed.as_deref())?;
+        // A Manual reader over the writer's own index: the coverage pass sees
+        // exactly the last commit.
+        let coverage: IndexReader = writer
+            .index()
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(tantivy_to_index)?;
 
-        let mut latest_committed = last_indexed.clone();
-        for event in &to_index {
-            let count = *clusters
-                .get(&event.skill_action)
-                .expect("pass-1 populates every skill_action present in pass-2");
-            add_document(&mut writer, &fields, event, count)?;
-            latest_committed = Some(event.id.as_str().to_owned());
-        }
-        // DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same rebuild,
-        // after the episodic replay and before the single commit below. One
-        // insertion point covers three recovery paths — cold start, the
-        // schema-migration rebuild above, and `dreamd doctor --repair` (which
-        // reopens through this same function, so `doctor.rs` needs no change).
-        let semantic = index_semantic_lessons(&mut writer, &fields, agent_root)?;
+        // 1. The log's identity, before the read: a change after this point is
+        //    either in the read or seen by the indexer's first tick.
+        #[cfg(unix)]
+        let log = LogIdentity::at(&jsonl_path).map_err(io_to_index)?;
+        // 2. Pass 1: cluster counts over the whole log.
+        let events = read_jsonl_events(&jsonl_path)?;
+        let clusters = count_clusters(&events);
+        // 3. The set difference between the log and the index.
+        cover(&mut writer, &fields, &coverage, &events, &clusters)?;
+        // 4. DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same
+        //    commit. One insertion point covers three recovery paths — cold
+        //    start, the schema-migration rebuild above, and `dreamd doctor
+        //    --repair` (which reopens through this same function).
+        index_semantic_lessons(&mut writer, &fields, agent_root)?;
+        // 5–6. Every log id is pending, so the commit backfills any `index_doc`
+        //    edge a crash skipped, and the watermark becomes the log's largest
+        //    id. Semantic lesson docs are not edges.
+        let mut persist = IndexerPersist::new(
+            progress_path.clone(),
+            lock.ledger().clone(),
+            &read_progress(&progress_path)?,
+        );
+        persist.cover_all(&events);
+        persist.commit(&mut writer)?;
+        // 7. The reader was created before this commit and uses the default
+        //    `ReloadPolicy::OnCommitWithDelay`, so the first query after open
+        //    would otherwise see a stale view until the background reload
+        //    fires. Force a synchronous reload so recall reflects the commit
+        //    the moment `open()` returns — the cross-harness read-after-open
+        //    case (a fresh process indexing a prior process's append).
+        //    Steady-state cadence commits from `run_indexer` are still picked
+        //    up by OnCommitWithDelay. (WEG-264 Defect 1.)
+        reader.reload().map_err(tantivy_to_index)?;
 
-        // The semantic pass has its own reason to commit: after a crash between
-        // the LESSONS.md write and the Tantivy commit, the episodic watermark is
-        // already current, so `to_index` is empty and the old
-        // `!to_index.is_empty()` gate would have skipped the commit and dropped
-        // the replayed lessons on the floor.
-        let needs_commit = !to_index.is_empty() || semantic.touched;
-        if needs_commit {
-            writer.commit().map_err(tantivy_to_index)?;
-            // Watermark tracks the episodic log only. The semantic pass is a
-            // wholesale delete-then-add and is idempotent by construction, so it
-            // deliberately has no watermark of its own (AILAB-205 §3 step 3).
-            if !to_index.is_empty() {
-                // BZR-155: replay does not go through `commit_and_persist`.
-                // Edges land after this commit and before the watermark, or a
-                // restart covers ids that never got an `index_doc` line.
-                // Semantic lesson docs are not in `to_index`.
-                let edges: Vec<(Kind, String, String)> = to_index
-                    .iter()
-                    .map(|event| {
-                        let id = event.id.as_str().to_owned();
-                        (Kind::IndexDoc, id.clone(), id)
-                    })
-                    .collect();
-                append_edges(&agent_root.provenance_ledger(), &edges)
-                    .map_err(|e| IndexError::Io(e.to_string()))?;
-                write_progress(
-                    &progress_path,
-                    &IndexProgress {
-                        last_indexed_id: latest_committed.clone(),
-                    },
-                )?;
-            }
-            // The reader was created before this replay commit and uses the
-            // default `ReloadPolicy::OnCommitWithDelay`, so the first query
-            // after open would otherwise see a stale (pre-replay) view until
-            // the background reload fires. Force a synchronous reload so recall
-            // reflects the replayed tail the moment `open()` returns — this is
-            // the cross-harness read-after-open case (a fresh process indexing
-            // a prior process's append). Steady-state cadence commits from
-            // `run_indexer` are still picked up by OnCommitWithDelay. (WEG-264
-            // Defect 1.)
-            reader.reload().map_err(tantivy_to_index)?;
-        }
-
-        // Build steady-state cluster counts: pass-1 already counted the
-        // entire JSONL, which is the correct live state going forward.
-        // (Replay only re-indexes the tail past last_indexed_id, but the
-        // cluster counter must reflect all prior events for new appends.)
-        // No additional work needed — `clusters` already holds the full count.
-        let _ = &mut clusters;
-
+        // 8. The indexer task. `clusters` already counts the whole log, which
+        //    is the live state new appends count from.
         let (tx, rx) = mpsc::channel::<IndexerMsg>(DEFAULT_INDEXER_CHANNEL_CAPACITY);
-        let persist = IndexerPersist {
-            progress_path,
-            ledger_path: agent_root.provenance_ledger(),
+        let state = IndexerState {
+            persist,
+            coverage,
+            agent_root: agent_root.clone(),
+            #[cfg(unix)]
+            log,
         };
         let lock = lock.clone();
         let join = tokio::spawn(async move {
             let _lock = lock;
-            run_indexer(
-                writer,
-                fields,
-                rx,
-                commit_cadence,
-                clusters,
-                persist,
-                latest_committed,
-            )
-            .await
+            run_indexer(writer, fields, rx, commit_cadence, clusters, state).await
         });
 
         Ok(Self {
@@ -344,8 +319,8 @@ impl TantivyIndexHandle {
     /// the primary handle is an `Arc` shared with `AppState`. When
     /// `Arc::try_unwrap` cannot recover sole ownership, this is the drain — it
     /// rides the existing [`IndexerMsg::Flush`] path, so there is exactly one
-    /// commit implementation (`commit_and_persist`) and no second, shutdown-only
-    /// code path that could drift from it.
+    /// commit implementation (the indexer's persist step) and no second,
+    /// shutdown-only code path that could drift from it.
     ///
     /// Unlike `shutdown` it leaves the indexer task running. That is the point:
     /// a shared handle has other owners, and the process is about to exit
@@ -355,6 +330,19 @@ impl TantivyIndexHandle {
         let (tx, rx) = oneshot::channel();
         self.sender()
             .send(IndexerMsg::Flush { ack: tx })
+            .await
+            .map_err(|_| IndexError::ChannelClosed)?;
+        rx.await.map_err(|_| IndexError::TaskDropped)?
+    }
+
+    /// Run the coverage pass on the live indexer and wait for its report.
+    #[cfg(test)]
+    pub(crate) async fn resync(
+        &self,
+    ) -> Result<crate::server::index_coverage::CoverageReport, IndexError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender()
+            .send(IndexerMsg::Resync { ack: Some(tx) })
             .await
             .map_err(|_| IndexError::ChannelClosed)?;
         rx.await.map_err(|_| IndexError::TaskDropped)?
@@ -414,36 +402,6 @@ impl IndexHandle for TantivyIndexHandle {
     }
 }
 
-// Replay (two-pass)
-
-fn replay_two_pass(
-    jsonl_path: &Path,
-    last_indexed_id: Option<&str>,
-) -> Result<(HashMap<String, u32>, Vec<AgentLearning>), IndexError> {
-    // One owned read via the shared episodic scan (WEG-378): pass 1 counts
-    // clusters over `&events`, pass 2 filters the same Vec by watermark.
-    let events = read_jsonl_events(jsonl_path)?;
-
-    // Pass 1: build final cluster counts by walking every well-formed line.
-    let mut clusters: HashMap<String, u32> = HashMap::new();
-    for ev in &events {
-        *clusters.entry(ev.skill_action.clone()).or_insert(0) += 1;
-    }
-
-    // Pass 2: filter to events whose id is strictly greater than the watermark.
-    // EventId does not implement `Ord`; compare via `as_str()` (ULIDs are
-    // lexicographically sortable in their canonical Crockford base32 form).
-    let to_index: Vec<AgentLearning> = events
-        .into_iter()
-        .filter(|ev| match last_indexed_id {
-            Some(last) => ev.id.as_str() > last,
-            None => true,
-        })
-        .collect();
-
-    Ok((clusters, to_index))
-}
-
 // Manifest persistence
 
 fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
@@ -460,8 +418,8 @@ fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
 
 /// Open or create the on-disk Tantivy index. If the directory holds a stale
 /// schema with no manifest (or a mismatch open_or_create cannot reconcile),
-/// wipe the index cache once and retry — same JSONL replay path as the
-/// manifest-driven self-heal rebuild, not `dreamd migrate`.
+/// wipe the index cache once and retry — the same coverage pass then rebuilds
+/// it from the JSONL, as in the manifest-driven self-heal, not `dreamd migrate`.
 fn open_or_create_index(
     index_dir: &Path,
     schema: tantivy::schema::Schema,
@@ -526,13 +484,16 @@ mod tests {
     #[cfg(unix)]
     use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
     use crate::index::{Layer, SchemaFields};
+    use crate::server::index_freshness::{write_progress, IndexProgress};
     use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
     use crate::server::indexer_actor::{
-        cluster_member_count, semantic_event_id, write_semantic_pass_record, SemanticPassOutcome,
+        add_document, cluster_member_count, semantic_event_id, write_semantic_pass_record,
+        SemanticPassOutcome,
     };
     use crate::test_support::{unique_tmpdir, DirGuard};
     use crate::writer_lock::WriterKind;
     use chrono::{DateTime, Utc};
+    use dreamd_protocol::AgentLearning;
     use std::io::Write;
     use std::path::PathBuf;
     use tantivy::query::AllQuery;
@@ -657,10 +618,10 @@ mod tests {
         assert!(index_dir.join(".tantivy-meta.lock").exists());
     }
 
-    // AC-2 — replay two-pass + AC-2 watermark gating
+    // AC-2 — open-time cluster counts; BZR-1236 coverage ignores the watermark
 
     #[tokio::test]
-    async fn replay_two_pass_assigns_final_cluster_count() {
+    async fn open_assigns_final_cluster_count() {
         let dir = unique_tmpdir("replay-cluster");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -688,9 +649,11 @@ mod tests {
         assert_eq!(ones, 1, "lone python.pytest doc carries count 1");
     }
 
+    /// V9 at unit level: an event at or below the watermark is still indexed.
+    /// The old assertion here, that it was not, was the defect.
     #[tokio::test]
-    async fn replay_two_pass_skips_events_at_or_below_last_indexed_id() {
-        let dir = unique_tmpdir("replay-watermark");
+    async fn open_indexes_events_at_or_below_the_watermark() {
+        let dir = unique_tmpdir("open-watermark");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
 
@@ -704,7 +667,7 @@ mod tests {
         ];
         prime_jsonl(&dir, &learnings);
 
-        // Pre-seed the watermark at B so only C should be (re-)indexed.
+        // Pre-seed the watermark at B. The coverage pass does not read it.
         let dreamd_dir = agent_root.dreamd_dir();
         std::fs::create_dir_all(&dreamd_dir).unwrap();
         let progress = IndexProgress {
@@ -718,9 +681,9 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
 
         let values = read_recurrence_values(&agent_root);
-        // Only the C event is indexed — its recurrence is 3 (cluster count
-        // from pass-1 over the entire JSONL).
-        assert_eq!(values, vec![3]);
+        // All three events are indexed, each with the cluster count from pass
+        // 1 over the entire JSONL.
+        assert_eq!(values, vec![3, 3, 3]);
     }
 
     // AC-3 — steady-state recurrence + bounded-staleness
@@ -821,7 +784,8 @@ mod tests {
         let lock = writer_lock(&agent_root);
         let handle =
             TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
-        // Empty JSONL, no replay events committed → no progress file yet.
+        // Empty JSONL: open commits, but the watermark is still none, so the
+        // persist step writes no progress file yet.
         assert!(
             !progress_path.exists(),
             "no progress file before any commit"
@@ -1064,9 +1028,8 @@ mod tests {
 
     /// A full indexer channel must BLOCK the coordinator, not shed the message.
     ///
-    /// Shedding is unrecoverable: `replay_two_pass` keeps `id > last_indexed_id`,
-    /// and that watermark is the newest *committed* id, not a contiguous prefix
-    /// — so a dropped event followed by any indexed event is skipped forever.
+    /// A shed event would stay out of recall until the next coverage pass (the
+    /// next open, or a resync), while later events answer queries.
     ///
     /// The setup makes the backpressure deterministic without a sleep. The
     /// consumer is gated shut, so the capacity-1 indexer channel stays full. The
@@ -1670,12 +1633,12 @@ mod tests {
             .expect("indexer task must be gone after close");
     }
 
-    // v0.1 index-vs-JSONL contract — replay healing. The `assess_index_freshness`
+    // v0.1 index-vs-JSONL contract — open-time healing. The `assess_index_freshness`
     // cases moved to `index_freshness::tests` with the function (BZR-170).
 
     #[tokio::test]
-    async fn startup_replay_heals_jsonl_index_divergence() {
-        let dir = unique_tmpdir("replay-heal");
+    async fn open_heals_jsonl_index_divergence() {
+        let dir = unique_tmpdir("open-heal");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
         let id_a = make_event_id('A');
@@ -1702,27 +1665,30 @@ mod tests {
             .unwrap();
 
         let before = assess_index_freshness(&agent_root).expect("assess before");
-        assert!(before.stale, "pre-replay must be stale: {before:?}");
+        assert!(
+            before.stale,
+            "before the reopen it must be stale: {before:?}"
+        );
         assert_eq!(before.unindexed_count, 1);
 
-        let handle2 = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
-            .expect("open replay");
-        handle2.shutdown().await.expect("shutdown replay");
+        let handle2 =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("reopen");
+        handle2.shutdown().await.expect("shutdown reopen");
 
         let after = assess_index_freshness(&agent_root).expect("assess after");
-        assert!(!after.stale, "post-replay must be fresh: {after:?}");
+        assert!(!after.stale, "after the reopen it must be fresh: {after:?}");
         assert_eq!(
             count_docs(&agent_root),
             2,
-            "A from first open + B from replay"
+            "A from the first open + B from the coverage pass"
         );
     }
 
-    /// Replay writes `index_doc` before the watermark. A second open of the
+    /// Open writes `index_doc` before the watermark. A second open of the
     /// same ids does not append a duplicate line.
     #[tokio::test]
-    async fn startup_replay_records_index_doc_and_skips_a_duplicate() {
-        let dir = unique_tmpdir("replay-ledger");
+    async fn open_records_index_doc_and_skips_a_duplicate() {
+        let dir = unique_tmpdir("open-ledger");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
         let id_a = make_event_id('A');
@@ -1743,11 +1709,12 @@ mod tests {
             "semantic docs are not index_doc edges"
         );
 
-        // Watermark lost after the edge was written: replay re-indexes A.
+        // Watermark lost after the edge was written: the next open covers A
+        // again, and the ledger already holds its edge.
         std::fs::remove_file(agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME)).unwrap();
         let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
-            .expect("replay A");
-        handle.shutdown().await.expect("shutdown replay A");
+            .expect("reopen A");
+        handle.shutdown().await.expect("shutdown reopen A");
         let lines = std::fs::read_to_string(&ledger).unwrap();
         assert_eq!(
             lines.matches("\"kind\":\"index_doc\"").count(),
@@ -1765,15 +1732,15 @@ mod tests {
             .write_all(extra.as_bytes())
             .unwrap();
         let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60))
-            .expect("replay B");
-        handle.shutdown().await.expect("shutdown replay B");
+            .expect("reopen B");
+        handle.shutdown().await.expect("shutdown reopen B");
         let lines = std::fs::read_to_string(&ledger).unwrap();
         assert_eq!(lines.matches("\"kind\":\"index_doc\"").count(), 2);
         assert!(lines.contains(id_b.as_str()));
     }
 
     /// An append that met a full indexer channel is still searchable after the
-    /// ordinary flush — no restart, no startup replay.
+    /// ordinary flush — no restart, no coverage pass.
     ///
     /// A capacity-1 channel sits in front of the real [`TantivyIndexHandle`]
     /// sender, pre-filled so there is no room for the coordinator's `send`. The
@@ -1789,8 +1756,8 @@ mod tests {
     /// Because the coordinator awaits instead of shedding, the marker token
     /// reaches Tantivy through the normal path and recall finds it. Under a
     /// drop-on-`Full` regression the token never reaches the indexer and the
-    /// recall assertion fails. Startup replay is deliberately not exercised —
-    /// it only ever heals the tail after `last_indexed_id`.
+    /// recall assertion fails. No reopen and no resync runs here, so nothing
+    /// else could have indexed it.
     ///
     /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
     /// `#[cfg(unix)]` (AILAB-192).
@@ -1895,7 +1862,7 @@ mod tests {
         assert!(
             !hits.is_empty(),
             "an append queued behind a full indexer channel must be recallable \
-             after the ordinary flush, with no restart replay"
+             after the ordinary flush, with no reopen"
         );
 
         let fresh = assess_index_freshness(&agent_root).expect("assess after flush");
@@ -1904,6 +1871,302 @@ mod tests {
             "backpressured append must leave the index fresh: {fresh:?}"
         );
 
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    // BZR-1236 — the persist step, the failpoint, and resync
+
+    /// The id `index_progress.json` holds, or `None` when the file is absent.
+    fn progress_id(agent_root: &AgentRoot) -> Option<String> {
+        let path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice::<IndexProgress>(&bytes)
+            .expect("parse progress")
+            .last_indexed_id
+    }
+
+    /// The `from` of every `index_doc` line in the ledger, sorted.
+    fn index_doc_edges(agent_root: &AgentRoot) -> Vec<String> {
+        let body = std::fs::read_to_string(agent_root.provenance_ledger()).unwrap_or_default();
+        let mut ids: Vec<String> = body
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("ledger line"))
+            .filter(|v| v["kind"] == "index_doc")
+            .map(|v| v["from"].as_str().expect("from").to_owned())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// A committed view of the on-disk index, opened fresh.
+    fn fresh_reader(agent_root: &AgentRoot) -> IndexReader {
+        let index = Index::open_in_dir(agent_root.dreamd_dir().join(INDEX_DIR_NAME))
+            .expect("open index for read");
+        let reader: IndexReader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .expect("reader builder");
+        reader.reload().expect("reload reader");
+        reader
+    }
+
+    fn jsonl_line(learning: &AgentLearning) -> String {
+        let mut line = serde_json::to_string(learning).unwrap();
+        line.push('\n');
+        line
+    }
+
+    /// Replace the log the way `git checkout` does: write a sibling, rename it over.
+    fn replace_by_rename(jsonl: &Path, bytes: &[u8]) {
+        let sibling = jsonl.with_extension("checkout");
+        std::fs::write(&sibling, bytes).unwrap();
+        std::fs::rename(&sibling, jsonl).unwrap();
+    }
+
+    #[tokio::test]
+    async fn watermark_is_the_largest_committed_id() {
+        let dir = unique_tmpdir("watermark-max");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        for c in ['Z', 'A'] {
+            let id = make_event_id(c);
+            handle
+                .sender()
+                .send(IndexerMsg::Append {
+                    event_id: id.clone(),
+                    learning: sample_learning(id, "rust.test", "body"),
+                })
+                .await
+                .unwrap();
+        }
+        flush(&handle).await.expect("flush");
+
+        assert_eq!(
+            progress_id(&agent_root).as_deref(),
+            Some(make_event_id('Z').as_str()),
+            "the watermark is the largest committed id, not the last to arrive"
+        );
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A message-site commit is the persist step too: it records the pending
+    /// appends it commits.
+    #[tokio::test]
+    async fn prune_commit_records_pending_appends() {
+        let dir = unique_tmpdir("prune-persist");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        let id = make_event_id('A');
+        handle
+            .sender()
+            .send(IndexerMsg::Append {
+                event_id: id.clone(),
+                learning: sample_learning(id.clone(), "rust.test", "body"),
+            })
+            .await
+            .unwrap();
+        handle
+            .prune_decayed_events(vec![])
+            .await
+            .expect("prune_decayed_events");
+
+        assert_eq!(index_doc_edges(&agent_root), vec![id.to_string()]);
+        assert_eq!(progress_id(&agent_root).as_deref(), Some(id.as_str()));
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A commit lands, then the process dies before the edges and the
+    /// watermark. The next open leaves one document per event and backfills
+    /// both.
+    #[tokio::test]
+    async fn crash_between_commit_and_progress_leaves_one_doc_per_event() {
+        let dir = unique_tmpdir("crash-persist");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        let failpoint = agent_root.dreamd_dir().join("failpoint-after-commit");
+        std::fs::write(&failpoint, b"").unwrap();
+        let a = sample_learning(make_event_id('A'), "rust.test", "alpha");
+        let b = sample_learning(make_event_id('B'), "rust.test", "beta");
+        // Durable in the log first, as the coordinator does.
+        prime_jsonl(&dir, &[a.clone(), b.clone()]);
+        for learning in [a.clone(), b.clone()] {
+            handle
+                .sender()
+                .send(IndexerMsg::Append {
+                    event_id: learning.id.clone(),
+                    learning,
+                })
+                .await
+                .unwrap();
+        }
+        assert!(
+            flush(&handle).await.is_err(),
+            "the failpoint stops the persist step after the commit"
+        );
+        handle.shutdown().await.expect("shutdown");
+        assert!(!progress_path.exists(), "no watermark after the crash");
+        assert!(
+            index_doc_edges(&agent_root).is_empty(),
+            "no index_doc edge after the crash"
+        );
+
+        std::fs::remove_file(&failpoint).unwrap();
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600))
+            .expect("reopen");
+
+        let violations = crate::invariants::check_store(&agent_root, Some(handle.reader()))
+            .expect("check_store");
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(progress_id(&agent_root).as_deref(), Some(b.id.as_str()));
+        assert_eq!(
+            index_doc_edges(&agent_root),
+            vec![a.id.to_string(), b.id.to_string()]
+        );
+        handle.shutdown().await.expect("shutdown reopen");
+    }
+
+    /// An append that finds the log replaced makes the coordinator send
+    /// `Resync`, and the indexer indexes the line the replacement brought in.
+    ///
+    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
+    /// `#[cfg(unix)]` (AILAB-192).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_on_append_mismatch_indexes_a_merged_line() {
+        let dir = unique_tmpdir("resync-append");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let jsonl = agent_root.episodic_jsonl();
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        let (coord_tx, coord_rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        let coord = MemoryCoordinator::open_at(
+            &jsonl,
+            agent_root.project_root(),
+            coord_rx,
+            Some(handle.sender()),
+        )
+        .expect("open coord");
+        let coord_handle = tokio::spawn(coord.run());
+        let append = |content: &'static str| {
+            let coord_tx = coord_tx.clone();
+            async move {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                coord_tx
+                    .send(MemoryCoordinatorMsg::AppendLearning {
+                        learning: sample_learning(make_event_id('0'), "rust.test", content),
+                        client_dedup_key: None,
+                        response_tx: resp_tx,
+                    })
+                    .await
+                    .expect("send append");
+                resp_rx.await.expect("recv").expect("append ok");
+            }
+        };
+
+        append("x before the merge").await;
+        let mut merged = std::fs::read(&jsonl).unwrap();
+        // Sorts below every id the coordinator mints today.
+        let m = sample_learning(make_event_id('M'), "rust.test", "merged from a branch");
+        merged.extend_from_slice(jsonl_line(&m).as_bytes());
+        replace_by_rename(&jsonl, &merged);
+        append("y after the merge").await;
+        flush(&handle).await.expect("flush");
+        handle.reader().reload().expect("reload");
+
+        let violations = crate::invariants::check_store(&agent_root, Some(handle.reader()))
+            .expect("check_store");
+        assert!(violations.is_empty(), "{violations:?}");
+
+        let (sh_tx, sh_rx) = oneshot::channel();
+        coord_tx
+            .send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
+            .await
+            .unwrap();
+        sh_rx.await.unwrap();
+        coord_handle.await.unwrap();
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// With no coordinator to notice, the tick finds a log replaced by rename
+    /// and runs the coverage pass.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tick_resync_indexes_a_log_replaced_by_rename() {
+        let dir = unique_tmpdir("resync-tick");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let a = sample_learning(make_event_id('A'), "rust.test", "alpha");
+        let b = sample_learning(make_event_id('B'), "rust.test", "beta");
+        prime_jsonl(&dir, std::slice::from_ref(&a));
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_millis(50)).expect("open");
+        replace_by_rename(
+            &agent_root.episodic_jsonl(),
+            [jsonl_line(&a), jsonl_line(&b)].concat().as_bytes(),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let violations =
+                crate::invariants::check_store(&agent_root, Some(&fresh_reader(&agent_root)))
+                    .expect("check_store");
+            if violations.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("the tick did not cover the replaced log within 5s: {violations:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A test-side `Resync` reports what the pass did.
+    #[tokio::test]
+    async fn resync_reports_the_ids_it_added() {
+        let dir = unique_tmpdir("resync-report");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        prime_jsonl(
+            &dir,
+            &[sample_learning(make_event_id('A'), "rust.test", "alpha")],
+        );
+
+        let report = handle.resync().await.expect("resync");
+
+        assert_eq!(report.added, 1, "{report:?}");
+        assert_eq!(
+            progress_id(&agent_root).as_deref(),
+            Some(make_event_id('A').as_str())
+        );
         handle.shutdown().await.expect("shutdown");
     }
 

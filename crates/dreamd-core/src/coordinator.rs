@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::episodic::{self, EpisodicError};
 use crate::id_minter::IdMinter;
 use crate::layout::AgentRoot;
+use crate::provenance::Ledger;
 
 /// Hard cap on a single serialized JSONL line — the on-disk line-format limit
 /// now lives in [`episodic`](crate::episodic). Re-exported so existing callers
@@ -152,6 +153,9 @@ pub struct MemoryCoordinator {
     /// decay) runs against this root. Distinct from `agent_root_key`, which is
     /// canonicalized for idempotency keying — do NOT use the key for the cycle.
     agent_root: AgentRoot,
+    /// The project writer lock's ledger appender. `None` from `open_at`, which
+    /// holds no lock; such a coordinator refuses to run a dream cycle.
+    ledger: Option<Ledger>,
     rx: mpsc::Receiver<MemoryCoordinatorMsg>,
     /// Canonicalized AgentRoot path — half of the idempotency LRU key.
     /// Falls back to the un-canonicalized path if canonicalization fails
@@ -165,6 +169,10 @@ pub struct MemoryCoordinator {
     /// `warn!` once and drop the sender.
     #[cfg(unix)]
     indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
+    /// Set when the log changed outside this coordinator; the next append
+    /// sends `IndexerMsg::Resync` after its own `Append` (BZR-1236).
+    #[cfg(unix)]
+    resync_pending: bool,
 }
 
 impl MemoryCoordinator {
@@ -174,19 +182,25 @@ impl MemoryCoordinator {
     /// Recovery: any trailing bytes that do not deserialize as a complete
     /// `AgentLearning` are truncated. The last fully parseable line is the
     /// recovery point. Subsequent appends start from there.
+    ///
+    /// `ledger` is the project writer lock's appender (`WriterLock::ledger`);
+    /// the dream cycle records its edges through it.
     pub fn open(
         agent_root: &AgentRoot,
+        ledger: Ledger,
         rx: mpsc::Receiver<MemoryCoordinatorMsg>,
         #[cfg(unix)] indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     ) -> std::io::Result<Self> {
         let path = agent_root.episodic_jsonl();
-        Self::open_at(
+        let mut coordinator = Self::open_at(
             &path,
             agent_root.project_root(),
             rx,
             #[cfg(unix)]
             indexer_tx,
-        )
+        )?;
+        coordinator.ledger = Some(ledger);
+        Ok(coordinator)
     }
 
     /// Lower-level constructor used by tests that need to point at a
@@ -228,11 +242,14 @@ impl MemoryCoordinator {
             #[cfg(unix)]
             identity,
             agent_root: AgentRoot::new(agent_root),
+            ledger: None,
             rx,
             agent_root_key,
             idempotency: LruCache::new(cap),
             #[cfg(unix)]
             indexer_tx,
+            #[cfg(unix)]
+            resync_pending: false,
         })
     }
 
@@ -345,13 +362,19 @@ impl MemoryCoordinator {
         // shows up as latency; only once that inbox is full too does the
         // `Supervisor`'s separate 100 ms send timeout start returning HTTP 503,
         // and only on the HTTP ingress (the in-process `dreamd mcp` path sends
-        // on this channel without that timeout, so it waits). Shedding is NOT
-        // replay-healed: startup replay filters `id > last_indexed_id`, a
-        // watermark rather than a contiguous prefix, so a gap followed by any
-        // indexed event is skipped forever. A `Closed` channel is still logged
-        // once and the sender dropped so we stop retrying.
+        // on this channel without that timeout, so it waits). A shed append
+        // would stay out of recall until the next coverage pass (the next
+        // open, or a resync), so backpressure is still what keeps live recall
+        // whole. A `Closed` channel is still logged once and the sender
+        // dropped so we stop retrying.
         #[cfg(unix)]
         self.route_to_indexer(&event_id, &learning).await;
+        // The log changed outside this coordinator: it may hold ids the index
+        // has never seen. Queued behind this append's `Append`.
+        #[cfg(unix)]
+        if std::mem::take(&mut self.resync_pending) {
+            self.send_resync().await;
+        }
 
         Ok(AppendOutcome {
             id: event_id,
@@ -377,8 +400,14 @@ impl MemoryCoordinator {
         no_llm: bool,
         share_personal: bool,
     ) -> Result<crate::decay::DecayResult, CoordinatorError> {
+        let Some(ledger) = self.ledger.clone() else {
+            return Err(CoordinatorError::DreamCycle(
+                "this coordinator was opened without the project writer lock".to_string(),
+            ));
+        };
         let result = crate::dream_cycle::run_filesystem_phases(
             &self.agent_root,
+            &ledger,
             now_sec,
             cycle_date,
             no_llm,
@@ -472,30 +501,30 @@ impl MemoryCoordinator {
             path = %self.jsonl_path.display(),
             "episodic log changed outside the coordinator; reopened it"
         );
-        // BZR-1236 queues `IndexerMsg::Resync` here.
+        // This function is sync; `handle_append` sends the resync.
+        self.resync_pending = true;
         Ok(records)
     }
 
     /// Hand one durable append to the indexer task, **awaiting** the send.
     ///
     /// The await is the point. A bounded channel that is momentarily full must
-    /// block this actor, not shed the message: startup `replay_two_pass` keeps
-    /// events whose `id > last_indexed_id`, and that watermark is the newest
-    /// committed id, not a contiguous prefix. Shed event N, index N+1, and N is
-    /// skipped forever. Blocking here stops the coordinator reading its own
-    /// inbox, so ingress degrades honestly instead of returning 201 for a record
-    /// recall will never see: the in-flight learns already queued in the 256-slot
-    /// coordinator channel just *wait* (no per-request timeout), and only
-    /// overflow past that inbox meets the `Supervisor`'s separate 100 ms send
-    /// timeout and becomes an HTTP 503. Sustained overload therefore surfaces as
+    /// block this actor, not shed the message: a shed append would stay out of
+    /// recall until the next coverage pass (the next open, or a resync), while
+    /// later appends answer queries. Blocking here stops the coordinator
+    /// reading its own inbox, so ingress degrades honestly instead of returning
+    /// 201 for a record recall does not see: the in-flight learns already
+    /// queued in the 256-slot coordinator channel just *wait* (no per-request
+    /// timeout), and only overflow past that inbox meets the `Supervisor`'s
+    /// separate 100 ms send timeout and becomes an HTTP 503. Sustained overload therefore surfaces as
     /// 503, a brief park as latency — and only on the HTTP ingress: the
     /// in-process `dreamd mcp` path sends on this channel without that timeout,
     /// so it waits.
     ///
     /// The append is acked once the indexer *accepts* the message; the Tantivy
     /// commit still lands on the usual 5 s cadence. A closed channel is terminal
-    /// for live routing: warn once, drop the sender, and let the next startup
-    /// replay pick the tail up.
+    /// for live routing: warn once, drop the sender, and let the next open's
+    /// coverage pass pick the append up.
     #[cfg(unix)]
     async fn route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
         let Some(tx) = self.indexer_tx.as_ref() else {
@@ -505,6 +534,23 @@ impl MemoryCoordinator {
             event_id: event_id.clone(),
             learning: learning.clone(),
         };
+        if tx.send(msg).await.is_err() {
+            tracing::warn!(
+                "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
+            );
+            self.indexer_tx = None;
+        }
+    }
+
+    /// Ask the indexer to run its coverage pass, **awaiting** the send for the
+    /// same reason [`Self::route_to_indexer`] does. A closed channel follows
+    /// that function's rule.
+    #[cfg(unix)]
+    async fn send_resync(&mut self) {
+        let Some(tx) = self.indexer_tx.as_ref() else {
+            return;
+        };
+        let msg = crate::server::tantivy_handle::IndexerMsg::Resync { ack: None };
         if tx.send(msg).await.is_err() {
             tracing::warn!(
                 "indexer channel closed; dropping sender — subsequent appends will not be indexed live"
@@ -524,13 +570,14 @@ fn open_append(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-/// What the coordinator expects at `jsonl_path`.
+/// What the coordinator expects at `jsonl_path`. The indexer's tick compares
+/// the same three fields.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LogIdentity {
-    dev: u64,
-    ino: u64,
-    len: u64,
+pub(crate) struct LogIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) len: u64,
 }
 
 #[cfg(unix)]
@@ -545,7 +592,7 @@ impl LogIdentity {
     }
 
     /// `None` when nothing is at `path`.
-    fn at(path: &Path) -> std::io::Result<Option<Self>> {
+    pub(crate) fn at(path: &Path) -> std::io::Result<Option<Self>> {
         match std::fs::metadata(path) {
             Ok(meta) => Ok(Some(Self::of(&meta))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -557,6 +604,7 @@ impl LogIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::writer_lock::{WriterKind, WriterLock};
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -827,11 +875,20 @@ mod tests {
         EventId::parse(&format!("evt_{}", ulid::Ulid::from_parts(ms, 0))).unwrap()
     }
 
+    /// Open the way a writer does: `.agent/`, the project writer lock, then
+    /// the coordinator with the lock's ledger. The lock is returned so it
+    /// outlives the test.
     fn open_coordinator(
         root: &AgentRoot,
-    ) -> (MemoryCoordinator, mpsc::Sender<MemoryCoordinatorMsg>) {
+    ) -> (
+        MemoryCoordinator,
+        mpsc::Sender<MemoryCoordinatorMsg>,
+        WriterLock,
+    ) {
+        std::fs::create_dir_all(root.episodic_dir()).expect("create .agent/");
+        let lock = WriterLock::acquire(root, WriterKind::Watch).expect("project writer lock");
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let c = MemoryCoordinator::open_at(
+        let mut c = MemoryCoordinator::open_at(
             &root.episodic_jsonl(),
             root.project_root(),
             rx,
@@ -839,7 +896,8 @@ mod tests {
             None,
         )
         .expect("open coord");
-        (c, tx)
+        c.ledger = Some(lock.ledger().clone());
+        (c, tx, lock)
     }
 
     async fn append_via(
@@ -881,7 +939,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = AgentRoot::new(dir.path());
-        let (mut c, _tx) = open_coordinator(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
 
         let x = learning_with(
             &id_from_now(std::time::Duration::from_secs(60), false),
@@ -997,7 +1055,7 @@ mod tests {
         std::fs::create_dir_all(root.dreamd_dir()).unwrap();
         std::fs::write(root.provenance_dir(), b"not a directory").unwrap();
 
-        let (mut c, _tx) = open_coordinator(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
         let before = ino(&c.file.metadata().unwrap());
 
         let result = c
@@ -1090,7 +1148,7 @@ mod tests {
             CYCLE_NOW_SEC,
         );
         std::fs::write(&jsonl, jsonl_line(&seed)).unwrap();
-        let (mut c, _tx) = open_coordinator(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
 
         let saved = std::fs::read(&jsonl).unwrap();
         let a = learning_with(

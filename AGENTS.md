@@ -181,7 +181,7 @@ Locked 2026-10-24:
    - `archive --force-unpin <id>` unpins every line with that id, not only the first.
 
    Spec: `assignments/BZR-1234.v2.md`.
-6. **BZR-1235** — signed off 2026-10-26; lands in the commit after `18d5767`. Open-time `episodic::recover` is skip-only:
+6. **BZR-1235** — on `main` (`4449d2a`). Open-time `episodic::recover` is skip-only:
    - every `\n`-terminated line stays in the log, skipped ones included, and one `warn!` gives the count and the first line number;
    - a torn final line that parses as a record gets `\n` and is returned with the others, so the `IdMinter` seeds from it; any other fragment is `set_len`'d away;
    - `parse_record` is the one parse rule `lines()` and `recover` share, and `lines()` still yields `Torn`.
@@ -195,7 +195,7 @@ Locked 2026-10-24:
    - sidecars written by earlier versions are left in place and never read.
 
    Spec: `assignments/BZR-1235.v2.md`.
-7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender.
+7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender. Spec: `assignments/BZR-1236.v2.md` (queued 2026-10-26).
 8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
 9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
 10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.

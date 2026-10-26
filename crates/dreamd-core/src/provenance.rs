@@ -5,15 +5,18 @@
 //! Each line is one edge, compact JSON with keys in the order
 //! `schema_version`, `kind`, `from`, `to`, and one trailing `\n`.
 //!
-//! Three writers call [`append_edges`]:
+//! Every edge goes through one [`Ledger`] per process and project (BZR-1236).
+//! `WriterLock::acquire` builds it, after cutting a torn final line, and the
+//! lock token carries it. Its callers:
 //!
-//! - the dream cycle, through [`record_cycle`], after decay and before
-//!   `wal::commit_cycle` (`lesson_citation` and `recurrence` edges);
-//! - the indexer actor's `commit_and_persist`, after `writer.commit()` and
-//!   before the watermark (`index_doc` edges for a live batch);
-//! - `TantivyIndexHandle::open`, after the replay `writer.commit()` and before
-//!   `write_progress` (`index_doc` edges for ids replay re-indexed). Startup
-//!   replay does not go through `commit_and_persist`.
+//! - the dream cycle and `dreamd forget`, through [`record_cycle`]
+//!   (`lesson_citation` and `recurrence` edges);
+//! - the indexer's persist step, after `writer.commit()` and before the
+//!   watermark (`index_doc` edges for every id that commit covered).
+//!
+//! The appender opens the file with `O_APPEND` on its first edge and
+//! serializes appends behind a mutex, so the coordinator and the indexer can
+//! append at the same time.
 //!
 //! The learn path never opens the ledger. The reserved vector kind in the
 //! format has no variant here: a writer MUST NOT emit it. This module has no
@@ -25,9 +28,10 @@
 //! not rewrite the ledger; the format forbids that.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use dreamd_protocol::EventId;
 use serde::{Deserialize, Serialize};
@@ -92,69 +96,128 @@ struct ExistingLine {
     to: String,
 }
 
-/// Append `edges` to the ledger at `ledger`, skipping any `(kind, from, to)`
-/// already present (in the file or earlier in `edges`).
-///
-/// A torn tail (non-empty file that does not end in `\n`) is truncated to the
-/// last `\n` first. Complete lines are never rewritten or reordered. An empty
-/// `edges` slice writes nothing and does not create the file.
-pub fn append_edges(
-    ledger: &Path,
-    edges: &[(Kind, String, String)],
-) -> Result<(), ProvenanceError> {
-    if edges.is_empty() {
+/// The project's provenance appender. `WriterLock::acquire` builds the only
+/// one; every edge this process writes goes through it.
+#[derive(Clone, Debug)]
+pub struct Ledger {
+    inner: Arc<LedgerInner>,
+}
+
+#[derive(Debug)]
+struct LedgerInner {
+    path: PathBuf,
+    /// Opened with `O_APPEND` on the first non-empty append.
+    file: Mutex<Option<File>>,
+}
+
+impl Ledger {
+    /// Cut a torn final line, then return an appender that has not opened the
+    /// file. Called only by `WriterLock::acquire`.
+    ///
+    /// A missing file is left missing. Any other failure, such as
+    /// `provenance/` being a regular file, is a `warn!`: the appender is still
+    /// returned, and its first append reports the error.
+    pub(crate) fn open(path: PathBuf) -> Self {
+        if let Err(e) = cut_torn_tail(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not check the provenance ledger for a torn final line"
+            );
+        }
+        Self {
+            inner: Arc::new(LedgerInner {
+                path,
+                file: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    /// Append `edges`, skipping any `(kind, from, to)` already in the file or
+    /// earlier in `edges`. An empty slice writes nothing and creates nothing.
+    ///
+    /// Never truncates: complete lines are never rewritten or reordered.
+    pub fn append(&self, edges: &[(Kind, String, String)]) -> Result<(), ProvenanceError> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut slot = self.inner.file.lock().expect("ledger mutex poisoned");
+        if slot.is_none() {
+            if let Some(parent) = self.inner.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            *slot = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .create(true)
+                    .open(&self.inner.path)?,
+            );
+        }
+        let file = slot.as_mut().expect("opened above");
+
+        // The dedupe reads through the same fd; `O_APPEND` still sends every
+        // write to the end.
+        file.seek(SeekFrom::Start(0))?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)?;
+
+        let mut seen: HashSet<(String, String, String)> = existing
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_slice::<ExistingLine>(line).ok())
+            .map(|l| (l.kind, l.from, l.to))
+            .collect();
+
+        let mut out = Vec::new();
+        for (kind, from, to) in edges {
+            if !seen.insert((kind.as_str().to_owned(), from.clone(), to.clone())) {
+                continue;
+            }
+            serde_json::to_writer(
+                &mut out,
+                &EdgeLine {
+                    schema_version: PROVENANCE_SCHEMA_VERSION,
+                    kind: *kind,
+                    from,
+                    to,
+                },
+            )?;
+            out.push(b'\n');
+        }
+
+        if !out.is_empty() {
+            file.write_all(&out)?;
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+}
+
+/// Truncate `path` to just after its last `\n` when it does not end in one.
+fn cut_torn_tail(path: &Path) -> io::Result<()> {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    if bytes.last().is_none_or(|b| *b == b'\n') {
         return Ok(());
     }
-    if let Some(parent) = ledger.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(ledger)?;
-
-    let mut existing = Vec::new();
-    file.read_to_end(&mut existing)?;
-    if existing.last().is_some_and(|b| *b != b'\n') {
-        let keep = existing
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map_or(0, |i| i + 1);
-        file.set_len(keep as u64)?;
-        existing.truncate(keep);
-    }
-
-    let mut seen: HashSet<(String, String, String)> = existing
-        .split(|b| *b == b'\n')
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<ExistingLine>(line).ok())
-        .map(|l| (l.kind, l.from, l.to))
-        .collect();
-
-    let mut out = Vec::new();
-    for (kind, from, to) in edges {
-        if !seen.insert((kind.as_str().to_owned(), from.clone(), to.clone())) {
-            continue;
-        }
-        serde_json::to_writer(
-            &mut out,
-            &EdgeLine {
-                schema_version: PROVENANCE_SCHEMA_VERSION,
-                kind: *kind,
-                from,
-                to,
-            },
-        )?;
-        out.push(b'\n');
-    }
-
-    if !out.is_empty() {
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(&out)?;
-    }
+    let keep = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    file.set_len(keep as u64)?;
     file.sync_data()?;
+    tracing::warn!(
+        path = %path.display(),
+        bytes = bytes.len() - keep,
+        "cut a torn final line from the provenance ledger"
+    );
     Ok(())
 }
 
@@ -164,7 +227,7 @@ pub fn append_edges(
 /// A missing or unreadable `LESSONS.md` writes nothing and returns `Ok`: the
 /// ledger must not fail a cycle that promoted nothing. A missing or malformed
 /// sidecar drops the `recurrence` edge only.
-pub fn record_cycle(agent_root: &AgentRoot) -> Result<(), ProvenanceError> {
+pub fn record_cycle(agent_root: &AgentRoot, ledger: &Ledger) -> Result<(), ProvenanceError> {
     let Ok(file) = lessons::read_lessons_file(&agent_root.lessons_md()) else {
         return Ok(());
     };
@@ -197,7 +260,7 @@ pub fn record_cycle(agent_root: &AgentRoot) -> Result<(), ProvenanceError> {
         }
     }
 
-    append_edges(&agent_root.provenance_ledger(), &edges)
+    ledger.append(&edges)
 }
 
 /// Result of [`verify`]. `root` is the Merkle root recomputed from the good
@@ -309,8 +372,8 @@ fn to_hex(bytes: &[u8]) -> String {
 /// (unparseable, wrong `schema_version`, `embedding`, or a known kind with a
 /// bad shape) and unknown kinds are left out of the root. An orphan is a good
 /// edge whose `from` is absent from the live JSONL; orphans stay in the root.
-/// An event with no `index_doc` edge is not reported: the index watermark is
-/// not a contiguous prefix.
+/// An event with no `index_doc` edge is not reported: edges land after the
+/// index commit, and the next coverage pass backfills any a crash skipped.
 pub fn verify(agent_root: &AgentRoot) -> Result<ProvenanceReport, ProvenanceError> {
     let bytes = match fs::read(agent_root.provenance_ledger()) {
         Ok(b) => b,
@@ -421,14 +484,12 @@ mod tests {
     #[test]
     fn line_bytes_are_exact() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = dir.path().join("provenance/ledger.jsonl");
-        append_edges(
-            &ledger,
-            &[(Kind::LessonCitation, EVT_A.into(), format!("lsn_{EVT_A}"))],
-        )
-        .unwrap();
+        let ledger = Ledger::open(dir.path().join("provenance/ledger.jsonl"));
+        ledger
+            .append(&[(Kind::LessonCitation, EVT_A.into(), format!("lsn_{EVT_A}"))])
+            .unwrap();
         assert_eq!(
-            fs::read(&ledger).unwrap(),
+            fs::read(ledger.path()).unwrap(),
             b"{\"schema_version\":\"provenance/1.0\",\"kind\":\"lesson_citation\",\"from\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"to\":\"lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}\n"
         );
     }
@@ -436,55 +497,91 @@ mod tests {
     #[test]
     fn duplicate_triple_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = dir.path().join("ledger.jsonl");
+        let ledger = Ledger::open(dir.path().join("ledger.jsonl"));
         let edge = (Kind::IndexDoc, EVT_A.to_owned(), EVT_A.to_owned());
-        append_edges(&ledger, std::slice::from_ref(&edge)).unwrap();
-        append_edges(&ledger, &[edge.clone(), edge]).unwrap();
-        assert_eq!(ledger_lines(&ledger).len(), 1);
+        ledger.append(std::slice::from_ref(&edge)).unwrap();
+        ledger.append(&[edge.clone(), edge]).unwrap();
+        assert_eq!(ledger_lines(ledger.path()).len(), 1);
     }
 
     #[test]
     fn same_ids_different_kind_is_a_new_edge() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = dir.path().join("ledger.jsonl");
-        append_edges(&ledger, &[(Kind::IndexDoc, EVT_A.into(), EVT_A.into())]).unwrap();
-        append_edges(
-            &ledger,
-            &[(Kind::LessonCitation, EVT_A.into(), EVT_A.into())],
-        )
-        .unwrap();
-        assert_eq!(ledger_lines(&ledger).len(), 2);
+        let ledger = Ledger::open(dir.path().join("ledger.jsonl"));
+        ledger
+            .append(&[(Kind::IndexDoc, EVT_A.into(), EVT_A.into())])
+            .unwrap();
+        ledger
+            .append(&[(Kind::LessonCitation, EVT_A.into(), EVT_A.into())])
+            .unwrap();
+        assert_eq!(ledger_lines(ledger.path()).len(), 2);
+    }
+
+    /// A second appender on the same path (a later process) sees the first
+    /// one's lines in its dedupe.
+    #[test]
+    fn duplicate_triple_from_an_earlier_appender_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let edge = (Kind::IndexDoc, EVT_A.to_owned(), EVT_A.to_owned());
+        Ledger::open(path.clone())
+            .append(std::slice::from_ref(&edge))
+            .unwrap();
+        Ledger::open(path.clone()).append(&[edge]).unwrap();
+        assert_eq!(ledger_lines(&path).len(), 1);
     }
 
     #[test]
-    fn torn_tail_is_truncated_and_prior_line_kept() {
+    fn empty_append_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = dir.path().join("ledger.jsonl");
-        append_edges(&ledger, &[(Kind::IndexDoc, EVT_A.into(), EVT_A.into())]).unwrap();
-        let first = fs::read(&ledger).unwrap();
-        let mut torn = first.clone();
-        torn.extend_from_slice(b"{\"schema_version\":\"provenance/1.0\",\"kind\":\"ind");
-        fs::write(&ledger, &torn).unwrap();
-
-        append_edges(&ledger, &[(Kind::IndexDoc, EVT_B.into(), EVT_B.into())]).unwrap();
-
-        let bytes = fs::read(&ledger).unwrap();
-        assert!(bytes.starts_with(&first), "complete line was rewritten");
-        let lines = ledger_lines(&ledger);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains(EVT_B));
-        assert!(bytes.ends_with(b"\n"));
+        let ledger = Ledger::open(dir.path().join("provenance/ledger.jsonl"));
+        ledger.append(&[]).unwrap();
+        assert!(!dir.path().join("provenance").exists());
     }
 
+    /// V12 (BZR-1230 audit): appends from several threads at once all land,
+    /// each as one whole line. Before the shared appender, every call opened
+    /// its own fd and wrote at the end it had seen, so two writers could land
+    /// on one offset, and one's tail repair could cut the other's line.
     #[test]
-    fn torn_only_line_truncates_to_empty() {
+    fn ledger_appends_from_many_threads_keep_every_line() {
+        use std::sync::Barrier;
         let dir = tempfile::tempdir().unwrap();
-        let ledger = dir.path().join("ledger.jsonl");
-        fs::write(&ledger, b"{\"schema_ver").unwrap();
-        append_edges(&ledger, &[(Kind::IndexDoc, EVT_A.into(), EVT_A.into())]).unwrap();
-        let lines = ledger_lines(&ledger);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("{\"schema_version\":\"provenance/1.0\""));
+        let ledger = Ledger::open(dir.path().join("provenance/ledger.jsonl"));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let ledger = ledger.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..100 {
+                        let id = format!("evt_01ARZ3NDEKTSV4RRFFQ69G{t}{i:03}");
+                        ledger.append(&[(Kind::IndexDoc, id.clone(), id)]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let bytes = fs::read(ledger.path()).unwrap();
+        let lines: Vec<&[u8]> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        let valid = lines
+            .iter()
+            .filter(|l| {
+                serde_json::from_slice::<VerifyLine>(l)
+                    .is_ok_and(|v| matches!(classify(&v), LineClass::Good))
+            })
+            .count();
+        assert_eq!(
+            (lines.len(), valid),
+            (800, 800),
+            "8 threads x 100 distinct edges must leave 800 valid lines"
+        );
     }
 
     fn write_lessons(root: &AgentRoot, cluster_key: &str, citations: &[&str]) {
@@ -530,7 +627,8 @@ mod tests {
         write_lessons(&root, key, &[EVT_A, EVT_B]);
         write_sidecar(&root, &[key]);
 
-        record_cycle(&root).unwrap();
+        let ledger = Ledger::open(root.provenance_ledger());
+        record_cycle(&root, &ledger).unwrap();
 
         let lsn = format!("lsn_{EVT_A}");
         let expected = vec![
@@ -547,7 +645,7 @@ mod tests {
         assert_eq!(ledger_lines(&root.provenance_ledger()), expected);
 
         // A second cycle over the same files adds nothing.
-        record_cycle(&root).unwrap();
+        record_cycle(&root, &ledger).unwrap();
         assert_eq!(ledger_lines(&root.provenance_ledger()).len(), 3);
     }
 
@@ -558,7 +656,7 @@ mod tests {
         write_lessons(&root, "rust::errors", &[EVT_A, EVT_B]);
         write_sidecar(&root, &["python::imports"]);
 
-        record_cycle(&root).unwrap();
+        record_cycle(&root, &Ledger::open(root.provenance_ledger())).unwrap();
 
         let lines = ledger_lines(&root.provenance_ledger());
         assert_eq!(lines.len(), 2);
@@ -571,7 +669,7 @@ mod tests {
     fn record_cycle_without_lessons_md_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let root = AgentRoot::new(dir.path());
-        record_cycle(&root).unwrap();
+        record_cycle(&root, &Ledger::open(root.provenance_ledger())).unwrap();
         assert!(!root.provenance_ledger().exists());
         assert!(!root.provenance_dir().exists());
     }

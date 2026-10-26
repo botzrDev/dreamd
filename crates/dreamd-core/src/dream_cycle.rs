@@ -27,7 +27,7 @@ use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLes
 use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
-use crate::provenance::{self, ProvenanceError};
+use crate::provenance::{self, Ledger, ProvenanceError};
 use crate::snapshot::{self, SnapshotError};
 use crate::wal::{self, WalError};
 
@@ -128,8 +128,12 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 /// (or `x-dreamd-share-personal: 1`). It is **only** permission to read
 /// `.agent/personal/`; it never causes a model call that would not otherwise
 /// happen, so `no_llm = true` ignores it entirely and reads nothing (AILAB-199).
+///
+/// `ledger` is the project writer lock's appender (`WriterLock::ledger`); the
+/// cycle's provenance edges go through it.
 pub async fn run_filesystem_phases(
     agent_root: &AgentRoot,
+    ledger: &Ledger,
     now_sec: i64,
     cycle_date: &str,
     no_llm: bool,
@@ -141,7 +145,7 @@ pub async fn run_filesystem_phases(
         // forwarded: with no backend there is no payload to consent to, and
         // reading `personal/` here would be a disclosure with no recipient.
         return filesystem_phases::<llm::GenaiBackend>(
-            agent_root, now_sec, cycle_date, None, false,
+            agent_root, ledger, now_sec, cycle_date, None, false,
         )
         .await;
     }
@@ -157,6 +161,7 @@ pub async fn run_filesystem_phases(
         Some(backend) => {
             filesystem_phases(
                 agent_root,
+                ledger,
                 now_sec,
                 cycle_date,
                 Some((&backend, config.model.as_str())),
@@ -165,8 +170,10 @@ pub async fn run_filesystem_phases(
             .await
         }
         None => {
-            filesystem_phases::<llm::GenaiBackend>(agent_root, now_sec, cycle_date, None, false)
-                .await
+            filesystem_phases::<llm::GenaiBackend>(
+                agent_root, ledger, now_sec, cycle_date, None, false,
+            )
+            .await
         }
     }
 }
@@ -179,6 +186,7 @@ pub async fn run_filesystem_phases(
 /// rest of the LLM assertions use.
 pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     agent_root: &AgentRoot,
+    ledger: &Ledger,
     now_sec: i64,
     cycle_date: &str,
     backend: &B,
@@ -187,6 +195,7 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
 ) -> Result<DecayResult, DreamCycleError> {
     filesystem_phases(
         agent_root,
+        ledger,
         now_sec,
         cycle_date,
         Some((backend, model)),
@@ -199,6 +208,7 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
 /// (`--no-llm`, no credentials, or a test that wants today's bytes).
 async fn filesystem_phases<B: LlmBackend>(
     agent_root: &AgentRoot,
+    ledger: &Ledger,
     now_sec: i64,
     cycle_date: &str,
     llm_target: Option<(&B, &str)>,
@@ -239,7 +249,7 @@ async fn filesystem_phases<B: LlmBackend>(
     let decay = decay::run_decay_pruner(agent_root, now_sec, cycle_date)?;
     // BZR-155: ledger lines land inside the existing envelope, not as a new
     // WalIntent. An append failure skips commit_cycle like any other phase.
-    provenance::record_cycle(agent_root)?;
+    provenance::record_cycle(agent_root, ledger)?;
     wal::commit_cycle(agent_root, now_sec)?;
     Ok(decay)
 }
@@ -531,6 +541,7 @@ pub fn run_in_process(
         crate::writer_lock::WriterKind::Dream,
     )?;
     let root = &agent_root;
+    let ledger = lock.ledger();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -547,7 +558,7 @@ pub fn run_in_process(
             index: IndexBackend::FreshHandle(lock.clone()),
         },
         |now_sec, cycle_date| async move {
-            run_filesystem_phases(root, now_sec, &cycle_date, no_llm, share_personal).await
+            run_filesystem_phases(root, ledger, now_sec, &cycle_date, no_llm, share_personal).await
         },
     ));
     // The indexer task holds a clone of the token; dropping the runtime ends
@@ -808,6 +819,14 @@ mod tests {
             .join("../../tests/fixtures/dream-cycle-snapshot/AGENT_LEARNINGS.jsonl")
     }
 
+    /// The project writer lock on `root`, for the ledger the filesystem
+    /// phases append through. A fixture root has no WAL and no `state.json`,
+    /// so taking it recovers nothing.
+    fn writer_lock(root: &AgentRoot) -> crate::writer_lock::WriterLock {
+        crate::writer_lock::WriterLock::acquire(root, crate::writer_lock::WriterKind::Dream)
+            .expect("project writer lock")
+    }
+
     fn scaffold_fixture() -> (tempfile::TempDir, AgentRoot) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = AgentRoot::new(dir.path());
@@ -824,6 +843,7 @@ mod tests {
     async fn run_deterministic(root: &AgentRoot) -> DecayResult {
         run_filesystem_phases(
             root,
+            writer_lock(root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             true,
@@ -1116,6 +1136,7 @@ mod tests {
         // real estimate of this prompt has to clear it for the LLM body to land.
         run_filesystem_phases_with_backend(
             &root,
+            writer_lock(&root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1247,6 +1268,7 @@ mod tests {
         ));
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1291,6 +1313,7 @@ mod tests {
         let fake = crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED}\n\ncitations: {outsider}"));
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1319,6 +1342,7 @@ mod tests {
         let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1350,6 +1374,7 @@ mod tests {
             crate::llm::fake::FakeLlm::ok(&format!("{COMPOSED} See {} and {}.", ids[0], ids[1]));
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1377,6 +1402,7 @@ mod tests {
         let fake = crate::llm::fake::FakeLlm::failing("connection reset by peer");
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1409,6 +1435,7 @@ mod tests {
         let fake = crate::llm::fake::FakeLlm::ok("   \n\t ");
         run_filesystem_phases_with_backend(
             &root_b,
+            writer_lock(&root_b).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1479,6 +1506,7 @@ mod tests {
 
         run_filesystem_phases_with_backend(
             &root,
+            writer_lock(&root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1522,6 +1550,7 @@ mod tests {
 
         run_filesystem_phases_with_backend(
             &root,
+            writer_lock(&root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
@@ -1585,6 +1614,7 @@ mod tests {
         // either — `personal/` is never distilled into `semantic/`.
         run_filesystem_phases(
             &root,
+            writer_lock(&root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             true,
@@ -1614,6 +1644,7 @@ mod tests {
 
         run_filesystem_phases_with_backend(
             &root,
+            writer_lock(&root).ledger(),
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,

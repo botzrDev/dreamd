@@ -33,7 +33,11 @@ pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 /// the staleness clears as the indexer drains the backlog instead of surviving
 /// until a restart. JSONL durability is WAL-backed; index freshness is
 /// best-effort and heals when the indexer commits the backlog (or, after a
-/// crash, on the next [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open) replay).
+/// crash, on the next [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open) coverage pass).
+///
+/// The watermark is the largest committed id, so an event merged in below it
+/// does not show here. `dreamd doctor` reports the full set difference through
+/// [`assess_index_coverage`](crate::server::index_coverage::assess_index_coverage).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IndexFreshness {
     /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
@@ -76,14 +80,15 @@ pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, 
     })
 }
 
-/// Crash-recovery watermark recording the daemon-assigned `EventId` of the
-/// most recently committed document. Lives at
-/// `<agent_root>/.dreamd/index_progress.json`. Reads on startup;
-/// writes after each successful Tantivy commit, never before.
+/// Watermark recording the largest daemon-assigned `EventId` the index has
+/// committed. Lives at `<agent_root>/.dreamd/index_progress.json`. Read at
+/// open; written by the persist step after a commit and its ledger edges,
+/// never before, and only when it changes. Nothing decides what to index from
+/// it: the coverage pass compares ids.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexProgress {
-    /// `evt_`-prefixed ULID string of the most recently committed document,
-    /// or `None` if no commit has succeeded yet (cold start / empty JSONL).
+    /// `evt_`-prefixed ULID string of the largest committed episodic id, or
+    /// `None` if nothing has been indexed (cold start / empty JSONL).
     pub(crate) last_indexed_id: Option<String>,
 }
 

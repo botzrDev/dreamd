@@ -3,25 +3,29 @@
 //!
 //! One tokio task owns the Tantivy `IndexWriter`. The coordinator and the
 //! dream cycle talk to it only through [`IndexerMsg`]. Everything that mutates
-//! the writer lives here: episodic `add_document`, the cadence and
-//! [`IndexerMsg::Flush`] commits, the recurrence sidecar, the decay prune, and
-//! the semantic (LESSONS.md) pass that `TantivyIndexHandle::open` also runs
-//! during replay.
+//! the writer lives here: episodic `add_document` (an upsert), the cadence and
+//! [`IndexerMsg::Flush`] commits, the coverage pass on [`IndexerMsg::Resync`],
+//! the recurrence sidecar, the decay prune, and the semantic (LESSONS.md) pass
+//! that `TantivyIndexHandle::open` also runs. Every commit goes through
+//! [`IndexerPersist::commit`] (BZR-1236).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use dreamd_protocol::{AgentLearning, EventId};
 use serde::{Deserialize, Serialize};
-use tantivy::{doc, IndexWriter, TantivyDocument};
+use tantivy::{doc, IndexReader, IndexWriter, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+#[cfg(unix)]
+use crate::coordinator::LogIdentity;
 use crate::index::{ClusterCount, Layer, RecurrenceSidecar, SchemaFields};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
-use crate::provenance::{append_edges, Kind};
+use crate::provenance::{Kind, Ledger};
+use crate::server::index_coverage::{cover, CoverageReport};
 use crate::server::index_freshness::{read_jsonl_events, write_progress, IndexProgress};
 use crate::server::index_map::{tantivy_to_index, IndexError};
 
@@ -36,10 +40,9 @@ use crate::server::index_map::{tantivy_to_index, IndexError};
 /// HTTP ingress alone: the in-process `dreamd mcp` path sends on the coordinator
 /// channel without that timeout, so it waits rather than 503ing.
 ///
-/// Nothing is dropped — a shed `IndexerMsg::Append` would NOT be recovered by
-/// startup replay, which filters `id > last_indexed_id` (a watermark, not a
-/// contiguous prefix), so a gap followed by any indexed event is skipped
-/// forever.
+/// Nothing is dropped. A shed `IndexerMsg::Append` would stay out of recall
+/// until the next coverage pass (the next open, or a resync), so backpressure
+/// is still what keeps live recall whole.
 pub(crate) const DEFAULT_INDEXER_CHANNEL_CAPACITY: usize = 1024;
 
 /// Relative filename for the semantic pass's report of lessons it could not
@@ -134,6 +137,13 @@ pub enum IndexerMsg {
         agent_root: AgentRoot,
         response: oneshot::Sender<Result<(), IndexError>>,
     },
+    /// The log may hold ids the index has not seen, or lack ids it has: the
+    /// coordinator found it replaced or edited outside itself (BZR-1236).
+    /// Commits pending work, runs the coverage pass against the log, and
+    /// commits again. The coordinator sends `ack: None`; tests pass `Some`.
+    Resync {
+        ack: Option<oneshot::Sender<Result<CoverageReport, IndexError>>>,
+    },
 }
 
 /// Owning handle for the spawned indexer task. Constructed inside
@@ -150,32 +160,139 @@ impl IndexerHandle {
     }
 }
 
-/// On-disk paths the indexer writes after a successful Tantivy commit.
+/// The one persist step every Tantivy commit in production code goes through.
 ///
-/// One argument so [`run_indexer`] stays within clippy's argument limit.
-/// `progress_path` is the episodic watermark. `ledger_path` is the
-/// provenance `index_doc` append (BZR-155).
+/// [`Self::commit`] commits, then appends an `index_doc` edge for every id in
+/// `pending`, then writes the watermark. That order means a watermark never
+/// covers an id with no edge, and a crash between the commit and the edges
+/// costs nothing: the next coverage pass puts every log id back in `pending`.
 pub(crate) struct IndexerPersist {
-    pub progress_path: PathBuf,
-    pub ledger_path: PathBuf,
+    progress_path: PathBuf,
+    ledger: Ledger,
+    /// Episodic ids upserted or covered since the last successful persist.
+    pending: Vec<EventId>,
+    /// The largest committed episodic id.
+    watermark: Option<EventId>,
+    /// What `index_progress.json` holds, so an unchanged watermark is not rewritten.
+    written: Option<EventId>,
 }
 
-/// The indexer task: owns the `IndexWriter`, batches appends, commits on the
-/// cadence tick or on [`IndexerMsg::Flush`], and exits after a final commit
-/// when every sender is dropped.
+impl IndexerPersist {
+    /// Seed from what `index_progress.json` holds now.
+    pub(crate) fn new(progress_path: PathBuf, ledger: Ledger, progress: &IndexProgress) -> Self {
+        let written = progress
+            .last_indexed_id
+            .as_deref()
+            .and_then(|id| EventId::parse(id).ok());
+        Self {
+            progress_path,
+            ledger,
+            pending: Vec::new(),
+            watermark: written.clone(),
+            written,
+        }
+    }
+
+    /// One upserted id, recorded at the next commit.
+    pub(crate) fn push(&mut self, id: EventId) {
+        self.pending.push(id);
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// A coverage pass covers the whole log: every log id goes into `pending`,
+    /// and the watermark restarts from nothing, so the next commit backfills
+    /// any missing edge and sets the watermark to the log's largest id, even
+    /// when that is lower than before.
+    pub(crate) fn cover_all(&mut self, events: &[AgentLearning]) {
+        self.pending = events.iter().map(|ev| ev.id.clone()).collect();
+        self.watermark = None;
+    }
+
+    /// The one persist step: commit, then `index_doc` edges for `pending`, then
+    /// the watermark. Every Tantivy commit in production code is this call.
+    ///
+    /// On a ledger failure `pending` stays intact and the watermark does not
+    /// move, so the next commit retries the edges. The ledger skips an edge it
+    /// already holds.
+    pub(crate) fn commit(
+        &mut self,
+        writer: &mut IndexWriter<TantivyDocument>,
+    ) -> Result<(), IndexError> {
+        writer.commit().map_err(tantivy_to_index)?;
+        #[cfg(test)]
+        if self
+            .progress_path
+            .with_file_name("failpoint-after-commit")
+            .exists()
+        {
+            return Err(IndexError::Other("failpoint-after-commit".to_string()));
+        }
+        let edges: Vec<(Kind, String, String)> = self
+            .pending
+            .iter()
+            .map(|id| {
+                (
+                    Kind::IndexDoc,
+                    id.as_str().to_owned(),
+                    id.as_str().to_owned(),
+                )
+            })
+            .collect();
+        self.ledger
+            .append(&edges)
+            .map_err(|e| IndexError::Io(e.to_string()))?;
+        let largest = self.pending.drain(..).max();
+        self.watermark = self.watermark.take().max(largest);
+        if self.watermark != self.written {
+            write_progress(
+                &self.progress_path,
+                &IndexProgress {
+                    last_indexed_id: self.watermark.as_ref().map(|id| id.as_str().to_owned()),
+                },
+            )?;
+            self.written = self.watermark.clone();
+        }
+        Ok(())
+    }
+}
+
+/// Everything the indexer task owns besides the writer, the schema fields, its
+/// inbox, the cadence and the cluster counts. One argument, so [`run_indexer`]
+/// stays within clippy's argument limit.
+pub(crate) struct IndexerState {
+    pub(crate) persist: IndexerPersist,
+    /// Manual-reload reader over the writer's index, for the coverage pass.
+    pub(crate) coverage: IndexReader,
+    pub(crate) agent_root: AgentRoot,
+    /// The log's device, inode and length as of the last tick or coverage pass.
+    #[cfg(unix)]
+    pub(crate) log: Option<LogIdentity>,
+}
+
+/// Count `events` by `skill_action`: pass 1 of every coverage pass.
+pub(crate) fn count_clusters(events: &[AgentLearning]) -> HashMap<String, u32> {
+    let mut clusters: HashMap<String, u32> = HashMap::new();
+    for ev in events {
+        *clusters.entry(ev.skill_action.clone()).or_insert(0) += 1;
+    }
+    clusters
+}
+
+/// The indexer task: owns the `IndexWriter`, upserts appends, commits on the
+/// cadence tick or on [`IndexerMsg::Flush`], runs the coverage pass on
+/// [`IndexerMsg::Resync`] or when the tick finds the log replaced or shrunk,
+/// and exits after a final commit when every sender is dropped.
 pub(crate) async fn run_indexer(
     mut writer: IndexWriter<TantivyDocument>,
     fields: SchemaFields,
     mut rx: mpsc::Receiver<IndexerMsg>,
     commit_cadence: Duration,
     mut clusters: HashMap<String, u32>,
-    persist: IndexerPersist,
-    mut last_committed_id: Option<String>,
+    mut state: IndexerState,
 ) {
-    let mut batch_last_id: Option<String> = None;
-    // Ids from successful `Append`s since the last commit; each becomes one
-    // `index_doc` ledger edge in `commit_and_persist` (BZR-155).
-    let mut batch_ids: Vec<String> = Vec::new();
     let mut interval = tokio::time::interval(commit_cadence);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Burn the first immediate tick so the cadence is measured from
@@ -196,18 +313,16 @@ pub(crate) async fn run_indexer(
                             tracing::warn!(error = ?e, "indexer add_document failed");
                             continue;
                         }
-                        batch_ids.push(event_id.as_str().to_owned());
-                        batch_last_id = Some(event_id.as_str().to_owned());
+                        // Each upserted id becomes one `index_doc` edge at the
+                        // next commit (BZR-155).
+                        state.persist.push(event_id);
                     }
                     Some(IndexerMsg::Flush { ack }) => {
-                        let result = commit_and_persist(
-                            &mut writer,
-                            &persist.progress_path,
-                            &persist.ledger_path,
-                            &mut batch_ids,
-                            &mut batch_last_id,
-                            &mut last_committed_id,
-                        );
+                        let result = if state.persist.has_pending() {
+                            state.persist.commit(&mut writer)
+                        } else {
+                            Ok(())
+                        };
                         let _ = ack.send(result);
                     }
                     Some(IndexerMsg::ApplyRecurrenceSidecar { agent_root, response }) => {
@@ -215,6 +330,7 @@ pub(crate) async fn run_indexer(
                             &mut writer,
                             &fields,
                             &agent_root,
+                            &mut state.persist,
                         );
                         let _ = response.send(result);
                     }
@@ -225,47 +341,66 @@ pub(crate) async fn run_indexer(
                             // LESSONS.md) — nothing to commit. A *missing* file
                             // does issue a delete: it retires the layer.
                             if outcome.touched {
-                                writer.commit().map_err(tantivy_to_index)?;
+                                state.persist.commit(&mut writer)?;
                             }
                             Ok(())
                         })();
                         let _ = response.send(result);
                     }
                     Some(IndexerMsg::PruneDecayedEvents { event_ids, response }) => {
-                        let result = (|| -> Result<(), IndexError> {
-                            for id in &event_ids {
-                                let term = tantivy::Term::from_field_text(fields.event_id, id.as_str());
-                                writer.delete_term(term);
+                        for id in &event_ids {
+                            let term = tantivy::Term::from_field_text(fields.event_id, id.as_str());
+                            writer.delete_term(term);
+                        }
+                        let _ = response.send(state.persist.commit(&mut writer));
+                    }
+                    Some(IndexerMsg::Resync { ack }) => {
+                        let result = resync(&mut writer, &fields, &mut clusters, &mut state);
+                        match ack {
+                            Some(ack) => {
+                                let _ = ack.send(result);
                             }
-                            writer.commit().map_err(tantivy_to_index)?;
-                            Ok(())
-                        })();
-                        let _ = response.send(result);
+                            None => {
+                                if let Err(e) = result {
+                                    tracing::warn!(error = ?e, "indexer resync failed");
+                                }
+                            }
+                        }
                     }
                     None => {
-                        // Channel closed: final flush, then exit.
-                        let _ = commit_and_persist(
-                            &mut writer,
-                            &persist.progress_path,
-                            &persist.ledger_path,
-                            &mut batch_ids,
-                            &mut batch_last_id,
-                            &mut last_committed_id,
-                        );
+                        // Channel closed: final commit, then exit.
+                        if state.persist.has_pending() {
+                            let _ = state.persist.commit(&mut writer);
+                        }
                         break;
                     }
                 }
             }
             _ = interval.tick() => {
-                if batch_last_id.is_some() {
-                    if let Err(e) = commit_and_persist(
-                        &mut writer,
-                        &persist.progress_path,
-                        &persist.ledger_path,
-                        &mut batch_ids,
-                        &mut batch_last_id,
-                        &mut last_committed_id,
-                    ) {
+                // A log replaced by rename, or one that shrank, can hold ids
+                // the index has never seen and lack ids it has.
+                #[cfg(unix)]
+                {
+                    let now = LogIdentity::at(&state.agent_root.episodic_jsonl()).ok().flatten();
+                    let changed = match (state.log, now) {
+                        (Some(was), Some(now)) => {
+                            (was.dev, was.ino) != (now.dev, now.ino) || now.len < was.len
+                        }
+                        (None, None) => false,
+                        _ => true,
+                    };
+                    if changed {
+                        // On success the pass records the identity it read;
+                        // on failure the old one stays, so the next tick retries.
+                        if let Err(e) = resync(&mut writer, &fields, &mut clusters, &mut state) {
+                            tracing::warn!(error = ?e, "indexer resync after a log change failed");
+                        }
+                    } else {
+                        state.log = now;
+                    }
+                }
+                if state.persist.has_pending() {
+                    if let Err(e) = state.persist.commit(&mut writer) {
                         tracing::warn!(error = ?e, "indexer cadence commit failed");
                     }
                 }
@@ -274,41 +409,33 @@ pub(crate) async fn run_indexer(
     }
 }
 
-pub(crate) fn commit_and_persist(
+/// The [`IndexerMsg::Resync`] handler: commit pending work (a reader cannot see
+/// uncommitted docs), read the log, recount clusters, run the coverage pass,
+/// and commit with every log id pending.
+fn resync(
     writer: &mut IndexWriter<TantivyDocument>,
-    progress_path: &Path,
-    ledger_path: &Path,
-    batch_ids: &mut Vec<String>,
-    batch_last_id: &mut Option<String>,
-    last_committed_id: &mut Option<String>,
-) -> Result<(), IndexError> {
-    if batch_last_id.is_none() {
-        return Ok(());
+    fields: &SchemaFields,
+    clusters: &mut HashMap<String, u32>,
+    state: &mut IndexerState,
+) -> Result<CoverageReport, IndexError> {
+    if state.persist.has_pending() {
+        state.persist.commit(writer)?;
     }
-    // Write protocol (WEG-42): Tantivy commit first, then watermark on disk.
-    // If we crash after commit but before write_progress, the next startup
-    // replay re-indexes at most one 5-second window (idempotent). If we wrote
-    // the watermark first and then crashed, those events would be silently
-    // skipped on recovery -- silent data loss.
-    writer.commit().map_err(tantivy_to_index)?;
-    // BZR-155: `index_doc` edges after the commit, before the watermark. On a
-    // ledger failure the batch stays pending (ids and `batch_last_id` intact),
-    // so the next commit retries it and no watermark covers an unrecorded id.
-    // The append is idempotent on (kind, from, to).
-    let edges: Vec<(Kind, String, String)> = batch_ids
-        .iter()
-        .map(|id| (Kind::IndexDoc, id.clone(), id.clone()))
-        .collect();
-    append_edges(ledger_path, &edges).map_err(|e| IndexError::Io(e.to_string()))?;
-    batch_ids.clear();
-    *last_committed_id = batch_last_id.take();
-    write_progress(
-        progress_path,
-        &IndexProgress {
-            last_indexed_id: last_committed_id.clone(),
-        },
-    )?;
-    Ok(())
+    let jsonl = state.agent_root.episodic_jsonl();
+    // Stat before the read: a change after this point is either in the read or
+    // seen by the next tick.
+    #[cfg(unix)]
+    let seen = LogIdentity::at(&jsonl).map_err(|e| IndexError::Io(e.to_string()))?;
+    let events = read_jsonl_events(&jsonl)?;
+    *clusters = count_clusters(&events);
+    let report = cover(writer, fields, &state.coverage, &events, clusters)?;
+    state.persist.cover_all(&events);
+    state.persist.commit(writer)?;
+    #[cfg(unix)]
+    {
+        state.log = seen;
+    }
+    Ok(report)
 }
 
 /// Implements the delete-and-re-add recurrence update triggered by
@@ -317,14 +444,14 @@ pub(crate) fn commit_and_persist(
 /// Algorithm:
 /// 1. Read `<agent_root>/.agent/semantic/recurrence_counts.json`.
 /// 2. Parse every line of the JSONL into a per-`skill_action` bucket.
-/// 3. For each cluster in the sidecar: delete every matching event by its
-///    `event_id` term, then re-add the event document with the sidecar's
-///    authoritative `count` as the `recurrence` FastField value.
-/// 4. Commit once after all clusters are processed.
+/// 3. For each cluster in the sidecar: upsert every matching event with the
+///    sidecar's authoritative `count` as the `recurrence` FastField value.
+/// 4. Commit once, through the persist step, after all clusters are processed.
 pub(crate) fn apply_recurrence_sidecar_inner(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
     agent_root: &AgentRoot,
+    persist: &mut IndexerPersist,
 ) -> Result<(), IndexError> {
     // 1. Read and parse the sidecar.
     let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
@@ -348,7 +475,7 @@ pub(crate) fn apply_recurrence_sidecar_inner(
             .push(learning);
     }
 
-    // 3. Delete-and-re-add for each cluster listed in the sidecar.
+    // 3. Upsert each event in a cluster the sidecar lists.
     for ClusterCount {
         skill_action,
         count,
@@ -359,18 +486,13 @@ pub(crate) fn apply_recurrence_sidecar_inner(
             None => continue,
         };
         for event in events {
-            // Delete the existing document by its exact event_id term.
-            let id_str = event.id.as_str().to_string();
-            let term = tantivy::Term::from_field_text(fields.event_id, &id_str);
-            writer.delete_term(term);
             // Re-add with the sidecar-authoritative recurrence count.
             add_document(writer, fields, event, *count)?;
         }
     }
 
     // 4. Commit once after all clusters.
-    writer.commit().map_err(tantivy_to_index)?;
-    Ok(())
+    persist.commit(writer)
 }
 
 /// What one semantic (LESSONS.md) indexing pass did.
@@ -428,7 +550,7 @@ pub(crate) fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) 
 /// cluster that stops recurring retires structurally with no expiry logic.
 ///
 /// Does **not** commit. The caller owns the commit so this pass can share the
-/// episodic replay's single commit inside [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open).
+/// coverage pass's single commit inside [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open).
 ///
 /// Exemplar lookup is the live episodic log only; a miss skips the lesson with
 /// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `apply_pin_unpin`
@@ -612,11 +734,14 @@ fn add_semantic_document(
 /// it, not any one harness.
 const SEMANTIC_SOURCE_HARNESS: &str = "dreamd";
 
-/// Map an [`AgentLearning`] onto a Tantivy document and add it to the writer.
+/// Upsert an [`AgentLearning`] as an episodic Tantivy document: delete every
+/// document with its `event_id` term, then add one. Every episodic add goes
+/// through here, so an id that is added twice before or after a commit still
+/// has one alive document (BZR-1236).
+///
 /// `layer` is always [`Layer::Episodic`]. Lesson documents are added by the
-/// semantic pass, not by this function.
-/// `event_id` is stored as `STRING | STORED` for targeted delete-and-re-add
-/// during recurrence sidecar application (WEG-45 / DR-205′).
+/// semantic pass, not by this function. `event_id` is `STRING | STORED`, so
+/// the delete matches exactly one id.
 pub(crate) fn add_document(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
@@ -639,6 +764,10 @@ pub(crate) fn add_document(
         fields.skill_action => learning.skill_action.clone(),
         fields.source_harness => learning.source_harness.clone(),
     );
+    writer.delete_term(tantivy::Term::from_field_text(
+        fields.event_id,
+        learning.id.as_str(),
+    ));
     writer.add_document(doc).map_err(tantivy_to_index)?;
     Ok(())
 }
@@ -667,6 +796,53 @@ pub(crate) fn write_semantic_pass_record(agent_root: &AgentRoot, record: &Semant
             error = %e,
             "could not record the semantic pass report; `dreamd doctor` will \
              report the previous pass until the next one lands"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::build_schema;
+    use chrono::DateTime;
+    use tantivy::collector::Count;
+    use tantivy::query::TermQuery;
+    use tantivy::schema::IndexRecordOption;
+    use tantivy::Index;
+
+    #[test]
+    fn add_document_replaces_an_existing_doc_for_the_id() {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        let id = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let learning = AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: EventId::parse(id).unwrap(),
+            timestamp: DateTime::from_timestamp(1_780_000_000, 0).unwrap(),
+            pain: 6.0,
+            importance: 6.0,
+            pinned: false,
+            skill_action: "rust::eh".to_string(),
+            source_harness: "test-harness".to_string(),
+            content: "indexed twice".to_string(),
+        };
+
+        add_document(&mut writer, &fields, &learning, 1).unwrap();
+        writer.commit().unwrap();
+        add_document(&mut writer, &fields, &learning, 2).unwrap();
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        let query = TermQuery::new(
+            tantivy::Term::from_field_text(fields.event_id, id),
+            IndexRecordOption::Basic,
+        );
+        let alive = reader.searcher().search(&query, &Count).unwrap();
+        assert_eq!(
+            alive, 1,
+            "a second add of the same id must replace the first"
         );
     }
 }

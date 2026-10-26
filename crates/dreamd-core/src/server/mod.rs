@@ -30,6 +30,8 @@
 //!   * [`tantivy_handle`] — Tantivy-backed `IndexHandle` (open/flush/close).
 //!   * [`indexer_actor`] — the writer-owning indexer task and `IndexerMsg`.
 //!   * [`index_freshness`] — the on-disk watermark and `assess_index_freshness`.
+//!   * [`index_coverage`] — the set difference between the log and the index
+//!     (`cover`, `assess_index_coverage`).
 //!   * `uds` — **`#[cfg(unix)]`** — bind/connect/cleanup for
 //!     `~/.agent/dreamd.sock` with `0600` perms and orphaned-socket recovery.
 //!   * `uds_server` — **`#[cfg(unix)]`** — the async `bind_api_socket` wrapper
@@ -51,6 +53,7 @@
 //! its `#[cfg(not(unix))]` arm.)
 
 pub mod http;
+pub mod index_coverage;
 pub mod index_freshness;
 pub mod index_map;
 pub mod indexer_actor;
@@ -69,6 +72,7 @@ pub mod uds_server;
 pub mod watch;
 
 pub use http::{build_router, AppState};
+pub use index_coverage::{assess_index_coverage, CoverageReport, IndexCoverage};
 pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,

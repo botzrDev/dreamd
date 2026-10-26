@@ -148,7 +148,7 @@ its append fd with `O_APPEND` and begins serving messages. Earlier versions
 moved bad lines to an `episodic/.corrupt-*.jsonl` sidecar (AILAB-163). dreamd
 no longer writes that file and does not read it.
 
-Plain readers (`episodic::read_all`: cluster selection, the index replay,
+Plain readers (`episodic::read_all`: cluster selection, the index coverage pass,
 `dreamd doctor`) apply the same scan but rewrite nothing: they skip a bad
 `\n`-terminated line and ignore a torn tail. The four log rewrites (the pin
 pass, decay, `dreamd forget` and `dreamd archive --force-unpin`) read through
