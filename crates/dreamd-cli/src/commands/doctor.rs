@@ -188,7 +188,8 @@ pub fn run(
                     writeln!(
                         out,
                         "episodic_log: torn tail ({} byte(s))  [WARNING: incomplete final \
-                         line with no trailing newline; truncated on daemon open]",
+                         line with no trailing newline; on daemon open it gets its newline \
+                         if it parses as a record, and is truncated otherwise]",
                         health.torn_tail_bytes,
                     )?;
                 }

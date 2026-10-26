@@ -25,11 +25,10 @@ placeholder the dream cycle neither reads nor writes). A dream cycle that
 promotes a cluster writes `semantic/LESSONS.md` and, beside it,
 `semantic/recurrence_counts.json` — dreamd's per-cluster counts, which the spec
 leaves to the implementation. `personal/` starts empty; dreamd reads
-`personal/PREFERENCES.md` for `GET /api/v1/preferences` if you create it. If
-startup recovery ever finds a malformed line in the log, it moves that line to
-`episodic/.corrupt-<YYYY-MM-DD>.jsonl` beside it. That quarantine file, like
-`semantic/recurrence_counts.json`, sits in the committed tree. `dreamd init`
-gitignores `/.agent/.dreamd/` only.
+`personal/PREFERENCES.md` for `GET /api/v1/preferences` if you create it.
+Startup recovery leaves a malformed line in the log where it is, and readers
+skip it. `semantic/recurrence_counts.json` sits in the committed tree.
+`dreamd init` gitignores `/.agent/.dreamd/` only.
 
 All four are plain UTF-8 text. `personal/` is the one directory with a hard
 privacy rule attached: its contents MUST NOT reach any LLM, local or remote,
@@ -42,9 +41,9 @@ exactly the one cycle it is passed to and is never persisted.
 
 An implementation may keep indexes, snapshots, and write-ahead logs under a
 hidden subfolder named for itself — `.<impl>/` — and that state MUST be
-gitignored. The recurrence sidecar and the quarantine files are not in that
-folder. dreamd uses `<project>/.agent/.dreamd/`, and `dreamd init` writes
-the ignore rule (`/.agent/.dreamd/`) for you:
+gitignored. The recurrence sidecar is not in that folder. dreamd uses
+`<project>/.agent/.dreamd/`, and `dreamd init` writes the ignore rule
+(`/.agent/.dreamd/`) for you:
 
 ```
 <project>/.agent/.dreamd/
@@ -103,10 +102,10 @@ would let a repo's git history leak the auth token. `dreamd service uninstall
 
 Everything dreamd adds beyond the four directories is either under the hidden
 `.dreamd/` folder above or is a checked-in sidecar:
-`semantic/recurrence_counts.json`, and after recovery
-`episodic/.corrupt-<YYYY-MM-DD>.jsonl`. None of it is part of the spec's required
-layout, a second implementation is free to ignore all of it, and a conformance
-claim must not depend on it.
+`semantic/recurrence_counts.json`. (Earlier versions also wrote an
+`episodic/.corrupt-*.jsonl` sidecar after recovery; dreamd no longer writes it.)
+None of it is part of the spec's required layout, a second implementation is
+free to ignore all of it, and a conformance claim must not depend on it.
 
 The reference implementation's path helpers also name `skills/` and
 `protocols/` under `.agent/`, but `dreamd init` does not create them, nothing

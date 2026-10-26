@@ -277,7 +277,6 @@ fn pin_pass_keeps_skipped_lines() {
 /// Open-time recovery must not remove a line the reader merely skips. A
 /// lowercase id is a valid ULID this reader does not accept.
 #[test]
-#[ignore = "BZR-1235: recovery excises SPEC-skippable lines"]
 fn open_keeps_a_record_this_reader_skips() {
     const UPPER: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FA1";
     const LOWER: &str = "evt_01arz3ndektsv4rrffq69g5fa1";
@@ -316,7 +315,6 @@ fn open_keeps_a_record_this_reader_skips() {
 /// A final record that parses but lacks its `\n` is complete. Recovery must
 /// add the newline, not truncate the record.
 #[test]
-#[ignore = "BZR-1235: valid unterminated final record truncated"]
 fn open_keeps_a_valid_final_record_without_newline() {
     let dir = tempfile::tempdir().unwrap();
     let root = AgentRoot::new(dir.path());

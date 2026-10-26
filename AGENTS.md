@@ -168,7 +168,7 @@ Locked 2026-10-24:
 2. **BZR-1231** — on `main` (`06c82eb`). Deleted `MemoryCoordinatorMsg::Forget`, `handle_forget`, `forget_index_phases` and `CoordinatorError::Forget`, with the one test that sent the message. Corrected the docs that called it the production route (`forget.rs`, ARCHITECTURE §3, `docs/architecture.md`, `docs/architecture/durability.md`). `dreamd forget` is unchanged: in-process, and it refuses while a daemon is live. Spec: `assignments/BZR-1231.v2.md`.
 3. **BZR-1232** — on `main` (`17e8382`). Project writer lock (`writer_lock.rs`, `.agent/.dreamd/writer.lock`, std `File::try_lock`, stamp `{"pid","kind"}`) and one acquisition sequence for every writer (lock → legacy index-lock probe → reset stale `in_progress` → WAL recover → index → coordinator). `server/project_runtime.rs` replaces the daemon's `index_map` / `supervisor_map` fields with one `AppState::runtimes` map; `supervisor_map.rs` is deleted. Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` and `DREAMD_SOCK`-elsewhere CLI writers as second writers, recovery that only watch runs, and idle eviction of the in-process MCP index. Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238): a registered root with no `.agent/` now gets HTTP 500 instead of a silently scaffolded store, and the CLI writers refuse while an in-process `dreamd mcp` holds the lock. The `cfg(not(unix))` lock paths were never compiled; about seven of the new tests will fail on the (already red, continue-on-error) Windows job. Spec: `assignments/BZR-1232.v2.md` (Amendment 1 fixed four stale docs).
 4. **BZR-1233** — on `main` (`f7b00fa`). Open-time recovery runs on its own plain read/write fd, which `open_at` closes before it opens the append fd with `O_APPEND`. On Unix a stat check (device, inode, length) runs before each append (`ensure_live_log`) and after it (`confirm_landed`, which appends the line again if the file was replaced). The dream cycle reopens the fd on every exit path. `id_minter::IdMinter` mints strictly increasing ids, seeded from the log, and skips ids more than 24 h ahead of the clock. `Ord` on `EventId`. R1 is un-ignored. The R4 and V2 tests are new (BZR-1230 never wrote them). Windows gets `O_APPEND` only. A reopen after an outside change logs a warning and leaves a `BZR-1236` marker where `IndexerMsg::Resync` goes. ulid 1.2.1's `Ulid::from_string` wraps an overflowing first character instead of rejecting it, so the seed checks `0`–`7` itself. The dev measured the stripped `dreamd` at 20,719,744 bytes. Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238): an append after a `git checkout` / `merge` / `pull` replaced the log now lands in the new file instead of being lost; ids are strictly increasing per coordinator; a foreign final line without `\n` gets one before the next append. Spec: `assignments/BZR-1233.v2.md`.
-5. **BZR-1234** — signed off 2026-10-26; lands in the commit after `f7b00fa`. New helpers in `episodic`:
+5. **BZR-1234** — on `main` (`18d5767`). New helpers in `episodic`:
    - `raw_lines` / `read_raw` read every line with its bytes. `scan` and both of them share one line loop, `lines()`.
    - `patch_lines(raw, pins, drops)` builds the new log. A flipped line is rebuilt from an ordered `RawValue` member list, not `serde_json::Value` (drift entry `jsonl-rewrites-go-through-patch-lines`).
 
@@ -181,7 +181,20 @@ Locked 2026-10-24:
    - `archive --force-unpin <id>` unpins every line with that id, not only the first.
 
    Spec: `assignments/BZR-1234.v2.md`.
-6. **BZR-1235** — skip-only open-time recovery. No in-place rewrite and no `.corrupt-*` sidecar. A valid final record without `\n` gets the newline instead of a truncate.
+6. **BZR-1235** — signed off 2026-10-26; lands in the commit after `18d5767`. Open-time `episodic::recover` is skip-only:
+   - every `\n`-terminated line stays in the log, skipped ones included, and one `warn!` gives the count and the first line number;
+   - a torn final line that parses as a record gets `\n` and is returned with the others, so the `IdMinter` seeds from it; any other fragment is `set_len`'d away;
+   - `parse_record` is the one parse rule `lines()` and `recover` share, and `lines()` still yields `Torn`.
+
+   `recover_at`, `quarantine_path`, `append_quarantine`, `ScanSkip.raw` and the AILAB-163 tests 5a, 5b, 5d and 5e are deleted. V7 and V15 are un-ignored. Docs changed: ARCHITECTURE §1 and its durability table, `durability.md`, `docs/spec/layout.md`, the crash-recovery example, and doctor's torn-tail warning. Stripped `dreamd` is 20,737,600 bytes, as measured by the dev.
+
+   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238; the AC's `[Unreleased]` bullet was deferred there):
+   - open-time recovery no longer moves bad lines to `episodic/.corrupt-<date>.jsonl` or rewrites the log; a bad line stays where it is, readers skip it, and `dreamd doctor` lists it;
+   - a final record that lacks only its `\n` gets the newline instead of being truncated;
+   - every open logs one `WARN` while skipped lines remain, where the quarantine warned once and left a clean log;
+   - sidecars written by earlier versions are left in place and never read.
+
+   Spec: `assignments/BZR-1235.v2.md`.
 7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender.
 8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
 9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
@@ -433,9 +446,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### weg378-skip-midfile-halt-torn-tail
 
-- **Rule:** Episodic JSONL policy is SPEC §88 / WEG-378: skip `\n`-terminated blank or unparseable mid-file lines; halt only a no-`\n` torn tail (`episodic::scan` / `read_all` / `recover`). Halt-at-blank is a regression.
+- **Rule:** Episodic JSONL policy is SPEC §88 / WEG-378: skip `\n`-terminated blank or unparseable mid-file lines; halt only a no-`\n` torn tail (`episodic::scan` / `read_all` / `read_raw`). Halt-at-blank is a regression. Open-time `recover` uses the same scan and, since BZR-1235, ends a torn tail that parses as a record with `\n` rather than truncating it.
 - **Why:** AILAB-166 Linear AC still said unify to halt-at-blank, but `read_all` + consolidation/decay/indexer already share that skip policy. Re-queuing 166 would have undone `read_all_skips_blank_midfile_line`. Closed as shipped 2026-08-18.
-- **How to apply:** Before queuing a JSONL-reader ticket, grep `fn read_all` and the skip tests. Quarantine-to-sidecar is AILAB-163 (still open), not a reader-unification ticket.
+- **How to apply:** Before queuing a JSONL-reader ticket, grep `fn read_all` and the skip tests. AILAB-163's quarantine-to-sidecar shipped and BZR-1235 removed it (`ailab-163-excise-skips-not-suffix`); do not bring it back as a reader change.
 - **Cross-refs:** `jsonl-torn-tail-validation`, `linear-todo-can-already-be-on-main`
 
 ### ailab-162-drain-not-sigterm
@@ -657,16 +670,21 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### ailab-163-excise-skips-not-suffix
 
-- **Rule:** AILAB-163 quarantines **only** mid-file blank/malformed `\n`-terminated lines into `.corrupt-YYYY-MM-DD.jsonl` and rewrites the live JSONL to keep every well-formed record. Do not quarantine the suffix from the first anomaly through EOF. Torn no-`\n` tails still truncate in place. Implement `assignments/AILAB-163.v2.md`, not Linear’s silent-truncate story.
-- **Why:** By `9ddd4b5`, WEG-378/`episodic::scan` already skips mid-file corruption and `recover` only `set_len`s torn tails (`recover_leaves_midfile_corruption_in_place`). Linear AC and the 2026-08-27 queue Q01 blurb still claim silent truncate. Suffix quarantine would regress “neither good lost.”
-- **How to apply:** Change `recover` to take the JSONL path; in-place fd rewrite only (no `rewrite_atomic`/`rename`). Since BZR-1233 that rewrite runs on its own plain read/write fd, closed before the coordinator opens its `O_APPEND` fd. BZR-1235 makes open-time recovery skip-only. Sidecar is a sibling `.corrupt-<date>.jsonl`, same-day append, `warn!` on quarantine. Call site: `MemoryCoordinator::open_at`.
-- **Cross-refs:** `weg378-skip-midfile-halt-torn-tail`, `jsonl-torn-tail-validation`, `v2-beats-linear-ac`, `linear-todo-can-already-be-on-main`
+- **Rule:** **Superseded by BZR-1235.** Open-time `episodic::recover` does not quarantine and does not rewrite. Every `\n`-terminated line stays in the log, skipped ones included. A torn final line gets `\n` when it parses as a record and is truncated otherwise. Do not bring back the `.corrupt-<date>.jsonl` sidecar or an in-place rewrite, and do not delete or read the sidecars earlier versions left in users' trees.
+- **Why:** AILAB-163 (shipped in 0.1.1) moved mid-file bad lines to the sidecar and re-serialized the survivors in place. That removed lines SPEC §88 only asks readers to skip, such as a lowercase ULID (audit V7), and dropped unknown fields from every record. Its torn-tail path also truncated a final record that lacked only its `\n` (V15). AILAB-163's own rule, never quarantine the suffix from the first anomaly, survives in a stronger form: recovery removes no complete line at all.
+- **How to apply:**
+  - The repros `open_keeps_a_record_this_reader_skips` and `open_keeps_a_valid_final_record_without_newline` (`tests/bzr1230_audit_defects.rs`) guard this.
+  - `recover`'s only writes are `set_len(clean_len)` or one `\n`, each followed by `sync_data`. They go to the plain fd that `open_at` closes before it opens the `O_APPEND` fd.
+  - The torn-tail parse is `parse_record`, the rule `lines()` uses. Readers still never treat an unterminated line as a record.
+  - The `[0.1.1]` CHANGELOG bullet that describes the sidecar stays put (`changelog-historical-entries-stay-put`).
+  - Spec: `assignments/BZR-1235.v2.md`.
+- **Cross-refs:** `weg378-skip-midfile-halt-torn-tail`, `jsonl-torn-tail-validation`, `jsonl-rewrites-go-through-patch-lines`, `changelog-historical-entries-stay-put`, `v2-beats-linear-ac`, `linear-todo-can-already-be-on-main`
 
 ### wal-guarded-replace-owns-tmp-path
 
 - **Rule:** Dream-cycle destructive replaces go through `wal::guarded_replace`. Callers never construct `WalIntent.temp_file_path`. The tmp path is the `&Path` `write_atomic_with_hook` passes into its hook after fsync, not a second `with_extension("tmp")` at the call site.
 - **Why:** AILAB-164 Linear still cited `consolidation.rs:226` and “three state.json getters.” Live pin/decay thread a closure through `rewrite_atomic` and recompute the tmp path; `write_selected_lesson` appends `ReplaceSemanticMemory` *before* `write_lessons_file` (intent can land with no tmp). AILAB-167 already owns the typed `state.json` writer; only `read_last_cycle_status` / `read_cycle_started_at` remain as `Value` parsers.
-- **How to apply:** Implement `assignments/AILAB-164.v2.md`. `apply_pin_unpin` / `run_decay_pruner` / `forget::cascade` use `episodic::rewrite_guarded` (Prune), which since BZR-1234 takes `patch_lines` bytes, not records. `write_selected_lesson` uses `guarded_replace` + `render_lessons_file` (Replace), not `write_lessons_file`. `archive.rs` keeps hook-free `rewrite_atomic`. `recover` must not call this seam (it rewrites in place on its own fd). Readers wrap `read_daemon_state`; do not add a third writer. Recovery tests drive `guarded_replace_crash_after_intent`, not hand-written WAL JSON.
+- **How to apply:** Implement `assignments/AILAB-164.v2.md`. `apply_pin_unpin` / `run_decay_pruner` / `forget::cascade` use `episodic::rewrite_guarded` (Prune), which since BZR-1234 takes `patch_lines` bytes, not records. `write_selected_lesson` uses `guarded_replace` + `render_lessons_file` (Replace), not `write_lessons_file`. `archive.rs` keeps hook-free `rewrite_atomic`. `recover` must not call this seam (since BZR-1235 its only writes are a `set_len` or one `\n` on its own fd). Readers wrap `read_daemon_state`; do not add a third writer. Recovery tests drive `guarded_replace_crash_after_intent`, not hand-written WAL JSON.
 - **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`, `init-is-a-create-only-statejson-writer`, `ailab-163-excise-skips-not-suffix`, `v2-beats-linear-ac`, `linear-folded-ac-may-already-be-in-the-blocker`
 
 ### tracelayer-default-span-is-debug
@@ -989,6 +1007,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - `docs/architecture.md:504-512` ("an operator cleanup");
   - `examples/crash-recovery/README.md:21` (recovery runs only at watch start or on a lazy open);
   - two handler comments naming the deleted `index_map` (`recall.rs`, `salience.rs`).
+
+  Recurred on BZR-1235, which stopped recovery from truncating a valid final record. The pre-flight grepped for doctor's "truncated on daemon open". It missed `scan`'s rustdoc in the same file, which said `clean_len` stops "so [`recover`] can truncate". The dev caught it.
 - **How to apply:**
   - List the old behaviour's observable effects, then grep `docs/`, `examples/`, `README.md`, `GUIDE.md` and comments next to the changed call sites for each one.
   - A §4 grep scoped to one file (`state.rs`) does not prove a removed name is gone from its neighbours.
@@ -1016,6 +1036,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - For each mutation row, ask whether anything after the disabled step repairs the same fault, and if so, name a test of what only that step does.
   - Run PM-side mutants in a copy of the repo, never in the dev's tree. Give each mutant its own `CARGO_TARGET_DIR`, or mutate one copy at a time. A second copy built into the same target dir ran without its own mutation.
   - Do not run `cargo test --workspace` while another build is compiling. `weg12_concurrency_torture`'s 10 s small-payload budget failed at 28 s under that load and passed in 2–3 s alone (WEG-511 is the same flake class).
+  - Describe each mutant by the rule it changes, and check that it compiles. BZR-1235's M4 said to parse the torn tail with `from_slice::<serde_json::Value>`, which cannot produce the `AgentLearning` that arm pushes. The dev matched on `Value` and pushed only when `parse_record` succeeded, so the mutant still accepted any JSON.
 - **Cross-refs:** `un-ignore-ac-can-name-tests-never-written`, `gated-consumer-is-what-makes-a-full-channel-test-real`
 
 ### jsonl-rewrites-go-through-patch-lines
@@ -1030,7 +1051,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - A flipped line is rebuilt from `OrderedObject` (ordered `RawValue` members), so every other member keeps its position and bytes.
   - A rewrite that changes nothing returns before any write: no rename, no WAL intent.
   - BZR-1239 (staged outputs) and BZR-1240 (`plan_cycle`) build on these helpers.
-  - `recover` / `recover_at` still re-serialize on open; that is BZR-1235's to remove.
+  - Since BZR-1235 `recover` rewrites nothing. It truncates a torn fragment or ends a final record with `\n` (`ailab-163-excise-skips-not-suffix`).
   - The `read_all` readers that rewrite nothing stay on `read_all`.
   - When an AC lists the call sites of a defect, grep for every writer of the path (`rewrite_atomic|rewrite_guarded|write_atomic`) before trusting the list.
 - **Cross-refs:** `wal-guarded-replace-owns-tmp-path`, `ailab-163-excise-skips-not-suffix`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `weg378-skip-midfile-halt-torn-tail`

@@ -200,9 +200,9 @@ impl MemoryCoordinator {
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Recovery rewrites from offset 0, which `O_APPEND` would send to the
-        // end, so it runs on its own plain fd, closed at the end of this block.
-        // `set_len` alone would work on either.
+        // Recovery runs on its own plain read/write fd, closed at the end of
+        // this block, before the append fd opens. It only truncates a torn
+        // fragment or ends a final record with `\n`.
         let records = {
             let mut file = OpenOptions::new()
                 .read(true)
@@ -941,6 +941,33 @@ mod tests {
             minted > seeded,
             "{minted} must sort above the seeded {seeded}"
         );
+    }
+
+    #[tokio::test]
+    async fn minted_id_is_above_a_terminated_final_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let seeded = id_from_now(std::time::Duration::from_secs(3600), true);
+        let line = jsonl_line(&learning_with(
+            &seeded,
+            "rust::seed",
+            "an hour ahead, no newline",
+            CYCLE_NOW_SEC,
+        ));
+        std::fs::write(root.episodic_jsonl(), line.trim_end_matches('\n')).unwrap();
+
+        let (tx, handle) = spawn_coordinator(root.project_root(), &root.episodic_jsonl()).await;
+        let minted = append_via(&tx, sample_learning()).await;
+        shutdown(tx, handle).await;
+
+        assert!(
+            minted > seeded,
+            "{minted} must sort above the seeded {seeded}"
+        );
+        let records = episodic::read_all(&root.episodic_jsonl()).unwrap();
+        let ids: Vec<&EventId> = records.iter().map(|r| &r.id).collect();
+        assert_eq!(ids, vec![&seeded, &minted], "both records are in the log");
     }
 
     #[cfg(unix)]

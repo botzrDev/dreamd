@@ -124,7 +124,7 @@ records for one logical event. The trade is intentional: the alternative
 (a sidecar dedup journal) would multiply the IOPS per write and has not been
 built.
 
-## Startup recovery: truncate the torn tail, quarantine mid-file damage
+## Startup recovery: end or truncate the torn tail, leave mid-file damage in place
 
 At construction (`MemoryCoordinator::open_at`) the coordinator calls
 `episodic::recover`, which scans the existing JSONL from offset 0 with the one
@@ -132,22 +132,21 @@ shared scan policy (`episodic::scan`, SPEC §"Corrupt input"). Three cases:
 
 - Every line parses and the file ends with `\n` — clean state, nothing is
   written.
-- Trailing bytes with no terminating `\n` (a torn tail) and no other damage —
-  `set_len` back to the end of the last complete line. No sidecar.
+- Trailing bytes with no terminating `\n` (a torn tail). If they parse as an
+  `AgentLearning`, the record was complete except for its newline: recovery
+  appends `\n` and keeps it. Otherwise `set_len` cuts the file back to the end
+  of the last complete line.
 - A `\n`-terminated line that is blank or does **not** parse as
-  `AgentLearning` — the raw line is appended to
-  `episodic/.corrupt-<YYYY-MM-DD>.jsonl` beside the log (same-day runs append
-  to the same sidecar), and the live file is rewritten **in place, on the
-  coordinator's own fd** to the well-formed records. Valid records on both
-  sides of the bad line survive; a torn tail in the same file is dropped in
-  the same rewrite. A `WARN` names the sidecar and the counts (AILAB-163).
+  `AgentLearning` stays where it is. Readers skip it (SPEC §88),
+  `dreamd doctor` lists its line number, and recovery logs one `WARN` with
+  the count.
 
-Recovery never truncates from the first bad line onward — that would discard
-good records after it. It runs on a plain read/write fd, because its in-place
-rewrite writes from offset 0 and `O_APPEND` would send those writes to the
-end. After either write the file is `sync_data`'d so the recovery itself is
-durable across a follow-up crash. The coordinator then closes that fd, opens
-its append fd with `O_APPEND`, and begins serving messages.
+Recovery never rewrites the file and never truncates a complete line. Its only
+writes are that `set_len` or that one `\n`, each followed by `sync_data`. It
+runs on a plain read/write fd, which the coordinator closes before it opens
+its append fd with `O_APPEND` and begins serving messages. Earlier versions
+moved bad lines to an `episodic/.corrupt-*.jsonl` sidecar (AILAB-163). dreamd
+no longer writes that file and does not read it.
 
 Plain readers (`episodic::read_all`: cluster selection, the index replay,
 `dreamd doctor`) apply the same scan but rewrite nothing: they skip a bad
@@ -158,7 +157,8 @@ They write unchanged lines back byte-identical, keep skipped lines and a torn
 final line verbatim, and do not rewrite the file when nothing changes.
 
 This is what makes a `kill -9` mid-`write_all` safe: even if a partial buffer
-landed on disk, the next process start prunes it before any new append.
+landed on disk, the next process start truncates it, or ends it with `\n` when
+the whole record landed, before any new append.
 
 ## Test coverage in this crate
 
