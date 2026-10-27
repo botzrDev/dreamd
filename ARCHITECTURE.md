@@ -152,13 +152,13 @@ Indexing is incremental (5-second commit cadence), never a nightly rebuild.
 
 ### 3. Dream cycle WAL
 
-A cycle stages every output under `.dreamd/stage/<cycle>/` and fsyncs it: the JSONL, `LESSONS.md` (or its unlink), the recurrence sidecar, the day's decay archive and the autosnap ref. One write of `dream_in_progress.wal` — `{"format":"redo/1","renames":[…],"unlinks":[…]}` — is the commit point. The renames and unlinks follow, then a directory fsync, the provenance edges, and the WAL's deletion. When a writer takes the project lock, a redo WAL rolls forward, a legacy `intents` WAL keeps its old meaning, and any stage directory is wiped. `.agent/` is either pre- or post-cycle, never mid-cycle.
+A cycle reads the log and `LESSONS.md` once and plans every output before it stages anything (`plan::plan_cycle`, a pure function). It then stages the plan under `.dreamd/stage/<cycle>/` and fsyncs it: the JSONL, `LESSONS.md` (or its unlink), the recurrence sidecar, the day's decay archive and the autosnap ref. One write of `dream_in_progress.wal` — `{"format":"redo/1","renames":[…],"unlinks":[…],"edges":[…]}` — is the commit point. The renames and unlinks follow, then a directory fsync, the append of the WAL's provenance edges (the plan's, carried by the WAL), and the WAL's deletion. When a writer takes the project lock, a redo WAL rolls forward, a legacy `intents` WAL keeps its old meaning, and any stage directory is wiped. `.agent/` is either pre- or post-cycle, never mid-cycle.
 
-`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases`), then the index and autobiography phases. The filesystem phases stage, then commit, then apply, in this order: `begin_cycle` (status `in_progress`, an empty stage), the autosnap ref (`snapshot::stage_autosnap`; the content-addressed object under `.dreamd/branches/objects/` is written directly), consolidation (including the optional LLM call that composes the lesson body — awaited while the cycle stages, with a deterministic fallback), decay, then `commit_cycle`, which writes the redo WAL and applies it through `roll_forward`, the same code recovery runs. A `state.json` left at `in_progress` with no WAL is reset to `failed` when the next writer takes the project lock; with a WAL, that writer rolls it forward.
+`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases`), then the index and autobiography phases. The filesystem phases stage, then commit, then apply, in this order: `begin_cycle` (status `in_progress`, an empty stage), the autosnap ref (`snapshot::stage_autosnap`; the content-addressed object under `.dreamd/branches/objects/` is written directly), the one read of the log and `LESSONS.md`, the optional LLM call that composes the lesson body (awaited inside the open cycle, with a deterministic fallback), the plan of consolidation and decay together (`plan::plan_cycle`), `Stage::apply_plan`, then `commit_cycle`, which writes the redo WAL and applies it through `roll_forward`, the same code recovery runs. A `state.json` left at `in_progress` with no WAL is reset to `failed` when the next writer takes the project lock; with a WAL, that writer rolls it forward.
 
-`dreamd forget` (`forget::cascade`) reuses the same stage and redo WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
+`dreamd forget` (`forget::cascade`) reuses the same plan shape (`plan::plan_forget`), stage and redo WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
 
-**Scope:** the redo WAL covers the JSONL, `LESSONS.md`, the recurrence sidecar, the decay archive and the autosnap ref. Provenance edges are re-derived from those files after the renames. Tantivy index mutations are **not** WAL-protected.
+**Scope:** the redo WAL covers the JSONL, `LESSONS.md`, the recurrence sidecar, the decay archive and the autosnap ref. The provenance edges are the plan's: the WAL carries them, and the commit appends them after the renames, so a rolled-forward cycle appends the same edges. Tantivy index mutations are **not** WAL-protected.
 
 ```mermaid
 sequenceDiagram
@@ -172,7 +172,7 @@ sequenceDiagram
     CLI->>WAL: write redo WAL (commit point)
     WAL->>FS: rename + unlink
     WAL->>FS: fsync dirs
-    WAL->>FS: record provenance
+    WAL->>FS: append the WAL's edges
     WAL->>WAL: delete WAL, mark complete
 ```
 

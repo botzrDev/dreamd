@@ -436,9 +436,10 @@ pub fn append(file: &mut File, learning: &AgentLearning) -> Result<usize, Episod
 /// file's bytes, with no WAL involvement.
 ///
 /// For one-shot rewrites outside a dream cycle — `dreamd archive --force-unpin`.
-/// A cycle never calls this: the pin pass, the decay pruner and
-/// `forget::cascade` stage the log with [`patch_lines`] output
-/// ([`crate::stage::Stage::put`]), and the cycle's redo WAL renames it in.
+/// A cycle never calls this: a dream cycle's or a forget's plan
+/// ([`crate::plan`]) builds the log with [`patch_lines`],
+/// [`crate::stage::Stage::apply_plan`] stages it, and the cycle's redo WAL
+/// renames it in.
 ///
 /// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
 /// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
@@ -781,27 +782,26 @@ mod tests {
     //
     // The whole point of WEG-378. On the `dreamd dream` CLI path there is no
     // coordinator to pre-truncate a torn tail, so a normal post-SIGKILL torn
-    // final line used to abort `run_decay_pruner` with `DecayError::Json`.
-    // Now the shared `episodic::read_all` scan tolerates it.
+    // final line used to abort the decay pass with a JSON error. Now the
+    // shared line scan tolerates it, and `plan_cycle` plans over those lines.
     #[test]
     fn cli_path_torn_tail_decay_cycle_succeeds() {
-        let dir = unique_tmpdir("cli-torn");
-        let _g = DirGuard(dir.clone());
-        let root = crate::layout::AgentRoot::new(&dir);
-        let jsonl = root.episodic_jsonl();
-        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
-
         // Two young (never-decay) records + a torn final line.
         let a = make_learning('A', "one");
         let b = make_learning('B', "two");
         let mut bytes = line_of(&a);
         bytes.extend_from_slice(&line_of(&b));
         bytes.extend_from_slice(b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_TOR"); // torn
-        std::fs::write(&jsonl, &bytes).unwrap();
 
-        let mut stage = crate::stage::Stage::create(&root, "dream-1").unwrap();
-        let result = crate::decay::run_decay_pruner(&mut stage, NOW_SEC, "2026-07-03");
-        let outcome = result.expect("torn tail must not abort the CLI dream path");
+        let result = crate::plan::plan_cycle(
+            &raw_lines(&bytes),
+            None,
+            NOW_SEC,
+            crate::consolidation::LessonBodySource::Deterministic,
+        );
+        let outcome = result
+            .expect("torn tail must not abort the CLI dream path")
+            .decay_result();
         assert_eq!(outcome.kept_count, 2, "both complete records kept");
         assert!(outcome.decayed_ids.is_empty(), "young records do not decay");
     }

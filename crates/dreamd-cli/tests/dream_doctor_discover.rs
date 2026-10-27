@@ -22,9 +22,10 @@ fn dreamd_bin() -> &'static str {
 fn dream_from_subdir_operates_on_parent_store() {
     let tmp = tempfile::tempdir().unwrap();
 
-    // Minimal runnable no-op store at the project root: `run_decay_pruner`
-    // fsyncs the episodic dir, so it must exist; an empty JSONL makes the
-    // cluster engine promote nothing and commit cleanly.
+    // Minimal runnable no-op store at the project root. The log rewrite is the
+    // cycle's plan (`plan_cycle`), committed with the cycle; an empty JSONL
+    // makes it promote nothing and rewrite nothing, so the cycle commits
+    // cleanly.
     let episodic = tmp.path().join(".agent/episodic");
     std::fs::create_dir_all(&episodic).unwrap();
     std::fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();

@@ -2,30 +2,28 @@
 //!
 //! `run_cluster_engine` reads the episodic JSONL, builds a prefix tree over
 //! `skill_action` (split on `::`), applies deepest-wins disambiguation, and
-//! writes `semantic/recurrence_counts.json`. A dream cycle uses its staged twin,
-//! `stage_cluster_engine`, which reads and writes through the cycle's
-//! [`Stage`].
+//! writes `semantic/recurrence_counts.json`. A dream cycle computes the same
+//! counts inside [`crate::plan::plan_cycle`] ([`compute_promoted_clusters`],
+//! [`sidecar_bytes`]) and stages them with the cycle's other outputs.
 //!
-//! `apply_pin_unpin` stages `AGENT_LEARNINGS.jsonl` with `pinned` set on IDs
-//! cited in the staged `LESSONS.md` **unioned** with any `pinned` flag an
-//! external writer already set — the cycle never unsets a pin it did not
-//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after the cycle stages
-//! `LESSONS.md`, before `commit_cycle`; stages nothing if `LESSONS.md` is
-//! absent.
+//! [`cited_pins`] is the pin rule: every unpinned record a `LESSONS.md` cites
+//! is pinned, **unioned** with any `pinned` flag an external writer already
+//! set — the cycle never unsets a pin it did not itself set (SPEC §67 /
+//! WEG-426). [`crate::plan::plan_cycle`] applies it to the lesson it plans,
+//! and pins nothing when no lesson is written.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use dreamd_protocol::{AgentLearning, EventId};
 
-use crate::episodic::{self, EpisodicError};
+use crate::episodic::{self, EpisodicError, RawLine};
 use crate::index::{ClusterCount, RecurrenceSidecar};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
-use crate::lessons::{self, Lesson, LessonsFile};
+use crate::lessons::{Lesson, LessonsFile};
 use crate::provenance::Ledger;
 use crate::salience::{salience_with_context, RecurrenceContext};
-use crate::stage::Stage;
 use crate::wal::{self, CycleKind, WalError};
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +118,8 @@ fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
 /// If the JSONL is absent or empty, returns `Ok(ClusterOutput { promoted: vec![] })`.
 ///
 /// This writes the live sidecar directly, for tests and doctor's fixtures. A
-/// dream cycle and `forget::cascade` use [`stage_cluster_engine`] instead.
+/// dream cycle and `forget::cascade` plan the sidecar instead
+/// ([`crate::plan`]) and stage it.
 pub fn run_cluster_engine(
     agent_root: &AgentRoot,
     now_sec: i64,
@@ -140,33 +139,8 @@ pub fn run_cluster_engine(
     Ok(ClusterOutput { promoted })
 }
 
-/// [`run_cluster_engine`] for a cycle: read the log through `stage`, and stage
-/// the sidecar rather than write it. An empty log stages nothing.
-pub fn stage_cluster_engine(
-    stage: &mut Stage,
-    now_sec: i64,
-) -> Result<ClusterOutput, ConsolidationError> {
-    let jsonl = stage.agent_root().episodic_jsonl();
-    let events: Vec<AgentLearning> = episodic::raw_lines(&stage.read(&jsonl)?.unwrap_or_default())
-        .into_iter()
-        .filter_map(|line| line.parsed)
-        .collect();
-    if events.is_empty() {
-        return Ok(ClusterOutput { promoted: vec![] });
-    }
-
-    let promoted = compute_promoted_clusters(&events, now_sec);
-    let sidecar_path = stage
-        .agent_root()
-        .semantic_dir()
-        .join("recurrence_counts.json");
-    stage.put(&sidecar_path, &sidecar_bytes(&promoted)?)?;
-
-    Ok(ClusterOutput { promoted })
-}
-
 /// The `recurrence_counts.json` bytes for `promoted`: one count per promoted
-/// cluster. Shared by [`run_cluster_engine`] and [`stage_cluster_engine`].
+/// cluster. Shared by [`run_cluster_engine`] and [`crate::plan`].
 pub(crate) fn sidecar_bytes(promoted: &[PromotedCluster]) -> Result<Vec<u8>, ConsolidationError> {
     let sidecar = RecurrenceSidecar {
         schema_version: "1.0".to_string(),
@@ -256,56 +230,32 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
     promoted
 }
 
-/// Set `pinned` on episodic entries cited in the staged `LESSONS.md`,
-/// **unioned** with any `pinned` flag an external writer already set — the cycle
-/// never unsets a pin it did not itself set (SPEC §67 / WEG-426).
+/// The pins `file` asks for: every record in `raw` that is not pinned and
+/// whose id is a [`Lesson::id`] or in the file-level `citations` (AILAB-200)
+/// maps to `true`.
 ///
-/// "Cited" means every [`Lesson::id`] **and** every id in the file-level
-/// `citations` frontmatter (AILAB-200).
-///
-/// Called by WEG-61 (DR-308) after [`write_selected_lesson`] has staged
-/// `LESSONS.md`. Reads both files through `stage`, so it sees this cycle's
-/// lesson, not the live one. Stages nothing when no record's `pinned` changes,
-/// including when `LESSONS.md` or the JSONL is absent. Every line it does not
-/// flip keeps its bytes ([`episodic::patch_lines`]).
-pub fn apply_pin_unpin(stage: &mut Stage) -> Result<(), ConsolidationError> {
-    let lessons_path = stage.agent_root().lessons_md();
-    let cited_ids: HashSet<String> = if let Some(bytes) = stage.read(&lessons_path)? {
-        let raw = String::from_utf8(bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let lessons_file = lessons::parse_lessons_file(&raw)?;
-        // Union, not either-or (AILAB-200). `Lesson.id` is the exemplar the
-        // lesson is filed under; `citations` is every cluster member the model
-        // said it drew on. Both must outlive decay or the lesson outlives its
-        // evidence. A pre-AILAB-200 file has no `citations` key, so the union
-        // collapses to today's exemplar-only set.
-        lessons_file
-            .lessons
-            .iter()
-            .map(|l| l.id.clone())
-            .chain(lessons_file.citations.iter().cloned())
-            .collect()
-    } else {
-        HashSet::new()
-    };
-
-    let jsonl_path = stage.agent_root().episodic_jsonl();
-    let raw = episodic::raw_lines(&stage.read(&jsonl_path)?.unwrap_or_default());
-
-    // Union, never clear: only an unpinned cited record flips.
-    let pins: HashMap<EventId, bool> = raw
+/// Union only: the result never holds `false`, so a cycle can pin an event it
+/// cites but never clears a pin it did not set (SPEC §67 / WEG-426). A record
+/// that is already pinned is left out, so a file that flips nothing gives an
+/// empty map and the cycle leaves the log alone.
+#[must_use]
+pub fn cited_pins(raw: &[RawLine], file: &LessonsFile) -> HashMap<EventId, bool> {
+    // Union, not either-or (AILAB-200). `Lesson.id` is the exemplar the lesson
+    // is filed under; `citations` is every cluster member the model said it
+    // drew on. Both must outlive decay or the lesson outlives its evidence. A
+    // pre-AILAB-200 file has no `citations` key, so the union collapses to the
+    // exemplar-only set.
+    let cited_ids: HashSet<&str> = file
+        .lessons
         .iter()
+        .map(|l| l.id.as_str())
+        .chain(file.citations.iter().map(String::as_str))
+        .collect();
+    raw.iter()
         .filter_map(|line| line.parsed.as_ref())
         .filter(|event| !event.pinned && cited_ids.contains(event.id.as_str()))
         .map(|event| (event.id.clone(), true))
-        .collect();
-    if pins.is_empty() {
-        return Ok(());
-    }
-
-    let contents = episodic::patch_lines(&raw, &pins, &HashSet::new())?;
-    stage.put(&jsonl_path, &contents)?;
-    Ok(())
+        .collect()
 }
 
 /// Error type for the consolidation (lesson) phase of a dream cycle.
@@ -329,7 +279,7 @@ pub const DETERMINISTIC_PROMPT_ID: &str = "deterministic-only";
 /// Where a lesson body came from (AILAB-204).
 ///
 /// Only the body text and the frontmatter `prompt_version` differ between the
-/// two — the staged write, the `cluster_key`, the pin pass, and above all the
+/// two — the planned write, the `cluster_key`, the pins, and above all the
 /// [`Lesson::id`] (always the exemplar's `evt_` id) are shared, so semantic
 /// indexing inherits the same pain/importance whichever path composed the prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,10 +303,10 @@ pub enum LessonBodySource {
 
 /// The cluster this cycle will write a lesson for, before a body is chosen.
 ///
-/// Produced by [`select_lesson_or_retire`] and consumed by
-/// [`write_selected_lesson`]. Splitting the cycle here is what lets an `await`
-/// on a network call sit between cluster selection and the `LESSONS.md` write
-/// while both paths still share one exemplar id and one stage.
+/// Produced by [`select_lesson`]. The dream cycle selects once to build the
+/// model prompt, then [`crate::plan::plan_cycle`] selects again from the same
+/// records, so an `await` on a network call can sit between selection and the
+/// plan while both still name one exemplar id.
 #[derive(Debug, Clone)]
 pub struct SelectedLesson {
     /// File-level cluster key of the winning (highest `salience_sum`) cluster.
@@ -369,67 +319,36 @@ pub struct SelectedLesson {
     pub events: Vec<AgentLearning>,
 }
 
-/// Cluster, then either select the winning cluster's exemplar or retire.
+/// Select the lesson for `promoted`: the top cluster by `salience_sum`, then
+/// its exemplar ([`pick_exemplar`]).
 ///
-/// `Ok(None)` means **nothing promoted**: the unlink of any existing
-/// `LESSONS.md` is staged (AILAB-699) and the caller must not write one.
-/// Absence — not an empty frontmatter file — is the canonical "nothing
-/// promoted" state, so a store that stops recurring converges on the same shape
-/// as one that never dreamed. Cited exemplars keep their pins.
-pub fn select_lesson_or_retire(
-    stage: &mut Stage,
-    now_sec: i64,
-) -> Result<Option<SelectedLesson>, LessonPhaseError> {
-    let cluster_output = stage_cluster_engine(stage, now_sec)?;
-
-    if cluster_output.promoted.is_empty() {
-        // AILAB-699: retirement is structural, not an expiry timer. When no
-        // cluster clears `PROMOTION_THRESHOLD` in either window any more, the
-        // `LESSONS.md` an earlier promoting cycle wrote is stale — leaving it
-        // meant recall served that lesson forever.
-        //
-        // The unlink is staged: it lands with the cycle's other outputs when
-        // the redo WAL commits, and not at all if the cycle never commits.
-        // An absent `LESSONS.md` stages nothing.
-        //
-        // Pins are untouched. `apply_pin_unpin` is union-only, so calling it
-        // here would rewrite the JSONL for no effect; the exemplars this
-        // lesson cited stay pinned (SPEC §67 / WEG-426).
-        //
-        // The index side is handled by the post-cycle semantic pass, which
-        // runs unconditionally and turns the now-absent file into
-        // `delete_term(layer="semantic")` (`server::tantivy_handle`).
-        let lessons_md = stage.agent_root().lessons_md();
-        stage.unlink(&lessons_md)?;
-        return Ok(None);
-    }
-
-    let top_cluster = cluster_output
-        .promoted
-        .iter()
-        .max_by(|a, b| {
-            a.salience_sum
-                .partial_cmp(&b.salience_sum)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .unwrap(); // safe: promoted.is_empty() guarded above
+/// `None` means **nothing promoted**. Pure: it reads nothing and stages
+/// nothing. On a real cycle [`crate::plan::plan_cycle`] turns `None` into the
+/// retirement of any existing `LESSONS.md` (AILAB-699).
+#[must_use]
+pub fn select_lesson(promoted: &[PromotedCluster], now_sec: i64) -> Option<SelectedLesson> {
+    let top_cluster = promoted.iter().max_by(|a, b| {
+        a.salience_sum
+            .partial_cmp(&b.salience_sum)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
 
     let exemplar = pick_exemplar(&top_cluster.events, now_sec);
 
-    Ok(Some(SelectedLesson {
+    Some(SelectedLesson {
         cluster_key: top_cluster.cluster_key.clone(),
         exemplar_id: exemplar.id.as_str().to_string(),
         exemplar_content: exemplar.content.clone(),
         events: top_cluster.events.clone(),
-    }))
+    })
 }
 
 /// Cluster + pick exemplar with no sidecar write and no `LESSONS.md` unlink.
 ///
-/// The read-only twin of [`select_lesson_or_retire`], for `dreamd dream --dry`
-/// (AILAB-341). Same promotion rules — it calls the same
-/// [`compute_promoted_clusters`] and the same [`pick_exemplar`] — but it reaches
-/// disk exactly once, to read the episodic JSONL.
+/// The read-only selection for `dreamd dream --dry` (AILAB-341). Same
+/// promotion rules — it calls the same [`compute_promoted_clusters`] and the
+/// same [`select_lesson`] the cycle's plan does — and it reaches disk exactly
+/// once, to read the episodic JSONL.
 ///
 /// `Ok(None)` means **nothing would be promoted**. Unlike the write path this
 /// leaves any existing `LESSONS.md` untouched: a preview that deleted the file
@@ -444,33 +363,13 @@ pub fn preview_select_lesson(
     let events =
         episodic::read_all(&agent_root.episodic_jsonl()).map_err(ConsolidationError::from)?;
     let promoted = compute_promoted_clusters(&events, now_sec);
-    if promoted.is_empty() {
-        return Ok(None);
-    }
-
-    let top_cluster = promoted
-        .iter()
-        .max_by(|a, b| {
-            a.salience_sum
-                .partial_cmp(&b.salience_sum)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .unwrap(); // safe: promoted.is_empty() guarded above
-
-    let exemplar = pick_exemplar(&top_cluster.events, now_sec);
-
-    Ok(Some(SelectedLesson {
-        cluster_key: top_cluster.cluster_key.clone(),
-        exemplar_id: exemplar.id.as_str().to_string(),
-        exemplar_content: exemplar.content.clone(),
-        events: top_cluster.events.clone(),
-    }))
+    Ok(select_lesson(&promoted, now_sec))
 }
 
 /// Build the [`LessonsFile`] `selected` + `body` resolve to.
 ///
 /// The single owner of the frontmatter shape and of the empty-LLM-body
-/// degradation rule. [`write_selected_lesson`] serializes what this returns and
+/// degradation rule. [`crate::plan::plan_cycle`] plans what this returns and
 /// `dreamd dream --dry` renders it; sharing the builder is what makes the
 /// preview byte-identical to the file a real cycle would persist (AILAB-341).
 #[must_use]
@@ -516,32 +415,6 @@ pub fn lessons_file_from_selected(
     }
 }
 
-/// Stage `LESSONS.md` for `selected` with the chosen body, then the pin pass.
-///
-/// The bytes are `lessons::render_lessons_file`'s — the same serializer
-/// `lessons::write_lessons_file` and `dreamd dream --dry` use (AILAB-341), so
-/// going around that writer to reach the stage cannot change what lands on
-/// disk.
-pub fn write_selected_lesson(
-    stage: &mut Stage,
-    now_sec: i64,
-    selected: &SelectedLesson,
-    body: LessonBodySource,
-) -> Result<(), LessonPhaseError> {
-    let lessons_file = lessons_file_from_selected(now_sec, selected, body);
-
-    let lessons_path = stage.agent_root().lessons_md();
-    stage.put(
-        &lessons_path,
-        lessons::render_lessons_file(&lessons_file).as_bytes(),
-    )?;
-
-    // The pin pass reads the lesson just staged and stages the log beside it.
-    apply_pin_unpin(stage)?;
-
-    Ok(())
-}
-
 /// Orchestrate the full dream cycle in `--no-llm` deterministic mode (DR-308).
 ///
 /// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
@@ -550,13 +423,13 @@ pub fn write_selected_lesson(
 /// If **no** cluster is promoted, the cycle *retires* instead: any existing
 /// `LESSONS.md` is unlinked (AILAB-699).
 ///
-/// Byte-for-byte identical to the pre-AILAB-204 single-function version except
-/// for the `citations` frontmatter key AILAB-200 added (always the exemplar id
-/// on this path) — the dream-cycle snapshot fixtures pin that. The LLM path is
-/// the same two steps with a different [`LessonBodySource`]; see
-/// [`crate::dream_cycle::run_filesystem_phases`].
+/// It reads the log and `LESSONS.md` once, plans every output with
+/// [`crate::plan::plan_cycle`], stages the plan and commits it: the same plan
+/// as [`crate::dream_cycle::run_filesystem_phases`] with the deterministic
+/// body. So it decays too (BZR-1240), but it does not autosnap. It has no
+/// production caller.
 ///
-/// One stage, one commit: `ledger` records the cycle's provenance edges.
+/// One stage, one commit: `ledger` appends the plan's provenance edges.
 #[must_use = "dream cycle errors must be handled"]
 pub fn run_deterministic_dream_cycle(
     agent_root: &AgentRoot,
@@ -566,14 +439,20 @@ pub fn run_deterministic_dream_cycle(
     let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
 
     let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
-    if let Some(selected) = select_lesson_or_retire(&mut stage, now_sec)? {
-        write_selected_lesson(
-            &mut stage,
-            now_sec,
-            &selected,
-            LessonBodySource::Deterministic,
-        )?;
-    }
+    let log = stage
+        .read(&agent_root.episodic_jsonl())
+        .map_err(WalError::Io)?;
+    let raw = episodic::raw_lines(&log.unwrap_or_default());
+    let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
+    let plan = crate::plan::plan_cycle(
+        &raw,
+        prior.as_deref(),
+        now_sec,
+        LessonBodySource::Deterministic,
+    )?;
+    stage
+        .apply_plan(&plan, &crate::dream_cycle::cycle_date_from_now_sec(now_sec))
+        .map_err(WalError::Io)?;
     wal::commit_cycle(stage, ledger, now_sec)?;
     Ok(())
 }
@@ -699,12 +578,38 @@ mod tests {
         Ledger::open(root.provenance_ledger())
     }
 
-    /// The pin pass in its own stage, committed, so the asserts read the live
-    /// log.
-    fn pin_pass(root: &AgentRoot) {
-        let mut stage = wal::begin_cycle(root, CycleKind::Dream, NOW_SEC).unwrap();
-        apply_pin_unpin(&mut stage).unwrap();
-        wal::commit_cycle(stage, &ledger(root), NOW_SEC).unwrap();
+    /// The log's lines for `events`, one serialized record per line.
+    fn raw_of(events: &[AgentLearning]) -> Vec<RawLine> {
+        let bytes: Vec<u8> = events
+            .iter()
+            .flat_map(|e| format!("{}\n", serde_json::to_string(e).unwrap()).into_bytes())
+            .collect();
+        episodic::raw_lines(&bytes)
+    }
+
+    /// A `rust::types` file with one lesson per id in `lessons`.
+    fn file_citing(lessons: &[u32], citations: &[u32]) -> LessonsFile {
+        LessonsFile {
+            last_updated: fixed_ts(),
+            prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
+            cluster_key: "rust::types".to_string(),
+            citations: citations
+                .iter()
+                .map(|n| test_id(*n).as_str().to_string())
+                .collect(),
+            lessons: lessons
+                .iter()
+                .map(|n| Lesson {
+                    id: test_id(*n).as_str().to_string(),
+                    content: format!("lesson {n}"),
+                    pinned: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn pins_of(ids: &[u32]) -> HashMap<EventId, bool> {
+        ids.iter().map(|n| (test_id(*n), true)).collect()
     }
 
     // ── Legacy dotted-key corpora (ARCHITECTURE.md §9) ─────────────────────
@@ -892,204 +797,109 @@ mod tests {
     }
 
     #[test]
-    fn apply_pin_unpin_unions_external_pins_with_cited() {
-        let dir = unique_tmpdir("pinunpin");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-
-        // Write 4 events: ids 0,1 are pinned=true (external, uncited); ids 2,3
-        // are pinned=false. LESSONS.md cites ids 2,3. Under union semantics the
-        // external pins on 0,1 SURVIVE and cited 2,3 get pinned → all four true.
+    fn cited_pins_never_unpins() {
+        // Ids 0,1 are pinned=true (external, uncited); ids 2,3 are pinned=false.
+        // The file cites 2,3. Under union semantics the external pins on 0,1
+        // SURVIVE and cited 2,3 get pinned → all four true.
         let events = vec![
             make_event(0, "rust::types", true),
             make_event(1, "rust::types", true),
             make_event(2, "rust::types", false),
             make_event(3, "rust::types", false),
         ];
-        write_jsonl(&root, &events);
+        let raw = raw_of(&events);
 
-        let lessons_path = root.lessons_md();
-        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
-        write_lessons_file(
-            &lessons_path,
-            &LessonsFile {
-                last_updated: fixed_ts(),
-                prompt_version: "dream-cycle/v1.1@2026-05-13".to_string(),
-                cluster_key: "rust::types".to_string(),
-                citations: vec![],
-                lessons: vec![
-                    Lesson {
-                        id: test_id(2).as_str().to_string(),
-                        content: "lesson 2".to_string(),
-                        pinned: false,
-                    },
-                    Lesson {
-                        id: test_id(3).as_str().to_string(),
-                        content: "lesson 3".to_string(),
-                        pinned: false,
-                    },
-                ],
-            },
-        )
-        .unwrap();
+        let pins = cited_pins(&raw, &file_citing(&[2, 3], &[]));
 
-        pin_pass(&root);
-
-        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
+        assert_eq!(
+            pins,
+            pins_of(&[2, 3]),
+            "only the unpinned cited ids flip, and only to true"
+        );
+        let patched = episodic::patch_lines(&raw, &pins, &HashSet::new()).unwrap();
+        let updated: Vec<AgentLearning> = episodic::raw_lines(&patched)
+            .into_iter()
+            .filter_map(|line| line.parsed)
+            .collect();
         assert_eq!(updated.len(), 4);
-        let find = |n: u32| {
-            updated
-                .iter()
-                .find(|e| e.id.as_str() == test_id(n).as_str())
-                .unwrap()
-                .pinned
-        };
-        assert!(find(0), "id 0: external pin, uncited → union preserves it");
-        assert!(find(1), "id 1: external pin, uncited → union preserves it");
-        assert!(find(2), "id 2: cited in LESSONS.md → must be true");
-        assert!(find(3), "id 3: cited in LESSONS.md → must be true");
+        assert!(
+            updated.iter().all(|e| e.pinned),
+            "ids 0,1 keep their external pins; ids 2,3 are cited → all true"
+        );
     }
 
-    /// AILAB-200: the pin pass reads `Lesson.id` **and** the frontmatter
+    /// AILAB-200: the pins come from `Lesson.id` **and** the frontmatter
     /// `citations`. A cluster member the model cited but that is not the
     /// exemplar must survive decay, or the lesson outlives its evidence.
     #[test]
-    fn apply_pin_unpin_unions_lesson_ids_with_frontmatter_citations() {
-        let dir = unique_tmpdir("pincitations");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-
+    fn cited_pins_unions_lesson_ids_with_citations() {
         // 0 is the exemplar (the `Lesson.id`), 1 is a second cluster member the
-        // model cited, 2 is an uncited member. Only 0 and 1 may end up pinned.
+        // model cited, 2 is an uncited member. Only 0 and 1 may be pinned.
         let events = vec![
             make_event(0, "rust::types", false),
             make_event(1, "rust::types", false),
             make_event(2, "rust::types", false),
         ];
-        write_jsonl(&root, &events);
 
-        let lessons_path = root.lessons_md();
-        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
-        write_lessons_file(
-            &lessons_path,
-            &LessonsFile {
-                last_updated: fixed_ts(),
-                prompt_version: "dream-cycle/v1.2@2026-08-23".to_string(),
-                cluster_key: "rust::types".to_string(),
-                citations: vec![
-                    test_id(0).as_str().to_string(),
-                    test_id(1).as_str().to_string(),
-                ],
-                lessons: vec![Lesson {
-                    id: test_id(0).as_str().to_string(),
-                    content: "composed prose".to_string(),
-                    pinned: false,
-                }],
-            },
-        )
-        .unwrap();
+        let pins = cited_pins(&raw_of(&events), &file_citing(&[0], &[0, 1]));
 
-        pin_pass(&root);
-
-        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
-        let find = |n: u32| {
-            updated
-                .iter()
-                .find(|e| e.id.as_str() == test_id(n).as_str())
-                .unwrap()
-                .pinned
-        };
-        assert!(find(0), "id 0: the exemplar `Lesson.id` → pinned");
-        assert!(
-            find(1),
-            "id 1: cited in frontmatter but not the exemplar → the union must \
-             still pin it; this is the whole point of AILAB-200"
-        );
-        assert!(
-            !find(2),
-            "id 2: an uncited cluster member must NOT be pinned — the union is \
-             over what the lesson claims, not over the cluster"
+        assert_eq!(
+            pins,
+            pins_of(&[0, 1]),
+            "id 1 is cited in frontmatter but not the exemplar, so the union must \
+             still pin it; id 2 is uncited and must not be pinned"
         );
     }
 
     #[test]
-    fn apply_pin_unpin_no_lessons_md_preserves_external_pins() {
-        let dir = unique_tmpdir("nopins");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-
+    fn cited_pins_of_a_file_citing_nothing_is_empty() {
         let events = vec![
             make_event(0, "rust::types", true),
-            make_event(1, "rust::types", true),
+            make_event(1, "rust::types", false),
         ];
-        write_jsonl(&root, &events);
 
-        // LESSONS.md is absent — cited_ids is empty, so union preserves the
-        // external pins rather than clearing them (SPEC §67 / WEG-426).
-        pin_pass(&root);
+        // Nothing cited: no pin is set, and the external pin on 0 is not
+        // cleared (SPEC §67 / WEG-426).
+        let pins = cited_pins(&raw_of(&events), &file_citing(&[], &[]));
 
-        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
-        assert_eq!(updated.len(), 2);
-        assert!(
-            updated[0].pinned,
-            "id 0: no LESSONS.md, but external pin survives union"
-        );
-        assert!(
-            updated[1].pinned,
-            "id 1: no LESSONS.md, but external pin survives union"
-        );
+        assert_eq!(pins, HashMap::new());
     }
 
     /// BZR-1234: a second cycle with the same exemplar flips nothing, so the
-    /// pin pass must stage nothing for the log, and the commit must not
-    /// rename it.
+    /// cycle must stage nothing for the log, and the commit must not rename
+    /// it.
     #[cfg(unix)]
     #[test]
-    fn pin_pass_without_a_flip_leaves_the_log_alone() {
+    fn a_cycle_that_flips_no_pin_leaves_the_log_inode() {
         use std::os::unix::fs::MetadataExt;
 
         let dir = unique_tmpdir("pin-noflip");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
 
+        // Event 0 has the highest pain, so it is the exemplar, and it is
+        // already pinned. Nothing is old, so nothing decays.
         let events = vec![
-            make_event(0, "rust::types", true),
+            {
+                let mut e = make_event(0, "rust::types", true);
+                e.pain = 8.0;
+                e
+            },
             make_event(1, "rust::types", false),
+            make_event(2, "rust::types", false),
         ];
         write_jsonl(&root, &events);
-
-        let lessons_path = root.lessons_md();
-        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
-        write_lessons_file(
-            &lessons_path,
-            &LessonsFile {
-                last_updated: fixed_ts(),
-                prompt_version: "deterministic-only".to_string(),
-                cluster_key: "rust::types".to_string(),
-                citations: vec![],
-                lessons: vec![Lesson {
-                    id: test_id(0).as_str().to_string(),
-                    content: "exemplar".to_string(),
-                    pinned: false,
-                }],
-            },
-        )
-        .unwrap();
-        let mut stage = wal::begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
-
         let jsonl = root.episodic_jsonl();
         let ino_before = fs::metadata(&jsonl).unwrap().ino();
         let bytes_before = fs::read(&jsonl).unwrap();
 
-        apply_pin_unpin(&mut stage).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
 
-        let redo = stage.redo();
-        assert!(
-            redo.renames.is_empty(),
-            "no flip must stage nothing for the log; got {:?}",
-            redo.renames
+        assert_eq!(
+            read_lessons_file(&root.lessons_md()).unwrap().lessons[0].id,
+            test_id(0).as_str(),
+            "precondition: the cycle wrote a lesson for the pinned exemplar"
         );
-        wal::commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
         assert_eq!(
             fs::metadata(&jsonl).unwrap().ino(),
             ino_before,
@@ -1246,14 +1056,16 @@ mod tests {
             "the preview must not rewrite the episodic log"
         );
 
-        // Now let the write path decide, and compare.
-        let mut stage = Stage::create(&root, "dream-1").unwrap();
-        let written = select_lesson_or_retire(&mut stage, NOW_SEC)
-            .unwrap()
-            .expect("a cluster promotes");
+        // Now let the write path's plan decide, and compare.
+        let raw = episodic::raw_lines(&jsonl_before);
+        let plan =
+            crate::plan::plan_cycle(&raw, None, NOW_SEC, LessonBodySource::Deterministic).unwrap();
+        let crate::plan::LessonsChange::Write(written) = plan.lessons else {
+            panic!("a cluster promotes, so the plan writes LESSONS.md");
+        };
         assert_eq!(previewed.cluster_key, written.cluster_key);
-        assert_eq!(previewed.exemplar_id, written.exemplar_id);
-        assert_eq!(previewed.exemplar_content, written.exemplar_content);
+        assert_eq!(previewed.exemplar_id, written.lessons[0].id);
+        assert_eq!(previewed.exemplar_content, written.lessons[0].content);
     }
 
     // --- AILAB-699: a cycle that promotes nothing retires LESSONS.md ---
@@ -1290,7 +1102,7 @@ mod tests {
         };
         assert!(
             pinned_after_promote(&exemplar_id),
-            "apply_pin_unpin must pin the cited exemplar on the promoting cycle"
+            "the plan must pin the cited exemplar on the promoting cycle"
         );
 
         // Cycle 2: one later run whose `now_sec` is past the 30-day window. The
@@ -1308,8 +1120,8 @@ mod tests {
         assert!(
             pinned_after_promote(&exemplar_id),
             "retirement removes the derived doc, never the pin on its source \
-             event — the retire path must not call apply_pin_unpin or clear \
-             `pinned` (option 3 is out of scope)"
+             event — the retire path must not plan pins or clear `pinned` \
+             (option 3 is out of scope)"
         );
 
         // Idempotent: a second no-promotion cycle over the same input is a

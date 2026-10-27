@@ -39,8 +39,9 @@ pub struct LessonsFile {
     /// File-level, like `cluster_key`: one cluster per file, so a per-lesson
     /// list could disagree with itself. The LLM arm carries the model's
     /// validated trailer; the deterministic arm carries the exemplar alone.
-    /// `apply_pin_unpin` pins the union of these and every [`Lesson::id`], so an
-    /// id here survives decay. Empty when read from a pre-AILAB-200 file.
+    /// `cited_pins` pins the union of these and every [`Lesson::id`], and
+    /// `plan_cycle` plans those pins with the cycle's decay, so an id here
+    /// survives decay. Empty when read from a pre-AILAB-200 file.
     pub citations: Vec<String>,
     pub lessons: Vec<Lesson>,
 }
@@ -159,7 +160,7 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
     let cluster_key = cluster_key.ok_or_else(|| invalid("missing cluster_key"))?;
     // Absent on every file written before AILAB-200. Missing is empty, not an
     // error — an old `LESSONS.md` must keep parsing, and an empty union just
-    // means `apply_pin_unpin` falls back to today's `Lesson.id`-only behavior.
+    // means `cited_pins` falls back to today's `Lesson.id`-only behavior.
     let citations: Vec<String> = citations
         .unwrap_or_default()
         .split_whitespace()

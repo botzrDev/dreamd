@@ -193,7 +193,7 @@ cargo test -p dreamd-core --test dream_cycle_snapshot
 cargo insta review
 ```
 
-Snapshot files live in `crates/dreamd-core/tests/snapshots/`. Any change to `dream_cycle::run_filesystem_phases` (what the test drives), `run_deterministic_dream_cycle`, `run_cluster_engine`, `write_lessons_file`, or `wal::commit_cycle` may produce a snapshot diff — review it via `cargo insta review` before accepting. The fixture corpus at `tests/fixtures/dream-cycle-snapshot/` is frozen; do not modify it without updating the spec and snapshots together.
+Snapshot files live in `crates/dreamd-core/tests/snapshots/`. Any change to `dream_cycle::run_filesystem_phases` (what the test drives), `plan::plan_cycle`, `run_deterministic_dream_cycle`, `run_cluster_engine`, `write_lessons_file`, or `wal::commit_cycle` may produce a snapshot diff — review it via `cargo insta review` before accepting. The fixture corpus at `tests/fixtures/dream-cycle-snapshot/` is frozen; do not modify it without updating the spec and snapshots together.
 
 ## License
 

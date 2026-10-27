@@ -276,7 +276,8 @@ impl TantivyIndexHandle {
     }
 
     /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
-    /// Called by the dream cycle orchestrator after `run_decay_pruner` returns.
+    /// Called by the dream cycle orchestrator after the cycle's plan
+    /// (`plan_cycle`) has committed the log rewrite.
     /// No-op if `event_ids` is empty (still sends message to stay on the indexer task).
     pub async fn prune_decayed_events(&self, event_ids: Vec<EventId>) -> Result<(), IndexError> {
         let (tx, rx) = oneshot::channel();

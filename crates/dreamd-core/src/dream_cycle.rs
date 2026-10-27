@@ -6,12 +6,13 @@
 //!   3. Index — recurrence sidecar apply → prune decayed docs
 //!   4. Autobiography — best-effort git commit
 //!
-//! [`run_filesystem_phases`] stages every output of consolidation + decay, then
-//! commits them with one redo WAL (one cycle = one atomic region).
+//! [`run_filesystem_phases`] reads the log and `LESSONS.md` once, plans every
+//! output of consolidation + decay ([`crate::plan::plan_cycle`]), stages the
+//! plan, then commits it with one redo WAL (one cycle = one atomic region).
 //!
 //! AILAB-204 made phase 1 async: the LLM call that composes the lesson body is
-//! `await`ed **while the cycle stages**, between cluster selection and the
-//! `LESSONS.md` stage. That is deliberate — it keeps the 409 in-progress guard
+//! `await`ed **inside the open cycle**, between cluster selection and the
+//! plan. That is deliberate — it keeps the 409 in-progress guard
 //! honest and keeps the coordinator the single writer. It also means a manual
 //! cycle serializes `AppendLearning` for the duration of the model call; HTTP
 //! callers see 503 + `Retry-After` rather than a lost write.
@@ -24,9 +25,11 @@ use std::path::{Path, PathBuf};
 
 use crate::autobiography::{self, AutobiographyOutcome};
 use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLesson};
-use crate::decay::{self, DecayError, DecayResult};
+use crate::decay::DecayResult;
+use crate::episodic;
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
+use crate::plan;
 use crate::provenance::{Ledger, ProvenanceError};
 use crate::snapshot::{self, SnapshotError};
 use crate::wal::{self, CycleKind, WalError};
@@ -36,8 +39,6 @@ use crate::wal::{self, CycleKind, WalError};
 pub enum DreamCycleError {
     #[error("consolidation: {0}")]
     Consolidation(#[from] LessonPhaseError),
-    #[error("decay: {0}")]
-    Decay(#[from] DecayError),
     #[error("WAL: {0}")]
     Wal(#[from] WalError),
     #[error("provenance: {0}")]
@@ -113,11 +114,12 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
     }
 }
 
-/// Filesystem phases: consolidation then decay.
+/// Filesystem phases: consolidation then decay, as one plan.
 ///
-/// Stages every output in one stage and commits them with one redo WAL after
-/// decay, so the full cycle is a single atomic region (ARCH-2). Called by the
-/// coordinator actor, which must reopen its append fd afterward.
+/// Reads the log and `LESSONS.md` once, plans every output, stages the plan in
+/// one stage and commits it with one redo WAL, so the full cycle is a single
+/// atomic region (ARCH-2). Called by the coordinator actor, which must reopen
+/// its append fd afterward.
 ///
 /// `no_llm` forces the deterministic body even when credentials exist. When it is
 /// `false`, the backend is resolved from the project's [`crate::config::Config`]
@@ -130,7 +132,7 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 /// happen, so `no_llm = true` ignores it entirely and reads nothing (AILAB-199).
 ///
 /// `ledger` is the project writer lock's appender (`WriterLock::ledger`); the
-/// cycle's provenance edges go through it.
+/// plan's provenance edges go through it at commit.
 pub async fn run_filesystem_phases(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -214,46 +216,60 @@ async fn filesystem_phases<B: LlmBackend>(
     llm_target: Option<(&B, &str)>,
     share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
-    // ARCH-2: ONE stage holds BOTH filesystem phases' outputs. begin_cycle
-    // guards `.agent/` existence (WEG-281), refuses a pending WAL and sets
-    // state=in_progress; nothing live changes until commit_cycle writes the redo
-    // WAL, applies it and sets state=complete. A phase error short-circuits via
-    // `?` BEFORE that commit point, leaving only the stage for the next writer
-    // to wipe (state=failed) — so no half-finished cycle is ever recorded
-    // "complete", and none is ever half-applied.
+    // ARCH-2: ONE plan holds BOTH filesystem phases' outputs, in ONE stage.
+    // begin_cycle guards `.agent/` existence (WEG-281), refuses a pending WAL
+    // and sets state=in_progress; nothing live changes until commit_cycle
+    // writes the redo WAL, applies it and sets state=complete. A read, plan or
+    // stage error short-circuits via `?` BEFORE that commit point, leaving only
+    // the stage for the next writer to wipe (state=failed) — so no
+    // half-finished cycle is ever recorded "complete", and none is ever
+    // half-applied.
     let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
     // BZR-160: one pre-mutation image of the four live files. Nothing is live
     // yet, so the object is the pre-cycle store; its ref is staged.
     snapshot::stage_autosnap(&mut stage, now_sec)?;
 
-    // Consolidation, split so the model call can sit between selection and the
-    // stage while both still share one exemplar id, one stage, one pin pass.
-    // `None` = nothing promoted; `select_lesson_or_retire` already staged the
-    // unlink of any stale LESSONS.md (AILAB-699) and decay still runs below.
-    if let Some(selected) = consolidation::select_lesson_or_retire(&mut stage, now_sec)? {
-        // The spend cap (AILAB-196) is read here rather than threaded through
-        // `run_filesystem_phases_with_backend`, because that signature is the
-        // FakeLlm seam and its callers hold a backend, not a project config.
-        // Reading it inside this arm also keeps a cycle that promotes nothing
-        // free of the extra file read. Same degrade-to-defaults rule as the
-        // production entry point: a broken config.toml must never fail a cycle.
-        let cap_usd = crate::config::load_config(agent_root.project_root())
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "config load failed; using the default LLM cost cap");
-                crate::config::Config::default()
-            })
-            .cost_cap_usd;
-        let body =
-            compose_lesson_body(&selected, llm_target, cap_usd, agent_root, share_personal).await;
-        consolidation::write_selected_lesson(&mut stage, now_sec, &selected, body)?;
-    }
+    // The one read of the plan's inputs: the log and the prior LESSONS.md.
+    // Every later step works on these bytes; nothing reads back a staged file.
+    let log = stage
+        .read(&agent_root.episodic_jsonl())
+        .map_err(WalError::Io)?;
+    let raw = episodic::raw_lines(&log.unwrap_or_default());
+    let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
 
-    let decay = decay::run_decay_pruner(&mut stage, now_sec, cycle_date)?;
-    // BZR-155: commit_cycle records the ledger lines after the renames, from the
-    // files the cycle left live; a roll-forward records them again, and the
-    // ledger skips an edge it already holds.
+    // Select once here, for the model prompt; `plan_cycle` selects again from
+    // the same records and reaches the same exemplar. `None` = nothing
+    // promoted: the plan retires any stale LESSONS.md (AILAB-699) and decay
+    // still runs.
+    let promoted = consolidation::compute_promoted_clusters(&plan::records(&raw), now_sec);
+    let body = match consolidation::select_lesson(&promoted, now_sec) {
+        Some(selected) => {
+            // The spend cap (AILAB-196) is read here rather than threaded
+            // through `run_filesystem_phases_with_backend`, because that
+            // signature is the FakeLlm seam and its callers hold a backend,
+            // not a project config. Reading it inside this arm also keeps a
+            // cycle that promotes nothing free of the extra file read. Same
+            // degrade-to-defaults rule as the production entry point: a broken
+            // config.toml must never fail a cycle.
+            let cap_usd = crate::config::load_config(agent_root.project_root())
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "config load failed; using the default LLM cost cap");
+                    crate::config::Config::default()
+                })
+                .cost_cap_usd;
+            compose_lesson_body(&selected, llm_target, cap_usd, agent_root, share_personal).await
+        }
+        None => LessonBodySource::Deterministic,
+    };
+
+    let plan =
+        plan::plan_cycle(&raw, prior.as_deref(), now_sec, body).map_err(LessonPhaseError::from)?;
+    stage.apply_plan(&plan, cycle_date).map_err(WalError::Io)?;
+    // BZR-1240: the redo WAL carries the plan's ledger edges, and the commit
+    // appends them after the renames; a roll-forward appends them again, and
+    // the ledger skips an edge it already holds.
     wal::commit_cycle(stage, ledger, now_sec)?;
-    Ok(decay)
+    Ok(plan.decay_result())
 }
 
 /// Compose the lesson body. **Infallible by construction** — every LLM failure
@@ -1099,13 +1115,9 @@ mod tests {
 
     /// The exemplar the deterministic path would have picked, for comparison.
     fn deterministic_exemplar(root: &AgentRoot) -> consolidation::SelectedLesson {
-        let mut stage = crate::stage::Stage::create(root, "dream-exemplar").unwrap();
-        let selected = consolidation::select_lesson_or_retire(&mut stage, NOW_SEC)
+        consolidation::preview_select_lesson(root, NOW_SEC)
             .expect("cluster engine")
-            .expect("fixture promotes a cluster");
-        // Only the selection is wanted; the stage never commits.
-        fs::remove_dir_all(root.stage_dir()).unwrap();
-        selected
+            .expect("fixture promotes a cluster")
     }
 
     /// The model's prose, minus the trailer the AILAB-200 gate strips.
@@ -1709,6 +1721,34 @@ mod tests {
             "the refusal must name the holder; got: {err}"
         );
         assert_eq!(store_bytes(&root), before, "a refused cycle writes nothing");
+    }
+
+    /// BZR-1240 Amendment 1 item 2: the cycle reads `LESSONS.md` before it
+    /// stages anything, so a path it cannot read fails the cycle before the
+    /// commit point. Before BZR-1240 the rename onto the directory failed
+    /// after it, and every recovery retried it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_at_lessons_md_fails_the_cycle_before_the_commit_point() {
+        let (_dir, root) = scaffold_fixture();
+        assert!(
+            consolidation::preview_select_lesson(&root, NOW_SEC)
+                .unwrap()
+                .is_some(),
+            "precondition: the fixture promotes a cluster"
+        );
+        fs::create_dir_all(root.lessons_md()).unwrap();
+        let log_before = fs::read(root.episodic_jsonl()).unwrap();
+        let lock = writer_lock(&root);
+
+        let result = consolidation::run_deterministic_dream_cycle(&root, lock.ledger(), NOW_SEC);
+
+        assert!(result.is_err(), "an unreadable LESSONS.md fails the cycle");
+        assert!(
+            !root.wal_path().exists(),
+            "the cycle never reached its commit point"
+        );
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), log_before);
     }
 
     #[test]

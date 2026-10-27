@@ -4,9 +4,11 @@
 //! mid-cycle crash. A cycle stages every output under
 //! `.agent/.dreamd/stage/<cycle>/` ([`crate::stage::Stage`]) while nothing live
 //! changes. [`commit_cycle`] then writes `dream_in_progress.wal` once — a redo
-//! log of the cycle's renames and unlinks ([`RedoWal`], format `redo/1`) — and
-//! that write is the commit point. The renames, unlinks, directory fsyncs,
-//! provenance edges and the `complete` status follow, and the WAL is deleted.
+//! log of the cycle's renames, unlinks and ledger edges ([`RedoWal`], format
+//! `redo/1`) — and that write is the commit point. The renames, unlinks,
+//! directory fsyncs, the append of the WAL's edges and the `complete` status
+//! follow, and the WAL is deleted. The edges are the cycle's plan
+//! ([`crate::plan`]); nothing derives them from the files the commit puts live.
 //!
 //! When a writer takes the project lock, [`recover_if_needed`] rolls a redo WAL
 //! forward through the same code ([`roll_forward`]), keeps the old meaning of a
@@ -30,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon_state::{read_daemon_state, update_daemon_state, DaemonStateError};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
-use crate::provenance::{self, Ledger, ProvenanceError};
+use crate::provenance::{Kind, Ledger, ProvenanceError};
 use crate::stage::{crash_point, Stage};
 
 /// Schema version for daemon state (`state.json`). Re-exported from
@@ -41,8 +43,8 @@ pub use crate::daemon_state::STATE_SCHEMA_VERSION;
 /// `format` of the WAL [`commit_cycle`] writes.
 pub const REDO_FORMAT: &str = "redo/1";
 
-/// The redo WAL: every rename and unlink one cycle commits. Paths are relative
-/// to `.agent/` and `/`-joined. A `from` is a staged file under
+/// The redo WAL: every rename, unlink and ledger edge one cycle commits. Paths
+/// are relative to `.agent/` and `/`-joined. A `from` is a staged file under
 /// `.dreamd/stage/`; a `to` or an unlink is a live path outside it.
 ///
 /// It has no `intents` key, so a reader built on [`DreamWal`] rejects it and an
@@ -55,11 +57,23 @@ pub struct RedoWal {
     pub format: String,
     pub renames: Vec<RedoRename>,
     pub unlinks: Vec<String>,
+    /// The plan's ledger edges, in order. [`roll_forward`] appends them after
+    /// the renames, at commit and again at recovery. Required: a `redo/1` WAL
+    /// without the key fails closed.
+    pub edges: Vec<RedoEdge>,
 }
 
 /// One staged file moving into place.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RedoRename {
+    pub from: String,
+    pub to: String,
+}
+
+/// One ledger edge a redo WAL appends.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RedoEdge {
+    pub kind: Kind,
     pub from: String,
     pub to: String,
 }
@@ -194,9 +208,8 @@ pub fn begin_cycle(
 /// Commit `stage`: fsync it, write the redo WAL (the commit point), apply it
 /// with [`roll_forward`], then remove the stage directory.
 ///
-/// `ledger` is the project writer lock's appender; the cycle's provenance
-/// edges are recorded after the renames. `now_sec` stamps
-/// `last_dream_cycle_at`.
+/// `ledger` is the project writer lock's appender; the WAL's provenance edges
+/// are appended after the renames. `now_sec` stamps `last_dream_cycle_at`.
 pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), WalError> {
     let agent_root = stage.agent_root().clone();
     File::open(stage.dir())?.sync_all()?;
@@ -278,7 +291,12 @@ fn roll_forward(
     }
     crash_point()?;
 
-    provenance::record_cycle(agent_root, ledger)?;
+    let edges: Vec<(Kind, String, String)> = redo
+        .edges
+        .iter()
+        .map(|e| (e.kind, e.from.clone(), e.to.clone()))
+        .collect();
+    ledger.append(&edges)?;
     crash_point()?;
 
     let cycle_at = cycle_at.map(|now_sec| {
@@ -465,8 +483,8 @@ fn recover_legacy(agent_root: &AgentRoot, wal: &DreamWal) -> Result<RecoveryOutc
 /// Called only by [`WriterLock::acquire`](crate::writer_lock::WriterLock::acquire),
 /// after the project writer lock is held and before any store access, so a
 /// WAL or stage directory it finds cannot belong to a cycle that is still
-/// running. `ledger` is the lock's appender: a roll-forward re-records the
-/// cycle's provenance edges.
+/// running. `ledger` is the lock's appender: a roll-forward appends the WAL's
+/// provenance edges, and the ledger skips any it already holds.
 pub fn recover_on_startup(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -563,7 +581,7 @@ mod tests {
         let (root, _g) = setup_root("begin-pending");
         write_wal(
             &root,
-            r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[]}"#,
+            r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[],"edges":[]}"#,
         );
 
         let err = begin_cycle(&root, CycleKind::Forget, NOW_SEC).unwrap_err();
@@ -632,10 +650,93 @@ mod tests {
                 to: "episodic/AGENT_LEARNINGS.jsonl".to_string(),
             }]
         );
+        assert!(redo.edges.is_empty(), "{bytes}");
         assert!(
             !root.episodic_jsonl().exists(),
             "the crash came before any rename"
         );
+    }
+
+    const EVT_A: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    /// The two edges a promoting cycle over one exemplar plans.
+    fn two_edges() -> Vec<(Kind, String, String)> {
+        vec![
+            (
+                Kind::LessonCitation,
+                EVT_A.to_string(),
+                format!("lsn_{EVT_A}"),
+            ),
+            (Kind::Recurrence, EVT_A.to_string(), "rust::eh".to_string()),
+        ]
+    }
+
+    #[test]
+    fn commit_writes_the_stage_edges_into_the_wal() {
+        let (root, _g) = setup_root("commit-redo-edges");
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.episodic_jsonl(), b"staged\n").unwrap();
+        stage.record_edges(&two_edges());
+
+        // Point 1 is right after the WAL write, before any rename or append.
+        arm_crash(Some(1));
+        let err = commit_cycle(stage, &ledger(&root), NOW_SEC);
+        arm_crash(None);
+        assert!(err.is_err(), "the injected crash must surface");
+
+        let redo: RedoWal = serde_json::from_slice(&fs::read(root.wal_path()).unwrap()).unwrap();
+        assert_eq!(
+            redo.edges,
+            vec![
+                RedoEdge {
+                    kind: Kind::LessonCitation,
+                    from: EVT_A.to_string(),
+                    to: format!("lsn_{EVT_A}"),
+                },
+                RedoEdge {
+                    kind: Kind::Recurrence,
+                    from: EVT_A.to_string(),
+                    to: "rust::eh".to_string(),
+                },
+            ]
+        );
+        assert!(
+            !root.provenance_ledger().exists(),
+            "the crash came before the append"
+        );
+    }
+
+    /// The roll-forward appends what the WAL lists; there is no `LESSONS.md`
+    /// or sidecar on disk to derive edges from.
+    #[test]
+    fn roll_forward_appends_the_wal_edges_without_reading_lessons_md() {
+        let (root, _g) = setup_root("roll-forward-edges");
+        write_wal(
+            &root,
+            &format!(
+                r#"{{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[],"edges":[{{"kind":"lesson_citation","from":"{EVT_A}","to":"lsn_{EVT_A}"}},{{"kind":"recurrence","from":"{EVT_A}","to":"rust::eh"}}]}}"#
+            ),
+        );
+        assert!(!root.lessons_md().exists());
+        assert!(!root.semantic_dir().join("recurrence_counts.json").exists());
+
+        let outcome = recover_if_needed(&root, &ledger(&root)).unwrap();
+
+        assert_eq!(
+            outcome,
+            RecoveryOutcome::RolledForward {
+                renamed: 0,
+                unlinked: 0
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(root.provenance_ledger()).unwrap(),
+            format!(
+                "{{\"schema_version\":\"provenance/1.0\",\"kind\":\"lesson_citation\",\"from\":\"{EVT_A}\",\"to\":\"lsn_{EVT_A}\"}}\n\
+                 {{\"schema_version\":\"provenance/1.0\",\"kind\":\"recurrence\",\"from\":\"{EVT_A}\",\"to\":\"rust::eh\"}}\n"
+            )
+        );
+        assert!(!root.wal_path().exists());
     }
 
     /// Fact 8: a reader built on the legacy struct fails closed on the new WAL.
@@ -836,6 +937,7 @@ mod tests {
                     to: to.clone(),
                 }],
                 unlinks: vec![],
+                edges: vec![],
             };
             write_wal(&root, &serde_json::to_string_pretty(&redo).unwrap());
 

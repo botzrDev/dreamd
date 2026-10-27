@@ -115,7 +115,7 @@ pub enum MemoryCoordinatorMsg {
     /// coordinator's own project root, then reopen the append fd (WEG-271).
     ///
     /// The cycle's commit can replace `AGENT_LEARNINGS.jsonl` by rename (the
-    /// staged pin pass or decay prune), which orphans the coordinator's
+    /// plan's pins or decay prune), which orphans the coordinator's
     /// long-lived fd. Routing
     /// the cycle through the actor lets the handler reopen `self.file` so
     /// subsequent appends land on the live inode. `now_sec` / `cycle_date` are
@@ -386,12 +386,12 @@ impl MemoryCoordinator {
 
     /// WEG-271: run the deterministic dream cycle, then reopen the append fd.
     ///
-    /// The cycle stages the pin pass (on cluster promotion) and the decay prune
-    /// (on prune), and its commit renames the staged log over
-    /// `AGENT_LEARNINGS.jsonl`, leaving `self.file` pointing at an orphaned
-    /// inode. It reopens on every exit path, error included, so the next append
-    /// lands on the live inode whether or not the commit replaced the file and
-    /// whether or not the cycle succeeded.
+    /// The cycle's plan rewrites the log when it pins a cited record (on
+    /// cluster promotion) or prunes one, and its commit renames the staged log
+    /// over `AGENT_LEARNINGS.jsonl`, leaving `self.file` pointing at an
+    /// orphaned inode. It reopens on every exit path, error included, so the
+    /// next append lands on the live inode whether or not the commit replaced
+    /// the file and whether or not the cycle succeeded.
     /// The staged log is a well-formed file, so no `episodic::recover` scan is
     /// needed on reopen.
     async fn handle_run_dream_cycle(
@@ -1051,8 +1051,8 @@ mod tests {
             )));
         }
         std::fs::write(root.episodic_jsonl(), body).unwrap();
-        // A regular file where the ledger's directory goes: `record_cycle` fails
-        // after the pin pass has already renamed the log.
+        // A regular file where the ledger's directory goes: the commit's ledger
+        // append fails after the rename of the log.
         std::fs::create_dir_all(root.dreamd_dir()).unwrap();
         std::fs::write(root.provenance_dir(), b"not a directory").unwrap();
 
@@ -1067,10 +1067,7 @@ mod tests {
             "precondition: the cycle fails; got {result:?}"
         );
         let at_path = ino(&std::fs::metadata(root.episodic_jsonl()).unwrap());
-        assert_ne!(
-            at_path, before,
-            "precondition: the pin pass renamed the log"
-        );
+        assert_ne!(at_path, before, "precondition: the commit renamed the log");
 
         assert_eq!(
             ino(&c.file.metadata().unwrap()),

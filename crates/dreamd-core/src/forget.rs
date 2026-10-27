@@ -1,10 +1,11 @@
 //! Forget cascade: remove one episodic event and the derived state
 //! that names it.
 //!
-//! [`cascade`] stages and commits like a dream cycle but is not one. It stages
-//! the JSONL without the one id, drops or unlinks the lesson that cites it, and
-//! recounts the recurrence sidecar; the commit renames them in and appends
-//! ledger edges for the lesson that remains. It never decays other rows, never re-selects a lesson,
+//! [`cascade`] plans, stages and commits like a dream cycle but is not one. Its
+//! plan ([`crate::plan::plan_forget`]) is the JSONL without the one id, the
+//! lesson that cites it dropped or unlinked, and the recurrence sidecar
+//! recounted; the commit renames them in and appends ledger edges for the
+//! lesson that remains. It never decays other rows, never re-selects a lesson,
 //! and never copies the forgotten row into `snapshots/`.
 //!
 //! The JSONL has one writer. `dreamd forget` runs [`cascade`] in-process and
@@ -20,20 +21,18 @@
 //! ([`render_receipt`], `forget-receipt/1.0`). The signed membership proof in
 //! `docs/provenance.md` is still absent.
 
-use std::collections::{HashMap, HashSet};
 use std::io;
 
-use chrono::DateTime;
 use dreamd_protocol::EventId;
 use serde::Serialize;
 
-use crate::consolidation::{self, ConsolidationError};
+use crate::consolidation::ConsolidationError;
 use crate::dream_cycle::{self, DreamCycleError};
 use crate::episodic::{self, EpisodicError};
 use crate::layout::AgentRoot;
 use crate::lessons;
+use crate::plan;
 use crate::provenance::{Ledger, ProvenanceError};
-use crate::stage::Stage;
 use crate::wal::{self, CycleKind, WalError};
 
 /// What [`cascade`] did to `semantic/LESSONS.md`.
@@ -120,8 +119,11 @@ pub fn cascade(
 ) -> Result<ForgetReport, ForgetError> {
     let jsonl = agent_root.episodic_jsonl();
     let raw = episodic::read_raw(&jsonl)?;
-    let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
-    if !records().any(|ev| ev.id == *id) {
+    if !raw
+        .iter()
+        .filter_map(|line| line.parsed.as_ref())
+        .any(|ev| ev.id == *id)
+    {
         return Ok(ForgetReport {
             removed: false,
             lesson: LessonEffect::Untouched,
@@ -131,73 +133,25 @@ pub fn cascade(
     dream_cycle::ensure_not_in_progress(agent_root)?;
     let mut stage = wal::begin_cycle(agent_root, CycleKind::Forget, now_sec)?;
 
+    // The log was read above; this is the one read of the prior lesson file.
+    let prior = stage
+        .read(&agent_root.lessons_md())
+        .map_err(ForgetError::Lessons)?;
     // Every other line, in read order and byte for byte, pinned or not,
-    // including lines the reader skips.
-    let contents = episodic::patch_lines(&raw, &HashMap::new(), &HashSet::from([id.clone()]))?;
-    stage.put(&jsonl, &contents).map_err(EpisodicError::Io)?;
+    // including lines the reader skips; the lesson that names `id`; the sidecar
+    // recounted without it; and the edges of the lesson that remains.
+    let (plan, lesson) = plan::plan_forget(&raw, prior.as_deref(), id, now_sec)?;
+    stage
+        .apply_plan(&plan, &dream_cycle::cycle_date_from_now_sec(now_sec))
+        .map_err(WalError::Io)?;
 
-    let lesson = cascade_lessons(&mut stage, id.as_str(), now_sec)?;
-
-    if !records().any(|ev| ev.id != *id) {
-        // `stage_cluster_engine` returns early on an empty log without staging
-        // the sidecar; a stale count for the forgotten event would survive.
-        let sidecar = agent_root.semantic_dir().join("recurrence_counts.json");
-        stage
-            .put(&sidecar, &consolidation::sidecar_bytes(&[])?)
-            .map_err(ConsolidationError::Io)?;
-    } else {
-        consolidation::stage_cluster_engine(&mut stage, now_sec)?;
-    }
-
-    // The commit records the ledger edges after the renames.
+    // The commit appends the plan's ledger edges after the renames.
     wal::commit_cycle(stage, ledger, now_sec)?;
 
     Ok(ForgetReport {
         removed: true,
         lesson,
     })
-}
-
-/// Stage dropping `id` from `LESSONS.md`, or the file's unlink when `id` is a
-/// lesson's exemplar. Only this file; no lesson is re-selected.
-fn cascade_lessons(stage: &mut Stage, id: &str, now_sec: i64) -> Result<LessonEffect, ForgetError> {
-    let path = stage.agent_root().lessons_md();
-    let Some(bytes) = stage.read(&path).map_err(ForgetError::Lessons)? else {
-        return Ok(LessonEffect::Untouched);
-    };
-    let raw = String::from_utf8(bytes)
-        .map_err(|e| ForgetError::Lessons(io::Error::new(io::ErrorKind::InvalidData, e)))?;
-    let mut file = lessons::parse_lessons_file(&raw).map_err(ForgetError::Lessons)?;
-
-    match classify_lessons(&file, id) {
-        LessonEffect::Untouched => return Ok(LessonEffect::Untouched),
-        LessonEffect::Unlinked => {
-            // The body is the forgotten event's content; there is nothing to keep.
-            stage.unlink(&path).map_err(ForgetError::Lessons)?;
-            return Ok(LessonEffect::Unlinked);
-        }
-        LessonEffect::CitationDropped => {}
-    }
-
-    file.citations.retain(|c| c != id);
-    file.last_updated = DateTime::from_timestamp(now_sec, 0).unwrap_or(DateTime::UNIX_EPOCH);
-    stage
-        .put(&path, lessons::render_lessons_file(&file).as_bytes())
-        .map_err(ForgetError::Lessons)?;
-    Ok(LessonEffect::CitationDropped)
-}
-
-/// What forgetting `id` does to `file`. Shared by [`cascade_lessons`] and
-/// [`preview`] so the two cannot drift: the exemplar unlinks, a citation drops,
-/// anything else is untouched.
-fn classify_lessons(file: &lessons::LessonsFile, id: &str) -> LessonEffect {
-    if file.lessons.iter().any(|l| l.id == id) {
-        LessonEffect::Unlinked
-    } else if file.citations.iter().any(|c| c == id) {
-        LessonEffect::CitationDropped
-    } else {
-        LessonEffect::Untouched
-    }
 }
 
 /// Report what [`cascade`] would do to `id`, writing nothing.
@@ -218,7 +172,7 @@ pub fn preview(agent_root: &AgentRoot, id: &EventId) -> Result<ForgetReport, For
     dream_cycle::ensure_not_in_progress(agent_root)?;
 
     let lesson = match lessons::read_lessons_file(&agent_root.lessons_md()) {
-        Ok(file) => classify_lessons(&file, id.as_str()),
+        Ok(file) => plan::classify_lessons(&file, id.as_str()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => LessonEffect::Untouched,
         Err(e) => return Err(ForgetError::Lessons(e)),
     };
@@ -292,6 +246,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use chrono::DateTime;
     use dreamd_protocol::AgentLearning;
 
     use crate::daemon_state::update_daemon_state;

@@ -466,6 +466,18 @@ mod tests {
             stage.put(&jsonl, b"staged log\n").unwrap();
             stage.put(&root.lessons_md(), lessons.as_bytes()).unwrap();
             stage.put(&sidecar_path, sidecar).unwrap();
+            stage.record_edges(&[
+                (
+                    crate::provenance::Kind::LessonCitation,
+                    X.to_string(),
+                    format!("lsn_{X}"),
+                ),
+                (
+                    crate::provenance::Kind::Recurrence,
+                    X.to_string(),
+                    "rust::eh".to_string(),
+                ),
+            ]);
             // Point 0 is the stage-dir fsync; point 1 follows the WAL write.
             arm_crash(Some(1));
             let result = wal::commit_cycle(stage, lock.ledger(), 0);

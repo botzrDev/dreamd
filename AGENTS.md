@@ -90,11 +90,12 @@ This is computed from Tantivy fastfields on recall. It is not stored or indexed.
 and `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
 
 **Dream cycle is WAL-protected.**
-Before any destructive op (replacing LESSONS.md, pruning JSONL), write
-`dream_in_progress.wal`. When a process takes the project writer lock, if the WAL
-exists, run compensating cleanup (`wal::recover_on_startup`; its one caller is
-`WriterLock::acquire`).
-`.agent/` must be either pre- or post-cycle, never mid-cycle.
+A dream cycle and `dreamd forget` stage every output under `.agent/.dreamd/stage/` and
+change nothing live until one redo WAL (`dream_in_progress.wal`, `format: "redo/1"`)
+commits them. When a process takes the project writer lock, recovery rolls a redo WAL
+forward and wipes any stage directory (`wal::recover_on_startup`; its one caller is
+`WriterLock::acquire`). `.agent/` is either pre- or post-cycle, never mid-cycle; the crash
+sweep (`crash_sweep.rs`) pins that.
 
 **`unsafe` policy.**
 `unsafe_code = "forbid"` at workspace level. `dreamd-core` has a scoped `deny` override
@@ -238,7 +239,35 @@ Locked 2026-10-24:
    - library: new `salience::age_secs`, `age_days` and `clamp_score`.
 
    Docs left for BZR-1238: `docs/architecture.md:255-260` does not mention the three new properties, and `docs/observability.md:31-32` still say "Stored 0.0–10.0". Spec: `assignments/BZR-1237.v2.md`.
-9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
+9. **BZR-1239** — on `main` (`22da460`). A dream cycle and `forget::cascade` stage every output, then commit them with one redo WAL:
+   - `stage::Stage` (`read` / `put` / `unlink` / `redo`) holds the outputs under `.agent/.dreamd/stage/<kind>-<now>/`. Every phase reads through the stage, so later phases see earlier staged output.
+   - `wal::begin_cycle(root, kind, now)` returns the stage and refuses while a WAL is pending. `commit_cycle(stage, ledger, now)` fsyncs the stage and writes `{"schema_version":"1.0","format":"redo/1","renames":[…],"unlinks":[…]}` (the commit point). It then runs `roll_forward` and removes the stage dir.
+   - `roll_forward`:
+     1. validate, failing closed on an absolute or `..` path, a `from` outside the stage, or a `to` / unlink inside it;
+     2. renames, then unlinks, then directory fsyncs;
+     3. `provenance::record_cycle`;
+     4. status `complete`, then WAL delete.
+   - Recovery at `WriterLock::acquire` rolls a redo WAL forward, keeps the old meaning of a legacy `intents` WAL, and wipes the stage root.
+   - The autosnap object is written directly; only its ref is staged.
+   - `crash_sweep.rs` crashes at every stage and rename point through `#[cfg(test)]` hooks and asserts the recovered store is pre- or post-cycle (drift entry `crash-sweep-oracle-is-the-image-not-the-wal`). V6 had no BZR-1230 test. The PM's own repro failed on `a99975e`.
+
+   PM re-run: workspace 1189 passed / 0 failed / 1 ignored. Mutations M1–M15 and a PM-only P1 fail as named. Stripped `dreamd` is 20,846,112 bytes.
+
+   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+   - a dream cycle and `dreamd forget` stage every output under `.agent/.dreamd/stage/` and change nothing live until one redo WAL commits them. A crash before that point leaves the store as it was (`failed`); a crash after it is rolled forward by the next writer (`complete`). Before 1.1.0 a crash between the `LESSONS.md` rename and the pin pass left a lesson citing an unpinned event (audit V6);
+   - `dream_in_progress.wal` is now `{"format":"redo/1","renames":[…],"unlinks":[…]}`. A pre-1.1.0 binary refuses to start on it. 1.1.0 still recovers a legacy `intents` WAL the old way;
+   - a WAL with an unknown `format`, or a redo path outside `.agent/` or on the wrong side of the stage, makes every writer refuse to start;
+   - a cycle refuses to begin while a WAL is pending;
+   - the day's decay archive is staged and renamed as a whole file instead of appended in place;
+   - a roll-forward at recovery sets the status to `complete` but leaves `last_dream_cycle_at` as it was;
+   - library: `wal::begin_cycle(root, kind, now) -> Stage`, `commit_cycle(stage, ledger, now)`, `recover_if_needed(root, ledger)` and `recover_on_startup(root, ledger)`; `apply_pin_unpin`, `select_lesson_or_retire`, `write_selected_lesson` and `run_decay_pruner` take a `&mut Stage`; `run_deterministic_dream_cycle(root, ledger, now)`. New: `stage::Stage`, `wal::{RedoWal, RedoRename, CycleKind, REDO_FORMAT}`, `RecoveryOutcome::RolledForward`, `WalError::{Pending, UnknownFormat, BadRedoPath, Provenance}`, `consolidation::stage_cluster_engine`, `lessons::parse_lessons_file`, `snapshot::stage_autosnap`, `AgentRoot::stage_dir`. Removed: `wal::guarded_replace`, `GuardedReplaceKind`, `append_intent`, `episodic::rewrite_guarded`. BZR-1240 replaces several of these again; write the CHANGELOG against the 1.1.0 tree, not this list.
+
+   Left for later tickets:
+   - BZR-1238: `docs/architecture/durability.md:33` says the phases "replace the file by atomic rename".
+   - BZR-1245: a crash before the commit point leaves an unreferenced autosnap object under `branches/objects/`.
+   - BZR-1244: on Windows, `io::write_atomic_with_hook` may have no non-test caller left.
+
+   Spec: `assignments/BZR-1239.v2.md`. Amendment 1 moved the stage removal into `commit_cycle` and fixed the crash-sweep oracle.
 10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
 11. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
 12. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
@@ -425,7 +454,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### pin-is-the-decay-exemption
 
-- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `apply_pin_unpin` pins every cited record that is not already pinned, and never clears a pin (`consolidation.rs`, BZR-1234), `should_decay` returns `false` immediately for pinned records (`decay.rs:33-35`), and consolidation runs before the pruner inside one WAL envelope (`dream_cycle.rs:106-107`) — so the pin always lands first. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
+- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `apply_pin_unpin` pins every cited record that is not already pinned, and never clears a pin (`consolidation.rs`, BZR-1234), `should_decay` returns `false` immediately for pinned records (`decay.rs:33-35`), and the pruner reads the log the pin pass staged in the same cycle (BZR-1239, `decay_reads_the_staged_log`) — so the pin always lands first. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
 - **Why:** AILAB-205 rev 2 specced a snapshot-fallback lookup on the premise that every exemplar decays at ~90 days, giving lessons a hard lifetime. The premise was false and the step was cut in rev 3. Cost: a scope expansion approved on bad evidence, plus in-flight dev work. The reasoning error was reading `should_decay`'s age and salience gates while skipping the `pinned` short-circuit three lines above them.
 - **How to apply:**
   - Before claiming a record decays, check `pinned` first — it is the outermost gate in `should_decay`, ahead of both age and salience.
@@ -683,7 +712,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### select-lesson-or-retire-unlinks
 
-- **Rule:** `select_lesson_or_retire` is not a read. On empty promotion it `remove_file`s `LESSONS.md` (AILAB-699). `run_cluster_engine` always writes `recurrence_counts.json`.
+- **Rule:** `select_lesson_or_retire` is not a read. On empty promotion it stages an unlink of `LESSONS.md` that the cycle's commit applies (AILAB-699; staged since BZR-1239). `run_cluster_engine` always writes `recurrence_counts.json`.
 - **Why:** A preview that reused the write-path select/cluster functions would mutate the store — the opposite of `--dry`.
 - **How to apply:** Dry uses `compute_promoted_clusters` (already pub, no disk) plus a new `preview_select_lesson` that does not unlink and does not call `run_cluster_engine`. Do not call `wal::begin_cycle`, `write_selected_lesson`, decay, index, or autobiography on the dry path.
 - **Cross-refs:** `dry-skips-proxy-unlike-no-llm`
@@ -723,6 +752,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### wal-guarded-replace-owns-tmp-path
 
+- **Superseded by BZR-1239.** `wal::guarded_replace`, `GuardedReplaceKind`, `append_intent` and `episodic::rewrite_guarded` are deleted. A cycle stages its outputs (`stage::Stage::put` / `unlink`) and commits them with one redo WAL (`wal::commit_cycle`). Do not bring back per-replace intents. The rest of this entry is history.
 - **Rule:** Dream-cycle destructive replaces go through `wal::guarded_replace`. Callers never construct `WalIntent.temp_file_path`. The tmp path is the `&Path` `write_atomic_with_hook` passes into its hook after fsync, not a second `with_extension("tmp")` at the call site.
 - **Why:** AILAB-164 Linear still cited `consolidation.rs:226` and “three state.json getters.” Live pin/decay thread a closure through `rewrite_atomic` and recompute the tmp path; `write_selected_lesson` appends `ReplaceSemanticMemory` *before* `write_lessons_file` (intent can land with no tmp). AILAB-167 already owns the typed `state.json` writer; only `read_last_cycle_status` / `read_cycle_started_at` remain as `Value` parsers.
 - **How to apply:** Implement `assignments/AILAB-164.v2.md`. `apply_pin_unpin` / `run_decay_pruner` / `forget::cascade` use `episodic::rewrite_guarded` (Prune), which since BZR-1234 takes `patch_lines` bytes, not records. `write_selected_lesson` uses `guarded_replace` + `render_lessons_file` (Replace), not `write_lessons_file`. `archive.rs` keeps hook-free `rewrite_atomic`. `recover` must not call this seam (since BZR-1235 its only writes are a `set_len` or one `\n` on its own fd). Readers wrap `read_daemon_state`; do not add a third writer. Recovery tests drive `guarded_replace_crash_after_intent`, not hand-written WAL JSON.
@@ -975,9 +1005,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### forget-cascade-does-not-run-the-dream-cycle
 
-- **Rule:** `forget::cascade` removes one event from the live JSONL under the open dream-cycle WAL. It does not call `filesystem_phases`, `select_lesson_or_retire`, or `run_decay_pruner`.
-- **Why:** BZR-158's Linear AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: `recover_if_needed` only deletes uncommitted temps.
-- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. Recount with `run_cluster_engine`. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
+- **Rule:** `forget::cascade` removes one event from the JSONL with the dream cycle's commit: it stages the log, the lesson change and the sidecar, then commits them with one redo WAL (BZR-1239). It does not call `filesystem_phases`, `select_lesson_or_retire`, or `run_decay_pruner`.
+- **Why:** BZR-158's Linear AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: the in-crate crash sweep (`crash_sweep_forget_*`) crashes at every stage and rename point.
+- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. Recount with `stage_cluster_engine` (a staged sidecar). Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
 - **Cross-refs:** `coordinator-not-mutex-file`, `delete-term-must-target-a-unique-field`, `provenance-verify-does-not-rewrite-the-ledger`, `select-lesson-or-retire-unlinks`, `remaining-build-order-2026-09-24`, `forget-proof-is-a-receipt-not-a-signed-membership-proof`
 
 ### forget-proof-is-a-receipt-not-a-signed-membership-proof
@@ -1012,7 +1042,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** Until the named ticket lands, do not cite these ARCHITECTURE.md claims as facts:
   - "`add_document` is idempotent; replay re-does at most one commit window" (§4). Resolved by BZR-1236: §4 now describes the upsert, the coverage pass and the persist step. Cite those.
-  - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). False until BZR-1239.
+  - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). Resolved by BZR-1239: outputs are staged and committed with one redo WAL, recovery rolls it forward, and `crash_sweep.rs` pins the claim. Cite §3.
   - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). False until BZR-1242.
   - The coordinator is the only writer (§1, "Architectural conventions"). Resolved by BZR-1232: §1 now says only a process holding the project writer lock starts a coordinator. Cite the new sentence.
 - **Why:** The 2026-10-24 audit reproduced four defects on `c241538`:
@@ -1096,11 +1126,11 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
     - a drop beats a pin;
     - lines with no record, including a torn final line, are copied verbatim.
   - A flipped line is rebuilt from `OrderedObject` (ordered `RawValue` members), so every other member keeps its position and bytes.
-  - A rewrite that changes nothing returns before any write: no rename, no WAL intent.
+  - A rewrite that changes nothing stages nothing, so the commit renames nothing (BZR-1239).
   - BZR-1239 (staged outputs) and BZR-1240 (`plan_cycle`) build on these helpers.
   - Since BZR-1235 `recover` rewrites nothing. It truncates a torn fragment or ends a final record with `\n` (`ailab-163-excise-skips-not-suffix`).
   - The `read_all` readers that rewrite nothing stay on `read_all`.
-  - When an AC lists the call sites of a defect, grep for every writer of the path (`rewrite_atomic|rewrite_guarded|write_atomic`) before trusting the list.
+  - When an AC lists the call sites of a defect, grep for every writer of the path (`rewrite_atomic|write_atomic|stage.put`) before trusting the list.
 - **Cross-refs:** `wal-guarded-replace-owns-tmp-path`, `ailab-163-excise-skips-not-suffix`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `weg378-skip-midfile-halt-torn-tail`
 
 ### index-fixtures-must-write-the-log-first
@@ -1146,3 +1176,14 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Name the strategy in the spec and grep for it (BZR-1237 grep 6).
   - Check that `git ls-files --others --exclude-standard` is empty before sign-off.
 - **Cross-refs:** `nan-safe-clamp-is-if-else`, `mutation-must-get-past-the-backstop`
+
+### crash-sweep-oracle-is-the-image-not-the-wal
+
+- **Rule:** A crash sweep decides pre- vs post-cycle by comparing the recovered store with the pre and post images, not by whether the WAL file exists. Read `crash_fired()` before the next `arm_crash`, because arming resets the flag.
+- **Why:** BZR-1239's spec classified each crash by `wal_path().exists()`. The dev's pre-flight question showed that a crash after the WAL is deleted, or during the stage cleanup, leaves no WAL and the post image (Amendment 1 item 3). The spec's step order also disarmed before reading `crash_fired()`. The dev read the flag first, which kept the intent. The same spec's §4 grep 4 counted three `crash_point` definitions and missed the `#[cfg(not(test))]` no-op twin.
+- **How to apply:**
+  - `landed = image == post`; assert `landed || image == pre`; if a WAL was left, assert `landed`; the status follows `landed`.
+  - Require at least one crash point that did not land, one that landed with the WAL left, and every not-landed point before every landed one.
+  - Report the final `k` and the first landed `k` rather than fixing them in the spec. A ticket that changes how many files a cycle stages (BZR-1240) moves them.
+  - When a spec counts a function's definitions, count its `cfg` twins.
+- **Cross-refs:** `mutation-must-get-past-the-backstop`, `guards-vs-mandates-same-line`, `architecture-claims-false-until-dreamd-hardening`

@@ -48,6 +48,7 @@ pub mod memory_diff;
 pub mod memory_store;
 pub mod migrate;
 pub mod observability;
+pub mod plan;
 pub mod privacy;
 pub mod provenance;
 pub mod redaction;

@@ -123,7 +123,8 @@ pub enum IndexerMsg {
         response: oneshot::Sender<Result<(), IndexError>>,
     },
     /// Decay pruner hook (WEG-62 / DR-309): delete decayed event IDs from the index.
-    /// Does not touch the JSONL — JSONL rewrite is handled by `run_decay_pruner`.
+    /// Does not touch the JSONL — the JSONL rewrite is the cycle's plan
+    /// (`plan_cycle`), committed with the cycle.
     PruneDecayedEvents {
         event_ids: Vec<EventId>,
         response: oneshot::Sender<Result<(), IndexError>>,
@@ -553,8 +554,8 @@ pub(crate) fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) 
 /// coverage pass's single commit inside [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open).
 ///
 /// Exemplar lookup is the live episodic log only; a miss skips the lesson with
-/// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `apply_pin_unpin`
-/// pins every cited exemplar and `should_decay` short-circuits on `pinned`, so
+/// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `plan_cycle` pins
+/// every cited exemplar (`cited_pins`) and its decay skips pinned records, so
 /// a cited exemplar does not age out). A lesson is never indexed with defaulted
 /// pain/importance: that document would score exactly 0.0 and could never rank.
 ///

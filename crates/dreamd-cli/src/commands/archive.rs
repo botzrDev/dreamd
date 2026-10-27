@@ -9,8 +9,9 @@
 //! Modeled on [`crate::commands::reset`]: a typed error enum, [`AgentRoot::discover`]
 //! for root resolution, and injectable `out`/`err` writers for testability. The
 //! read → mutate → rewrite path is the inverse of
-//! [`dreamd_core::consolidation::apply_pin_unpin`] — force-clear instead of
-//! union-set — and reuses the same [`dreamd_core::episodic`] I/O seam
+//! [`dreamd_core::consolidation::cited_pins`] as `plan_cycle` applies it —
+//! force-clear instead of union-set — and reuses the same
+//! [`dreamd_core::episodic`] I/O seam
 //! ([`read_raw`](dreamd_core::episodic::read_raw) +
 //! [`patch_lines`](dreamd_core::episodic::patch_lines) +
 //! [`rewrite_atomic`](dreamd_core::episodic::rewrite_atomic)) so no JSONL I/O is

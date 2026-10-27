@@ -554,9 +554,9 @@ fn check_cluster_health(
 /// information, not ill health. Every failure arm below still returns `Ok(())`
 /// for the same reason.
 ///
-/// Doctor must never call `select_lesson_or_retire` (it unlinks
-/// `semantic/LESSONS.md`) and must never call `run_cluster_engine` (it writes
-/// `semantic/recurrence_counts.json`). Selection therefore goes through
+/// Doctor never stages or commits a cycle's plan (a plan can unlink
+/// `semantic/LESSONS.md`) and never writes the sidecar (`run_cluster_engine`
+/// writes `semantic/recurrence_counts.json`). Selection therefore goes through
 /// [`consolidation::preview_select_lesson`], the read-only `--dry` seam: a
 /// health check must not mutate the store it is auditing.
 ///
@@ -1675,8 +1675,8 @@ mod tests {
         );
         assert!(
             !root.lessons_md().exists(),
-            "doctor must never take select_lesson_or_retire's write path, which \
-             unlinks LESSONS.md; got: {output:?}"
+            "doctor must never stage or commit a cycle's plan, which can \
+             unlink LESSONS.md; got: {output:?}"
         );
         assert!(
             !root.semantic_dir().join("recurrence_counts.json").exists(),

@@ -9,8 +9,9 @@
 //! `WriterLock::acquire` builds it, after cutting a torn final line, and the
 //! lock token carries it. Its callers:
 //!
-//! - the dream cycle and `dreamd forget`, through [`record_cycle`]
-//!   (`lesson_citation` and `recurrence` edges);
+//! - the dream cycle and `dreamd forget`: their plan lists the
+//!   `lesson_citation` and `recurrence` edges ([`lesson_edges`]), the redo WAL
+//!   carries them, and `wal::roll_forward` appends them after the renames;
 //! - the indexer's persist step, after `writer.commit()` and before the
 //!   watermark (`index_doc` edges for every id that commit covered).
 //!
@@ -40,14 +41,15 @@ use sha2::{Digest, Sha256};
 use crate::episodic::{self, EpisodicError};
 use crate::index::RecurrenceSidecar;
 use crate::layout::AgentRoot;
-use crate::lessons;
+use crate::lessons::{self, LessonsFile};
 
 /// The ledger's `schema_version` token. It is not the episodic record token
 /// and not the daemon state token.
 pub const PROVENANCE_SCHEMA_VERSION: &str = "provenance/1.0";
 
-/// The edge kinds this writer emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+/// The edge kinds this writer emits. A redo WAL carries them, so they read
+/// back too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// Event id → `lsn_` + lesson id; the lesson's `citations` names the event.
@@ -221,46 +223,28 @@ fn cut_torn_tail(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Record the dream cycle's `lesson_citation` and `recurrence` edges from the
-/// `LESSONS.md` and `semantic/recurrence_counts.json` this cycle left on disk.
+/// The `lesson_citation` and `recurrence` edges of `file`: one citation edge
+/// per `citations` id, in order, to `lsn_<first lesson id>`, then one
+/// `recurrence` edge, exemplar → `cluster_key`, when `cluster_listed` (the
+/// recurrence sidecar lists `cluster_key`). A file with no lesson has no edges.
 ///
-/// A missing or unreadable `LESSONS.md` writes nothing and returns `Ok`: the
-/// ledger must not fail a cycle that promoted nothing. A missing or malformed
-/// sidecar drops the `recurrence` edge only.
-pub fn record_cycle(agent_root: &AgentRoot, ledger: &Ledger) -> Result<(), ProvenanceError> {
-    let Ok(file) = lessons::read_lessons_file(&agent_root.lessons_md()) else {
-        return Ok(());
-    };
+/// The one edge rule: a cycle's or a forget's plan lists these edges for the
+/// commit to append, and [`verify`] expects them of the live files.
+#[must_use]
+pub fn lesson_edges(file: &LessonsFile, cluster_listed: bool) -> Vec<(Kind, String, String)> {
     let Some(exemplar) = file.lessons.first().map(|l| l.id.clone()) else {
-        return Ok(());
+        return Vec::new();
     };
     let lesson_doc = format!("lsn_{exemplar}");
-
     let mut edges: Vec<(Kind, String, String)> = file
         .citations
         .iter()
         .map(|id| (Kind::LessonCitation, id.clone(), lesson_doc.clone()))
         .collect();
-
-    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-    if let Ok(raw) = fs::read_to_string(&sidecar_path) {
-        match serde_json::from_str::<RecurrenceSidecar>(&raw) {
-            Ok(sidecar) => {
-                if sidecar
-                    .clusters
-                    .iter()
-                    .any(|c| c.skill_action == file.cluster_key)
-                {
-                    edges.push((Kind::Recurrence, exemplar, file.cluster_key.clone()));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "recurrence_counts.json unparseable; no recurrence edge");
-            }
-        }
+    if cluster_listed {
+        edges.push((Kind::Recurrence, exemplar, file.cluster_key.clone()));
     }
-
-    ledger.append(&edges)
+    edges
 }
 
 /// Result of [`verify`]. `root` is the Merkle root recomputed from the good
@@ -424,25 +408,16 @@ pub fn verify(agent_root: &AgentRoot) -> Result<ProvenanceReport, ProvenanceErro
         .collect();
     let mut expected: Vec<(Kind, String, String)> = Vec::new();
     if let Ok(file) = lessons::read_lessons_file(&agent_root.lessons_md()) {
-        if let Some(exemplar) = file.lessons.first().map(|l| l.id.clone()) {
-            let lesson_doc = format!("lsn_{exemplar}");
-            expected.extend(
-                file.citations
-                    .iter()
-                    .map(|id| (Kind::LessonCitation, id.clone(), lesson_doc.clone())),
-            );
-            let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-            let sidecar = fs::read_to_string(&sidecar_path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<RecurrenceSidecar>(&raw).ok());
-            if sidecar.is_some_and(|s| {
-                s.clusters
-                    .iter()
-                    .any(|c| c.skill_action == file.cluster_key)
-            }) {
-                expected.push((Kind::Recurrence, exemplar, file.cluster_key.clone()));
-            }
-        }
+        let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
+        let sidecar = fs::read_to_string(&sidecar_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<RecurrenceSidecar>(&raw).ok());
+        let listed = sidecar.is_some_and(|s| {
+            s.clusters
+                .iter()
+                .any(|c| c.skill_action == file.cluster_key)
+        });
+        expected = lesson_edges(&file, listed);
     }
     let missing = expected
         .into_iter()
@@ -584,9 +559,9 @@ mod tests {
         );
     }
 
-    fn write_lessons(root: &AgentRoot, cluster_key: &str, citations: &[&str]) {
-        fs::create_dir_all(root.semantic_dir()).unwrap();
-        let file = LessonsFile {
+    /// A one-lesson file filed under `EVT_A`.
+    fn lessons_file(cluster_key: &str, citations: &[&str]) -> LessonsFile {
+        LessonsFile {
             last_updated: chrono::DateTime::from_timestamp(1_747_137_600, 0).unwrap(),
             prompt_version: "deterministic".into(),
             cluster_key: cluster_key.into(),
@@ -596,13 +571,18 @@ mod tests {
                 content: "prefer typed errors".into(),
                 pinned: false,
             }],
-        };
-        lessons::write_lessons_file(&root.lessons_md(), &file).unwrap();
+        }
+    }
+
+    fn write_lessons(root: &AgentRoot, cluster_key: &str, citations: &[&str]) {
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        lessons::write_lessons_file(&root.lessons_md(), &lessons_file(cluster_key, citations))
+            .unwrap();
     }
 
     fn write_sidecar(root: &AgentRoot, keys: &[&str]) {
         let sidecar = RecurrenceSidecar {
-            // record_cycle reads only `clusters`.
+            // verify reads only `clusters`.
             schema_version: String::new(),
             clusters: keys
                 .iter()
@@ -620,58 +600,43 @@ mod tests {
     }
 
     #[test]
-    fn record_cycle_writes_citations_and_one_recurrence_edge() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = AgentRoot::new(dir.path());
+    fn lesson_edges_lists_citations_then_one_recurrence_edge() {
         let key = "rust::error_handling::axum_rejection";
-        write_lessons(&root, key, &[EVT_A, EVT_B]);
-        write_sidecar(&root, &[key]);
-
-        let ledger = Ledger::open(root.provenance_ledger());
-        record_cycle(&root, &ledger).unwrap();
+        let file = lessons_file(key, &[EVT_A, EVT_B]);
 
         let lsn = format!("lsn_{EVT_A}");
-        let expected = vec![
-            format!(
-                r#"{{"schema_version":"provenance/1.0","kind":"lesson_citation","from":"{EVT_A}","to":"{lsn}"}}"#
-            ),
-            format!(
-                r#"{{"schema_version":"provenance/1.0","kind":"lesson_citation","from":"{EVT_B}","to":"{lsn}"}}"#
-            ),
-            format!(
-                r#"{{"schema_version":"provenance/1.0","kind":"recurrence","from":"{EVT_A}","to":"{key}"}}"#
-            ),
-        ];
-        assert_eq!(ledger_lines(&root.provenance_ledger()), expected);
-
-        // A second cycle over the same files adds nothing.
-        record_cycle(&root, &ledger).unwrap();
-        assert_eq!(ledger_lines(&root.provenance_ledger()).len(), 3);
+        assert_eq!(
+            lesson_edges(&file, true),
+            vec![
+                (Kind::LessonCitation, EVT_A.to_owned(), lsn.clone()),
+                (Kind::LessonCitation, EVT_B.to_owned(), lsn),
+                (Kind::Recurrence, EVT_A.to_owned(), key.to_owned()),
+            ]
+        );
     }
 
     #[test]
-    fn record_cycle_skips_sidecar_rows_for_other_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = AgentRoot::new(dir.path());
-        write_lessons(&root, "rust::errors", &[EVT_A, EVT_B]);
-        write_sidecar(&root, &["python::imports"]);
+    fn lesson_edges_without_a_listed_cluster_has_no_recurrence_edge() {
+        let file = lessons_file("rust::errors", &[EVT_A, EVT_B]);
 
-        record_cycle(&root, &Ledger::open(root.provenance_ledger())).unwrap();
-
-        let lines = ledger_lines(&root.provenance_ledger());
-        assert_eq!(lines.len(), 2);
-        assert!(lines
-            .iter()
-            .all(|l| l.contains("\"kind\":\"lesson_citation\"")));
+        let lsn = format!("lsn_{EVT_A}");
+        assert_eq!(
+            lesson_edges(&file, false),
+            vec![
+                (Kind::LessonCitation, EVT_A.to_owned(), lsn.clone()),
+                (Kind::LessonCitation, EVT_B.to_owned(), lsn),
+            ]
+        );
     }
 
     #[test]
-    fn record_cycle_without_lessons_md_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = AgentRoot::new(dir.path());
-        record_cycle(&root, &Ledger::open(root.provenance_ledger())).unwrap();
-        assert!(!root.provenance_ledger().exists());
-        assert!(!root.provenance_dir().exists());
+    fn lesson_edges_of_a_file_without_lessons_is_empty() {
+        let file = LessonsFile {
+            lessons: Vec::new(),
+            ..lessons_file("rust::errors", &[EVT_A])
+        };
+
+        assert_eq!(lesson_edges(&file, true), Vec::new());
     }
 
     // ---- verify (BZR-148) ----

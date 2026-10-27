@@ -7,8 +7,11 @@
 //! — and applies it. A crash before the commit point leaves only the stage
 //! directory, which the next writer to take the project lock wipes.
 //!
-//! [`Stage::read`] reads through the stage: a later phase of the same cycle
-//! sees what an earlier phase staged, not the live file.
+//! A cycle plans every output first ([`crate::plan`]) and stages the plan with
+//! [`Stage::apply_plan`], which also carries the plan's ledger edges into the
+//! redo WAL. No phase reads back what another staged: the cycle reads its
+//! inputs through the empty stage, and `apply_plan` reads only the day's
+//! archive (and, for an unlink, whether `LESSONS.md` exists).
 //!
 //! Test builds also carry the crash hooks the crash sweep drives
 //! ([`crash_point`], `arm_crash`, `crash_fired`). Release builds compile
@@ -19,8 +22,12 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use crate::decay;
 use crate::layout::AgentRoot;
-use crate::wal::{RedoRename, RedoWal, REDO_FORMAT, STATE_SCHEMA_VERSION};
+use crate::lessons;
+use crate::plan::{CyclePlan, LessonsChange};
+use crate::provenance::Kind;
+use crate::wal::{RedoEdge, RedoRename, RedoWal, REDO_FORMAT, STATE_SCHEMA_VERSION};
 
 /// A dream cycle's (or forget's) outputs, staged under
 /// `.agent/.dreamd/stage/<name>/` before the redo WAL commits them.
@@ -31,6 +38,8 @@ pub struct Stage {
     seq: u32,
     /// Key: live path relative to `.agent/`.
     entries: BTreeMap<PathBuf, Entry>,
+    /// Ledger edges the commit appends, in order.
+    edges: Vec<(Kind, String, String)>,
 }
 
 #[derive(Debug)]
@@ -56,6 +65,7 @@ impl Stage {
             dir,
             seq: 0,
             entries: BTreeMap::new(),
+            edges: Vec::new(),
         })
     }
 
@@ -66,6 +76,11 @@ impl Stage {
     /// The bytes `live` will hold once this stage commits: the staged bytes
     /// for a [`put`](Self::put), `None` for an [`unlink`](Self::unlink), and
     /// otherwise the live file (`None` when it is absent).
+    ///
+    /// A cycle reads its inputs through the stage before it stages anything,
+    /// so it reads the live files. After that only [`apply_plan`](Self::apply_plan)
+    /// reads through it: the day's archive, and, through `unlink`, whether
+    /// `LESSONS.md` exists.
     pub fn read(&self, live: &Path) -> io::Result<Option<Vec<u8>>> {
         if let Some(rel) = self.relative(live) {
             match self.entries.get(&rel) {
@@ -133,9 +148,48 @@ impl Stage {
         Ok(())
     }
 
+    /// Add `edges` to the ledger edges the commit appends, after any already
+    /// recorded.
+    pub fn record_edges(&mut self, edges: &[(Kind, String, String)]) {
+        self.edges.extend_from_slice(edges);
+    }
+
+    /// Stage `plan`: the log, the `LESSONS.md` write or unlink, the sidecar,
+    /// and, when anything decays, the day's archive merged with its current
+    /// bytes ([`decay::merge_archive`]). Then record the plan's edges.
+    /// `cycle_date` names the archive (`YYYY-MM-DD`).
+    pub fn apply_plan(&mut self, plan: &CyclePlan, cycle_date: &str) -> io::Result<()> {
+        let agent_root = self.agent_root.clone();
+        if let Some(log) = &plan.log {
+            self.put(&agent_root.episodic_jsonl(), log)?;
+        }
+        match &plan.lessons {
+            LessonsChange::Keep => {}
+            LessonsChange::Write(file) => self.put(
+                &agent_root.lessons_md(),
+                lessons::render_lessons_file(file).as_bytes(),
+            )?,
+            LessonsChange::Unlink => self.unlink(&agent_root.lessons_md())?,
+        }
+        if let Some(sidecar) = &plan.sidecar {
+            self.put(
+                &agent_root.semantic_dir().join("recurrence_counts.json"),
+                sidecar,
+            )?;
+        }
+        if !plan.archived.is_empty() {
+            let archive_path = agent_root.snapshot_file(cycle_date);
+            let archive = decay::merge_archive(self.read(&archive_path)?, &plan.archived);
+            self.put(&archive_path, &archive)?;
+        }
+        self.record_edges(&plan.edges);
+        Ok(())
+    }
+
     /// The redo WAL that commits this stage: `from` is the staged file
     /// (`.dreamd/stage/<name>/<file>`), `to` and `unlinks` are live paths, all
-    /// relative to `.agent/` and `/`-joined, in path order.
+    /// relative to `.agent/` and `/`-joined, in path order. `edges` are the
+    /// recorded ledger edges, in the order they were recorded.
     pub(crate) fn redo(&self) -> RedoWal {
         let stage_rel = self
             .relative(&self.dir)
@@ -157,6 +211,15 @@ impl Stage {
             format: REDO_FORMAT.to_string(),
             renames,
             unlinks,
+            edges: self
+                .edges
+                .iter()
+                .map(|(kind, from, to)| RedoEdge {
+                    kind: *kind,
+                    from: from.clone(),
+                    to: to.clone(),
+                })
+                .collect(),
         }
     }
 

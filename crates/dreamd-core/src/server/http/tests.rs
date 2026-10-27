@@ -1908,7 +1908,7 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
     // B's running cycle has reached its commit point: its redo WAL is on disk.
     std::fs::write(
         root_b.wal_path(),
-        r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[]}"#,
+        r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[],"edges":[]}"#,
     )
     .expect("B's running cycle writes its redo WAL");
     state
