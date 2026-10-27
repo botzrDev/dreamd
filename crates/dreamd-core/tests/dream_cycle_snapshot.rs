@@ -4,7 +4,9 @@
 //! and pins the three output files: LESSONS.md, recurrence_counts.json, state.json.
 //!
 //! NOW_SEC = 1_747_137_600 (2025-05-13T12:00:00Z) — fixed clock; no wall-time calls.
-//! Two clusters promote; Cluster B wins by salience_sum (~39.97 vs ~39.40).
+//! Two clusters promote. Every event is dated after NOW_SEC, so the age clamp
+//! gives each one recency 1.0 (BZR-1237), and Cluster B wins by salience_sum
+//! (~3.84 vs ~3.32).
 //! Exemplar = evt_01ARZ3NDEKTSV4RRFFQ69G5FA4 (highest pain in B).
 
 use std::fs;

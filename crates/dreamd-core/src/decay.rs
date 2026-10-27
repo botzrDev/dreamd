@@ -14,7 +14,7 @@ use dreamd_protocol::{AgentLearning, EventId};
 
 use crate::episodic::{self, EpisodicError};
 use crate::layout::AgentRoot;
-use crate::salience::{salience_with_context, RecurrenceContext};
+use crate::salience::{age_secs, salience_with_context, RecurrenceContext};
 
 /// Age threshold: events older than this are candidates for decay.
 pub const DECAY_AGE_THRESHOLD_SEC: i64 = 90 * 24 * 3600; // 90 days
@@ -33,7 +33,7 @@ pub fn should_decay(now_sec: i64, learning: &AgentLearning) -> bool {
     if learning.pinned {
         return false;
     }
-    let age_sec = now_sec - learning.timestamp.timestamp();
+    let age_sec = age_secs(now_sec, learning.timestamp.timestamp());
     if age_sec <= DECAY_AGE_THRESHOLD_SEC {
         return false;
     }
@@ -291,6 +291,13 @@ mod tests {
     fn should_not_decay_young() {
         let id = make_event_id('0');
         let learning = make_learning(id, YOUNG_TS, false);
+        assert!(!should_decay(NOW_SEC, &learning));
+    }
+
+    #[test]
+    fn should_not_decay_future_dated() {
+        let id = make_event_id('0');
+        let learning = make_learning(id, NOW_SEC + 200 * 24 * 3600, false);
         assert!(!should_decay(NOW_SEC, &learning));
     }
 

@@ -27,7 +27,7 @@ Each entry in `citations` is:
 | `salience_component` | Query-time salience multiplier |
 | `layer` | Memory layer: `episodic` or `semantic` — the same token as the paired `results[].source` |
 | `snippet` | Full stored learning text, no truncation |
-| `age_days` | `(now - timestamp) / 86400`, the same expression the salience formula uses |
+| `age_days` | `(now - timestamp) / 86400`, floored at 0: the age the salience formula uses |
 | `pain` | Stored 0.0–10.0 subjective friction score — the raw value, not divided by 10 |
 | `importance` | Stored 0.0–10.0 long-term relevance score — the raw value, not divided by 10 |
 | `recurrence` | Cluster occurrence count from the index fastfield (bounded-staleness sidecar) |
@@ -46,9 +46,9 @@ BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + r
 
 The `14` in `exp(-age_days / 14)` is an **e-folding time constant** (the
 curve reaches `1/e` at 14 days), not a half-life. The half-life of this curve
-is `14 × ln(2) ≈ 9.7` days. `citations[].age_days` is the input to that term;
-`citations[].pain` and `citations[].importance` are the stored values before
-the `/ 10` the formula applies.
+is `14 × ln(2) ≈ 9.7` days. `citations[].age_days` is the input to that term.
+`citations[].pain` and `citations[].importance` are the stored values, before
+the formula clamps them to 0–10 and applies `/ 10`.
 
 ## Where else this shows up
 

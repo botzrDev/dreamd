@@ -10,6 +10,11 @@
 //! not refactor the arithmetic shape (e.g., do not factor out `/ 10.0`) so
 //! that `--explain` output reads the same as the spec.
 //!
+//! BZR-1237: [`salience`] clamps its inputs before the formula runs. Age is
+//! floored at 0, and pain and importance are held to `0.0..=10.0`. A record
+//! that skipped ingress validation (a hand edit, a merged log) cannot score
+//! above `1 + ln(1 + recurrence)`. The clamp leaves the formula's shape alone.
+//!
 //! [`RecurrenceContext`] centralizes per-phase recurrence policy. Per SPEC.md,
 //! `recurrence` is not an event field — each consumer derives the `u64` fed
 //! into [`salience`] separately. Bugs in call-site policy (index-time
@@ -84,14 +89,45 @@ pub fn salience_with_context(
     salience(now, ts, pain, importance, recurrence.as_u64())
 }
 
+/// Age in seconds that [`salience`] and the decay pruner use: `now - ts`,
+/// floored at 0. A `ts` after `now` (clock skew, a merged or hand-edited
+/// record) counts as brand new. Saturates instead of overflowing.
+#[must_use]
+pub fn age_secs(now: i64, ts: i64) -> i64 {
+    now.saturating_sub(ts).max(0)
+}
+
+/// Age in days that [`salience`] feeds its recency term: [`age_secs`] / 86 400.
+#[must_use]
+pub fn age_days(now: i64, ts: i64) -> f64 {
+    age_secs(now, ts) as f64 / 86_400.0
+}
+
+/// A pain or importance score as [`salience`] uses it: clamped to
+/// `0.0..=10.0`, with `NaN` counted as 0. Not `f64::clamp`, which returns
+/// `NaN` for `NaN`.
+#[must_use]
+pub fn clamp_score(score: f64) -> f64 {
+    if score >= 0.0 {
+        score.min(10.0)
+    } else {
+        0.0
+    }
+}
+
 /// Compute the salience score for an episodic record at query time.
 ///
-/// `now` and `ts` are unix epoch seconds (`i64` to allow `now < ts` skew).
+/// `now` and `ts` are unix epoch seconds. A `ts` after `now` counts as age 0
+/// ([`age_secs`]), and `pain` and `importance` are clamped to `0.0..=10.0`
+/// ([`clamp_score`]), so the result lies in `[0, 1 + ln(1 + recurrence)]` for
+/// every input.
 /// `recurrence` is `u64` per the protocol type; it is cast to `f64` before
 /// `ln` so a recurrence of 0 evaluates to `ln(1.0) == 0.0` (no panic, no
 /// `NaN`).
 pub fn salience(now: i64, ts: i64, pain: f64, importance: f64, recurrence: u64) -> f64 {
-    let age_days = (now - ts) as f64 / 86_400.0;
+    let age_days = age_days(now, ts);
+    let pain = clamp_score(pain);
+    let importance = clamp_score(importance);
     (-age_days / 14.0).exp()
         * (pain / 10.0)
         * (importance / 10.0)
@@ -151,6 +187,40 @@ mod tests {
         let s = salience(NOW, NOW, 5.0, 7.0, 9);
         let expected = 1.0 * 0.5 * 0.7 * (1.0 + 10.0_f64.ln());
         assert!((s - expected).abs() < 1e-12, "expected {expected}, got {s}");
+    }
+
+    #[test]
+    fn future_timestamp_scores_as_now() {
+        assert_eq!(
+            salience(NOW, NOW + 365 * DAY, 8.0, 9.0, 3),
+            salience(NOW, NOW, 8.0, 9.0, 3),
+        );
+    }
+
+    #[test]
+    fn pain_and_importance_above_ten_score_as_ten() {
+        assert_eq!(
+            salience(NOW, NOW - DAY, 50.0, 6.0, 2),
+            salience(NOW, NOW - DAY, 10.0, 6.0, 2),
+        );
+        assert_eq!(
+            salience(NOW, NOW - DAY, 6.0, 50.0, 2),
+            salience(NOW, NOW - DAY, 6.0, 10.0, 2),
+        );
+    }
+
+    #[test]
+    fn negative_and_nan_scores_count_as_zero() {
+        assert_eq!(salience(NOW, NOW - DAY, -1.0, 5.0, 2), 0.0);
+        assert_eq!(salience(NOW, NOW - DAY, f64::NAN, 5.0, 2), 0.0);
+        assert_eq!(salience(NOW, NOW - DAY, 5.0, -1.0, 2), 0.0);
+        assert_eq!(salience(NOW, NOW - DAY, 5.0, f64::NAN, 2), 0.0);
+    }
+
+    #[test]
+    fn extreme_timestamps_do_not_panic() {
+        assert_eq!(salience(0, i64::MIN, 5.0, 5.0, 0), 0.0);
+        assert_eq!(salience(i64::MIN, i64::MAX, 10.0, 10.0, 0), 1.0);
     }
 
     #[test]

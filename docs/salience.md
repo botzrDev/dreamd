@@ -21,13 +21,15 @@ salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + r
 - `(importance / 10)` — normalised importance, in 0.0–1.0.
 - `(1 + ln(1 + recurrence))` — the recurrence boost; the leading `1 +` is load-bearing, not decoration (see [Derivation](#derivation)).
 
+**Input ranges.** `salience()` clamps its inputs before the formula runs. `age_days` is floored at 0: a record dated after `now` (clock skew, a teammate's merged log, a hand edit) scores as if it were written this second. Its recency term is 1.0, never more, and it starts to decay once `now` passes its timestamp. `pain` and `importance` are held to 0–10, and a value that is not a number counts as 0. `POST /api/v1/learn` and MCP `append_node` still reject out-of-range scores; the clamp covers records that reach the index another way. It runs at query time, so it also covers documents indexed before 1.1.0. Salience therefore lies between 0 and `1 + ln(1 + recurrence)`. `--explain` and `citations[].age_days` report the clamped values the score used.
+
 Salience is computed **at query time** and is never stored or indexed. Storing it would force a nightly re-index, because `age_days` drifts continuously. `dreamd recall --explain` (and `dreamd score --explain`, `dreamd blame --explain`) print all four factors for any hit, so the number can be inspected rather than taken on faith. `explain=1` on `GET /api/v1/recall` adds a `citations` array carrying each hit's inputs (`age_days`, `pain`, `importance`, `recurrence`) and its BM25 and salience components.
 
 ## Derivation
 
 Each factor answers one question, and the arithmetic shape is deliberate.
 
-**Why exponential recency.** `age_days` is `(now - timestamp) / 86400`, recomputed on every recall, so the recency term must be smooth and continuous — an exponential avoids any cliff where a record is full-weight one day and gone the next, and it means the index never has to be rebuilt as records age. A step function or a nightly re-rank would trade that away.
+**Why exponential recency.** `age_days` is `(now - timestamp) / 86400`, floored at 0 and recomputed on every recall, so the recency term must be smooth and continuous — an exponential avoids any cliff where a record is full-weight one day and gone the next, and it means the index never has to be rebuilt as records age. A step function or a nightly re-rank would trade that away.
 
 **Why 14, and why it is an e-folding time constant — not a half-life.** `exp(-age_days / 14)` falls to `1/e` (≈ 0.37) of its starting value after 14 days; that is an **e-folding** time constant. The half-life of the same curve is `14 · ln 2 ≈ 9.7` days, so 14 is **not a half-life**, and calling it one is a factual error. The value is a product decision — a two-week horizon on "how stale is this claim" — not a fitted parameter.
 

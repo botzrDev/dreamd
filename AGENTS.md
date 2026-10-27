@@ -195,7 +195,29 @@ Locked 2026-10-24:
    - sidecars written by earlier versions are left in place and never read.
 
    Spec: `assignments/BZR-1235.v2.md`.
-7. **BZR-1236** — index upsert, coverage by set difference over `evt_` ids, `IndexerMsg::Resync`, one persist step, and one ledger appender. Spec: `assignments/BZR-1236.v2.md` (queued 2026-10-26).
+7. **BZR-1236** — on `main` (`600d638`). The index is a function of the log:
+   - every episodic add is an upsert: `add_document` deletes the `event_id` term first;
+   - `server/index_coverage.rs` computes the set difference between log ids and alive `evt_` terms, keyed by the 26-byte ULID body. `cover` adds missing ids, re-adds duplicated ones, and deletes ids the log lacks. The mass-delete guard skips those deletes when the log is empty, or when more than half of the index and at least 64 docs would go;
+   - `TantivyIndexHandle::open` runs the pass in place of `replay_two_pass`. The indexer runs it on `IndexerMsg::Resync`, which the coordinator sends after an outside change, and from the 5 s tick when the log's inode changed or the file shrank;
+   - `IndexerPersist::commit` is the one persist step: commit, then `index_doc` edges, then the watermark, which is now the largest committed id. Every coverage pass backfills an edge for every log id;
+   - `provenance::Ledger` is the one appender per process and project. `WriterLock::acquire` builds it and cuts a torn tail; it opens `O_APPEND` lazily and appends behind a mutex. `append_edges` is gone, and `record_cycle`, `run_filesystem_phases(_with_backend)`, `forget::cascade` and `MemoryCoordinator::open` take the ledger;
+   - doctor's `index_freshness:` line is the set difference (`assess_index_coverage`). `/health` stays on the watermark until BZR-1243.
+
+   R2 is un-ignored. The V9 and V12 tests are new; BZR-1230 never wrote them. Two `mcp/mod.rs` fixtures now write the log before seeding the index (drift entry `index-fixtures-must-write-the-log-first`). PM re-run: workspace 1167 passed / 0 failed / 2 ignored. The pasted report was cut off at mutation row M12, so the PM has no figure for M13–M17 or NFR-2.
+
+   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+   - recall no longer returns an event twice after a lost or stale watermark: every add is an upsert, and the next open re-adds any id that has two documents;
+   - an event merged in below the newest indexed id is indexed at the next open;
+   - an event no longer in the log leaves the index, unless the log is empty or more than half of the index (at least 64 docs) would go; then a `WARN` names `dreamd doctor --repair`;
+   - a running daemon re-covers the index when the log is replaced or shrinks, and when an append finds it changed outside dreamd;
+   - `dreamd doctor`'s `index_freshness` line reports missing, not-in-log and duplicated ids from the committed index. A store with no index yet prints `no index yet` and no longer warns;
+   - `/health`'s `last_indexed_id` is the largest committed id, not the last one to arrive;
+   - the dream cycle and the indexer no longer interleave ledger appends;
+   - a torn ledger tail is cut when the writer lock is taken, not on every append;
+   - the first open after the upgrade backfills an `index_doc` edge for every event the index holds;
+   - library: `MemoryCoordinator::open`, `run_filesystem_phases(_with_backend)`, `forget::cascade` and `provenance::record_cycle` take a `Ledger`, and `provenance::append_edges` is removed.
+
+   Spec: `assignments/BZR-1236.v2.md`.
 8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
 9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
 10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
@@ -467,16 +489,16 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### replay-two-pass-already-filters
 
-- **Rule:** `replay_two_pass` already does one `episodic::read_all` and `events.into_iter().filter(|ev| id > watermark)`. Do not re-queue "remove the double-parse."
-- **Why:** AILAB-161 item 2 (June audit) shipped with the WEG-378 shared scan. Re-doing it is a no-op; a second `read_jsonl_events` would be a regression.
-- **How to apply:** Read `fn replay_two_pass` before queuing any replay/index-error cleanup. The remaining 161 work is the enum + registry lockfile.
+- **Rule:** **Superseded by BZR-1236.** `replay_two_pass` is deleted. `TantivyIndexHandle::open` reads the log once (`read_jsonl_events`), counts clusters (`count_clusters`), and runs `index_coverage::cover`. Do not re-queue "remove the double-parse", and do not bring back a watermark filter.
+- **Why:** AILAB-161 item 2 (June audit) shipped with the WEG-378 shared scan, so one read already fed both passes. The `id > watermark` filter it kept missed events merged in below the watermark (audit V9). BZR-1236 replaced it with the set difference.
+- **How to apply:** Read `index_coverage::cover` before queuing any open-time or index-error cleanup. The remaining 161 work is the enum + registry lockfile.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `weg378-skip-midfile-halt-torn-tail`
 
 ### indexer-shed-is-not-replay-healed
 
-- **Rule:** Startup replay does not heal a middle gap. `replay_two_pass` keeps `ev.id.as_str() > last_indexed_id` (newest committed id, not a contiguous prefix). Live appends no longer shed: `handle_append` awaits `tx.send(IndexerMsg::Append)`, so a full 1024-slot indexer channel parks the coordinator instead of dropping. A `Closed` tail past the watermark is still replay-healed; a gap followed by any later indexed event is still skipped forever.
-- **Why:** The pre-fix `try_send` + Full drop logged "recoverable via next-startup replay". False for any shed-then-continue sequence. The ticket closed the live hole by awaiting send; it did not change the watermark.
-- **How to apply:** Do not document channel backpressure as if replay closes a shed gap — there is no shed on Full anymore. Do not "fix" remaining crash holes by rewriting `replay_two_pass` into a contiguous watermark unless that is its own ticket. HTTP 503 is **not** "coordinator parked": in-flight learns wait in the 256-slot inbox (`resp_rx.await` has no timeout); only overflow of that inbox trips `Supervisor::try_send`'s 100 ms timeout, and only on HTTP. In-process `dreamd mcp` sends on a raw coordinator clone with no timeout and waits. `Supervisor::drain`'s deadline-free `Shutdown` can now park behind the indexer and consume `DRAIN_TIMEOUT`, skipping the index flush (lost last commit → rebuild on next open, not JSONL loss). The indexer task never sends back to the coordinator, so coordinator→indexer is acyclic.
+- **Rule:** Since BZR-1236 the coverage pass heals any gap. `TantivyIndexHandle::open` and `IndexerMsg::Resync` compare log ids with indexed ids, so a missing event is indexed at the next open or resync, wherever its id sorts. Live appends still never shed: `handle_append` awaits `tx.send(IndexerMsg::Append)`, so a full 1024-slot indexer channel parks the coordinator instead of dropping. Backpressure is what keeps *live* recall whole between coverage passes.
+- **Why:** The pre-fix `try_send` + Full drop logged "recoverable via next-startup replay". That was false: until BZR-1236, startup replay kept `id > last_indexed_id`, so a gap followed by any indexed event was skipped forever. The shed fix closed the live hole by awaiting the send; BZR-1236 replaced the watermark filter.
+- **How to apply:** Keep the awaited send. A shed append would be missing from recall until the next open or resync. Do not bring back a watermark filter for what to index. HTTP 503 is **not** "coordinator parked": in-flight learns wait in the 256-slot inbox (`resp_rx.await` has no timeout); only overflow of that inbox trips `Supervisor::try_send`'s 100 ms timeout, and only on HTTP. In-process `dreamd mcp` sends on a raw coordinator clone with no timeout and waits. `Supervisor::drain`'s deadline-free `Shutdown` can now park behind the indexer and consume `DRAIN_TIMEOUT`, skipping the index flush (lost last commit → rebuild on next open, not JSONL loss). The indexer task never sends back to the coordinator, so coordinator→indexer is acyclic.
 - **Cross-refs:** `ailab-162-drain-not-sigterm`, `replay-two-pass-already-filters`, `spec-deadlock-fixture-names-must-match-the-tree`
 
 ### spec-deadlock-fixture-names-must-match-the-tree
@@ -888,9 +910,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### replay-open-is-an-index-doc-writer
 
-- **Rule:** `index_doc` edges are written in two places, both after `writer.commit()` and before `write_progress`: `commit_and_persist` for a live `Append` batch, and `TantivyIndexHandle::open` for the episodic ids in `to_index`. Startup replay does not call `commit_and_persist`.
-- **Why:** BZR-155 spec item 7 said a failed ledger append is healed because the next startup replays the batch. `open` committed that replay and moved the watermark with no `append_edges` call, so those ids never got an edge. The in-process retry (keep the batch when `append_edges` fails) does not survive a process restart.
-- **How to apply:** Any new commit path that updates `index_progress.json` for episodic ids appends `index_doc` edges first. Semantic `lsn_` docs are not edges. The append is idempotent on `(kind, from, to)`. `run_indexer` takes the watermark path and the ledger path as one `IndexerPersist` argument; a separate `PathBuf` pushes the signature to 8 and `cargo clippy -- -D warnings` fails at 7.
+- **Rule:** `index_doc` edges have one writer: `IndexerPersist::commit` (`server/indexer_actor.rs`). It is the one persist step every production Tantivy commit goes through: the commit, then edges for `pending` through the writer lock's `Ledger`, then the watermark. A coverage pass, at open and on `Resync`, puts every log id in `pending`, so it backfills any edge a crash or an older commit skipped.
+- **Why:** BZR-155's `open` committed its replay with no edges. Later, the three message commits (sidecar, prune, semantic) committed pending appends with no edges and no watermark, which widened R2's window. BZR-1236 folded all five commit sites into one step.
+- **How to apply:**
+  - A new commit path calls `persist.commit(&mut writer)`, never `writer.commit()`; BZR-1236 §4 grep 3 checks this.
+  - Semantic `lsn_` docs are not edges.
+  - The ledger append is idempotent on `(kind, from, to)`.
+  - `run_indexer` takes its state as one `IndexerState` argument: an eighth argument fails `cargo clippy -- -D warnings`.
 - **Cross-refs:** `indexer-shed-is-not-replay-healed`
 
 ### bisect-searches-snap-refs-not-a-parent-graph
@@ -903,7 +929,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### provenance-verify-does-not-rewrite-the-ledger
 
 - **Rule:** `provenance::verify` only reads. There is no stored Merkle root to compare against, and no `--repair`. An unknown `kind` is skipped. `embedding` is corrupt, not skipped. A JSONL id with no `index_doc` edge is not a missing edge.
-- **Why:** BZR-148's Linear AC asks for hash mismatches against a root and for `--repair`. BZR-155 never writes the root. The format forbids rewriting ledger lines. The index watermark is not a contiguous prefix, so "every event has an index_doc" would flag healthy logs.
+- **Why:** BZR-148's Linear AC asks for hash mismatches against a root and for `--repair`. BZR-155 never writes the root. The format forbids rewriting ledger lines. Edges land after the index commit, so a live batch has none yet, and the next coverage pass backfills them (BZR-1236). "Every event has an index_doc" would flag healthy logs.
 - **How to apply:** Recompute the root from the good lines and return it. Report orphans (`from` absent from the live JSONL), missing `lesson_citation` / `recurrence` edges, and corrupt line numbers. The doctor flag is its own ticket now that `cli.rs` is free: print this report, and do not rebuild the ledger under `--repair` or any other flag name.
 - **Cross-refs:** `replay-open-is-an-index-doc-writer`, `remaining-build-order-2026-09-24`, `doctor-repair-is-the-index-rebuild`
 
@@ -966,7 +992,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### architecture-claims-false-until-dreamd-hardening
 
 - **Rule:** Until the named ticket lands, do not cite these ARCHITECTURE.md claims as facts:
-  - "`add_document` is idempotent; replay re-does at most one commit window" (§4). False until BZR-1236.
+  - "`add_document` is idempotent; replay re-does at most one commit window" (§4). Resolved by BZR-1236: §4 now describes the upsert, the coverage pass and the persist step. Cite those.
   - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). False until BZR-1239.
   - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). False until BZR-1242.
   - The coordinator is the only writer (§1, "Architectural conventions"). Resolved by BZR-1232: §1 now says only a process holding the project writer lock starts a coordinator. Cite the new sentence.
@@ -978,7 +1004,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
   Mapping the code for the response turned up more: per-request WAL recovery for non-boot projects, a stale fd after a failed cycle, the pin pass dropping `x_` fields, and unlocked concurrent ledger appenders.
 
-  BZR-1233 fixed the inode swap, the `Ulid::new()` inversions and the stale fd after a failed cycle.
+  BZR-1233 fixed the inode swap, the `Ulid::new()` inversions and the stale fd after a failed cycle. BZR-1236 fixed the replay duplicates and the unlocked ledger appenders.
 - **How to apply:**
   - Each claim becomes true when its ticket lands, and that ticket rewrites the ARCHITECTURE sentence in the same commit.
   - Each defect has an ignored test (`#[ignore = "BZR-<n>: …"]`) from BZR-1230. Un-ignore it in the fixing ticket; it must fail before the fix and pass after.
@@ -1009,10 +1035,12 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - two handler comments naming the deleted `index_map` (`recall.rs`, `salience.rs`).
 
   Recurred on BZR-1235, which stopped recovery from truncating a valid final record. The pre-flight grepped for doctor's "truncated on daemon open". It missed `scan`'s rustdoc in the same file, which said `clean_len` stops "so [`recover`] can truncate". The dev caught it.
+  Recurred on BZR-1236, this time in test fixtures rather than docs: two MCP tests seeded the index without the log (`index-fixtures-must-write-the-log-first`).
 - **How to apply:**
   - List the old behaviour's observable effects, then grep `docs/`, `examples/`, `README.md`, `GUIDE.md` and comments next to the changed call sites for each one.
+  - Grep the tests too, for fixtures that only worked because of the old behaviour.
   - A §4 grep scoped to one file (`state.rs`) does not prove a removed name is gone from its neighbours.
-- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`
+- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`, `index-fixtures-must-write-the-log-first`
 
 ### banned-crate-grep-needs-a-word-boundary
 
@@ -1055,3 +1083,23 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - The `read_all` readers that rewrite nothing stay on `read_all`.
   - When an AC lists the call sites of a defect, grep for every writer of the path (`rewrite_atomic|rewrite_guarded|write_atomic`) before trusting the list.
 - **Cross-refs:** `wal-guarded-replace-owns-tmp-path`, `ailab-163-excise-skips-not-suffix`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `weg378-skip-midfile-halt-torn-tail`
+
+### index-fixtures-must-write-the-log-first
+
+- **Rule:** A test that seeds the index directly, through `IndexerMsg::Append`, `add_document` or a raw writer, writes the same records to the episodic log first, as the coordinator does. Since BZR-1236 the index is a function of the log. At the next open, the coverage pass deletes indexed ids the log lacks, or keeps them behind the mass-delete guard with a `WARN`.
+- **Why:** BZR-1236's mass-delete STOP condition fired in two `mcp/mod.rs` tests. They sent `IndexerMsg::Append` against an empty log and then reopened the index. The pre-flight had looked for tests that pinned the old watermark filter, but not for fixtures that relied on the index only ever growing.
+- **How to apply:**
+  - Before queuing a ticket that makes a derived store an exact function of its source, grep the tests for writes to the derived store that skip the source: `IndexerMsg::Append`, `add_document(` and `writer.add_document` under `#[cfg(test)]` and `tests/`.
+  - Write the log line, then send the message. `mcp/mod.rs`'s `append_to_log` helper is the shape.
+  - A test that deliberately builds a duplicate or a ghost doc (the `index_coverage` tests) uses a raw `writer.add_document` and says so.
+- **Cross-refs:** `behaviour-change-needs-a-grep-for-the-old-behaviour`, `replay-open-is-an-index-doc-writer`, `indexer-shed-is-not-replay-healed`
+
+### report-back-paste-can-be-truncated
+
+- **Rule:** A pasted report-back can arrive cut off. Before signing off, check that the last numbered item of the spec's §5 arrived. Every spec's §5 ends by asking the dev to finish the report with the line `END OF REPORT`, so a cut is visible.
+- **Why:** BZR-1234's paste stopped at §4 grep 4c. BZR-1236's stopped inside the mutation table at M12, which lost M13–M17, the NFR-2 size, the §4 outputs and the list of spec mismatches. Both times the PM re-ran what it could and reported the rest as unverified.
+- **How to apply:**
+  - Put "End the report with the line `END OF REPORT`." last in §5.
+  - The PM re-runs the §4 greps whatever the paste shows, because pasted output is not evidence.
+  - When the marker is missing, ask the user for the rest before signing off the rows that are missing.
+- **Cross-refs:** `mutation-must-get-past-the-backstop`, `git-diff-name-only-misses-untracked`

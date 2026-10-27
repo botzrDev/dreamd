@@ -393,7 +393,6 @@ fn open_keeps_a_valid_final_record_without_newline() {
 /// Recency is at most 1.0, so with pain and importance at the 10.0 ceiling and
 /// no recurrence, salience is at most 1.0 whatever the timestamp.
 #[test]
-#[ignore = "BZR-1237: salience unbounded for future timestamps"]
 fn future_timestamp_cannot_raise_salience_above_one() {
     let now = NOW_SEC;
     let s = salience(now, now + 365 * 86_400, 10.0, 10.0, 0);

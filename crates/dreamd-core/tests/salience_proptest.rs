@@ -10,6 +10,10 @@
 //! - Monotonic non-decreasing in `pain`, `importance`, and `recurrence`.
 //! - No `NaN` / `Infinity` for valid inputs.
 //! - Edge cases: zero pain/importance → score 0; recurrence 0 → ln factor 1.
+//! - Bounded for every input, including `i64` extremes, `NaN` and infinities:
+//!   salience lies in `[0, 1 + ln(1 + recurrence)]` (BZR-1237).
+//! - A timestamp after `now` scores as `now` (BZR-1237).
+//! - Pain or importance above 10 scores as 10; below 0 scores as 0 (BZR-1237).
 
 use dreamd_core::salience::salience;
 use proptest::prelude::*;
@@ -191,5 +195,55 @@ proptest! {
     ) {
         let s = salience_at_age_days(age_days, pain, importance, recurrence);
         prop_assert!(s.is_finite(), "expected finite score, got {s}");
+    }
+
+    /// BZR-1237: every input, including `i64` extremes, `NaN` and infinities,
+    /// scores in `[0, 1 + ln(1 + recurrence)]`.
+    #[test]
+    fn salience_is_bounded_for_all_inputs(
+        now in any::<i64>(),
+        ts in any::<i64>(),
+        pain in prop::num::f64::ANY,
+        importance in prop::num::f64::ANY,
+        recurrence in any::<u64>(),
+    ) {
+        let s = salience(now, ts, pain, importance, recurrence);
+        let max = 1.0 + (1.0 + recurrence as f64).ln();
+        prop_assert!(
+            (0.0..=max).contains(&s),
+            "salience({now}, {ts}, {pain}, {importance}, {recurrence}) = {s}, outside [0, {max}]"
+        );
+    }
+
+    /// BZR-1237: a timestamp after `now` scores as if it were written at `now`.
+    #[test]
+    fn future_timestamps_score_as_now(
+        ahead in 0i64..=10 * 365 * 86_400,
+        (_age_days, pain, importance, recurrence) in valid_inputs_strategy(),
+    ) {
+        prop_assert_eq!(
+            salience(NOW, NOW + ahead, pain, importance, recurrence),
+            salience(NOW, NOW, pain, importance, recurrence)
+        );
+    }
+
+    /// BZR-1237: a pain or importance above 10 scores as 10, and a negative
+    /// one scores as 0.
+    #[test]
+    fn out_of_range_scores_score_as_their_bound(
+        (age_days, pain, importance, recurrence) in valid_inputs_strategy(),
+        over in 10.0f64..=1e300,
+        under in prop::num::f64::NEGATIVE,
+    ) {
+        prop_assert_eq!(
+            salience_at_age_days(age_days, over, importance, recurrence),
+            salience_at_age_days(age_days, 10.0, importance, recurrence)
+        );
+        prop_assert_eq!(salience_at_age_days(age_days, under, importance, recurrence), 0.0);
+        prop_assert_eq!(
+            salience_at_age_days(age_days, pain, over, recurrence),
+            salience_at_age_days(age_days, pain, 10.0, recurrence)
+        );
+        prop_assert_eq!(salience_at_age_days(age_days, pain, under, recurrence), 0.0);
     }
 }

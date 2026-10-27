@@ -49,7 +49,7 @@ impl RecallIngress {
             salience_component: r.salience,
             layer: r.layer.as_str().to_owned(),
             snippet: r.content.clone(),
-            age_days: (now_sec - r.timestamp_sec as i64) as f64 / 86_400.0,
+            age_days: crate::salience::age_days(now_sec, r.timestamp_sec as i64),
             pain: r.pain,
             importance: r.importance,
             recurrence: r.recurrence,
@@ -167,5 +167,23 @@ mod tests {
             c["snippet"].as_str().unwrap(),
             "rust tokio full text, not truncated"
         );
+    }
+
+    /// BZR-1237: a hit dated after `now` reports the age the score used (0),
+    /// while `pain` stays the stored value.
+    #[test]
+    fn citation_age_days_is_floored_at_zero() {
+        let now_sec: i64 = 1_700_100_000;
+        let r = RecallResult {
+            timestamp_sec: (now_sec + 30 * 86_400) as u64,
+            ..sample_result()
+        };
+
+        let json = RecallIngress::to_json_with_citations(vec![r], now_sec);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+
+        let citations = value["citations"].as_array().expect("citations array");
+        assert_eq!(citations[0]["age_days"].as_f64().unwrap(), 0.0);
+        assert_eq!(citations[0]["pain"].as_f64().unwrap(), 7.0);
     }
 }

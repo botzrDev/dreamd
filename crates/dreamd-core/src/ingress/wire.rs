@@ -142,11 +142,14 @@ pub struct CitationJson {
     pub layer: String,
     /// Full stored learning text, no truncation.
     pub snippet: String,
-    /// `(now_sec - timestamp_sec) / 86_400.0`, the same expression `salience` uses.
+    /// The age in days the salience formula uses ([`crate::salience::age_days`]):
+    /// floored at 0.
     pub age_days: f64,
-    /// Stored 0.0..=10.0 subjective friction score (not divided by 10).
+    /// The stored pain score, before the formula clamps it to 0.0..=10.0 and
+    /// divides it by 10.
     pub pain: f64,
-    /// Stored 0.0..=10.0 long-term relevance score (not divided by 10).
+    /// The stored importance score, before the formula clamps it to 0.0..=10.0
+    /// and divides it by 10.
     pub importance: f64,
     /// Cluster occurrence count (bounded-staleness sidecar).
     pub recurrence: u64,

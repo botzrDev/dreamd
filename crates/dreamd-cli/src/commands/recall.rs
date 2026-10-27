@@ -23,6 +23,7 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::collector::RecallExclusion;
+use dreamd_core::salience::clamp_score;
 use dreamd_core::{AgentRoot, LayoutError, RecallResult};
 use tantivy::Index;
 
@@ -74,17 +75,18 @@ impl std::error::Error for RecallError {}
 /// `--explain` block prints. `salience_product` must equal `RecallResult::salience`
 /// within float noise; `score` must equal `RecallResult::score`.
 ///
-/// The arithmetic mirrors [`dreamd_core::salience::salience`] verbatim (the
-/// `/ 10.0` shape is intentionally not factored out) so `--explain` reads the
-/// same as ARCHITECTURE.md decision #2 / PRD FR-4.2.
+/// The arithmetic mirrors [`dreamd_core::salience::salience`] verbatim, including
+/// its input clamp (the `/ 10.0` shape is intentionally not factored out) so
+/// `--explain` reads the same as ARCHITECTURE.md decision #2 / PRD FR-4.2.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExplainFactors {
+    /// Age in days, floored at 0.
     pub age_days: f64,
     /// `exp(-age_days / 14)`
     pub decay: f64,
-    /// `pain / 10`
+    /// `pain / 10`, pain clamped to 0–10
     pub pain_factor: f64,
-    /// `importance / 10`
+    /// `importance / 10`, importance clamped to 0–10
     pub importance_factor: f64,
     /// `1 + ln(1 + recurrence)`
     pub recurrence_factor: f64,
@@ -102,23 +104,24 @@ const HEADER_LINE: &str =
 /// GitHub-flavored-markdown separator row (nine columns).
 const SEPARATOR_LINE: &str = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |";
 
-/// Derive `age_days` for a hit: `(now_sec - timestamp_sec) / 86_400`.
+/// Derive `age_days` for a hit with [`dreamd_core::salience::age_days`]:
+/// `(now_sec - timestamp_sec) / 86_400`, floored at 0.
 ///
 /// Kept as one helper so the table cell and the `--explain` block agree.
 fn age_days(now_sec: i64, timestamp_sec: u64) -> f64 {
-    (now_sec as f64 - timestamp_sec as f64) / 86_400.0
+    dreamd_core::salience::age_days(now_sec, timestamp_sec as i64)
 }
 
 /// Derive the DR-204 salience factor breakdown for one recall hit.
 ///
 /// The arithmetic mirrors [`dreamd_core::salience::salience`] verbatim (same
-/// factor order, `/ 10.0` not factored out) so the printed product equals the
-/// stored `RecallResult::salience` bit-for-bit.
+/// input clamp, same factor order, `/ 10.0` not factored out) so the printed
+/// product equals the stored `RecallResult::salience` bit-for-bit.
 pub fn explain_factors(r: &RecallResult, now_sec: i64) -> ExplainFactors {
     let age_days = age_days(now_sec, r.timestamp_sec);
     let decay = (-age_days / 14.0).exp();
-    let pain_factor = r.pain / 10.0;
-    let importance_factor = r.importance / 10.0;
+    let pain_factor = clamp_score(r.pain) / 10.0;
+    let importance_factor = clamp_score(r.importance) / 10.0;
     let recurrence_factor = 1.0 + (1.0 + r.recurrence as f64).ln();
     let salience_product = decay * pain_factor * importance_factor * recurrence_factor;
     let score = r.bm25 * salience_product;
@@ -466,6 +469,27 @@ mod tests {
             f.score,
             r.score
         );
+    }
+
+    /// BZR-1237: `--explain` prints the clamped inputs the score used, so its
+    /// product still equals the stored salience exactly.
+    #[test]
+    fn explain_factors_report_the_clamped_inputs() {
+        let r = result(
+            "axum error handling",
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAG",
+            NOW_SEC + 365 * DAY,
+            50.0,
+            8.0,
+            2,
+            1.5,
+        );
+        let f = explain_factors(&r, NOW_SEC);
+        assert_eq!(f.age_days, 0.0);
+        assert_eq!(f.decay, 1.0);
+        assert_eq!(f.pain_factor, 1.0);
+        assert_eq!(f.salience_product, r.salience);
+        assert_eq!(f.score, r.score);
     }
 
     #[test]
