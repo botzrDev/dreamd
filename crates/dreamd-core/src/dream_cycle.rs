@@ -6,12 +6,12 @@
 //!   3. Index — recurrence sidecar apply → prune decayed docs
 //!   4. Autobiography — best-effort git commit
 //!
-//! [`run_filesystem_phases`] opens and commits the single WAL envelope that
-//! spans consolidation + decay (one cycle = one atomic region).
+//! [`run_filesystem_phases`] stages every output of consolidation + decay, then
+//! commits them with one redo WAL (one cycle = one atomic region).
 //!
 //! AILAB-204 made phase 1 async: the LLM call that composes the lesson body is
-//! `await`ed **inside** that same WAL envelope, between cluster selection and the
-//! `LESSONS.md` write. That is deliberate — it keeps the 409 in-progress guard
+//! `await`ed **while the cycle stages**, between cluster selection and the
+//! `LESSONS.md` stage. That is deliberate — it keeps the 409 in-progress guard
 //! honest and keeps the coordinator the single writer. It also means a manual
 //! cycle serializes `AppendLearning` for the duration of the model call; HTTP
 //! callers see 503 + `Retry-After` rather than a lost write.
@@ -27,9 +27,9 @@ use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLes
 use crate::decay::{self, DecayError, DecayResult};
 use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
-use crate::provenance::{self, Ledger, ProvenanceError};
+use crate::provenance::{Ledger, ProvenanceError};
 use crate::snapshot::{self, SnapshotError};
-use crate::wal::{self, WalError};
+use crate::wal::{self, CycleKind, WalError};
 
 /// Unified error type for dream-cycle orchestration.
 #[derive(Debug, thiserror::Error)]
@@ -115,9 +115,9 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 
 /// Filesystem phases: consolidation then decay.
 ///
-/// Opens one WAL envelope before consolidation and commits it after decay so the
-/// full cycle is a single atomic region (ARCH-2). Called by the coordinator
-/// actor, which must reopen its append fd afterward.
+/// Stages every output in one stage and commits them with one redo WAL after
+/// decay, so the full cycle is a single atomic region (ARCH-2). Called by the
+/// coordinator actor, which must reopen its append fd afterward.
 ///
 /// `no_llm` forces the deterministic body even when credentials exist. When it is
 /// `false`, the backend is resolved from the project's [`crate::config::Config`]
@@ -204,8 +204,8 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     .await
 }
 
-/// The one WAL envelope. `llm` is `None` for every deterministic trigger
-/// (`--no-llm`, no credentials, or a test that wants today's bytes).
+/// The one stage and its commit. `llm` is `None` for every deterministic
+/// trigger (`--no-llm`, no credentials, or a test that wants today's bytes).
 async fn filesystem_phases<B: LlmBackend>(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -214,21 +214,23 @@ async fn filesystem_phases<B: LlmBackend>(
     llm_target: Option<(&B, &str)>,
     share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
-    // ARCH-2: ONE WAL envelope spans BOTH filesystem phases. begin_cycle guards
-    // `.agent/` existence (WEG-281) and sets state=in_progress; commit_cycle sets
-    // state=complete and deletes the WAL. A phase error short-circuits via `?`
-    // BEFORE commit, leaving an uncommitted WAL for next-startup recovery
-    // (state=failed) — so no half-finished cycle is ever recorded "complete".
-    wal::begin_cycle(agent_root, now_sec)?;
-    // BZR-160: one pre-mutation image of the four live files, before lessons
-    // can be rewritten or unlinked and before decay prunes the log.
-    snapshot::create_autosnap(agent_root, now_sec)?;
+    // ARCH-2: ONE stage holds BOTH filesystem phases' outputs. begin_cycle
+    // guards `.agent/` existence (WEG-281), refuses a pending WAL and sets
+    // state=in_progress; nothing live changes until commit_cycle writes the redo
+    // WAL, applies it and sets state=complete. A phase error short-circuits via
+    // `?` BEFORE that commit point, leaving only the stage for the next writer
+    // to wipe (state=failed) — so no half-finished cycle is ever recorded
+    // "complete", and none is ever half-applied.
+    let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
+    // BZR-160: one pre-mutation image of the four live files. Nothing is live
+    // yet, so the object is the pre-cycle store; its ref is staged.
+    snapshot::stage_autosnap(&mut stage, now_sec)?;
 
     // Consolidation, split so the model call can sit between selection and the
-    // write while both still share one exemplar id, one WAL intent, one pin pass.
-    // `None` = nothing promoted; `select_lesson_or_retire` already unlinked any
-    // stale LESSONS.md (AILAB-699) and decay still runs below.
-    if let Some(selected) = consolidation::select_lesson_or_retire(agent_root, now_sec)? {
+    // stage while both still share one exemplar id, one stage, one pin pass.
+    // `None` = nothing promoted; `select_lesson_or_retire` already staged the
+    // unlink of any stale LESSONS.md (AILAB-699) and decay still runs below.
+    if let Some(selected) = consolidation::select_lesson_or_retire(&mut stage, now_sec)? {
         // The spend cap (AILAB-196) is read here rather than threaded through
         // `run_filesystem_phases_with_backend`, because that signature is the
         // FakeLlm seam and its callers hold a backend, not a project config.
@@ -243,14 +245,14 @@ async fn filesystem_phases<B: LlmBackend>(
             .cost_cap_usd;
         let body =
             compose_lesson_body(&selected, llm_target, cap_usd, agent_root, share_personal).await;
-        consolidation::write_selected_lesson(agent_root, now_sec, &selected, body)?;
+        consolidation::write_selected_lesson(&mut stage, now_sec, &selected, body)?;
     }
 
-    let decay = decay::run_decay_pruner(agent_root, now_sec, cycle_date)?;
-    // BZR-155: ledger lines land inside the existing envelope, not as a new
-    // WalIntent. An append failure skips commit_cycle like any other phase.
-    provenance::record_cycle(agent_root, ledger)?;
-    wal::commit_cycle(agent_root, now_sec)?;
+    let decay = decay::run_decay_pruner(&mut stage, now_sec, cycle_date)?;
+    // BZR-155: commit_cycle records the ledger lines after the renames, from the
+    // files the cycle left live; a roll-forward records them again, and the
+    // ledger skips an edge it already holds.
+    wal::commit_cycle(stage, ledger, now_sec)?;
     Ok(decay)
 }
 
@@ -473,7 +475,8 @@ pub struct GuardedCycleOptions<'a> {
 /// coordinator actor, which runs [`run_filesystem_phases`] and reopens its append
 /// fd (WEG-271); a full inbox maps to [`DreamCycleError::CoordinatorBusy`]. The
 /// CLI's callback calls [`run_filesystem_phases`] directly. This function never
-/// opens the WAL itself — the single envelope stays inside the filesystem phases.
+/// opens a stage itself — the one stage and its commit stay inside the
+/// filesystem phases.
 ///
 /// Queue property: appends wait only while the actor is inside
 /// `handle_run_dream_cycle` (consolidation, decay, and any model call). Index and
@@ -522,7 +525,8 @@ where
 /// Takes the project writer lock before anything else, so it refuses while
 /// `dreamd watch`, an in-process `dreamd mcp`, or another CLI writer holds the
 /// project, and writes nothing when it does. Taking the lock also resets a
-/// stale `in_progress` status and recovers a crashed cycle's WAL.
+/// stale `in_progress` status, rolls a committed cycle's WAL forward and wipes
+/// any staged one.
 ///
 /// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
 /// filesystem phases are async too (they `await` the model call), so they share
@@ -588,7 +592,7 @@ pub struct DryPreview {
 /// preview reproducible; with a live model the prose is the model's, so a later
 /// real cycle composes its own and the bytes will differ.
 ///
-/// Deliberately absent: the WAL envelope, the recurrence sidecar, the retire
+/// Deliberately absent: the stage and its WAL, the recurrence sidecar, the retire
 /// unlink, the JSONL pin rewrite, decay, Tantivy, and the autobiography commit.
 /// Every one of those is a write, and `--dry` has none. `--no-commit` is
 /// therefore meaningless here and is ignored by the caller.
@@ -957,7 +961,7 @@ mod tests {
     #[test]
     fn guarded_cycle_rejects_an_active_cycle_before_dispatch() {
         let (_dir, root) = scaffold_fixture();
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        wal::begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -984,7 +988,7 @@ mod tests {
         run_deterministic(&root).await;
         assert!(
             !root.wal_path().exists(),
-            "single envelope committed + WAL cleaned"
+            "the one stage committed + WAL cleaned"
         );
         assert_eq!(
             crate::wal::read_last_cycle_status(&root).unwrap(),
@@ -1095,9 +1099,13 @@ mod tests {
 
     /// The exemplar the deterministic path would have picked, for comparison.
     fn deterministic_exemplar(root: &AgentRoot) -> consolidation::SelectedLesson {
-        consolidation::select_lesson_or_retire(root, NOW_SEC)
+        let mut stage = crate::stage::Stage::create(root, "dream-exemplar").unwrap();
+        let selected = consolidation::select_lesson_or_retire(&mut stage, NOW_SEC)
             .expect("cluster engine")
-            .expect("fixture promotes a cluster")
+            .expect("fixture promotes a cluster");
+        // Only the selection is wanted; the stage never commits.
+        fs::remove_dir_all(root.stage_dir()).unwrap();
+        selected
     }
 
     /// The model's prose, minus the trailer the AILAB-200 gate strips.
@@ -1703,72 +1711,14 @@ mod tests {
         assert_eq!(store_bytes(&root), before, "a refused cycle writes nothing");
     }
 
-    /// A crash mid-cycle leaves the WAL, its temp file and `in_progress`. The
-    /// next in-process cycle takes the project lock, which recovers that state,
-    /// and then completes on a healthy store.
-    #[cfg(unix)]
-    #[test]
-    fn in_process_cycle_completes_after_a_mid_cycle_crash() {
-        let (_dir, root) = scaffold_fixture();
-        let jsonl = root.episodic_jsonl();
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
-        wal::guarded_replace_crash_after_intent(
-            &root,
-            &jsonl,
-            b"partial write\n",
-            wal::GuardedReplaceKind::PruneEpisodicMemory,
-        )
-        .unwrap_err();
-        assert!(root.wal_path().exists() && jsonl.with_extension("tmp").exists());
-
-        run_in_process(root.project_root(), NOW_SEC, true, true, false)
-            .expect("the cycle after a crash completes");
-
-        let violations = crate::invariants::check_store(&root, None).unwrap();
-        assert!(violations.is_empty(), "{violations:?}");
-        assert!(!jsonl.with_extension("tmp").exists());
-    }
-
     #[test]
     fn ensure_not_in_progress_rejects_active_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let root = AgentRoot::new(dir.path());
         fs::create_dir_all(root.dreamd_dir()).unwrap();
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        wal::begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
         let err = ensure_not_in_progress(&root).unwrap_err();
         assert!(matches!(err, DreamCycleError::InProgress));
-    }
-
-    #[test]
-    fn seam_crash_after_consolidation_recovers_not_clean() {
-        // Old two-envelope bug: run_deterministic_dream_cycle committed its OWN WAL,
-        // so a crash after consolidation but before decay left NO WAL → recovery
-        // returned Clean and state read "complete" (a half-cycle silently recorded
-        // as success). With the single hoisted envelope the orchestrator's WAL stays
-        // open across the seam, so the same crash is recoverable.
-        let (_dir, root) = scaffold_fixture();
-
-        // Orchestrator opens the one envelope...
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
-        // ...consolidation runs and records its intents but no longer commits.
-        consolidation::run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
-
-        // Simulate a crash in the seam: decay + commit never run.
-        assert!(root.wal_path().exists(), "WAL must remain open in the seam");
-        let wal: crate::wal::DreamWal =
-            serde_json::from_str(&std::fs::read_to_string(root.wal_path()).unwrap()).unwrap();
-        assert!(
-            !wal.intents.contains(&crate::wal::WalIntent::Commit),
-            "no Commit intent — the cycle did not finish"
-        );
-
-        // Recovery must NOT report Clean, and state must NOT be left "complete".
-        let outcome = crate::wal::recover_if_needed(&root, NOW_SEC).unwrap();
-        assert!(
-            matches!(outcome, crate::wal::RecoveryOutcome::Recovered { .. }),
-            "seam crash must be recovered, not silently Clean"
-        );
-        assert_eq!(crate::wal::read_last_cycle_status(&root).unwrap(), "failed");
     }
 }

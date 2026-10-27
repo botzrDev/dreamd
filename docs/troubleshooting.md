@@ -71,7 +71,7 @@ Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (da
 
 **Symptom:** Daemon killed during `dreamd dream` or `POST /api/v1/dream`; store may look inconsistent.
 
-**Cause:** Interrupted dream cycle left `dream_in_progress.wal` and/or temp files.
+**Cause:** a crash left `.dreamd/stage/` and/or `dream_in_progress.wal`.
 
 **Fix:** Restart the daemon or run any command that triggers WAL recovery:
 
@@ -82,7 +82,9 @@ dreamd status              # last_dream_cycle (cargo-installed `dreamd`; npm shi
 npx -y dreamd-mcp doctor   # dream-cycle mode + index health; with the daemon stopped, --repair rebuilds a stale index
 ```
 
-Recovery deletes incomplete temp files, removes the WAL, sets `state.json` → `failed`. See [examples/crash-recovery/](../examples/crash-recovery/).
+Recovery depends on how far the cycle got. A `dream_in_progress.wal` means the cycle reached its commit point: recovery rolls it forward, applying the rest of its staged outputs, and sets `state.json` → `complete`. With no WAL, the cycle crashed before its commit point: the stage dir is wiped, the store is exactly as it was before that cycle, and `state.json` → `failed`. A WAL written by a version before 1.1.0 (an `intents` list) is recovered the old way. See [examples/crash-recovery/](../examples/crash-recovery/).
+
+A WAL whose `format` this version does not know, or one that names a path outside `.agent/`, makes every writer refuse to start (`wal recovery: …`). This is deliberate: dreamd will not guess at a store it cannot recover.
 
 Recovery keys off the WAL file (`.agent/.dreamd/dream_in_progress.wal`). It runs whenever a process takes the project writer lock: `dreamd watch` at start, an in-process `dreamd mcp`, and the CLI writers (`dreamd dream` without a daemon or with `--no-commit`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`). Taking the lock also resets a `state.json` left at `in_progress` with no WAL to `failed`. An interrupted cycle therefore needs no hand edit: the next writer recovers it and then runs. While a cycle is live, a second one is refused: HTTP 409 through the daemon, or the writer-lock refusal (`project writer lock is held by pid N (kind)`, exit 1) from the CLI.
 

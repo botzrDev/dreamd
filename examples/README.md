@@ -4,7 +4,7 @@
 
 These are five `.agent/` fixtures. The first two are complete workspaces with
 generated lessons; the other three are minimal stores (an episodic log, plus
-WAL state for `crash-recovery/`) that each show one behavior. Clone the repo,
+a legacy WAL for `crash-recovery/`) that each show one behavior. Clone the repo,
 open them, and you can see exactly what dreamd produces — no install, no daemon, no
 API key. Everything here is the file system of truth: plain Markdown and JSONL
 you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
@@ -16,7 +16,7 @@ you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 |----------|-------|
 | [`solo-rust-dev/`](solo-rust-dev/) | One Rust developer, Claude Code only. The agent keeps tripping the same family of clippy lints; dreamd consolidates them into one durable lesson. |
 | [`multi-harness/`](multi-harness/) | The same project worked across Claude Code **and** Cursor. A lesson first captured in Cursor surfaces in Claude Code — the payoff of "across every tool." |
-| [`crash-recovery/`](crash-recovery/) | Mid-cycle crash fixture: WAL + torn JSONL, and the recovery path on restart. |
+| [`crash-recovery/`](crash-recovery/) | Mid-cycle crash fixture: a legacy (`intents`) WAL that 1.1.0 still recovers the old way, a torn JSONL, and the recovery path on restart. |
 | [`pinned-events/`](pinned-events/) | Mix of `pinned: true/false` events showing what survives dream-cycle decay. |
 | [`cross-project/`](cross-project/) | Two projects with separate `.agent/` stores — memory does not cross boundaries. |
 

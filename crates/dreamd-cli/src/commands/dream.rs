@@ -16,8 +16,9 @@
 //!
 //! ## WAL protocol
 //!
-//! The in-process path writes [`dream_in_progress.wal`](dreamd_core::wal::DreamWal) before
-//! destructive steps. `--no-commit` skips the git autobiography commit but still runs
+//! The in-process path stages every output, then writes one redo
+//! [`dream_in_progress.wal`](dreamd_core::wal::RedoWal) as its commit point and
+//! applies it. `--no-commit` skips the git autobiography commit but still runs
 //! the full cycle.
 //!
 //! ## `--dry` contract

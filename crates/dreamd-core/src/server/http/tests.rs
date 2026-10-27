@@ -1831,7 +1831,9 @@ fn make_routing_state() -> (
     (dir_a, dir_b, canonical_a, canonical_b, state)
 }
 
-/// Plant a mid-cycle crash on `project_root` (WAL + partial tmp, no Commit).
+/// Plant a crash a pre-1.1.0 binary left on `project_root`: a legacy `intents`
+/// WAL with a partial tmp and no `Commit`, which 1.1.0 still recovers the old
+/// way.
 fn plant_mid_cycle_crash(project_root: &std::path::Path) -> AgentRoot {
     use crate::wal::{DreamWal, WalIntent};
 
@@ -1903,7 +1905,12 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
         .resolve_supervisor(&canonical_b)
         .expect("first resolve starts B");
     let root_b = AgentRoot::new(&canonical_b);
-    crate::wal::begin_cycle(&root_b, 0).expect("B's running cycle opens its WAL");
+    // B's running cycle has reached its commit point: its redo WAL is on disk.
+    std::fs::write(
+        root_b.wal_path(),
+        r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[]}"#,
+    )
+    .expect("B's running cycle writes its redo WAL");
     state
         .resolve_supervisor(&canonical_b)
         .expect("second resolve reuses B");

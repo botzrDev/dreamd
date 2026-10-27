@@ -37,8 +37,6 @@ use dreamd_protocol::{AgentLearning, EventId};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
-use crate::layout::AgentRoot;
-
 /// Hard cap on one serialized JSONL line (including the trailing `\n`). This is
 /// a property of the on-disk line format, so it lives here; the coordinator
 /// re-exports it (`pub use crate::episodic::MAX_LEARNING_LINE_BYTES;`). Anything
@@ -437,48 +435,15 @@ pub fn append(file: &mut File, learning: &AgentLearning) -> Result<usize, Episod
 /// Atomically replace the whole episodic log at `path` with `contents`, the new
 /// file's bytes, with no WAL involvement.
 ///
-/// For one-shot rewrites outside a dream cycle — `dreamd archive --force-unpin` —
-/// where
-/// there is no open WAL for an intent to land in. A cycle's own prune goes
-/// through [`rewrite_guarded`] instead; do not reintroduce a caller-supplied
-/// hook here to bolt one on (AILAB-164).
+/// For one-shot rewrites outside a dream cycle — `dreamd archive --force-unpin`.
+/// A cycle never calls this: the pin pass, the decay pruner and
+/// `forget::cascade` stage the log with [`patch_lines`] output
+/// ([`crate::stage::Stage::put`]), and the cycle's redo WAL renames it in.
 ///
 /// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
 /// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
 pub fn rewrite_atomic(path: &Path, contents: &[u8]) -> Result<(), EpisodicError> {
     crate::io::write_atomic(path, contents)?;
-    Ok(())
-}
-
-/// [`rewrite_atomic`] under the dream-cycle WAL: `contents` are the new file's
-/// bytes, and the
-/// [`PruneEpisodicMemory`](crate::wal::WalIntent::PruneEpisodicMemory) intent is
-/// appended between the temp's fsync and the rename, naming the temp
-/// [`wal::guarded_replace`](crate::wal::guarded_replace) just wrote.
-///
-/// The pin pass, the decay pruner and `forget::cascade` call this with
-/// [`patch_lines`] output. None of them names a temp path, and none passes a
-/// closure: the intent and the write are one call (AILAB-164). No-ops the
-/// intent — but still writes — when no cycle is open.
-pub fn rewrite_guarded(
-    agent_root: &AgentRoot,
-    path: &Path,
-    contents: &[u8],
-) -> Result<(), EpisodicError> {
-    crate::wal::guarded_replace(
-        agent_root,
-        path,
-        contents,
-        crate::wal::GuardedReplaceKind::PruneEpisodicMemory,
-    )
-    .map_err(|e| match e {
-        // Unwrap rather than `Error::other(e)`: the inner error IS the rewrite's
-        // own I/O failure, and re-boxing it would flatten every `ErrorKind` to
-        // `Other` — including the `Unsupported` the Windows arm returns, which
-        // AILAB-164 keeps as it is today.
-        crate::wal::WalError::Io(io) => EpisodicError::Io(io),
-        other => EpisodicError::Io(std::io::Error::other(other)),
-    })?;
     Ok(())
 }
 
@@ -834,7 +799,8 @@ mod tests {
         bytes.extend_from_slice(b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_TOR"); // torn
         std::fs::write(&jsonl, &bytes).unwrap();
 
-        let result = crate::decay::run_decay_pruner(&root, NOW_SEC, "2026-07-03");
+        let mut stage = crate::stage::Stage::create(&root, "dream-1").unwrap();
+        let result = crate::decay::run_decay_pruner(&mut stage, NOW_SEC, "2026-07-03");
         let outcome = result.expect("torn tail must not abort the CLI dream path");
         assert_eq!(outcome.kept_count, 2, "both complete records kept");
         assert!(outcome.decayed_ids.is_empty(), "young records do not decay");

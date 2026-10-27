@@ -86,6 +86,8 @@ reference memory server intentionally. Do not rename them.
 **Salience is computed at query time.**
 `BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`
 This is computed from Tantivy fastfields on recall. It is not stored or indexed.
+`salience()` clamps its inputs first (BZR-1237): `salience::age_secs` floors the age at 0,
+and `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
 
 **Dream cycle is WAL-protected.**
 Before any destructive op (replacing LESSONS.md, pruning JSONL), write
@@ -218,7 +220,24 @@ Locked 2026-10-24:
    - library: `MemoryCoordinator::open`, `run_filesystem_phases(_with_backend)`, `forget::cascade` and `provenance::record_cycle` take a `Ledger`, and `provenance::append_edges` is removed.
 
    Spec: `assignments/BZR-1236.v2.md`.
-8. **BZR-1237** — clamp salience inputs inside `salience()` (age ≥ 0, pain and importance in [0, 10]).
+8. **BZR-1237** — on `main` (`a99975e`). `salience()` clamps its inputs with three new public helpers:
+   - `age_secs` is `now.saturating_sub(ts).max(0)`; `age_days` divides it by 86,400;
+   - `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
+
+   `should_decay` uses `age_secs`. That changes no result, because a future record never reached the 90-day gate.
+
+   CLI `explain_factors` and HTTP `citations[].age_days` report the clamped values, so the explain product still equals the score bit-for-bit (user call, 2026-10-27).
+
+   The AC's fixture rework was not needed: every dream-cycle snapshot passed unchanged.
+
+   V10 is un-ignored. 10 new tests: 4 salience unit, 1 decay, 3 proptest properties (the bound uses `prop::num::f64::ANY`), 1 CLI and 1 citation. PM re-run: workspace 1178 passed / 0 failed / 1 ignored. Stripped `dreamd` is 20,801,728 bytes, which covers BZR-1236 too.
+
+   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+   - salience is at most `1 + ln(1 + recurrence)` for every input, including documents indexed before 1.1.0. A timestamp after `now` scores as written now, out-of-range pain or importance scores as its bound, and NaN scores 0;
+   - `recall --explain`, `blame --explain` and its JSON, the recall table's `age_days` column, and `citations[].age_days` show the clamped age and factors. `citations[].pain` and `importance` stay the stored values;
+   - library: new `salience::age_secs`, `age_days` and `clamp_score`.
+
+   Docs left for BZR-1238: `docs/architecture.md:255-260` does not mention the three new properties, and `docs/observability.md:31-32` still say "Stored 0.0–10.0". Spec: `assignments/BZR-1237.v2.md`.
 9. **BZR-1239** — atomic dream cycle: staged outputs, a redo WAL (`format: "redo/1"`, no `intents` key), roll-forward recovery, crash sweep.
 10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
 11. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
@@ -1103,3 +1122,27 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - The PM re-runs the §4 greps whatever the paste shows, because pasted output is not evidence.
   - When the marker is missing, ask the user for the rest before signing off the rows that are missing.
 - **Cross-refs:** `mutation-must-get-past-the-backstop`, `git-diff-name-only-misses-untracked`
+
+### nan-safe-clamp-is-if-else
+
+- **Rule:** To clamp an `f64` that may be NaN to a range, use `if x >= lo { x.min(hi) } else { lo }`. Never use `x.max(lo).min(hi)`, which fails `clippy::manual_clamp` under `-D warnings`. Never use `x.clamp(lo, hi)`, the lint's own suggestion, which returns NaN for NaN.
+- **Why:** BZR-1237's AC needed salience bounded "for all inputs". Checked on clippy 0.1.95 in a scratch crate before queuing: the max/min chain fails the lint, and the fix it suggests breaks the bound for NaN. The if/else form maps NaN and `-inf` to the low bound and `+inf` to the high one.
+- **How to apply:**
+  - See `salience::clamp_score`.
+  - A §4 grep over the production slice can ban `\.clamp\(|\.max\(0\.0\)` (BZR-1237 grep 2).
+  - A mutation row that swaps in `.clamp(` must fail a test that passes NaN.
+- **Cross-refs:** `proptest-any-f64-excludes-nan`
+
+### proptest-any-f64-excludes-nan
+
+- **Rule:**
+  - A property that must hold "for all inputs" draws floats from `prop::num::f64::ANY`, not `any::<f64>()`.
+  - A failing proptest run writes `<test>.proptest-regressions` into the source tree. Delete it after red-first and mutation runs.
+- **Why:**
+  - In proptest 1.11.0, `any::<f64>()` is `POSITIVE | NEGATIVE | ZERO | SUBNORMAL | NORMAL`: never NaN, never infinity (`arbitrary/primitives.rs:25-26`). `f64::ANY` adds `INFINITE` and `QUIET_NAN`; NaN's weight is 1/30.
+  - The regressions file uses `SourceParallel` persistence and is not gitignored. A stale one replays its seeds first on the next run.
+  - Both showed up on BZR-1237: the dev flagged the regressions file, and the PM deleted it between mutation runs.
+- **How to apply:**
+  - Name the strategy in the spec and grep for it (BZR-1237 grep 6).
+  - Check that `git ls-files --others --exclude-standard` is empty before sign-off.
+- **Cross-refs:** `nan-safe-clamp-is-if-else`, `mutation-must-get-past-the-backstop`

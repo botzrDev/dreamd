@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::AgentRoot;
+use crate::stage::Stage;
 
 /// `schema_version` of every manifest this module writes.
 pub const BRANCHES_SCHEMA_VERSION: &str = "branches/1.0";
@@ -245,11 +246,16 @@ pub fn autosnap_ref_name(now_sec: i64) -> Result<String, SnapshotError> {
     ))
 }
 
-fn write_ref(refs_dir: &Path, name: &str, id: &str, now_sec: i64) -> Result<(), SnapshotError> {
+/// A ref's two lines: the object id, then the UTC time it was taken.
+fn ref_body(id: &str, now_sec: i64) -> Result<String, SnapshotError> {
     let ts = chrono::DateTime::from_timestamp(now_sec, 0)
         .ok_or(SnapshotError::InvalidTimestamp(now_sec))?;
+    Ok(format!("{id}\n{}\n", ts.format("%Y-%m-%dT%H:%M:%SZ")))
+}
+
+fn write_ref(refs_dir: &Path, name: &str, id: &str, now_sec: i64) -> Result<(), SnapshotError> {
+    let body = ref_body(id, now_sec)?;
     fs::create_dir_all(refs_dir).map_err(io_err(refs_dir))?;
-    let body = format!("{id}\n{}\n", ts.format("%Y-%m-%dT%H:%M:%SZ"));
     // Leading dot: the temp name cannot match the ref-name grammar.
     let tmp = refs_dir.join(format!(".{name}.tmp"));
     fs::write(&tmp, body).map_err(io_err(&tmp))?;
@@ -271,6 +277,28 @@ pub fn create_autosnap(agent_root: &AgentRoot, now_sec: i64) -> Result<String, S
 
     write_object(&agent_root.branches_objects_dir(), &id, &files, &manifest)?;
     write_ref(&agent_root.branches_refs_dir(), &name, &id, now_sec)?;
+    Ok(id)
+}
+
+/// [`create_autosnap`] for a dream cycle: the object is written directly, and
+/// the ref is staged, so it lands with the cycle's other outputs when the redo
+/// WAL commits. Returns the object id.
+///
+/// The object is content-addressed, so a cycle that never commits leaves at
+/// most an object no ref names.
+pub fn stage_autosnap(stage: &mut Stage, now_sec: i64) -> Result<String, SnapshotError> {
+    let agent_root = stage.agent_root().clone();
+    let name = autosnap_ref_name(now_sec)?;
+    let files = read_live(&agent_root);
+    let entries: Vec<ManifestFile> = files.iter().map(|(m, _)| m.clone()).collect();
+    let manifest = manifest_bytes(&entries)?;
+    let id = sha256_hex(&manifest);
+
+    write_object(&agent_root.branches_objects_dir(), &id, &files, &manifest)?;
+    let ref_path = agent_root.branches_refs_dir().join(&name);
+    stage
+        .put(&ref_path, ref_body(&id, now_sec)?.as_bytes())
+        .map_err(io_err(&ref_path))?;
     Ok(id)
 }
 

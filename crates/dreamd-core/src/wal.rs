@@ -1,16 +1,28 @@
-//! Dream cycle write-ahead log (DR-303 / WEG-60).
+//! Dream cycle write-ahead log (DR-303 / WEG-60; redo format since BZR-1239).
 //!
 //! Guarantees `.agent/` is never left in a half-promoted state after a
-//! mid-cycle crash. Before any destructive op, the intent is appended to
-//! `dream_in_progress.wal`. On startup, if the WAL exists, recovery runs
-//! before the daemon serves traffic.
+//! mid-cycle crash. A cycle stages every output under
+//! `.agent/.dreamd/stage/<cycle>/` ([`crate::stage::Stage`]) while nothing live
+//! changes. [`commit_cycle`] then writes `dream_in_progress.wal` once — a redo
+//! log of the cycle's renames and unlinks ([`RedoWal`], format `redo/1`) — and
+//! that write is the commit point. The renames, unlinks, directory fsyncs,
+//! provenance edges and the `complete` status follow, and the WAL is deleted.
 //!
-//! v0.1 WAL covers JSONL + LESSONS.md + recurrence sidecar writes only.
-//! Tantivy index mutations are NOT WAL-protected in v0.1 — see
-//! [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index freshness contract) and
-//! [`assess_index_freshness`](crate::server::tantivy_handle::assess_index_freshness).
+//! When a writer takes the project lock, [`recover_if_needed`] rolls a redo WAL
+//! forward through the same code ([`roll_forward`]), keeps the old meaning of a
+//! legacy `intents` WAL ([`DreamWal`]), refuses any other WAL, and wipes every
+//! stage directory.
+//!
+//! The redo WAL covers the JSONL, `LESSONS.md`, the recurrence sidecar, the
+//! decay archive and the autosnap ref. Tantivy index mutations are NOT
+//! WAL-protected — see [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index
+//! freshness contract).
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::fmt;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,48 +30,99 @@ use serde::{Deserialize, Serialize};
 use crate::daemon_state::{read_daemon_state, update_daemon_state, DaemonStateError};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
+use crate::provenance::{self, Ledger, ProvenanceError};
+use crate::stage::{crash_point, Stage};
 
 /// Schema version for daemon state (`state.json`). Re-exported from
 /// [`crate::daemon_state`], which owns the typed writer (AILAB-167);
 /// `crate::wal::STATE_SCHEMA_VERSION` remains a valid path.
 pub use crate::daemon_state::STATE_SCHEMA_VERSION;
 
-/// Destructive dream-cycle step recorded before it executes.
+/// `format` of the WAL [`commit_cycle`] writes.
+pub const REDO_FORMAT: &str = "redo/1";
+
+/// The redo WAL: every rename and unlink one cycle commits. Paths are relative
+/// to `.agent/` and `/`-joined. A `from` is a staged file under
+/// `.dreamd/stage/`; a `to` or an unlink is a live path outside it.
 ///
-/// On crash recovery without [`WalIntent::Commit`], each non-commit intent's
-/// temp file is deleted and the WAL is removed so `.agent/` stays pre-cycle.
+/// It has no `intents` key, so a reader built on [`DreamWal`] rejects it and an
+/// older binary refuses to start rather than misread it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RedoWal {
+    /// [`STATE_SCHEMA_VERSION`], `"1.0"`.
+    pub schema_version: String,
+    /// [`REDO_FORMAT`].
+    pub format: String,
+    pub renames: Vec<RedoRename>,
+    pub unlinks: Vec<String>,
+}
+
+/// One staged file moving into place.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RedoRename {
+    pub from: String,
+    pub to: String,
+}
+
+/// What opened a stage. Its token prefixes the stage directory name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleKind {
+    Dream,
+    Forget,
+}
+
+impl CycleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dream => "dream",
+            Self::Forget => "forget",
+        }
+    }
+}
+
+impl fmt::Display for CycleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One step of a **legacy** (pre-1.1.0) intents WAL. Nothing writes these any
+/// more; [`recover_if_needed`] still reads them from a WAL an older binary left.
+///
+/// Without [`WalIntent::Commit`] — the legacy commit marker — recovery deletes
+/// each step's temp file and the WAL, so `.agent/` stays pre-cycle.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "operation", content = "payload")]
 pub enum WalIntent {
-    /// About to promote a temp LESSONS.md (or semantic memory file) into place.
+    /// A temp `LESSONS.md` (or semantic memory file) was about to be renamed in.
     ReplaceSemanticMemory { temp_file_path: String },
-    /// About to replace episodic JSONL with a pruned temp copy.
+    /// A pruned temp copy of the episodic JSONL was about to be renamed in.
     PruneEpisodicMemory { temp_file_path: String },
-    /// All destructive steps succeeded; recovery treats the cycle as committed.
+    /// The legacy commit marker: every step had run.
     Commit,
 }
 
-/// On-disk write-ahead log for an in-flight dream cycle.
-///
-/// Serialized to `.agent/.dreamd/dream_in_progress.wal`. Each [`WalIntent`]
-/// records a destructive step before it executes so crash recovery can unwind
-/// partial work. Deleted after a successful [`commit_cycle`](crate::wal::commit_cycle).
+/// A **legacy** (pre-1.1.0) WAL: an ordered list of [`WalIntent`]s. Read only
+/// by recovery. [`commit_cycle`] writes a [`RedoWal`] instead.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DreamWal {
     /// Daemon state schema version (independent of episodic `schema_version`).
     pub schema_version: String,
-    /// Ordered list of intents recorded this cycle.
+    /// Ordered list of intents the older binary recorded.
     pub intents: Vec<WalIntent>,
 }
 
 /// Result of scanning / applying `dream_in_progress.wal` on startup.
 #[derive(Debug, PartialEq)]
 pub enum RecoveryOutcome {
-    /// No WAL found — nothing to recover.
+    /// No WAL found — nothing to recover. Any stage directory was wiped.
     Clean,
-    /// Incomplete cycle (no Commit): temp files removed, WAL deleted.
+    /// A committed redo WAL was applied: `renamed` renames and `unlinked`
+    /// unlinks were still to do.
+    RolledForward { renamed: usize, unlinked: usize },
+    /// Legacy WAL with no `Commit`: temp files removed, WAL deleted.
     Recovered { cleaned_files: Vec<PathBuf> },
-    /// Commit was recorded but post-commit cleanup did not finish; repair state.json.
+    /// Legacy WAL with `Commit` whose cleanup did not finish; state.json repaired.
     CommittedButUnclean,
 }
 
@@ -71,6 +134,21 @@ pub enum WalError {
     Json(#[from] serde_json::Error),
     #[error("no .agent/ store at {0} — refusing to scaffold a phantom store; run `dreamd init`")]
     NoAgentStore(PathBuf),
+    /// A cycle started while a WAL is still on disk.
+    #[error(
+        "a dream-cycle WAL is pending at {0}; the next writer to take the project lock recovers it"
+    )]
+    Pending(PathBuf),
+    /// The WAL's `format` is not one this version reads (`"none"` when the
+    /// WAL has neither `format` nor `intents`).
+    #[error("dream-cycle WAL has unknown format {0:?}; refusing to touch the store")]
+    UnknownFormat(String),
+    /// A redo path that is absolute, climbs with `..`, or points at the wrong
+    /// side of `.dreamd/stage/`.
+    #[error("dream-cycle WAL names a path outside the store: {0:?}; refusing to touch the store")]
+    BadRedoPath(String),
+    #[error("WAL provenance: {0}")]
+    Provenance(#[from] ProvenanceError),
 }
 
 impl From<DaemonStateError> for WalError {
@@ -82,27 +160,27 @@ impl From<DaemonStateError> for WalError {
     }
 }
 
-/// Write a fresh WAL and set state.json to "in_progress".
-/// `_now_sec` is caller-provided for testability.
-pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError> {
-    // WEG-281 — never conjure a store. begin_cycle may create the `.dreamd/`
-    // subdir, but only under an EXISTING `.agent/`. If `.agent/` is absent the
-    // caller resolved the wrong root (or skipped discovery); error rather than
-    // create_dir_all a phantom empty store. Last line of defense behind the
-    // cli.rs discover gate.
+/// Set state.json to `in_progress` and open an empty stage at
+/// `.dreamd/stage/<kind>-<now_sec>/`. Writes no WAL.
+///
+/// Refuses with [`WalError::Pending`] while a WAL exists: that WAL belongs to
+/// a committed cycle the next lock holder must roll forward first.
+pub fn begin_cycle(
+    agent_root: &AgentRoot,
+    kind: CycleKind,
+    now_sec: i64,
+) -> Result<Stage, WalError> {
+    // WEG-281 — never conjure a store. Under an EXISTING `.agent/` this may
+    // create `.dreamd/`; if `.agent/` is absent the caller resolved the wrong
+    // root (or skipped discovery). Last line of defense behind the cli.rs
+    // discover gate.
     if !agent_root.agent_dir().exists() {
         return Err(WalError::NoAgentStore(agent_root.agent_dir()));
     }
-    let wal = DreamWal {
-        schema_version: STATE_SCHEMA_VERSION.to_string(),
-        intents: Vec::new(),
-    };
-    let json = serde_json::to_string_pretty(&wal)?;
     let wal_path = agent_root.wal_path();
-    if let Some(parent) = wal_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if wal_path.exists() {
+        return Err(WalError::Pending(wal_path));
     }
-    write_atomic(&wal_path, json.as_bytes())?;
     // Status-only patch, deliberately (AILAB-167): a cycle that is starting has
     // no completion timestamp, and the previous cycle's `last_dream_cycle_at`
     // must survive. The pre-AILAB-167 from-scratch writer wrote JSON `null`
@@ -110,133 +188,241 @@ pub fn begin_cycle(agent_root: &AgentRoot, _now_sec: i64) -> Result<(), WalError
     update_daemon_state(agent_root, |s| {
         s.last_dream_cycle_status = "in_progress".to_string()
     })?;
-    Ok(())
+    Ok(Stage::create(agent_root, &format!("{kind}-{now_sec}"))?)
 }
 
-/// Append one intent to the existing WAL (rewrites atomically).
-/// No-ops gracefully if no active cycle (WAL not begun).
-pub fn append_intent(agent_root: &AgentRoot, intent: WalIntent) -> Result<(), WalError> {
-    let wal_path = agent_root.wal_path();
-    if !wal_path.exists() {
-        return Ok(());
-    }
-    let mut wal: DreamWal = serde_json::from_str(&std::fs::read_to_string(&wal_path)?)?;
-    wal.intents.push(intent);
-    let json = serde_json::to_string_pretty(&wal)?;
-    write_atomic(&wal_path, json.as_bytes())?;
-    Ok(())
-}
-
-/// Which [`WalIntent`] a [`guarded_replace`] records for the file it is
-/// replacing.
+/// Commit `stage`: fsync it, write the redo WAL (the commit point), apply it
+/// with [`roll_forward`], then remove the stage directory.
 ///
-/// A *kind*, not an intent: the `temp_file_path` half is supplied by
-/// [`guarded_replace`] from the tmp the atomic write actually created, so a
-/// caller has no way to name one (AILAB-164).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardedReplaceKind {
-    /// `.agent/semantic/LESSONS.md` and friends.
-    ReplaceSemanticMemory,
-    /// `.agent/episodic/AGENT_LEARNINGS.jsonl`.
-    PruneEpisodicMemory,
+/// `ledger` is the project writer lock's appender; the cycle's provenance
+/// edges are recorded after the renames. `now_sec` stamps
+/// `last_dream_cycle_at`.
+pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), WalError> {
+    let agent_root = stage.agent_root().clone();
+    File::open(stage.dir())?.sync_all()?;
+    crash_point()?;
+
+    let redo = stage.redo();
+    let json = serde_json::to_string_pretty(&redo)?;
+    write_atomic(&agent_root.wal_path(), json.as_bytes())?;
+    crash_point()?;
+
+    roll_forward(&agent_root, &redo, ledger, Some(now_sec))?;
+
+    remove_dir_all_if_present(stage.dir())?;
+    match fs::remove_dir(agent_root.stage_dir()) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(e) => return Err(e.into()),
+    }
+    crash_point()?;
+    Ok(())
 }
 
-impl GuardedReplaceKind {
-    /// Build the on-disk intent for `tmp`. Deliberately private: this is the
-    /// **only** place production code mints a `temp_file_path`, and `tmp` can
-    /// only come from [`crate::io::write_atomic_with_hook`]'s hook argument.
-    fn into_intent(self, tmp: &Path) -> WalIntent {
-        let temp_file_path = tmp.to_string_lossy().into_owned();
-        match self {
-            Self::ReplaceSemanticMemory => WalIntent::ReplaceSemanticMemory { temp_file_path },
-            Self::PruneEpisodicMemory => WalIntent::PruneEpisodicMemory { temp_file_path },
+/// Apply `redo`: the one code path for commit and recovery. Idempotent: a
+/// rename whose `from` is gone already happened, and an unlink of an absent
+/// file is done. Returns how many renames and unlinks it performed.
+///
+/// `cycle_at` stamps `last_dream_cycle_at` on commit. Recovery passes `None`
+/// and sets the status only.
+fn roll_forward(
+    agent_root: &AgentRoot,
+    redo: &RedoWal,
+    ledger: &Ledger,
+    cycle_at: Option<i64>,
+) -> Result<(usize, usize), WalError> {
+    validate(redo)?;
+    let agent_dir = agent_root.agent_dir();
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+
+    let mut renamed = 0;
+    for rename in &redo.renames {
+        let from = agent_dir.join(&rename.from);
+        let to = agent_dir.join(&rename.to);
+        if let Some(parent) = to.parent() {
+            dirs.insert(parent.to_path_buf());
         }
+        match fs::symlink_metadata(&from) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&from, &to)?;
+        renamed += 1;
+        crash_point()?;
     }
-}
 
-/// Replace `dest` with `contents` and record the matching [`WalIntent`] as one
-/// operation (AILAB-164).
-///
-/// Sequence, inside [`crate::io::write_atomic_with_hook`]: write `dest`'s `.tmp`,
-/// fsync it, **then** append the intent naming that exact tmp, then rename and
-/// fsync the parent dir. The intent therefore never references a tmp that does
-/// not exist yet, and never a tmp this call did not write — the two halves used
-/// to be separate statements at each call site, each re-deriving
-/// `dest.with_extension("tmp")` for itself, and `write_selected_lesson` even ran
-/// them in the opposite order (intent, *then* write).
-///
-/// Follows [`append_intent`]'s no-active-cycle rule: with no WAL on disk the
-/// intent append is a no-op and the replace still commits. One-shot CLI rewrites
-/// with no open cycle (`dreamd archive`) call
-/// [`episodic::rewrite_atomic`](crate::episodic::rewrite_atomic) instead and do
-/// not come through here at all.
-///
-/// Returns [`std::io::ErrorKind::Unsupported`] on Windows, inherited from
-/// `write_atomic_with_hook`; see `docs/windows.md`.
-pub fn guarded_replace(
-    agent_root: &AgentRoot,
-    dest: &Path,
-    contents: &[u8],
-    kind: GuardedReplaceKind,
-) -> Result<(), WalError> {
-    crate::io::write_atomic_with_hook(dest, contents, |tmp| {
-        append_intent(agent_root, kind.into_intent(tmp)).map_err(std::io::Error::other)
-    })?;
-    Ok(())
-}
+    let mut unlinked = 0;
+    for unlink in &redo.unlinks {
+        let path = agent_dir.join(unlink);
+        if let Some(parent) = path.parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => unlinked += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        crash_point()?;
+    }
 
-/// [`guarded_replace`] that crashes in the one window recovery exists for:
-/// after the `.tmp` is fsynced and the intent is durably appended, before the
-/// rename. Leaves `dest` byte-identical, the `.tmp` on disk, and the WAL naming
-/// it — exactly the state a `SIGKILL` there would.
-///
-/// Test-only, and the only supported way to produce that state: hand-writing WAL
-/// JSON tests the recovery *reader* against a fixture nothing in production
-/// emits.
-#[cfg(test)]
-pub(crate) fn guarded_replace_crash_after_intent(
-    agent_root: &AgentRoot,
-    dest: &Path,
-    contents: &[u8],
-    kind: GuardedReplaceKind,
-) -> Result<(), WalError> {
-    crate::io::write_atomic_with_hook(dest, contents, |tmp| {
-        append_intent(agent_root, kind.into_intent(tmp)).map_err(std::io::Error::other)?;
-        Err(std::io::Error::other("injected crash after intent"))
-    })?;
-    Ok(())
-}
+    for dir in &dirs {
+        sync_dir_if_present(dir)?;
+    }
+    crash_point()?;
 
-/// Append Commit intent, update state.json to "complete", delete WAL.
-/// Caller-provided `now_sec`.
-pub fn commit_cycle(agent_root: &AgentRoot, now_sec: i64) -> Result<(), WalError> {
-    append_intent(agent_root, WalIntent::Commit)?;
-    let iso = DateTime::from_timestamp(now_sec, 0)
-        .map(|dt: DateTime<Utc>| dt.to_rfc3339())
-        .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string());
+    provenance::record_cycle(agent_root, ledger)?;
+    crash_point()?;
+
+    let cycle_at = cycle_at.map(|now_sec| {
+        DateTime::from_timestamp(now_sec, 0)
+            .map(|dt: DateTime<Utc>| dt.to_rfc3339())
+            .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string())
+    });
     update_daemon_state(agent_root, |s| {
         s.last_dream_cycle_status = "complete".to_string();
-        s.last_dream_cycle_at = Some(iso);
+        if let Some(iso) = cycle_at {
+            s.last_dream_cycle_at = Some(iso);
+        }
     })?;
-    let wal_path = agent_root.wal_path();
-    if wal_path.exists() {
-        std::fs::remove_file(&wal_path)?;
+    crash_point()?;
+
+    match fs::remove_file(agent_root.wal_path()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    sync_dir_if_present(&agent_root.dreamd_dir())?;
+    crash_point()?;
+
+    Ok((renamed, unlinked))
+}
+
+/// Fail closed on any redo path that could reach outside the store: absolute,
+/// non-plain components (`..`, `.`), a `from` outside `.dreamd/stage/`, or a
+/// `to` / unlink inside it.
+fn validate(redo: &RedoWal) -> Result<(), WalError> {
+    for rename in &redo.renames {
+        if !is_plain_relative(&rename.from) || !is_staged(&rename.from) {
+            return Err(WalError::BadRedoPath(rename.from.clone()));
+        }
+        if !is_plain_relative(&rename.to) || points_into_stage(&rename.to) {
+            return Err(WalError::BadRedoPath(rename.to.clone()));
+        }
+    }
+    for unlink in &redo.unlinks {
+        if !is_plain_relative(unlink) || points_into_stage(unlink) {
+            return Err(WalError::BadRedoPath(unlink.clone()));
+        }
     }
     Ok(())
 }
 
-/// Check for a stale WAL on startup and run recovery.
-/// Returns `Clean` if no WAL found, `Recovered` if incomplete cycle cleaned up.
+fn is_plain_relative(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+fn points_into_stage(path: &str) -> bool {
+    let mut parts = Path::new(path).components();
+    parts.next() == Some(Component::Normal(".dreamd".as_ref()))
+        && parts.next() == Some(Component::Normal("stage".as_ref()))
+}
+
+/// `.dreamd/stage/<something>…`: a staged file, never the stage root itself.
+fn is_staged(path: &str) -> bool {
+    points_into_stage(path) && Path::new(path).components().count() > 2
+}
+
+fn sync_dir_if_present(dir: &Path) -> io::Result<()> {
+    match File::open(dir) {
+        Ok(f) => f.sync_all(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn remove_dir_all_if_present(dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove `.dreamd/stage/` and everything a crashed or uncommitted cycle
+/// staged there.
+fn wipe_stage(agent_root: &AgentRoot) -> io::Result<()> {
+    let stage_dir = agent_root.stage_dir();
+    if stage_dir.exists() {
+        tracing::info!(
+            path = %stage_dir.display(),
+            "removing staged outputs of a dream cycle that never committed"
+        );
+        remove_dir_all_if_present(&stage_dir)?;
+    }
+    Ok(())
+}
+
+/// Bring the store to a pre- or post-cycle state.
+///
+/// - No WAL: remove a WAL temp left by a crash inside the WAL's own write,
+///   wipe `.dreamd/stage/`, return [`RecoveryOutcome::Clean`].
+/// - A `redo/1` WAL: [`roll_forward`] it, wipe the stage root, return
+///   [`RecoveryOutcome::RolledForward`].
+/// - A legacy WAL (`intents`, no `format`): the pre-1.1.0 recovery, then wipe
+///   the stage root.
+/// - Anything else: [`WalError::UnknownFormat`], touching nothing.
 pub fn recover_if_needed(
     agent_root: &AgentRoot,
-    _now_sec: i64,
+    ledger: &Ledger,
 ) -> Result<RecoveryOutcome, WalError> {
     let wal_path = agent_root.wal_path();
     if !wal_path.exists() {
+        match fs::remove_file(wal_path.with_extension("tmp")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        wipe_stage(agent_root)?;
         return Ok(RecoveryOutcome::Clean);
     }
 
-    let wal: DreamWal = serde_json::from_str(&std::fs::read_to_string(&wal_path)?)?;
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&wal_path)?)?;
+    match value.get("format") {
+        Some(format) if format == REDO_FORMAT => {
+            let redo: RedoWal = serde_json::from_value(value)?;
+            let (renamed, unlinked) = roll_forward(agent_root, &redo, ledger, None)?;
+            wipe_stage(agent_root)?;
+            Ok(RecoveryOutcome::RolledForward { renamed, unlinked })
+        }
+        Some(format) => Err(WalError::UnknownFormat(
+            format
+                .as_str()
+                .map_or_else(|| format.to_string(), str::to_owned),
+        )),
+        None if value.get("intents").is_some() => {
+            let wal: DreamWal = serde_json::from_value(value)?;
+            let outcome = recover_legacy(agent_root, &wal)?;
+            wipe_stage(agent_root)?;
+            Ok(outcome)
+        }
+        None => Err(WalError::UnknownFormat("none".to_string())),
+    }
+}
+
+/// The pre-1.1.0 recovery of an intents WAL, unchanged.
+fn recover_legacy(agent_root: &AgentRoot, wal: &DreamWal) -> Result<RecoveryOutcome, WalError> {
+    let wal_path = agent_root.wal_path();
     let committed = wal.intents.contains(&WalIntent::Commit);
 
     if committed {
@@ -274,19 +460,23 @@ pub fn recover_if_needed(
     })
 }
 
-/// Check for a stale WAL and run recovery with logging.
+/// [`recover_if_needed`] with logging.
 ///
 /// Called only by [`WriterLock::acquire`](crate::writer_lock::WriterLock::acquire),
 /// after the project writer lock is held and before any store access, so a
-/// WAL it finds cannot belong to a cycle that is still running.
-pub fn recover_on_startup(agent_root: &AgentRoot) -> Result<RecoveryOutcome, WalError> {
-    let now_sec = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let outcome = recover_if_needed(agent_root, now_sec)?;
+/// WAL or stage directory it finds cannot belong to a cycle that is still
+/// running. `ledger` is the lock's appender: a roll-forward re-records the
+/// cycle's provenance edges.
+pub fn recover_on_startup(
+    agent_root: &AgentRoot,
+    ledger: &Ledger,
+) -> Result<RecoveryOutcome, WalError> {
+    let outcome = recover_if_needed(agent_root, ledger)?;
     match &outcome {
         RecoveryOutcome::Clean => {}
+        RecoveryOutcome::RolledForward { renamed, unlinked } => {
+            tracing::info!(renamed, unlinked, "rolled a committed dream cycle forward");
+        }
         RecoveryOutcome::Recovered { cleaned_files } => {
             tracing::info!(
                 count = cleaned_files.len(),
@@ -324,6 +514,7 @@ pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, W
 mod tests {
     use super::*;
     use crate::daemon_state::{read_daemon_state, AutobiographySkip};
+    use crate::stage::arm_crash;
     use crate::test_support::{unique_tmpdir, DirGuard};
     use std::fs;
 
@@ -336,50 +527,333 @@ mod tests {
         (root, guard)
     }
 
+    fn ledger(root: &AgentRoot) -> Ledger {
+        Ledger::open(root.provenance_ledger())
+    }
+
+    fn status(root: &AgentRoot) -> String {
+        read_daemon_state(root).unwrap().last_dream_cycle_status
+    }
+
+    fn write_wal(root: &AgentRoot, json: &str) {
+        fs::write(root.wal_path(), json).unwrap();
+    }
+
     const NOW_SEC: i64 = 1747137600; // 2026-05-13T12:00:00Z
 
     #[test]
-    fn wal_begin_creates_file() {
+    fn begin_cycle_sets_in_progress_and_writes_no_wal() {
         let (root, _g) = setup_root("begin");
-        begin_cycle(&root, NOW_SEC).unwrap();
+        let stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
-        let wal_path = root.wal_path();
-        assert!(wal_path.exists(), "WAL file must exist after begin_cycle");
-
-        let wal: DreamWal = serde_json::from_str(&fs::read_to_string(&wal_path).unwrap()).unwrap();
-        assert_eq!(wal.schema_version, "1.0");
-        assert!(wal.intents.is_empty(), "WAL must start with empty intents");
-
-        let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(root.state_json()).unwrap()).unwrap();
-        assert_eq!(state["last_dream_cycle_status"], "in_progress");
+        assert!(
+            !root.wal_path().exists(),
+            "begin_cycle must write no WAL; the WAL is the commit point"
+        );
+        assert_eq!(status(&root), "in_progress");
+        assert_eq!(
+            stage.dir(),
+            root.stage_dir().join(format!("dream-{NOW_SEC}"))
+        );
+        assert!(stage.dir().is_dir());
     }
 
     #[test]
-    fn wal_commit_removes_wal_and_updates_state() {
-        let (root, _g) = setup_root("commit");
-        begin_cycle(&root, NOW_SEC).unwrap();
-        commit_cycle(&root, NOW_SEC).unwrap();
+    fn begin_cycle_refuses_while_a_wal_is_pending() {
+        let (root, _g) = setup_root("begin-pending");
+        write_wal(
+            &root,
+            r#"{"schema_version":"1.0","format":"redo/1","renames":[],"unlinks":[]}"#,
+        );
 
+        let err = begin_cycle(&root, CycleKind::Forget, NOW_SEC).unwrap_err();
+
+        assert!(
+            matches!(&err, WalError::Pending(p) if *p == root.wal_path()),
+            "got {err:?}"
+        );
+        assert_eq!(status(&root), "idle", "a refused begin sets no status");
+        assert!(!root.stage_dir().exists(), "a refused begin stages nothing");
+    }
+
+    #[test]
+    fn commit_applies_renames_and_unlinks_then_deletes_the_wal() {
+        let (root, _g) = setup_root("commit");
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        fs::write(root.lessons_md(), b"old lesson\n").unwrap();
+        let jsonl = root.episodic_jsonl();
+
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&jsonl, b"new log\n").unwrap();
+        stage.unlink(&root.lessons_md()).unwrap();
+        assert!(!jsonl.exists(), "nothing live changes before the commit");
+        commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
+
+        assert_eq!(fs::read(&jsonl).unwrap(), b"new log\n");
+        assert!(!root.lessons_md().exists(), "the unlink must land");
         assert!(
             !root.wal_path().exists(),
             "WAL must be deleted after commit_cycle"
         );
-
-        let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(root.state_json()).unwrap()).unwrap();
-        assert_eq!(state["last_dream_cycle_status"], "complete");
         assert!(
-            state["last_dream_cycle_at"].is_string(),
+            !root.stage_dir().exists(),
+            "commit must remove the stage dir and the empty stage root"
+        );
+        let state = read_daemon_state(&root).unwrap();
+        assert_eq!(state.last_dream_cycle_status, "complete");
+        assert!(
+            state.last_dream_cycle_at.is_some(),
             "last_dream_cycle_at must be set after commit"
         );
     }
 
     #[test]
+    fn commit_writes_one_redo_wal_with_no_intents_key() {
+        let (root, _g) = setup_root("commit-redo-bytes");
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.episodic_jsonl(), b"staged\n").unwrap();
+
+        // Crash point 0 is the stage-dir fsync; point 1 is right after the
+        // WAL write.
+        arm_crash(Some(1));
+        let err = commit_cycle(stage, &ledger(&root), NOW_SEC);
+        arm_crash(None);
+        assert!(err.is_err(), "the injected crash must surface");
+
+        let bytes = fs::read_to_string(root.wal_path()).unwrap();
+        assert!(bytes.contains("\"format\": \"redo/1\""), "{bytes}");
+        assert!(!bytes.contains("\"intents\""), "{bytes}");
+        let redo: RedoWal = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(redo.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(
+            redo.renames,
+            vec![RedoRename {
+                from: format!(".dreamd/stage/dream-{NOW_SEC}/0-AGENT_LEARNINGS.jsonl"),
+                to: "episodic/AGENT_LEARNINGS.jsonl".to_string(),
+            }]
+        );
+        assert!(
+            !root.episodic_jsonl().exists(),
+            "the crash came before any rename"
+        );
+    }
+
+    /// Fact 8: a reader built on the legacy struct fails closed on the new WAL.
+    #[test]
+    fn legacy_reader_rejects_a_redo_wal() {
+        let (root, _g) = setup_root("legacy-reader");
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.lessons_md(), b"lesson\n").unwrap();
+        let json = serde_json::to_string_pretty(&stage.redo()).unwrap();
+
+        assert!(serde_json::from_str::<DreamWal>(&json).is_err(), "{json}");
+    }
+
+    #[test]
+    fn roll_forward_twice_is_a_no_op_the_second_time() {
+        let (root, _g) = setup_root("roll-twice");
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        fs::write(root.lessons_md(), b"old lesson\n").unwrap();
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.episodic_jsonl(), b"new log\n").unwrap();
+        stage.unlink(&root.lessons_md()).unwrap();
+        let redo = stage.redo();
+        write_atomic(
+            &root.wal_path(),
+            serde_json::to_string_pretty(&redo).unwrap().as_bytes(),
+        )
+        .unwrap();
+        let ledger = ledger(&root);
+
+        assert_eq!(roll_forward(&root, &redo, &ledger, None).unwrap(), (1, 1));
+        let after_first = (
+            fs::read(root.episodic_jsonl()).unwrap(),
+            root.lessons_md().exists(),
+            fs::read(root.state_json()).unwrap(),
+        );
+        assert_eq!(roll_forward(&root, &redo, &ledger, None).unwrap(), (0, 0));
+
+        assert_eq!(
+            (
+                fs::read(root.episodic_jsonl()).unwrap(),
+                root.lessons_md().exists(),
+                fs::read(root.state_json()).unwrap(),
+            ),
+            after_first
+        );
+        assert_eq!(after_first.0, b"new log\n");
+        assert!(!after_first.1);
+        assert_eq!(status(&root), "complete");
+        assert!(!root.wal_path().exists());
+    }
+
+    #[test]
     fn recover_clean_when_no_wal() {
         let (root, _g) = setup_root("clean");
-        let outcome = recover_if_needed(&root, NOW_SEC).unwrap();
+        let outcome = recover_if_needed(&root, &ledger(&root)).unwrap();
         assert_eq!(outcome, RecoveryOutcome::Clean);
+    }
+
+    #[test]
+    fn recover_wipes_a_stage_dir_without_a_wal() {
+        let (root, _g) = setup_root("recover-wipe");
+        let jsonl = root.episodic_jsonl();
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(&jsonl, b"live log\n").unwrap();
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&jsonl, b"never committed\n").unwrap();
+        drop(stage);
+        // A crash inside the WAL's own atomic write leaves its temp.
+        fs::write(root.wal_path().with_extension("tmp"), b"{\"partial").unwrap();
+
+        let outcome = recover_if_needed(&root, &ledger(&root)).unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::Clean);
+        assert!(!root.stage_dir().exists(), "the stage root must be wiped");
+        assert!(!root.wal_path().with_extension("tmp").exists());
+        assert_eq!(fs::read(&jsonl).unwrap(), b"live log\n");
+    }
+
+    /// A hand-written legacy WAL plus temp: an older binary left it, and 1.1.0
+    /// recovers it the old way.
+    #[test]
+    fn recover_keeps_the_legacy_meaning_of_an_intents_wal() {
+        let legacy = |root: &AgentRoot, intents: Vec<WalIntent>| {
+            let wal = DreamWal {
+                schema_version: "1.0".to_string(),
+                intents,
+            };
+            write_wal(root, &serde_json::to_string_pretty(&wal).unwrap());
+        };
+
+        // No `Commit`: the temp goes, the destination stays, status `failed`.
+        let (root, _g) = setup_root("recover-legacy");
+        let dest = root.episodic_jsonl();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"pre-cycle record\n").unwrap();
+        let tmp_path = dest.with_extension("tmp");
+        fs::write(&tmp_path, b"pruned record\n").unwrap();
+        legacy(
+            &root,
+            vec![WalIntent::PruneEpisodicMemory {
+                temp_file_path: tmp_path.to_string_lossy().into_owned(),
+            }],
+        );
+        // A stage dir beside it is wiped too.
+        fs::create_dir_all(root.stage_dir().join("dream-1")).unwrap();
+
+        let outcome = recover_if_needed(&root, &ledger(&root)).unwrap();
+
+        assert_eq!(
+            outcome,
+            RecoveryOutcome::Recovered {
+                cleaned_files: vec![tmp_path.clone()]
+            }
+        );
+        assert!(!tmp_path.exists(), ".tmp file must be deleted by recovery");
+        assert!(!root.wal_path().exists(), "WAL must be deleted by recovery");
+        assert!(!root.stage_dir().exists());
+        assert_eq!(
+            fs::read(&dest).unwrap(),
+            b"pre-cycle record\n",
+            "recovery must leave the destination pre-cycle"
+        );
+        assert_eq!(status(&root), "failed");
+
+        // `Commit`: the cycle finished; only the status and the WAL remain.
+        let (root, _g) = setup_root("recover-legacy-commit");
+        legacy(&root, vec![WalIntent::Commit]);
+
+        let outcome = recover_if_needed(&root, &ledger(&root)).unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::CommittedButUnclean);
+        assert!(!root.wal_path().exists());
+        assert_eq!(status(&root), "complete");
+    }
+
+    #[test]
+    fn unknown_wal_format_fails_closed() {
+        for (label, json, expected) in [
+            (
+                "wal-redo2",
+                r#"{"schema_version":"1.0","format":"redo/2","renames":[],"unlinks":[]}"#,
+                "redo/2",
+            ),
+            ("wal-neither", r#"{"schema_version":"1.0"}"#, "none"),
+        ] {
+            let (root, _g) = setup_root(label);
+            write_wal(&root, json);
+            let staged = root.stage_dir().join("dream-1");
+            fs::create_dir_all(&staged).unwrap();
+
+            let err = recover_if_needed(&root, &ledger(&root)).unwrap_err();
+
+            assert!(
+                matches!(&err, WalError::UnknownFormat(f) if f == expected),
+                "{label}: got {err:?}"
+            );
+            assert_eq!(fs::read_to_string(root.wal_path()).unwrap(), json);
+            assert!(staged.is_dir(), "{label}: a refused WAL touches nothing");
+            assert!(!root.state_json().exists(), "{label}: no status change");
+        }
+    }
+
+    #[test]
+    fn redo_path_outside_the_agent_dir_fails_closed() {
+        let (root, _g) = setup_root("redo-bad-paths");
+        let staged_rel = ".dreamd/stage/dream-1/0-LESSONS.md";
+        let staged = root.agent_dir().join(staged_rel);
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        fs::write(&staged, b"staged lesson\n").unwrap();
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        fs::write(root.lessons_md(), b"live lesson\n").unwrap();
+        let outside = root.project_root().join("escaped.md");
+
+        let cases = [
+            (
+                staged_rel.to_string(),
+                outside.to_string_lossy().into_owned(),
+            ),
+            (
+                staged_rel.to_string(),
+                "semantic/../../escaped.md".to_string(),
+            ),
+            (
+                "semantic/LESSONS.md".to_string(),
+                "semantic/MOVED.md".to_string(),
+            ),
+            (
+                staged_rel.to_string(),
+                ".dreamd/stage/dream-1/1-LESSONS.md".to_string(),
+            ),
+        ];
+        for (from, to) in cases {
+            let redo = RedoWal {
+                schema_version: STATE_SCHEMA_VERSION.to_string(),
+                format: REDO_FORMAT.to_string(),
+                renames: vec![RedoRename {
+                    from: from.clone(),
+                    to: to.clone(),
+                }],
+                unlinks: vec![],
+            };
+            write_wal(&root, &serde_json::to_string_pretty(&redo).unwrap());
+
+            let err = recover_if_needed(&root, &ledger(&root)).unwrap_err();
+
+            assert!(
+                matches!(err, WalError::BadRedoPath(_)),
+                "{from} -> {to}: got {err:?}"
+            );
+            assert_eq!(fs::read(&staged).unwrap(), b"staged lesson\n");
+            assert_eq!(fs::read(root.lessons_md()).unwrap(), b"live lesson\n");
+            assert!(!outside.exists());
+            assert!(!root.semantic_dir().join("MOVED.md").exists());
+            assert!(
+                root.wal_path().exists(),
+                "a refused WAL stays for the operator"
+            );
+        }
     }
 
     #[test]
@@ -416,8 +890,8 @@ mod tests {
     #[test]
     fn read_cycle_started_at_returns_some_after_commit() {
         let (root, _g) = setup_root("cycle-started-set");
-        begin_cycle(&root, NOW_SEC).unwrap();
-        commit_cycle(&root, NOW_SEC).unwrap();
+        let stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
         let started = read_cycle_started_at(&root).unwrap();
         assert!(started.is_some(), "must return Some after commit");
         assert!(
@@ -437,7 +911,7 @@ mod tests {
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
 
-        let err = begin_cycle(&root, NOW_SEC).unwrap_err();
+        let err = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap_err();
         assert!(
             matches!(err, WalError::NoAgentStore(_)),
             "expected NoAgentStore, got {err:?}",
@@ -445,129 +919,6 @@ mod tests {
         assert!(
             !dir.join(".agent").exists(),
             ".agent/ must not be created when begin_cycle refuses",
-        );
-    }
-
-    /// Read back the WAL on disk and return the `temp_file_path` of its single
-    /// non-`Commit` intent. Pattern-binds by shorthand rather than reaching for
-    /// the field, so no test *names* a `temp_file_path` value either.
-    fn only_intent_tmp(root: &AgentRoot) -> PathBuf {
-        let wal: DreamWal =
-            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
-        let paths: Vec<PathBuf> = wal
-            .intents
-            .iter()
-            .filter_map(|i| match i {
-                WalIntent::ReplaceSemanticMemory { temp_file_path }
-                | WalIntent::PruneEpisodicMemory { temp_file_path } => {
-                    Some(PathBuf::from(temp_file_path))
-                }
-                WalIntent::Commit => None,
-            })
-            .collect();
-        assert_eq!(paths.len(), 1, "expected exactly one replace intent");
-        paths.into_iter().next().unwrap()
-    }
-
-    /// The seam's happy path: `dest` gets the new bytes, no `.tmp` is left, and
-    /// the recorded intent names the tmp the write actually created — not a path
-    /// the caller re-derived (AILAB-164).
-    #[test]
-    fn guarded_replace_records_the_tmp_it_wrote_then_renames_it() {
-        let (root, _g) = setup_root("guarded-happy");
-        let dest = root.lessons_md();
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        fs::write(&dest, b"old lesson\n").unwrap();
-
-        begin_cycle(&root, NOW_SEC).unwrap();
-        guarded_replace(
-            &root,
-            &dest,
-            b"new lesson\n",
-            GuardedReplaceKind::ReplaceSemanticMemory,
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&dest).unwrap(), b"new lesson\n");
-        let tmp = dest.with_extension("tmp");
-        assert!(!tmp.exists(), "happy path must leave no stray .tmp");
-        assert_eq!(
-            only_intent_tmp(&root),
-            tmp,
-            "intent must name the tmp the write created"
-        );
-    }
-
-    /// `append_intent`'s no-active-cycle rule survives the wrapper: with no WAL
-    /// on disk the replace still commits (AILAB-164 §1.6).
-    #[test]
-    fn guarded_replace_still_writes_with_no_open_wal() {
-        let (root, _g) = setup_root("guarded-no-wal");
-        let dest = root.lessons_md();
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        assert!(!root.wal_path().exists(), "no cycle is open");
-
-        guarded_replace(
-            &root,
-            &dest,
-            b"unguarded\n",
-            GuardedReplaceKind::ReplaceSemanticMemory,
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&dest).unwrap(), b"unguarded\n");
-        assert!(!root.wal_path().exists(), "no WAL must be conjured");
-    }
-
-    /// Crash in the window recovery exists for — intent durable, rename not yet
-    /// done — driven through the real seam rather than a hand-written WAL
-    /// fixture, then unwound by `recover_if_needed`.
-    #[test]
-    fn recover_incomplete_deletes_tmp_and_marks_failed() {
-        let (root, _g) = setup_root("recovery");
-        let dest = root.episodic_jsonl();
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        fs::write(&dest, b"pre-cycle record\n").unwrap();
-
-        begin_cycle(&root, NOW_SEC).unwrap();
-        let err = guarded_replace_crash_after_intent(
-            &root,
-            &dest,
-            b"pruned record\n",
-            GuardedReplaceKind::PruneEpisodicMemory,
-        )
-        .expect_err("injected crash must surface");
-        assert!(
-            matches!(err, WalError::Io(_)),
-            "crash surfaces as I/O, got {err:?}"
-        );
-
-        // State at the crash: dest untouched, tmp on disk, WAL naming that tmp.
-        let tmp_path = dest.with_extension("tmp");
-        assert_eq!(fs::read(&dest).unwrap(), b"pre-cycle record\n");
-        assert!(
-            tmp_path.exists(),
-            ".tmp must survive as the recovery signal"
-        );
-        assert_eq!(only_intent_tmp(&root), tmp_path);
-
-        let outcome = recover_if_needed(&root, NOW_SEC).unwrap();
-
-        assert!(!tmp_path.exists(), ".tmp file must be deleted by recovery");
-        assert!(!root.wal_path().exists(), "WAL must be deleted by recovery");
-        assert_eq!(
-            fs::read(&dest).unwrap(),
-            b"pre-cycle record\n",
-            "recovery must leave the destination pre-cycle"
-        );
-
-        let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(root.state_json()).unwrap()).unwrap();
-        assert_eq!(state["last_dream_cycle_status"], "failed");
-
-        assert!(
-            matches!(outcome, RecoveryOutcome::Recovered { .. }),
-            "outcome must be Recovered"
         );
     }
 
@@ -584,7 +935,7 @@ mod tests {
         let (root, _g) = setup_root("skip-survives-begin");
         update_daemon_state(&root, |s| s.last_autobiography_skip = Some(skip_fixture())).unwrap();
 
-        begin_cycle(&root, NOW_SEC).unwrap();
+        begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
         let state = read_daemon_state(&root).unwrap();
         let skip = state
@@ -601,8 +952,8 @@ mod tests {
         let (root, _g) = setup_root("skip-survives-commit");
         update_daemon_state(&root, |s| s.last_autobiography_skip = Some(skip_fixture())).unwrap();
 
-        begin_cycle(&root, NOW_SEC).unwrap();
-        commit_cycle(&root, NOW_SEC).unwrap();
+        let stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
 
         let state = read_daemon_state(&root).unwrap();
         let skip = state
@@ -619,15 +970,15 @@ mod tests {
     #[test]
     fn last_dream_cycle_at_survives_begin_cycle() {
         let (root, _g) = setup_root("cycle-at-survives-begin");
-        begin_cycle(&root, NOW_SEC).unwrap();
-        commit_cycle(&root, NOW_SEC).unwrap();
+        let stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
 
         let committed_at = read_daemon_state(&root)
             .unwrap()
             .last_dream_cycle_at
             .expect("commit_cycle must stamp last_dream_cycle_at");
 
-        begin_cycle(&root, NOW_SEC).unwrap();
+        begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
         let state = read_daemon_state(&root).unwrap();
         assert_eq!(

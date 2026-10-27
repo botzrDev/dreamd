@@ -131,12 +131,12 @@ With the daemon running the cycle is proxied to it and prints `dream cycle compl
 
 **What just happened:**
 
-1. WAL written (`dream_in_progress.wal`) before any destructive step
+1. Every output is staged under `.agent/.dreamd/stage/` first; nothing live changes until one redo WAL (`dream_in_progress.wal`) commits them all
 2. Episodic events clustered by `skill_action`
 3. Clusters with ≥3 events in a 7- or 30-day window are promotion candidates; the cycle writes **one** lesson to `.agent/semantic/LESSONS.md` — the highest-salience exemplar from the top cluster (salience, then pain, then importance, then EventId)
 4. Promoted exemplar events get `pinned: true` in JSONL
 5. Decay pruner archives stale unpinned events to `.agent/.dreamd/snapshots/`
-6. `recurrence_counts.json` updated; WAL committed
+6. `recurrence_counts.json` updated; the redo WAL committed, its renames applied, and the WAL deleted
 7. (1.0.0) The memory files are snapshotted under `.agent/.dreamd/branches/` and named `snap-<UTC timestamp>` (section 8 uses these)
 
 Inspect outputs:
@@ -223,7 +223,7 @@ Restart:
 npx -y dreamd-mcp watch
 ```
 
-**What just happened:** The restart replaces the stale socket the killed daemon left behind. If `dream_in_progress.wal` exists, recovery runs before serving traffic — temp files from incomplete intents are cleaned up, WAL deleted, `state.json` marked `failed`. The store is never left half-promoted. Killing an idle daemon leaves no WAL, so there is nothing to recover and the last cycle status is unchanged.
+**What just happened:** The restart replaces the stale socket the killed daemon left behind. Recovery runs before serving traffic. If `dream_in_progress.wal` exists, the cycle had reached its commit point: recovery rolls it forward, applying the rest of its staged outputs, and marks `state.json` `complete`. If only staged outputs exist (`.agent/.dreamd/stage/`), the cycle crashed before its commit point: recovery wipes them and marks `state.json` `failed`, and the store is exactly as it was before that cycle. The store is never left half-promoted. Killing an idle daemon leaves no WAL, so there is nothing to recover and the last cycle status is unchanged.
 
 Verify:
 

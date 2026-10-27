@@ -85,7 +85,7 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | [../examples/README.md](../examples/README.md) | New users | Overview of bundled example projects |
 | [../examples/solo-rust-dev/README.md](../examples/solo-rust-dev/README.md) | New users | Single-harness happy path |
 | [../examples/multi-harness/README.md](../examples/multi-harness/README.md) | New users | Claude Code + Cursor sharing one `.agent/` |
-| [../examples/crash-recovery/README.md](../examples/crash-recovery/README.md) | Contributors | WAL crash-recovery fixture |
+| [../examples/crash-recovery/README.md](../examples/crash-recovery/README.md) | Contributors | Legacy (`intents`) WAL crash-recovery fixture |
 | [../examples/pinned-events/README.md](../examples/pinned-events/README.md) | Contributors | Pinned vs unpinned decay behavior |
 | [../examples/cross-project/README.md](../examples/cross-project/README.md) | New users | Per-project memory isolation |
 

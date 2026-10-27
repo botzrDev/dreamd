@@ -2,19 +2,17 @@
 //!
 //! Archives `AGENT_LEARNINGS.jsonl` records older than 90 days whose salience
 //! has fallen below 2.0 into a date-stamped snapshot file under
-//! `.agent/.dreamd/snapshots/`. The live JSONL is rewritten atomically via a
-//! WAL-guarded rename so a mid-cycle crash leaves `.agent/` in a recoverable
-//! state. Pinned records are never archived.
+//! `.agent/.dreamd/snapshots/`. Both the archive and the pruned log are staged
+//! with the cycle's other outputs, so they land together when the cycle's redo
+//! WAL commits, or not at all. Pinned records are never archived.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 
 use dreamd_protocol::{AgentLearning, EventId};
 
 use crate::episodic::{self, EpisodicError};
-use crate::layout::AgentRoot;
 use crate::salience::{age_secs, salience_with_context, RecurrenceContext};
+use crate::stage::Stage;
 
 /// Age threshold: events older than this are candidates for decay.
 pub const DECAY_AGE_THRESHOLD_SEC: i64 = 90 * 24 * 3600; // 90 days
@@ -109,33 +107,29 @@ impl From<EpisodicError> for DecayError {
 /// `cycle_date` is `"YYYY-MM-DD"` string for the snapshot filename — caller
 /// derives it from `now_sec` (avoids timezone ambiguity inside the fn).
 ///
-/// Write sequence:
-///   1. Read AGENT_LEARNINGS.jsonl via `episodic::read_raw` (absent → empty;
-///      every line keeps its bytes)
+/// Sequence:
+///   1. Read AGENT_LEARNINGS.jsonl through `stage` (absent → empty; every line
+///      keeps its bytes), so the pin pass staged earlier in the cycle is seen
 ///   2. Select the parsed records `should_decay` picks (recurrence = 0; see
 ///      constant note above); their ids are the drops
-///   3. If nothing is selected → return early (no files touched)
-///   4. fs::create_dir_all(snapshots_dir)
-///   5. Append each dropped line's bytes to snapshot_file(cycle_date), skipping
-///      ids already parsed from that file, after ending a torn tail with `\n`
-///   6. sync_data the snapshot — must complete before the destructive rewrite
-///   7. `episodic::rewrite_guarded` with `episodic::patch_lines` output — temp
-///      write+fsync, WAL prune intent naming that temp (after tmp-fsync / before
-///      rename), rename, parent-dir fsync. Runs even when step 5 appended nothing
-///   8. Return DecayResult { decayed_ids, kept_count }
+///   3. If nothing is selected → return early (nothing staged)
+///   4. Build the day's archive: its current bytes (staged or live), a `\n`
+///      ending a torn tail, then each dropped line's bytes whose id the
+///      archive does not already hold
+///   5. Stage the archive, then the log with `episodic::patch_lines` output
+///   6. Return DecayResult { decayed_ids, kept_count }
 ///
-/// The WAL envelope is owned by `dream_cycle::run_filesystem_phases`; this fn
-/// only records the prune intent into the already-open WAL.
+/// `stage` belongs to `dream_cycle::run_filesystem_phases`, which commits it.
 pub fn run_decay_pruner(
-    agent_root: &AgentRoot,
+    stage: &mut Stage,
     now_sec: i64,
     cycle_date: &str,
 ) -> Result<DecayResult, DecayError> {
     // Step 1: read AGENT_LEARNINGS.jsonl through the shared episodic scan
     // (WEG-378), keeping every line's bytes. A torn tail is never a record, so
     // the CLI `dreamd dream` path does not abort on a post-SIGKILL torn line.
-    let jsonl_path = agent_root.episodic_jsonl();
-    let raw = episodic::read_raw(&jsonl_path)?;
+    let jsonl_path = stage.agent_root().episodic_jsonl();
+    let raw = episodic::raw_lines(&stage.read(&jsonl_path)?.unwrap_or_default());
     let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
 
     // Step 2: select the decayed records ([`RecurrenceContext::decay`]). A drop
@@ -150,7 +144,7 @@ pub fn run_decay_pruner(
         .collect();
     let kept_count = records().count() - decayed_ids.len();
 
-    // Step 3: if nothing decayed, return early — no files touched, no WAL.
+    // Step 3: if nothing decayed, return early — nothing staged.
     if drops.is_empty() {
         return Ok(DecayResult {
             decayed_ids,
@@ -158,49 +152,30 @@ pub fn run_decay_pruner(
         });
     }
 
-    let snapshots_dir = agent_root.snapshots_dir();
-    fs::create_dir_all(&snapshots_dir)?;
-
-    // Step 5: append each dropped line's bytes to snapshot_file. Ids already in
-    // that file are skipped, so re-running a cycle that crashed before its log
-    // rewrite archives each row once.
-    let snapshot_path = agent_root.snapshot_file(cycle_date);
-    let archived = episodic::read_raw(&snapshot_path)?;
-    let existing: HashSet<&EventId> = archived
-        .iter()
-        .filter_map(|line| line.parsed.as_ref())
-        .map(|event| &event.id)
+    // Step 4: the archive is a full copy. Ids already in it are skipped, so a
+    // row a store already archived is not archived twice.
+    let snapshot_path = stage.agent_root().snapshot_file(cycle_date);
+    let mut archive = stage.read(&snapshot_path)?.unwrap_or_default();
+    let existing: HashSet<EventId> = episodic::raw_lines(&archive)
+        .into_iter()
+        .filter_map(|line| line.parsed.map(|event| event.id))
         .collect();
-    {
-        let mut snap_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&snapshot_path)?;
-        // A crash mid-append leaves a fragment with no `\n`. End it first, or
-        // the next row is glued onto it and never parses.
-        if archived
-            .last()
-            .is_some_and(|line| !line.bytes.ends_with(b"\n"))
-        {
-            snap_file.write_all(b"\n")?;
+    // A crash mid-append by an older binary leaves a fragment with no `\n`.
+    // End it first, or the next row is glued onto it and never parses.
+    if !archive.is_empty() && !archive.ends_with(b"\n") {
+        archive.push(b'\n');
+    }
+    for line in &raw {
+        let Some(event) = &line.parsed else { continue };
+        if drops.contains(&event.id) && !existing.contains(&event.id) {
+            archive.extend_from_slice(&line.bytes);
         }
-        for line in &raw {
-            let Some(event) = &line.parsed else { continue };
-            if drops.contains(&event.id) && !existing.contains(&event.id) {
-                snap_file.write_all(&line.bytes)?;
-            }
-        }
-        // Step 6: sync snapshot before the destructive rewrite.
-        snap_file.sync_data()?;
     }
 
-    // Step 7: atomically rewrite the live JSONL without the dropped lines.
-    // `episodic::rewrite_guarded` writes the temp, fsyncs it, records the WAL
-    // prune intent naming that temp, then renames and parent-dir fsyncs. The
-    // intent's path comes from the write, so this pruner never names a temp of
-    // its own (AILAB-164).
+    // Step 5: the archive, then the log without the dropped lines.
+    stage.put(&snapshot_path, &archive)?;
     let contents = episodic::patch_lines(&raw, &HashMap::new(), &drops)?;
-    episodic::rewrite_guarded(agent_root, &jsonl_path, &contents)?;
+    stage.put(&jsonl_path, &contents)?;
 
     Ok(DecayResult {
         decayed_ids,
@@ -220,7 +195,9 @@ mod tests {
     use dreamd_protocol::EventId;
 
     use crate::layout::AgentRoot;
+    use crate::provenance::Ledger;
     use crate::test_support::{unique_tmpdir, DirGuard};
+    use crate::wal::{self, CycleKind};
 
     const SAMPLE_ULID_BASE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA";
 
@@ -250,6 +227,15 @@ mod tests {
             source_harness: "test-harness".to_string(),
             content: "test content".to_string(),
         }
+    }
+
+    /// The decay pass in its own stage, committed, so the asserts read the live
+    /// files.
+    fn prune(root: &AgentRoot, date: &str) -> DecayResult {
+        let mut stage = wal::begin_cycle(root, CycleKind::Dream, NOW_SEC).unwrap();
+        let result = run_decay_pruner(&mut stage, NOW_SEC, date).unwrap();
+        wal::commit_cycle(stage, &Ledger::open(root.provenance_ledger()), NOW_SEC).unwrap();
+        result
     }
 
     fn write_jsonl(root: &AgentRoot, events: &[AgentLearning]) {
@@ -314,13 +300,15 @@ mod tests {
         write_jsonl(&root, &events);
         std::fs::create_dir_all(root.dreamd_dir()).unwrap();
 
-        let result = run_decay_pruner(&root, NOW_SEC, "2026-05-24").unwrap();
+        let mut stage = Stage::create(&root, "dream-1").unwrap();
+        let result = run_decay_pruner(&mut stage, NOW_SEC, "2026-05-24").unwrap();
 
         assert!(result.decayed_ids.is_empty());
         assert_eq!(result.kept_count, 5);
+        // Nothing staged: no archive, no log.
+        assert!(stage.redo().renames.is_empty());
         // No snapshot file created.
         assert!(!root.snapshot_file("2026-05-24").exists());
-        // JSONL is untouched (no WAL opened).
         assert!(!root.wal_path().exists());
     }
 
@@ -356,7 +344,7 @@ mod tests {
         write_jsonl(&root, &events);
         std::fs::create_dir_all(root.dreamd_dir()).unwrap();
 
-        let result = run_decay_pruner(&root, NOW_SEC, "2026-05-24").unwrap();
+        let result = prune(&root, "2026-05-24");
 
         assert_eq!(result.decayed_ids.len(), 30, "30 events decayed");
         assert_eq!(result.kept_count, 70, "70 events kept");
@@ -413,7 +401,7 @@ mod tests {
         write_jsonl(&root, &[pinned, decayable]);
         std::fs::create_dir_all(root.dreamd_dir()).unwrap();
 
-        let result = run_decay_pruner(&root, NOW_SEC, "2026-05-24").unwrap();
+        let result = prune(&root, "2026-05-24");
 
         assert_eq!(result.decayed_ids.len(), 1);
         assert_eq!(result.decayed_ids[0], decay_id);
@@ -471,7 +459,7 @@ mod tests {
         let log = [young.as_slice(), SKIPPED, old.as_slice()].concat();
         let (root, _g) = setup("decay-bytes", &log);
 
-        let result = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        let result = prune(&root, DATE);
 
         assert_eq!(result.decayed_ids, vec![make_event_id('D')]);
         assert_eq!(result.kept_count, 1);
@@ -487,19 +475,21 @@ mod tests {
         );
     }
 
+    /// A row already in the day's archive is not archived again, e.g. when a
+    /// merge brings archived rows back into the log.
     #[test]
-    fn decay_rerun_after_a_crash_before_the_rename_archives_once() {
+    fn decay_skips_ids_already_in_the_archive() {
         let old_a = make_learning(make_event_id('A'), OLD_TS, false);
         let old_b = make_learning(make_event_id('B'), OLD_TS, false);
         let young = make_learning(make_event_id('Y'), YOUNG_TS, false);
         let log = [line_of(&old_a), line_of(&young), line_of(&old_b)].concat();
         let (root, _g) = setup("decay-rerun", &log);
 
-        let first = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        let first = prune(&root, DATE);
         assert_eq!(first.decayed_ids.len(), 2);
-        // The archive was synced but the rename never landed.
+        // The archived rows come back into the log.
         std::fs::write(root.episodic_jsonl(), &log).unwrap();
-        let second = run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        let second = prune(&root, DATE);
         assert_eq!(second.decayed_ids, first.decayed_ids);
 
         let archived = episodic::read_all(&root.snapshot_file(DATE)).unwrap();
@@ -522,7 +512,7 @@ mod tests {
         std::fs::create_dir_all(root.snapshots_dir()).unwrap();
         std::fs::write(root.snapshot_file(DATE), b"{\"partial").unwrap();
 
-        run_decay_pruner(&root, NOW_SEC, DATE).unwrap();
+        prune(&root, DATE);
 
         let archive = root.snapshot_file(DATE);
         assert_eq!(
@@ -530,5 +520,51 @@ mod tests {
             [b"{\"partial\n".as_slice(), &line_of(&old)].concat()
         );
         assert_eq!(episodic::read_all(&archive).unwrap(), vec![old]);
+    }
+
+    /// One stage, pin pass then decay: decay sees the staged pin, so an old
+    /// cited row stays and is pinned, and only the uncited old row goes.
+    #[test]
+    fn decay_reads_the_staged_log() {
+        let cited = make_learning(make_event_id('P'), OLD_TS, false);
+        let uncited = make_learning(make_event_id('D'), OLD_TS, false);
+        let young = make_learning(make_event_id('Y'), YOUNG_TS, false);
+        let log = [line_of(&cited), line_of(&uncited), line_of(&young)].concat();
+        let (root, _g) = setup("decay-staged-log", &log);
+        let mut stage = wal::begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        let lessons = crate::lessons::render_lessons_file(&crate::lessons::LessonsFile {
+            last_updated: Utc.timestamp_opt(NOW_SEC, 0).single().unwrap(),
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: "rust.test".to_string(),
+            citations: vec![cited.id.as_str().to_string()],
+            lessons: vec![crate::lessons::Lesson {
+                id: cited.id.as_str().to_string(),
+                content: "test content".to_string(),
+                pinned: false,
+            }],
+        });
+        stage.put(&root.lessons_md(), lessons.as_bytes()).unwrap();
+
+        crate::consolidation::apply_pin_unpin(&mut stage).unwrap();
+        let result = run_decay_pruner(&mut stage, NOW_SEC, DATE).unwrap();
+
+        assert_eq!(result.decayed_ids, vec![uncited.id.clone()]);
+        let staged = stage.read(&root.episodic_jsonl()).unwrap().unwrap();
+        let staged: Vec<AgentLearning> = episodic::raw_lines(&staged)
+            .into_iter()
+            .filter_map(|line| line.parsed)
+            .collect();
+        let mut pinned = cited.clone();
+        pinned.pinned = true;
+        assert_eq!(
+            staged,
+            vec![pinned, young],
+            "the staged log keeps the pin and lacks the decayed row"
+        );
+        assert_eq!(
+            std::fs::read(root.episodic_jsonl()).unwrap(),
+            log,
+            "nothing live changes before the commit"
+        );
     }
 }

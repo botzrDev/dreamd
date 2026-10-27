@@ -279,10 +279,17 @@ mod tests {
         let project = dir.path().join("proj");
         let root = AgentRoot::new(&project);
         fs::create_dir_all(root.agent_dir()).unwrap();
-        // Drive the state through the core WAL writers rather than touching the
-        // state file directly (keeps this command's state access via wal::).
-        wal::begin_cycle(&root, 1_751_371_200).unwrap();
-        wal::commit_cycle(&root, 1_751_371_200).unwrap();
+        // Drive the state through the core cycle writers rather than touching
+        // the state file directly (keeps this command's state access via wal::):
+        // an empty stage, committed under the project lock's ledger.
+        let lock = dreamd_core::writer_lock::WriterLock::acquire(
+            &root,
+            dreamd_core::writer_lock::WriterKind::Dream,
+        )
+        .unwrap();
+        let stage = wal::begin_cycle(&root, wal::CycleKind::Dream, 1_751_371_200).unwrap();
+        wal::commit_cycle(stage, lock.ledger(), 1_751_371_200).unwrap();
+        drop(lock);
 
         let mut buf = Vec::new();
         run(

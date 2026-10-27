@@ -163,11 +163,18 @@ impl AgentRoot {
         self.dreamd_dir().join("agent.log")
     }
 
-    /// `<project>/.agent/.dreamd/dream_in_progress.wal` — WAL for the dream
-    /// cycle. Exists only during an in-progress or crashed cycle; its presence
-    /// on startup is the signal to run recovery before serving traffic.
+    /// `<project>/.agent/.dreamd/dream_in_progress.wal` — the dream cycle's
+    /// redo WAL. Exists only between a cycle's commit point and the end of its
+    /// apply; a writer that finds it when taking the project lock rolls the
+    /// cycle forward.
     pub fn wal_path(&self) -> PathBuf {
         self.dreamd_dir().join("dream_in_progress.wal")
+    }
+
+    /// `<project>/.agent/.dreamd/stage/` — one `<cycle>/` directory per dream
+    /// cycle or forget, holding its outputs until the redo WAL commits them.
+    pub fn stage_dir(&self) -> PathBuf {
+        self.dreamd_dir().join("stage")
     }
 
     /// `<project>/.agent/.dreamd/snapshots/` — archived episodic decay snapshots.

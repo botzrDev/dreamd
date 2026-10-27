@@ -162,15 +162,15 @@ pub(crate) async fn post_dream(
 /// `POST /api/v1/dream` on a target without atomic file replacement — always
 /// `500`.
 ///
-/// Every persistence step of a cycle goes through
-/// [`io::write_atomic`](crate::io::write_atomic), which is
-/// `ErrorKind::Unsupported` off Unix — the WAL guard (`wal::begin`/`commit`),
-/// the consolidation recurrence sidecar, the decay rewrite
-/// (`episodic::rewrite_guarded`), the `LESSONS.md` render, and the index progress
-/// + manifest sidecars. Implementing a portable `write_atomic` is an explicit
-/// non-goal of AILAB-192, so there is no partial version of this route worth
-/// serving — the Unix body would die on `wal::begin`, before it consolidated
-/// anything, and return this same `500` the long way round.
+/// Every persistence step of a cycle is either a staged output
+/// ([`Stage::put`](crate::stage::Stage::put)) or goes through
+/// [`io::write_atomic`](crate::io::write_atomic), and both are
+/// `ErrorKind::Unsupported` off Unix — the staged log, `LESSONS.md`, recurrence
+/// sidecar, decay archive and autosnap ref, the redo WAL itself, and the index
+/// progress + manifest sidecars. Implementing a portable `write_atomic` is an
+/// explicit non-goal of AILAB-192, so there is no partial version of this route
+/// worth serving — the Unix body would die on its first staged output, before
+/// anything live changed, and return this same `500` the long way round.
 ///
 /// It stays *mounted* rather than being dropped from `build_router` on purpose:
 /// a `404` would read as "this daemon does not speak the dream API" and send a

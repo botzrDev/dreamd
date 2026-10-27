@@ -49,7 +49,8 @@ gitignored. The recurrence sidecar is not in that folder. dreamd uses
 <project>/.agent/.dreamd/
   config.toml              # Per-project settings (all keys optional). Written by init.
   state.json               # Daemon state: version, last dream-cycle status and time. Written by init.
-  dream_in_progress.wal    # Present only while a dream cycle (or a forget) is mid-flight.
+  dream_in_progress.wal    # Present only between a cycle's commit point and the end of its apply.
+  stage/<cycle>/           # A dream cycle's (or forget's) outputs until its WAL commits them.
   index/                   # Tantivy index — a rebuildable cache of the log and LESSONS.md.
   index_manifest.json      # Index schema version.
   index_progress.json      # Newest indexed event id.
@@ -72,8 +73,8 @@ Only `config.toml` and `state.json` exist after `init`; the rest appear the
 first time the daemon, a dream cycle, or `dreamd memory branch` needs them.
 Three of these are easy to confuse. `snapshots/` holds only decay archives.
 `branches/` ([`docs/branching.md`](../branching.md)) holds whole-store copies:
-every dream cycle saves one as a `snap-*` ref before it changes anything, and
-`dreamd memory branch` names one. `provenance/`
+every dream cycle saves one before it changes anything, and its `snap-*` ref
+lands with the cycle's other outputs; `dreamd memory branch` names one. `provenance/`
 ([`docs/provenance.md`](../provenance.md)) holds the ledger that
 `dreamd doctor --provenance` checks.
 

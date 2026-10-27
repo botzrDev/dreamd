@@ -15,6 +15,9 @@ pub mod config;
 pub mod consolidation;
 pub mod context_grant;
 pub mod coordinator;
+/// BZR-1239 — every cycle crashed at every crash point, then recovered.
+#[cfg(all(test, unix))]
+mod crash_sweep;
 /// Shared outbound transport to the dreamd daemon.
 ///
 /// Compiled on every target as of AILAB-192. The UDS half (`send_one`,
@@ -75,6 +78,8 @@ pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry}
 // bearer layer from `~/.agent/auth.json` in the slot peer-UID holds on Unix.
 pub mod server;
 pub mod snapshot;
+/// BZR-1239 — a cycle's outputs, staged until its redo WAL commits them.
+pub mod stage;
 #[cfg(feature = "vectors")]
 pub mod vectors;
 

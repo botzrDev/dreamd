@@ -1,10 +1,12 @@
 //! WEG-60 regression: `dreamd watch` must run WAL recovery before serving traffic.
 //!
 //! If WAL recovery does not run at daemon boot (it runs when `dreamd watch`
-//! takes the project writer lock), a mid-cycle crash leaves
-//! `dream_in_progress.wal` and partial `.tmp` files behind forever. This spawns
-//! the real `run_watch` via `weg268_watch_helper`, waits for the socket to bind
-//! (recovery completed), and asserts the WAL and temp artefacts are gone.
+//! takes the project writer lock), a crashed cycle's WAL is left behind
+//! forever. The fixture is a **legacy** (`intents`) WAL with partial `.tmp`
+//! files, as a pre-1.1.0 binary left it; 1.1.0 still recovers it the old way.
+//! This spawns the real `run_watch` via `weg268_watch_helper`, waits for the
+//! socket to bind (recovery completed), and asserts the WAL and temp artefacts
+//! are gone.
 
 #![cfg(unix)]
 

@@ -1,6 +1,6 @@
 # crash-recovery
 
-A **frozen mid-cycle state** showing what dreamd leaves behind when a dream cycle is interrupted — and how recovery cleans it up on the next start.
+A **frozen mid-cycle state** showing what a pre-1.1.0 dreamd left behind when a dream cycle was interrupted — a **legacy** (`intents`) WAL that 1.1.0 still recovers the old way — and how recovery cleans it up on the next start.
 
 ## What's in this fixture
 
@@ -10,11 +10,11 @@ A **frozen mid-cycle state** showing what dreamd leaves behind when a dream cycl
     AGENT_LEARNINGS.jsonl       # two valid lines + a third, incomplete JSON line
     AGENT_LEARNINGS.jsonl.tmp   # partial rewrite from interrupted prune
   .dreamd/
-    dream_in_progress.wal       # PruneEpisodicMemory intent, no Commit
+    dream_in_progress.wal       # legacy WAL: PruneEpisodicMemory intent, no Commit
     state.json                  # last_dream_cycle_status: "in_progress"
 ```
 
-This mirrors the `recover_incomplete_deletes_tmp_and_marks_failed` test in `crates/dreamd-core/src/wal.rs`.
+This mirrors the `recover_keeps_the_legacy_meaning_of_an_intents_wal` test in `crates/dreamd-core/src/wal.rs`.
 
 ## Recovery path
 
@@ -45,4 +45,4 @@ dreamd watch        # Ctrl-C once it is up
 
 ## Prevention
 
-The dream cycle writes WAL intents **before** any destructive rename. A single-writer daemon (`dreamd watch`) serializes cycles — do not run `dreamd dream` in two terminals against the same project while the daemon is cycling (HTTP 409 guard).
+Since 1.1.0 a cycle stages its outputs and writes one redo WAL as its commit point. A single-writer daemon (`dreamd watch`) serializes cycles — do not run `dreamd dream` in two terminals against the same project while the daemon is cycling (HTTP 409 guard).

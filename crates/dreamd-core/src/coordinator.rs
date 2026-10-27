@@ -114,8 +114,9 @@ pub enum MemoryCoordinatorMsg {
     /// Run a deterministic dream cycle (consolidation + decay) against the
     /// coordinator's own project root, then reopen the append fd (WEG-271).
     ///
-    /// Both consolidation and decay can replace `AGENT_LEARNINGS.jsonl` by
-    /// atomic rename, which orphans the coordinator's long-lived fd. Routing
+    /// The cycle's commit can replace `AGENT_LEARNINGS.jsonl` by rename (the
+    /// staged pin pass or decay prune), which orphans the coordinator's
+    /// long-lived fd. Routing
     /// the cycle through the actor lets the handler reopen `self.file` so
     /// subsequent appends land on the live inode. `now_sec` / `cycle_date` are
     /// supplied by the caller (the HTTP handler) so the cycle stays
@@ -385,14 +386,14 @@ impl MemoryCoordinator {
 
     /// WEG-271: run the deterministic dream cycle, then reopen the append fd.
     ///
-    /// `run_deterministic_dream_cycle` (on cluster promotion) and
-    /// `run_decay_pruner` (on prune) each replace `AGENT_LEARNINGS.jsonl` by
-    /// atomic rename, leaving `self.file` pointing at an orphaned inode. It
-    /// reopens on every exit path, error included, so the next append lands on
-    /// the live inode whether or not either step rewrote the file and whether
-    /// or not the cycle succeeded.
-    /// The cycle writes a well-formed file via atomic rename, so no
-    /// `episodic::recover` scan is needed on reopen.
+    /// The cycle stages the pin pass (on cluster promotion) and the decay prune
+    /// (on prune), and its commit renames the staged log over
+    /// `AGENT_LEARNINGS.jsonl`, leaving `self.file` pointing at an orphaned
+    /// inode. It reopens on every exit path, error included, so the next append
+    /// lands on the live inode whether or not the commit replaced the file and
+    /// whether or not the cycle succeeded.
+    /// The staged log is a well-formed file, so no `episodic::recover` scan is
+    /// needed on reopen.
     async fn handle_run_dream_cycle(
         &mut self,
         now_sec: i64,
@@ -415,8 +416,8 @@ impl MemoryCoordinator {
         )
         .await
         .map_err(|e| CoordinatorError::DreamCycle(e.to_string()));
-        // Every exit path reopens: a phase can fail after the pin pass or decay
-        // has already replaced the log by rename.
+        // Every exit path reopens: the commit can fail after its rename has
+        // already replaced the log.
         let reopened = self.reopen();
         match (result, reopened) {
             (Ok(decay), Ok(())) => Ok(decay),

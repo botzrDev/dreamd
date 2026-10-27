@@ -2,15 +2,17 @@
 
 dreamd's durability guarantees lean on POSIX file semantics. Episodic appends
 are `OpenOptions` + `write_all` + `sync_data` on the JSONL, which works
-anywhere. Everything that *replaces* a file — the dream cycle's `LESSONS.md`
-rewrite, the pruned JSONL, the recurrence sidecar, the Tantivy index manifest —
-goes through `io::write_atomic`, which writes a temporary file and atomically
-renames it over the target (`rename(2)`), so a crash mid-write can never leave a
-half-written file in the store. That is what `io::write_atomic` provides on
-Linux and macOS.
+anywhere. Everything that *replaces* a file is written in full first and then
+renamed over the target (`rename(2)`), so a crash mid-write can never leave a
+half-written file in the store. The dream cycle stages its outputs — the
+`LESSONS.md` rewrite, the pruned JSONL, the recurrence sidecar, the decay
+archive — under `.agent/.dreamd/stage/` and renames them in once its redo WAL
+commits; the Tantivy index manifest and the other sidecars go through
+`io::write_atomic`. That is what those writers provide on Linux and macOS.
 
-**Windows durable writes are not in 1.0.0.** The atomic-write path
-returns [`std::io::ErrorKind::Unsupported`] on Windows rather than silently
+**Windows durable writes are not in 1.0.0.** The atomic-write path and the
+dream cycle's stage writer both return
+[`std::io::ErrorKind::Unsupported`] on Windows rather than silently
 falling back to a non-atomic write that could corrupt the store on a crash.
 The error says atomic file replacement is unavailable, and names the dream
 cycle and the Tantivy index.
@@ -82,7 +84,8 @@ JSONL append never touches `write_atomic` — so learnings do land durably in
 `.agent/episodic/AGENT_LEARNINGS.jsonl`. `POST /api/v1/dream` stays mounted and
 returns **500** naming the reason (`dream cycle is unavailable on this platform:
 atomic file replacement is unsupported`), because consolidation, decay, the
-`LESSONS.md` rewrite and the recurrence sidecar all replace files atomically.
+`LESSONS.md` rewrite and the recurrence sidecar are all staged and renamed into
+place, and the stage writer is `Unsupported` there like `write_atomic`.
 `GET /api/v1/recall` opens the index and returns **500** when that open fails.
 `GET /api/v1/health` does not open Tantivy. It compares the JSONL tail to
 `index_progress.json` and returns **200** when that read succeeds. `stale` is

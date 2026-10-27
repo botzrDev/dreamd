@@ -7,12 +7,14 @@
 //! holder's pid and [`WriterKind`], which [`WriterLock::acquire`] reads back from
 //! the stamp the holder wrote into the lockfile.
 //!
-//! Acquisition is one sequence, in this order: lock, stamp, reset a stale
-//! `in_progress` status when there is no WAL, then WAL recovery. Only after
-//! that may the caller open the index and start the coordinator, and both of
-//! those take a `&WriterLock` so they cannot be reached without one.
-//! Acquisition also cuts a torn final line from the provenance ledger, and the
-//! token carries the project's one ledger appender ([`WriterLock::ledger`]).
+//! Acquisition is one sequence, in this order: lock, stamp, open the
+//! provenance ledger (cutting a torn final line), reset a stale `in_progress`
+//! status when there is no WAL, then WAL recovery, which rolls a committed
+//! cycle forward and wipes any staged one. Only after that may the caller open
+//! the index and start the coordinator, and both of those take a `&WriterLock`
+//! so they cannot be reached without one. The token carries the project's one
+//! ledger appender ([`WriterLock::ledger`]); a roll-forward records its edges
+//! through it.
 //!
 //! The lock is an advisory `flock` (Unix) / `LockFileEx` (Windows) through
 //! [`File::try_lock`]. It belongs to the open file description, so a second
@@ -155,7 +157,8 @@ pub struct WriterLock {
 impl WriterLock {
     /// Take the project writer lock for `root`, then bring the store to a
     /// pre- or post-cycle state: reset a stale `in_progress` status when no WAL
-    /// exists, then run WAL recovery.
+    /// exists, then WAL recovery, which rolls a committed cycle forward and
+    /// wipes any staged one.
     ///
     /// Creates `.agent/.dreamd/` and the lockfile when they are absent, but
     /// never `.agent/` itself. Never creates, truncates or deletes the Tantivy
@@ -182,6 +185,7 @@ impl WriterLock {
                 kind,
             },
         )?;
+        let ledger = Ledger::open(root.provenance_ledger());
 
         if !root.wal_path().exists() && wal::read_last_cycle_status(root)? == "in_progress" {
             update_daemon_state(root, |s| s.last_dream_cycle_status = "failed".to_string())
@@ -192,8 +196,7 @@ impl WriterLock {
                  reset the status to failed"
             );
         }
-        wal::recover_on_startup(root)?;
-        let ledger = Ledger::open(root.provenance_ledger());
+        wal::recover_on_startup(root, &ledger)?;
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -311,8 +314,9 @@ fn probe_legacy_writer(path: &Path) -> Result<(), WriterLockError> {
 mod tests {
     use super::*;
     use crate::daemon_state::read_daemon_state;
+    use crate::stage::arm_crash;
     use crate::test_support::{unique_tmpdir, DirGuard};
-    use crate::wal::GuardedReplaceKind;
+    use crate::wal::{CycleKind, DreamWal, RecoveryOutcome, WalIntent};
 
     fn store(label: &str) -> (AgentRoot, DirGuard) {
         let dir = unique_tmpdir(label);
@@ -435,28 +439,90 @@ mod tests {
         assert_eq!(status(&root), "failed");
     }
 
+    /// A crash right after the redo WAL's write: the next `acquire` finishes
+    /// the cycle.
     #[test]
-    fn mid_cycle_crash_is_recovered() {
-        let (root, _g) = store("wl-recover");
+    fn acquire_rolls_a_committed_cycle_forward() {
+        const X: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let (root, _g) = store("wl-roll-forward");
+        let lessons = crate::lessons::render_lessons_file(&crate::lessons::LessonsFile {
+            last_updated: chrono::DateTime::from_timestamp(1_747_137_600, 0).unwrap(),
+            prompt_version: "deterministic-only".to_string(),
+            cluster_key: "rust::eh".to_string(),
+            citations: vec![X.to_string()],
+            lessons: vec![crate::lessons::Lesson {
+                id: X.to_string(),
+                content: "handle errors".to_string(),
+                pinned: false,
+            }],
+        });
+        let sidecar =
+            br#"{"schema_version":"1.0","clusters":[{"skill_action":"rust::eh","count":3}]}"#;
         let jsonl = root.episodic_jsonl();
-        fs::write(&jsonl, b"").unwrap();
-        wal::begin_cycle(&root, 0).unwrap();
-        wal::guarded_replace_crash_after_intent(
-            &root,
-            &jsonl,
-            b"partial\n",
-            GuardedReplaceKind::PruneEpisodicMemory,
-        )
-        .unwrap_err();
-        let tmp = jsonl.with_extension("tmp");
-        assert!(root.wal_path().exists() && tmp.exists());
+        let sidecar_path = root.semantic_dir().join("recurrence_counts.json");
+        {
+            let lock = WriterLock::acquire(&root, WriterKind::Dream).unwrap();
+            let mut stage = wal::begin_cycle(&root, CycleKind::Dream, 0).unwrap();
+            stage.put(&jsonl, b"staged log\n").unwrap();
+            stage.put(&root.lessons_md(), lessons.as_bytes()).unwrap();
+            stage.put(&sidecar_path, sidecar).unwrap();
+            // Point 0 is the stage-dir fsync; point 1 follows the WAL write.
+            arm_crash(Some(1));
+            let result = wal::commit_cycle(stage, lock.ledger(), 0);
+            arm_crash(None);
+            result.unwrap_err();
+        }
+        assert!(root.wal_path().exists());
+        assert!(!jsonl.exists(), "the crash came before any rename");
         assert_eq!(status(&root), "in_progress");
+
+        let _lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+
+        assert_eq!(fs::read(&jsonl).unwrap(), b"staged log\n");
+        assert_eq!(fs::read_to_string(root.lessons_md()).unwrap(), lessons);
+        assert_eq!(fs::read(&sidecar_path).unwrap(), sidecar);
+        let ledger = fs::read_to_string(root.provenance_ledger()).unwrap();
+        assert!(
+            ledger.contains("\"lesson_citation\"") && ledger.contains("\"recurrence\""),
+            "the roll-forward must record the cycle's edges: {ledger}"
+        );
+        assert!(!root.wal_path().exists(), "the WAL must be gone");
+        assert!(!root.stage_dir().exists(), "the stage must be wiped");
+        assert_eq!(status(&root), "complete");
+    }
+
+    /// A hand-written legacy WAL with no `Commit`: the temp goes, the
+    /// destination stays, status `failed`, as before 1.1.0.
+    #[test]
+    fn acquire_keeps_a_legacy_wal_meaning() {
+        let (root, _g) = store("wl-legacy-wal");
+        let jsonl = root.episodic_jsonl();
+        fs::write(&jsonl, b"pre-cycle\n").unwrap();
+        let tmp = jsonl.with_extension("tmp");
+        fs::write(&tmp, b"partial\n").unwrap();
+        let wal = DreamWal {
+            schema_version: "1.0".to_string(),
+            intents: vec![WalIntent::PruneEpisodicMemory {
+                temp_file_path: tmp.to_string_lossy().into_owned(),
+            }],
+        };
+        fs::create_dir_all(root.dreamd_dir()).unwrap();
+        fs::write(root.wal_path(), serde_json::to_string_pretty(&wal).unwrap()).unwrap();
+        write_status(&root, "in_progress");
 
         let _lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
 
         assert!(!root.wal_path().exists(), "the WAL must be gone");
         assert!(!tmp.exists(), "the temp file must be gone");
+        assert_eq!(fs::read(&jsonl).unwrap(), b"pre-cycle\n");
         assert_eq!(status(&root), "failed");
+        // Recovery ran exactly once: a second acquire finds a clean store.
+        drop(_lock);
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        assert_eq!(
+            wal::recover_if_needed(&root, lock.ledger()).unwrap(),
+            RecoveryOutcome::Clean
+        );
     }
 
     /// Taking the lock cuts a final ledger line with no `\n`, keeps every

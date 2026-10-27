@@ -118,7 +118,7 @@ sequenceDiagram
 
 All appends to `episodic/AGENT_LEARNINGS.jsonl` flow through one `MemoryCoordinator` actor.
 
-**Writer lock.** Every process that writes a project's store first takes `.agent/.dreamd/writer.lock`: `dreamd watch` for its boot project and each project it opens lazily, in-process `dreamd mcp`, `dreamd setup`'s first lesson, and the CLI writers (in-process `dream`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`) for one invocation. A second holder is refused with the first holder's pid and kind. Acquisition is one sequence: lock, reset a stale `in_progress` when there is no WAL, WAL recovery, then the index and the coordinator.
+**Writer lock.** Every process that writes a project's store first takes `.agent/.dreamd/writer.lock`: `dreamd watch` for its boot project and each project it opens lazily, in-process `dreamd mcp`, `dreamd setup`'s first lesson, and the CLI writers (in-process `dream`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`) for one invocation. A second holder is refused with the first holder's pid and kind. Acquisition is one sequence: lock, open the provenance ledger, reset a stale `in_progress` when there is no WAL, WAL recovery (a redo WAL rolls forward; any stage directory is wiped), then the index and the coordinator.
 
 Write order:
 
@@ -152,28 +152,27 @@ Indexing is incremental (5-second commit cadence), never a nightly rebuild.
 
 ### 3. Dream cycle WAL
 
-Before any destructive op (replacing `LESSONS.md`, pruning JSONL), write `dream_in_progress.wal` with `WalIntent` entries (`ReplaceSemanticMemory`, `PruneEpisodicMemory`, `Commit`). On startup, if the WAL exists, run compensating cleanup before serving traffic. `.agent/` must be either pre- or post-cycle, never mid-cycle.
+A cycle stages every output under `.dreamd/stage/<cycle>/` and fsyncs it: the JSONL, `LESSONS.md` (or its unlink), the recurrence sidecar, the day's decay archive and the autosnap ref. One write of `dream_in_progress.wal` — `{"format":"redo/1","renames":[…],"unlinks":[…]}` — is the commit point. The renames and unlinks follow, then a directory fsync, the provenance edges, and the WAL's deletion. When a writer takes the project lock, a redo WAL rolls forward, a legacy `intents` WAL keeps its old meaning, and any stage directory is wiped. `.agent/` is either pre- or post-cycle, never mid-cycle.
 
-`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases` — the single WAL envelope), then the index and autobiography phases. Inside the envelope, in order: `begin_cycle`, a pre-mutation autosnap of the live files into `.dreamd/branches/` (`snapshot::create_autosnap`), consolidation (including the optional LLM call that composes the lesson body — awaited inside the envelope, with a deterministic fallback), decay, `provenance::record_cycle`, `commit_cycle`. Each `ReplaceSemanticMemory` / `PruneEpisodicMemory` intent is recorded by `wal::guarded_replace` between the temp file's fsync and its rename, so an intent always names a temp that exists. A `state.json` left at `in_progress` with no WAL is reset to `failed` when the next writer takes the project lock; with a WAL, that writer runs recovery.
+`dream_cycle::run_guarded_cycle` is the one sequencer for both entry points (`dreamd dream` in-process and `POST /api/v1/dream`): 409 in-progress guard, then the filesystem phases (`run_filesystem_phases`), then the index and autobiography phases. The filesystem phases stage, then commit, then apply, in this order: `begin_cycle` (status `in_progress`, an empty stage), the autosnap ref (`snapshot::stage_autosnap`; the content-addressed object under `.dreamd/branches/objects/` is written directly), consolidation (including the optional LLM call that composes the lesson body — awaited while the cycle stages, with a deterministic fallback), decay, then `commit_cycle`, which writes the redo WAL and applies it through `roll_forward`, the same code recovery runs. A `state.json` left at `in_progress` with no WAL is reset to `failed` when the next writer takes the project lock; with a WAL, that writer rolls it forward.
 
-`dreamd forget` (`forget::cascade`) reuses the same WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
+`dreamd forget` (`forget::cascade`) reuses the same stage and redo WAL to remove one event and the lesson state that names it; it does not run the dream cycle. It runs in-process and refuses while a daemon is live, so it never races a coordinator's append fd.
 
-**Scope:** WAL protects JSONL, `LESSONS.md`, and recurrence sidecar writes only. Tantivy index mutations are **not** WAL-protected.
+**Scope:** the redo WAL covers the JSONL, `LESSONS.md`, the recurrence sidecar, the decay archive and the autosnap ref. Provenance edges are re-derived from those files after the renames. Tantivy index mutations are **not** WAL-protected.
 
 ```mermaid
 sequenceDiagram
     participant CLI as dreamd dream / POST /dream
+    participant Stage as .dreamd/stage/<cycle>/
     participant WAL as dream_in_progress.wal
-    participant Cycle as consolidation + decay
-    participant FS as LESSONS.md + JSONL
+    participant FS as live .agent/ files
 
-    CLI->>WAL: begin_cycle (in_progress)
-    CLI->>Cycle: cluster + promote
-    Cycle->>WAL: append ReplaceSemanticMemory intent
-    Cycle->>FS: atomic rename LESSONS.md
-    Cycle->>WAL: append PruneEpisodicMemory intent
-    Cycle->>FS: atomic rename JSONL
-    Cycle->>WAL: Commit
+    CLI->>Stage: begin_cycle (in_progress)
+    CLI->>Stage: stage outputs + fsync
+    CLI->>WAL: write redo WAL (commit point)
+    WAL->>FS: rename + unlink
+    WAL->>FS: fsync dirs
+    WAL->>FS: record provenance
     WAL->>WAL: delete WAL, mark complete
 ```
 
@@ -184,7 +183,7 @@ sequenceDiagram
 | Layer | Durability | Recovery |
 |---|---|---|
 | JSONL append | `write_all` + `sync_data` before HTTP 201 | `episodic::recover` on coordinator open (a final record missing its `\n` gets one; any other torn fragment is truncated; mid-file bad lines stay in place) |
-| Dream cycle | WAL before destructive ops | `recover_on_startup` |
+| Dream cycle | Outputs staged and fsynced; one redo WAL write commits them | `recover_on_startup` in `WriterLock::acquire` (redo WAL rolls forward; stage dir wiped) |
 | Tantivy index | 5 s commit cadence; coordinator → indexer awaited `send` (backpressures when full) | Coverage pass in `TantivyIndexHandle::open` and on `IndexerMsg::Resync` (set difference of log ids and indexed `evt_` ids) |
 
 Module map for this section (BZR-170 split): `server/tantivy_handle.rs` keeps `TantivyIndexHandle` (`open` / `flush` / `shutdown` / `close`) and the open-time coverage pass; `server/indexer_actor.rs` is the indexer task (`IndexerMsg`, commit cadence, the persist step, semantic pass, prune, recurrence sidecar); `server/index_coverage.rs` is the set difference (`cover`, `assess_index_coverage`); `server/index_freshness.rs` is the watermark (`index_progress.json`) and `assess_index_freshness`; `server/index_map.rs` defines `IndexError` and the per-project handle map.

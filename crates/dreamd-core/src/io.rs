@@ -1,10 +1,11 @@
-//! Atomic file writes for dream-cycle outputs (DR-104 / WEG-8).
+//! Atomic file writes (DR-104 / WEG-8).
 //!
-//! [`write_atomic`] is the durability primitive the dream cycle leans on when
-//! it replaces `LESSONS.md`, `PREFERENCES.md`, `DECISIONS.md`, and similar
-//! semantic-layer files. It writes to `<path>.tmp`, `sync_data`s the bytes,
-//! renames into place, then `sync_all`s the parent directory so the rename
-//! itself survives crash. On Windows [`write_atomic`] stays
+//! [`write_atomic`] is the durable replace for the registry, the index
+//! sidecars, `state.json`, the dream cycle's redo WAL, and the one-shot CLI
+//! rewrites. It writes to `<path>.tmp`, `sync_data`s the bytes, renames into
+//! place, then `sync_all`s the parent directory so the rename itself survives
+//! crash. A dream cycle's own outputs are staged and committed by the redo WAL
+//! instead (`crate::stage`, `crate::wal`). On Windows [`write_atomic`] stays
 //! [`io::ErrorKind::Unsupported`] — see `docs/windows.md`. `registry.toml` is
 //! the exception: a temp-file rename used only for that file, and it does not
 //! make the dream cycle durable.
@@ -32,8 +33,8 @@ Tantivy index cannot run (see docs/windows.md)";
 /// Replace `path` with `contents` atomically.
 ///
 /// On any failure between `.tmp` creation and `rename` into place, the `.tmp`
-/// file is left on disk as a recovery signal for the daemon's startup check.
-/// Do not silently remove it — WEG-8 relies on its presence to drive cleanup.
+/// file is left on disk and `path` is untouched. The `.tmp` is not what
+/// recovery reads: dream-cycle recovery keys off the WAL and the stage dir.
 ///
 /// Returns [`io::ErrorKind::Unsupported`] on Windows; see `docs/windows.md`.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -51,19 +52,13 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Shared implementation behind [`write_atomic`] and
-/// [`wal::guarded_replace`](crate::wal::guarded_replace).
+/// The implementation behind [`write_atomic`].
 ///
 /// `hook` runs after the `.tmp` file is fully fsynced and before the rename into
 /// `path` — the only window any caller can wedge into the atomic write — and is
-/// handed **the `.tmp` path this call actually created**. Passing it is the point
-/// (AILAB-164): the tmp name is `path.with_extension("tmp")`, and every caller
-/// that re-derived that formula to name a WAL intent was one edit away from
-/// recording a path this function had never written. The only production hook is
-/// `wal::guarded_replace`'s intent append, which fills
-/// [`WalIntent`](crate::wal::WalIntent)`::{ReplaceSemanticMemory,PruneEpisodicMemory}`
-/// from this argument; tests inject a failing hook to assert the destination file
-/// is untouched on error and the `.tmp` survives as a recovery signal.
+/// handed **the `.tmp` path this call actually created**. [`write_atomic`]
+/// passes a no-op; tests inject a failing hook to assert the destination file is
+/// untouched on error and the `.tmp` is left behind.
 ///
 /// Returns [`io::ErrorKind::Unsupported`] on Windows (hook ignored), mirroring
 /// [`write_atomic`]. See `docs/windows.md`.
@@ -218,12 +213,9 @@ mod tests {
 
         // Destination is byte-identical to its pre-call state.
         assert_eq!(fs::read(&target).unwrap(), b"original\n");
-        // `.tmp` is deliberately preserved as a recovery signal (WEG-8).
+        // `.tmp` is left behind; the destination never saw it (WEG-8).
         let tmp = target.with_extension("tmp");
-        assert!(
-            tmp.exists(),
-            ".tmp must remain after failure as recovery signal"
-        );
+        assert!(tmp.exists(), ".tmp must remain after failure");
     }
 
     /// Two threads contending on ONE lock path must not overlap inside the

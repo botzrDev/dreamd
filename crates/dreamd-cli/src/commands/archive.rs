@@ -221,9 +221,8 @@ pub fn run(
         tracing::warn!(event_id = %cleared_id, "archive: force-unpinned episodic entry");
     }
 
-    // Only touch the file when something changed. `rewrite_atomic`, never
-    // `rewrite_guarded`: a one-shot CLI rewrite has no open WAL for an intent to
-    // land in (that seam is the daemon dream cycle's).
+    // Only touch the file when something changed. `rewrite_atomic`: a one-shot
+    // CLI rewrite opens no stage and no WAL (those are the dream cycle's).
     if !cleared.is_empty() {
         let contents = episodic::patch_lines(&raw, &pins, &HashSet::new())?;
         episodic::rewrite_atomic(&jsonl, &contents)?;

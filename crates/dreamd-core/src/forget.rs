@@ -1,10 +1,10 @@
 //! Forget cascade: remove one episodic event and the derived state
 //! that names it.
 //!
-//! [`cascade`] runs under the dream-cycle WAL but is not a dream cycle. It
-//! rewrites the live JSONL without the one id, drops or unlinks the lesson that
-//! cites it, recounts the recurrence sidecar, and appends ledger edges for the
-//! lesson that remains. It never decays other rows, never re-selects a lesson,
+//! [`cascade`] stages and commits like a dream cycle but is not one. It stages
+//! the JSONL without the one id, drops or unlinks the lesson that cites it, and
+//! recounts the recurrence sidecar; the commit renames them in and appends
+//! ledger edges for the lesson that remains. It never decays other rows, never re-selects a lesson,
 //! and never copies the forgotten row into `snapshots/`.
 //!
 //! The JSONL has one writer. `dreamd forget` runs [`cascade`] in-process and
@@ -30,12 +30,11 @@ use serde::Serialize;
 use crate::consolidation::{self, ConsolidationError};
 use crate::dream_cycle::{self, DreamCycleError};
 use crate::episodic::{self, EpisodicError};
-use crate::index::RecurrenceSidecar;
-use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::lessons;
-use crate::provenance::{self, Ledger, ProvenanceError};
-use crate::wal::{self, GuardedReplaceKind, WalError};
+use crate::provenance::{Ledger, ProvenanceError};
+use crate::stage::Stage;
+use crate::wal::{self, CycleKind, WalError};
 
 /// What [`cascade`] did to `semantic/LESSONS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,18 +98,20 @@ impl From<DreamCycleError> for ForgetError {
 /// Remove `id` from the live episodic log and cascade to the lesson file, the
 /// recurrence sidecar, and the provenance ledger.
 ///
-/// A missing id returns `removed: false` without opening a WAL. A present id is
-/// removed even when `pinned` is set. `now_sec` is caller-provided; this
+/// A missing id returns `removed: false` without opening a stage. A present id
+/// is removed even when `pinned` is set. `now_sec` is caller-provided; this
 /// function reads no clock.
 ///
-/// A failure after `wal::begin_cycle` returns the error and leaves the WAL for
-/// startup recovery. The caller must reopen any append fd it holds on the
-/// JSONL, because the rewrite replaces the file by rename.
+/// A failure before the commit point returns the error and leaves only the
+/// stage, which the next writer to take the project lock wipes; a failure
+/// after it leaves the redo WAL, which that writer rolls forward. The caller
+/// must reopen any append fd it holds on the JSONL, because the commit
+/// replaces the file by rename.
 ///
 /// `ledger` is the project writer lock's appender (`WriterLock::ledger`).
 ///
 /// Returns [`io::ErrorKind::Unsupported`] (wrapped) on Windows, inherited from
-/// `write_atomic`.
+/// the stage writer.
 pub fn cascade(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -128,36 +129,28 @@ pub fn cascade(
     }
 
     dream_cycle::ensure_not_in_progress(agent_root)?;
-    wal::begin_cycle(agent_root, now_sec)?;
+    let mut stage = wal::begin_cycle(agent_root, CycleKind::Forget, now_sec)?;
 
     // Every other line, in read order and byte for byte, pinned or not,
     // including lines the reader skips.
     let contents = episodic::patch_lines(&raw, &HashMap::new(), &HashSet::from([id.clone()]))?;
-    episodic::rewrite_guarded(agent_root, &jsonl, &contents)?;
+    stage.put(&jsonl, &contents).map_err(EpisodicError::Io)?;
 
-    let lesson = cascade_lessons(agent_root, id.as_str(), now_sec)?;
+    let lesson = cascade_lessons(&mut stage, id.as_str(), now_sec)?;
 
     if !records().any(|ev| ev.id != *id) {
-        // `run_cluster_engine` returns early on an empty log without touching
+        // `stage_cluster_engine` returns early on an empty log without staging
         // the sidecar; a stale count for the forgotten event would survive.
-        let sidecar = RecurrenceSidecar {
-            schema_version: "1.0".to_string(),
-            clusters: vec![],
-        };
-        std::fs::create_dir_all(agent_root.semantic_dir()).map_err(ConsolidationError::Io)?;
-        let json = serde_json::to_string_pretty(&sidecar)
-            .map_err(|e| ConsolidationError::Json { line: 0, source: e })?;
-        write_atomic(
-            &agent_root.semantic_dir().join("recurrence_counts.json"),
-            json.as_bytes(),
-        )
-        .map_err(ConsolidationError::Io)?;
+        let sidecar = agent_root.semantic_dir().join("recurrence_counts.json");
+        stage
+            .put(&sidecar, &consolidation::sidecar_bytes(&[])?)
+            .map_err(ConsolidationError::Io)?;
     } else {
-        consolidation::run_cluster_engine(agent_root, now_sec)?;
+        consolidation::stage_cluster_engine(&mut stage, now_sec)?;
     }
 
-    provenance::record_cycle(agent_root, ledger)?;
-    wal::commit_cycle(agent_root, now_sec)?;
+    // The commit records the ledger edges after the renames.
+    wal::commit_cycle(stage, ledger, now_sec)?;
 
     Ok(ForgetReport {
         removed: true,
@@ -165,29 +158,22 @@ pub fn cascade(
     })
 }
 
-/// Drop `id` from `LESSONS.md`, or unlink the file when `id` is a lesson's
-/// exemplar. Only this file; no lesson is re-selected.
-fn cascade_lessons(
-    agent_root: &AgentRoot,
-    id: &str,
-    now_sec: i64,
-) -> Result<LessonEffect, ForgetError> {
-    let path = agent_root.lessons_md();
-    let mut file = match lessons::read_lessons_file(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LessonEffect::Untouched),
-        Err(e) => return Err(ForgetError::Lessons(e)),
+/// Stage dropping `id` from `LESSONS.md`, or the file's unlink when `id` is a
+/// lesson's exemplar. Only this file; no lesson is re-selected.
+fn cascade_lessons(stage: &mut Stage, id: &str, now_sec: i64) -> Result<LessonEffect, ForgetError> {
+    let path = stage.agent_root().lessons_md();
+    let Some(bytes) = stage.read(&path).map_err(ForgetError::Lessons)? else {
+        return Ok(LessonEffect::Untouched);
     };
+    let raw = String::from_utf8(bytes)
+        .map_err(|e| ForgetError::Lessons(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+    let mut file = lessons::parse_lessons_file(&raw).map_err(ForgetError::Lessons)?;
 
     match classify_lessons(&file, id) {
         LessonEffect::Untouched => return Ok(LessonEffect::Untouched),
         LessonEffect::Unlinked => {
             // The body is the forgotten event's content; there is nothing to keep.
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(ForgetError::Lessons(e)),
-            }
+            stage.unlink(&path).map_err(ForgetError::Lessons)?;
             return Ok(LessonEffect::Unlinked);
         }
         LessonEffect::CitationDropped => {}
@@ -195,12 +181,9 @@ fn cascade_lessons(
 
     file.citations.retain(|c| c != id);
     file.last_updated = DateTime::from_timestamp(now_sec, 0).unwrap_or(DateTime::UNIX_EPOCH);
-    wal::guarded_replace(
-        agent_root,
-        &path,
-        lessons::render_lessons_file(&file).as_bytes(),
-        GuardedReplaceKind::ReplaceSemanticMemory,
-    )?;
+    stage
+        .put(&path, lessons::render_lessons_file(&file).as_bytes())
+        .map_err(ForgetError::Lessons)?;
     Ok(LessonEffect::CitationDropped)
 }
 
@@ -221,7 +204,7 @@ fn classify_lessons(file: &lessons::LessonsFile, id: &str) -> LessonEffect {
 ///
 /// Same decision order as `cascade`: a missing id returns `removed: false`
 /// without checking the dream-cycle status; a present id refuses with
-/// [`ForgetError::InProgress`] before reading `LESSONS.md`. Opens no WAL and
+/// [`ForgetError::InProgress`] before reading `LESSONS.md`. Opens no stage and
 /// reads no clock.
 pub fn preview(agent_root: &AgentRoot, id: &EventId) -> Result<ForgetReport, ForgetError> {
     let events = episodic::read_all(&agent_root.episodic_jsonl())?;
@@ -312,6 +295,7 @@ mod tests {
     use dreamd_protocol::AgentLearning;
 
     use crate::daemon_state::update_daemon_state;
+    use crate::index::RecurrenceSidecar;
     use crate::lessons::{read_lessons_file, write_lessons_file, Lesson, LessonsFile};
     use crate::test_support::{unique_tmpdir, DirGuard};
     use crate::writer_lock::{WriterKind, WriterLock};
@@ -524,36 +508,6 @@ mod tests {
 
         assert!(matches!(err, ForgetError::InProgress), "{err}");
         assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), before);
-        assert!(!root.wal_path().exists());
-    }
-
-    #[test]
-    fn crash_after_intent_recovers_to_the_pre_forget_log() {
-        let (root, _lock, _g) = setup(
-            "forget-crash",
-            &[learning('A', "alpha", false), learning('B', "beta", false)],
-        );
-        let jsonl = root.episodic_jsonl();
-        let before = fs::read(&jsonl).unwrap();
-        let mut rest = serde_json::to_string(&learning('B', "beta", false)).unwrap();
-        rest.push('\n');
-
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
-        let err = wal::guarded_replace_crash_after_intent(
-            &root,
-            &jsonl,
-            rest.as_bytes(),
-            GuardedReplaceKind::PruneEpisodicMemory,
-        );
-        assert!(err.is_err());
-        let tmp = jsonl.with_extension("tmp");
-        assert!(tmp.exists());
-
-        wal::recover_if_needed(&root, NOW_SEC).unwrap();
-
-        assert!(ids(&root).contains(&eid('A').to_string()));
-        assert_eq!(fs::read(&jsonl).unwrap(), before);
-        assert!(!tmp.exists());
         assert!(!root.wal_path().exists());
     }
 

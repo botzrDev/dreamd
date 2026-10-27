@@ -576,8 +576,8 @@ async fn case_10_lesson_without_an_exemplar_is_skipped_not_indexed() {
         )],
     );
     // An exemplar id the live log does not hold — `archive --force-unpin`, a
-    // hand-edited `pinned: false`, or a crash between `write_lessons_file` and
-    // `apply_pin_unpin`.
+    // hand-edited `pinned: false`, or a LESSONS.md written by hand. A cycle
+    // commits the lesson and the pin together, so a crash no longer leaves this.
     let orphan = event_id('9');
     write_lessons(
         &root,
@@ -631,15 +631,19 @@ async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
         })
         .collect();
     write_jsonl(&root, &events);
+    // One project lock for both cycles and the handle: the handle's indexer
+    // keeps it, so a second acquire would be refused.
+    let lock = WriterLock::acquire(&root, WriterKind::Watch).expect("project writer lock");
 
     // Cycle 1 — the real consolidation path writes LESSONS.md.
-    run_deterministic_dream_cycle(&root, NOW_SEC).expect("promoting cycle");
+    run_deterministic_dream_cycle(&root, lock.ledger(), NOW_SEC).expect("promoting cycle");
     assert!(
         root.lessons_md().exists(),
         "the promoting cycle must write a lesson for this test to mean anything"
     );
 
-    let handle = open(&root);
+    let handle =
+        TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE).expect("open index handle");
     assert_eq!(
         query(&handle, "gasket", Some(Layer::Semantic)).len(),
         1,
@@ -651,7 +655,7 @@ async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
     // by time, not by deleting events: retirement must follow from recurrence
     // stopping, which is what actually happens in a real store.
     let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;
-    run_deterministic_dream_cycle(&root, later).expect("no-promotion cycle");
+    run_deterministic_dream_cycle(&root, lock.ledger(), later).expect("no-promotion cycle");
     assert!(
         !root.lessons_md().exists(),
         "the no-promotion cycle must unlink LESSONS.md"

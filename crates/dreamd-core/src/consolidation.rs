@@ -2,14 +2,16 @@
 //!
 //! `run_cluster_engine` reads the episodic JSONL, builds a prefix tree over
 //! `skill_action` (split on `::`), applies deepest-wins disambiguation, and
-//! writes `semantic/recurrence_counts.json`.
+//! writes `semantic/recurrence_counts.json`. A dream cycle uses its staged twin,
+//! `stage_cluster_engine`, which reads and writes through the cycle's
+//! [`Stage`].
 //!
-//! `apply_pin_unpin` rewrites `AGENT_LEARNINGS.jsonl`, setting `pinned` on IDs
-//! cited in the freshly-written `LESSONS.md` **unioned** with any `pinned` flag
-//! an external writer already set — the cycle never unsets a pin it did not
-//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after the cycle's guarded
-//! `LESSONS.md` write, before `commit_cycle`; not safe to call before
-//! `LESSONS.md` exists (succeeds silently if absent).
+//! `apply_pin_unpin` stages `AGENT_LEARNINGS.jsonl` with `pinned` set on IDs
+//! cited in the staged `LESSONS.md` **unioned** with any `pinned` flag an
+//! external writer already set — the cycle never unsets a pin it did not
+//! itself set (SPEC §67 / WEG-426). Called by WEG-61 after the cycle stages
+//! `LESSONS.md`, before `commit_cycle`; stages nothing if `LESSONS.md` is
+//! absent.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -21,8 +23,10 @@ use crate::index::{ClusterCount, RecurrenceSidecar};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
+use crate::provenance::Ledger;
 use crate::salience::{salience_with_context, RecurrenceContext};
-use crate::wal::{self, GuardedReplaceKind, WalError};
+use crate::stage::Stage;
+use crate::wal::{self, CycleKind, WalError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidationError {
@@ -114,6 +118,9 @@ fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
 /// 6. Return [`ClusterOutput`].
 ///
 /// If the JSONL is absent or empty, returns `Ok(ClusterOutput { promoted: vec![] })`.
+///
+/// This writes the live sidecar directly, for tests and doctor's fixtures. A
+/// dream cycle and `forget::cascade` use [`stage_cluster_engine`] instead.
 pub fn run_cluster_engine(
     agent_root: &AgentRoot,
     now_sec: i64,
@@ -126,24 +133,54 @@ pub fn run_cluster_engine(
     let promoted = compute_promoted_clusters(&events, now_sec);
 
     // Step 5: write recurrence sidecar.
-    let sidecar_clusters: Vec<ClusterCount> = promoted
-        .iter()
-        .map(|c| ClusterCount {
-            skill_action: c.cluster_key.clone(),
-            count: c.events.len() as u32,
-        })
-        .collect();
-    let sidecar = RecurrenceSidecar {
-        schema_version: "1.0".to_string(),
-        clusters: sidecar_clusters,
-    };
     let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
     std::fs::create_dir_all(agent_root.semantic_dir())?;
-    let sidecar_json = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| ConsolidationError::Json { line: 0, source: e })?;
-    write_atomic(&sidecar_path, sidecar_json.as_bytes())?;
+    write_atomic(&sidecar_path, &sidecar_bytes(&promoted)?)?;
 
     Ok(ClusterOutput { promoted })
+}
+
+/// [`run_cluster_engine`] for a cycle: read the log through `stage`, and stage
+/// the sidecar rather than write it. An empty log stages nothing.
+pub fn stage_cluster_engine(
+    stage: &mut Stage,
+    now_sec: i64,
+) -> Result<ClusterOutput, ConsolidationError> {
+    let jsonl = stage.agent_root().episodic_jsonl();
+    let events: Vec<AgentLearning> = episodic::raw_lines(&stage.read(&jsonl)?.unwrap_or_default())
+        .into_iter()
+        .filter_map(|line| line.parsed)
+        .collect();
+    if events.is_empty() {
+        return Ok(ClusterOutput { promoted: vec![] });
+    }
+
+    let promoted = compute_promoted_clusters(&events, now_sec);
+    let sidecar_path = stage
+        .agent_root()
+        .semantic_dir()
+        .join("recurrence_counts.json");
+    stage.put(&sidecar_path, &sidecar_bytes(&promoted)?)?;
+
+    Ok(ClusterOutput { promoted })
+}
+
+/// The `recurrence_counts.json` bytes for `promoted`: one count per promoted
+/// cluster. Shared by [`run_cluster_engine`] and [`stage_cluster_engine`].
+pub(crate) fn sidecar_bytes(promoted: &[PromotedCluster]) -> Result<Vec<u8>, ConsolidationError> {
+    let sidecar = RecurrenceSidecar {
+        schema_version: "1.0".to_string(),
+        clusters: promoted
+            .iter()
+            .map(|c| ClusterCount {
+                skill_action: c.cluster_key.clone(),
+                count: c.events.len() as u32,
+            })
+            .collect(),
+    };
+    serde_json::to_string_pretty(&sidecar)
+        .map(String::into_bytes)
+        .map_err(|e| ConsolidationError::Json { line: 0, source: e })
 }
 
 /// Compute the clusters the dream cycle would promote from `events`, with no
@@ -219,22 +256,24 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
     promoted
 }
 
-/// Set `pinned` on episodic entries cited in the freshly-written `LESSONS.md`,
+/// Set `pinned` on episodic entries cited in the staged `LESSONS.md`,
 /// **unioned** with any `pinned` flag an external writer already set — the cycle
 /// never unsets a pin it did not itself set (SPEC §67 / WEG-426).
 ///
 /// "Cited" means every [`Lesson::id`] **and** every id in the file-level
 /// `citations` frontmatter (AILAB-200).
 ///
-/// Called by WEG-61 (DR-308) after [`write_selected_lesson`] has replaced
-/// `LESSONS.md`, while the orchestrator-owned dream-cycle WAL is still open. Writes nothing
-/// (no rewrite, no WAL intent) when no record's `pinned` changes, including when `LESSONS.md`
-/// or the JSONL is absent. Every line it does not flip keeps its bytes
-/// ([`episodic::patch_lines`]).
-pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError> {
-    let lessons_path = agent_root.lessons_md();
-    let cited_ids: HashSet<String> = if lessons_path.exists() {
-        let lessons_file = lessons::read_lessons_file(&lessons_path)?;
+/// Called by WEG-61 (DR-308) after [`write_selected_lesson`] has staged
+/// `LESSONS.md`. Reads both files through `stage`, so it sees this cycle's
+/// lesson, not the live one. Stages nothing when no record's `pinned` changes,
+/// including when `LESSONS.md` or the JSONL is absent. Every line it does not
+/// flip keeps its bytes ([`episodic::patch_lines`]).
+pub fn apply_pin_unpin(stage: &mut Stage) -> Result<(), ConsolidationError> {
+    let lessons_path = stage.agent_root().lessons_md();
+    let cited_ids: HashSet<String> = if let Some(bytes) = stage.read(&lessons_path)? {
+        let raw = String::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let lessons_file = lessons::parse_lessons_file(&raw)?;
         // Union, not either-or (AILAB-200). `Lesson.id` is the exemplar the
         // lesson is filed under; `citations` is every cluster member the model
         // said it drew on. Both must outlive decay or the lesson outlives its
@@ -250,8 +289,8 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
         HashSet::new()
     };
 
-    let jsonl_path = agent_root.episodic_jsonl();
-    let raw = episodic::read_raw(&jsonl_path)?;
+    let jsonl_path = stage.agent_root().episodic_jsonl();
+    let raw = episodic::raw_lines(&stage.read(&jsonl_path)?.unwrap_or_default());
 
     // Union, never clear: only an unpinned cited record flips.
     let pins: HashMap<EventId, bool> = raw
@@ -264,12 +303,8 @@ pub fn apply_pin_unpin(agent_root: &AgentRoot) -> Result<(), ConsolidationError>
         return Ok(());
     }
 
-    // One call: the prune intent is recorded inside the atomic rewrite, between
-    // the temp's fsync and the rename, naming the temp the write itself created
-    // (AILAB-164). Recovery cleans up that temp on a mid-cycle crash. No WAL
-    // open (no cycle) still rewrites the log.
     let contents = episodic::patch_lines(&raw, &pins, &HashSet::new())?;
-    episodic::rewrite_guarded(agent_root, &jsonl_path, &contents)?;
+    stage.put(&jsonl_path, &contents)?;
     Ok(())
 }
 
@@ -294,7 +329,7 @@ pub const DETERMINISTIC_PROMPT_ID: &str = "deterministic-only";
 /// Where a lesson body came from (AILAB-204).
 ///
 /// Only the body text and the frontmatter `prompt_version` differ between the
-/// two — the WAL intent, the `cluster_key`, the pin pass, and above all the
+/// two — the staged write, the `cluster_key`, the pin pass, and above all the
 /// [`Lesson::id`] (always the exemplar's `evt_` id) are shared, so semantic
 /// indexing inherits the same pain/importance whichever path composed the prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,7 +356,7 @@ pub enum LessonBodySource {
 /// Produced by [`select_lesson_or_retire`] and consumed by
 /// [`write_selected_lesson`]. Splitting the cycle here is what lets an `await`
 /// on a network call sit between cluster selection and the `LESSONS.md` write
-/// while both paths still share one exemplar id and one WAL envelope.
+/// while both paths still share one exemplar id and one stage.
 #[derive(Debug, Clone)]
 pub struct SelectedLesson {
     /// File-level cluster key of the winning (highest `salience_sum`) cluster.
@@ -336,16 +371,16 @@ pub struct SelectedLesson {
 
 /// Cluster, then either select the winning cluster's exemplar or retire.
 ///
-/// `Ok(None)` means **nothing promoted**: any existing `LESSONS.md` has already
-/// been unlinked (AILAB-699) and the caller must not write one. Absence — not an
-/// empty frontmatter file — is the canonical "nothing promoted" state, so a
-/// store that stops recurring converges on the same shape as one that never
-/// dreamed. Cited exemplars keep their pins.
+/// `Ok(None)` means **nothing promoted**: the unlink of any existing
+/// `LESSONS.md` is staged (AILAB-699) and the caller must not write one.
+/// Absence — not an empty frontmatter file — is the canonical "nothing
+/// promoted" state, so a store that stops recurring converges on the same shape
+/// as one that never dreamed. Cited exemplars keep their pins.
 pub fn select_lesson_or_retire(
-    agent_root: &AgentRoot,
+    stage: &mut Stage,
     now_sec: i64,
 ) -> Result<Option<SelectedLesson>, LessonPhaseError> {
-    let cluster_output = run_cluster_engine(agent_root, now_sec)?;
+    let cluster_output = stage_cluster_engine(stage, now_sec)?;
 
     if cluster_output.promoted.is_empty() {
         // AILAB-699: retirement is structural, not an expiry timer. When no
@@ -353,10 +388,9 @@ pub fn select_lesson_or_retire(
         // `LESSONS.md` an earlier promoting cycle wrote is stale — leaving it
         // meant recall served that lesson forever.
         //
-        // No `WalIntent`: recovery only cleans up intent temps (`wal.rs`), and
-        // an unlink of the live file is itself the desired post-state — crash
-        // after it and the lesson is retired, crash before and the file
-        // remains for the next cycle to retire.
+        // The unlink is staged: it lands with the cycle's other outputs when
+        // the redo WAL commits, and not at all if the cycle never commits.
+        // An absent `LESSONS.md` stages nothing.
         //
         // Pins are untouched. `apply_pin_unpin` is union-only, so calling it
         // here would rewrite the JSONL for no effect; the exemplars this
@@ -365,13 +399,8 @@ pub fn select_lesson_or_retire(
         // The index side is handled by the post-cycle semantic pass, which
         // runs unconditionally and turns the now-absent file into
         // `delete_term(layer="semantic")` (`server::tantivy_handle`).
-        match std::fs::remove_file(agent_root.lessons_md()) {
-            Ok(()) => {}
-            // Already gone — the common never-promoted case, or a racing
-            // remover. Either way the post-state is the one we wanted.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+        let lessons_md = stage.agent_root().lessons_md();
+        stage.unlink(&lessons_md)?;
         return Ok(None);
     }
 
@@ -487,37 +516,28 @@ pub fn lessons_file_from_selected(
     }
 }
 
-/// Write `LESSONS.md` for `selected` with the chosen body, then apply pins.
-///
-/// The `ReplaceSemanticMemory` intent lands in the orchestrator-owned WAL
-/// envelope as part of the write itself, naming the temp that write created
-/// (AILAB-164). It is deliberately **not** recorded ahead of the write any more:
-/// that order could put an intent in the WAL pointing at a `.tmp` that did not
-/// exist yet, so a crash between the two left recovery chasing a phantom.
+/// Stage `LESSONS.md` for `selected` with the chosen body, then the pin pass.
 ///
 /// The bytes are `lessons::render_lessons_file`'s — the same serializer
 /// `lessons::write_lessons_file` and `dreamd dream --dry` use (AILAB-341), so
-/// going around that writer to reach the WAL cannot change what lands on disk.
+/// going around that writer to reach the stage cannot change what lands on
+/// disk.
 pub fn write_selected_lesson(
-    agent_root: &AgentRoot,
+    stage: &mut Stage,
     now_sec: i64,
     selected: &SelectedLesson,
     body: LessonBodySource,
 ) -> Result<(), LessonPhaseError> {
     let lessons_file = lessons_file_from_selected(now_sec, selected, body);
 
-    let lessons_path = agent_root.lessons_md();
-    std::fs::create_dir_all(agent_root.semantic_dir())?;
-    wal::guarded_replace(
-        agent_root,
+    let lessons_path = stage.agent_root().lessons_md();
+    stage.put(
         &lessons_path,
         lessons::render_lessons_file(&lessons_file).as_bytes(),
-        GuardedReplaceKind::ReplaceSemanticMemory,
     )?;
 
-    // Pin/unpin rewrites JSONL under the same envelope, via
-    // `episodic::rewrite_guarded` (opened by `run_filesystem_phases`).
-    apply_pin_unpin(agent_root)?;
+    // The pin pass reads the lesson just staged and stages the log beside it.
+    apply_pin_unpin(stage)?;
 
     Ok(())
 }
@@ -535,22 +555,27 @@ pub fn write_selected_lesson(
 /// on this path) — the dream-cycle snapshot fixtures pin that. The LLM path is
 /// the same two steps with a different [`LessonBodySource`]; see
 /// [`crate::dream_cycle::run_filesystem_phases`].
+///
+/// One stage, one commit: `ledger` records the cycle's provenance edges.
 #[must_use = "dream cycle errors must be handled"]
 pub fn run_deterministic_dream_cycle(
     agent_root: &AgentRoot,
+    ledger: &Ledger,
     now_sec: i64,
 ) -> Result<(), LessonPhaseError> {
     let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
 
-    let Some(selected) = select_lesson_or_retire(agent_root, now_sec)? else {
-        return Ok(());
-    };
-    write_selected_lesson(
-        agent_root,
-        now_sec,
-        &selected,
-        LessonBodySource::Deterministic,
-    )
+    let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
+    if let Some(selected) = select_lesson_or_retire(&mut stage, now_sec)? {
+        write_selected_lesson(
+            &mut stage,
+            now_sec,
+            &selected,
+            LessonBodySource::Deterministic,
+        )?;
+    }
+    wal::commit_cycle(stage, ledger, now_sec)?;
+    Ok(())
 }
 
 /// Pick the cluster exemplar: highest salience, then pain, then importance,
@@ -616,9 +641,6 @@ mod tests {
     use crate::layout::AgentRoot;
     use crate::lessons::{read_lessons_file, write_lessons_file, Lesson, LessonsFile};
     use crate::test_support::{unique_tmpdir, DirGuard};
-    // Production code here mints no intents any more (AILAB-164); the assertions
-    // below still read them back off disk.
-    use crate::wal::WalIntent;
 
     fn test_id(n: u32) -> EventId {
         EventId::parse(&format!("evt_{:0>26}", n)).unwrap()
@@ -672,6 +694,18 @@ mod tests {
     /// Fixed `now_sec` for deterministic salience: same as `fixed_ts` timestamp
     /// so age_days = 0.
     const NOW_SEC: i64 = 1747137600; // 2026-05-13T12:00:00Z
+
+    fn ledger(root: &AgentRoot) -> Ledger {
+        Ledger::open(root.provenance_ledger())
+    }
+
+    /// The pin pass in its own stage, committed, so the asserts read the live
+    /// log.
+    fn pin_pass(root: &AgentRoot) {
+        let mut stage = wal::begin_cycle(root, CycleKind::Dream, NOW_SEC).unwrap();
+        apply_pin_unpin(&mut stage).unwrap();
+        wal::commit_cycle(stage, &ledger(root), NOW_SEC).unwrap();
+    }
 
     // ── Legacy dotted-key corpora (ARCHITECTURE.md §9) ─────────────────────
     //
@@ -899,7 +933,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_pin_unpin(&root).unwrap();
+        pin_pass(&root);
 
         let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 4);
@@ -955,7 +989,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_pin_unpin(&root).unwrap();
+        pin_pass(&root);
 
         let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         let find = |n: u32| {
@@ -992,7 +1026,7 @@ mod tests {
 
         // LESSONS.md is absent — cited_ids is empty, so union preserves the
         // external pins rather than clearing them (SPEC §67 / WEG-426).
-        apply_pin_unpin(&root).unwrap();
+        pin_pass(&root);
 
         let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 2);
@@ -1007,7 +1041,8 @@ mod tests {
     }
 
     /// BZR-1234: a second cycle with the same exemplar flips nothing, so the
-    /// pin pass must not rename the log or record a prune intent.
+    /// pin pass must stage nothing for the log, and the commit must not
+    /// rename it.
     #[cfg(unix)]
     #[test]
     fn pin_pass_without_a_flip_leaves_the_log_alone() {
@@ -1040,29 +1075,27 @@ mod tests {
             },
         )
         .unwrap();
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
+        let mut stage = wal::begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
 
         let jsonl = root.episodic_jsonl();
         let ino_before = fs::metadata(&jsonl).unwrap().ino();
         let bytes_before = fs::read(&jsonl).unwrap();
 
-        apply_pin_unpin(&root).unwrap();
+        apply_pin_unpin(&mut stage).unwrap();
 
+        let redo = stage.redo();
+        assert!(
+            redo.renames.is_empty(),
+            "no flip must stage nothing for the log; got {:?}",
+            redo.renames
+        );
+        wal::commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
         assert_eq!(
             fs::metadata(&jsonl).unwrap().ino(),
             ino_before,
             "no flip must not rename the log"
         );
         assert_eq!(fs::read(&jsonl).unwrap(), bytes_before);
-        let wal: crate::wal::DreamWal =
-            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
-        assert!(
-            !wal.intents
-                .iter()
-                .any(|i| matches!(i, WalIntent::PruneEpisodicMemory { .. })),
-            "no flip must record no PruneEpisodicMemory intent; got {:?}",
-            wal.intents
-        );
     }
 
     #[test]
@@ -1130,7 +1163,7 @@ mod tests {
         // begin_cycle refuse a missing store, so the test sets one up — empty
         // JSONL still exercises the no-promotion path.
         write_jsonl(&root, &[]);
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
         assert!(!root.lessons_md().exists());
     }
 
@@ -1214,7 +1247,8 @@ mod tests {
         );
 
         // Now let the write path decide, and compare.
-        let written = select_lesson_or_retire(&root, NOW_SEC)
+        let mut stage = Stage::create(&root, "dream-1").unwrap();
+        let written = select_lesson_or_retire(&mut stage, NOW_SEC)
             .unwrap()
             .expect("a cluster promotes");
         assert_eq!(previewed.cluster_key, written.cluster_key);
@@ -1237,7 +1271,7 @@ mod tests {
             .collect();
         write_jsonl(&root, &events);
 
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
 
         assert!(
             root.lessons_md().exists(),
@@ -1264,7 +1298,7 @@ mod tests {
         // `ts >= now_sec - window`), so nothing promotes. No hysteresis, no
         // second no-promotion cycle needed.
         let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;
-        run_deterministic_dream_cycle(&root, later).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), later).unwrap();
 
         assert!(
             !root.lessons_md().exists(),
@@ -1280,7 +1314,7 @@ mod tests {
 
         // Idempotent: a second no-promotion cycle over the same input is a
         // no-op, not an error on the already-absent file.
-        run_deterministic_dream_cycle(&root, later).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), later).unwrap();
         assert!(!root.lessons_md().exists());
     }
 
@@ -1310,7 +1344,7 @@ mod tests {
         ];
         write_jsonl(&root, &events);
 
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
 
         assert!(root.lessons_md().exists());
         let lf = read_lessons_file(&root.lessons_md()).unwrap();
@@ -1333,194 +1367,10 @@ mod tests {
         ];
         write_jsonl(&root, &events);
 
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
 
         let lf = read_lessons_file(&root.lessons_md()).unwrap();
         assert_eq!(lf.lessons[0].id, test_id(5).as_str().to_string());
-    }
-
-    #[test]
-    fn deterministic_cycle_pin_unpin_recorded_in_wal_before_commit() {
-        let dir = unique_tmpdir("dc-wal-pin");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-        let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
-            .map(|i| make_event(i as u32, "rust::types", false))
-            .collect();
-        write_jsonl(&root, &events);
-
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
-        let cluster_output = run_cluster_engine(&root, NOW_SEC).unwrap();
-        assert!(!cluster_output.promoted.is_empty());
-
-        let top_cluster = cluster_output
-            .promoted
-            .iter()
-            .max_by(|a, b| {
-                a.salience_sum
-                    .partial_cmp(&b.salience_sum)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap();
-        let exemplar = pick_exemplar(&top_cluster.events, NOW_SEC);
-        let lessons = vec![Lesson {
-            id: exemplar.id.as_str().to_string(),
-            content: exemplar.content.clone(),
-            pinned: false,
-        }];
-
-        let lessons_path = root.lessons_md();
-        let last_updated = DateTime::<Utc>::from_timestamp(NOW_SEC, 0).unwrap_or_default();
-        let lessons_file = LessonsFile {
-            last_updated,
-            prompt_version: "deterministic-only".to_string(),
-            cluster_key: top_cluster.cluster_key.clone(),
-            citations: vec![],
-            lessons,
-        };
-        fs::create_dir_all(root.semantic_dir()).unwrap();
-        // The lessons write records its own intent now — the test no longer
-        // stands in for the production path by minting one by hand.
-        wal::guarded_replace(
-            &root,
-            &lessons_path,
-            lessons::render_lessons_file(&lessons_file).as_bytes(),
-            GuardedReplaceKind::ReplaceSemanticMemory,
-        )
-        .unwrap();
-
-        apply_pin_unpin(&root).unwrap();
-
-        let wal: crate::wal::DreamWal =
-            serde_json::from_str(&fs::read_to_string(root.wal_path()).unwrap()).unwrap();
-        assert!(
-            wal.intents
-                .iter()
-                .any(|i| matches!(i, WalIntent::ReplaceSemanticMemory { .. })),
-            "the lessons write must record ReplaceSemanticMemory while WAL is active"
-        );
-        assert!(
-            wal.intents
-                .iter()
-                .any(|i| matches!(i, WalIntent::PruneEpisodicMemory { .. })),
-            "pin/unpin must append PruneEpisodicMemory while WAL is active"
-        );
-        assert!(
-            !wal.intents.contains(&WalIntent::Commit),
-            "commit must not precede pin/unpin"
-        );
-
-        wal::commit_cycle(&root, NOW_SEC).unwrap();
-        assert!(!root.wal_path().exists());
-    }
-
-    #[test]
-    fn recover_mid_pin_unpin_preserves_jsonl_when_tmp_survives() {
-        let dir = unique_tmpdir("recover-pin");
-        let _g = DirGuard(dir.clone());
-        let root = AgentRoot::new(&dir);
-        fs::create_dir_all(root.dreamd_dir()).unwrap();
-
-        let events = vec![
-            make_event(0, "rust::types", true),
-            make_event(1, "rust::types", false),
-            make_event(2, "rust::types", false),
-        ];
-        write_jsonl(&root, &events);
-        let original_bytes = fs::read(root.episodic_jsonl()).unwrap();
-
-        let lessons_path = root.lessons_md();
-        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
-
-        wal::begin_cycle(&root, NOW_SEC).unwrap();
-
-        // Step one of the cycle, run for real: this lands `ReplaceSemanticMemory`
-        // in the WAL and renames its temp away. Recovery must therefore walk TWO
-        // intents, one of whose temps is already gone — the multi-intent shape
-        // the hand-written WAL fixture used to stand in for.
-        let lessons_file = LessonsFile {
-            last_updated: fixed_ts(),
-            prompt_version: "deterministic-only".to_string(),
-            cluster_key: "rust::types".to_string(),
-            citations: vec![],
-            lessons: vec![Lesson {
-                id: test_id(2).as_str().to_string(),
-                content: "exemplar".to_string(),
-                pinned: false,
-            }],
-        };
-        wal::guarded_replace(
-            &root,
-            &lessons_path,
-            lessons::render_lessons_file(&lessons_file).as_bytes(),
-            GuardedReplaceKind::ReplaceSemanticMemory,
-        )
-        .unwrap();
-        let lessons_bytes = fs::read(&lessons_path).unwrap();
-
-        // Crash the real pin rewrite in the window recovery exists for: the
-        // temp is fsynced and the intent is durable, the rename never happened.
-        // Driving the seam is the point — a hand-written WAL fixture would only
-        // exercise the recovery reader against bytes production never emits.
-        let mut pinned = events.clone();
-        pinned[2].pinned = true;
-        let pinned_bytes: String = pinned
-            .iter()
-            .map(|e| format!("{}\n", serde_json::to_string(e).unwrap()))
-            .collect();
-        crate::wal::guarded_replace_crash_after_intent(
-            &root,
-            &root.episodic_jsonl(),
-            pinned_bytes.as_bytes(),
-            GuardedReplaceKind::PruneEpisodicMemory,
-        )
-        .expect_err("injected crash must surface");
-
-        let jsonl_tmp = root.episodic_jsonl().with_extension("tmp");
-        assert!(
-            jsonl_tmp.exists(),
-            "the pin rewrite's .tmp must survive the crash as the recovery signal"
-        );
-        let wal_json = fs::read_to_string(root.wal_path()).unwrap();
-        assert!(
-            wal_json.contains("PruneEpisodicMemory"),
-            "the crashed rewrite must have left its intent in the WAL"
-        );
-        assert!(
-            wal_json.contains("ReplaceSemanticMemory"),
-            "the completed lessons write must still be in the same WAL"
-        );
-
-        let outcome = wal::recover_if_needed(&root, NOW_SEC).unwrap();
-        assert!(
-            matches!(outcome, crate::wal::RecoveryOutcome::Recovered { .. }),
-            "incomplete pin/unpin cycle must be recoverable"
-        );
-        assert!(
-            !jsonl_tmp.exists(),
-            ".tmp from pin/unpin must be cleaned up"
-        );
-        assert_eq!(
-            fs::read(root.episodic_jsonl()).unwrap(),
-            original_bytes,
-            "JSONL must be unchanged when pin/unpin rename never completed"
-        );
-
-        let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
-        assert!(
-            updated[0].pinned,
-            "pre-cycle pin state must survive recovery"
-        );
-        assert!(!updated[2].pinned, "partial rewrite must not have landed");
-
-        // The committed half's temp was renamed away before the crash, so
-        // recovery walks an intent whose temp is already gone and leaves the
-        // promoted file alone rather than erroring on the missing path.
-        assert_eq!(
-            fs::read(&lessons_path).unwrap(),
-            lessons_bytes,
-            "an intent whose temp already renamed must not disturb the live file"
-        );
     }
 
     #[test]
@@ -1548,7 +1398,7 @@ mod tests {
         ];
         write_jsonl(&root, &events);
 
-        run_deterministic_dream_cycle(&root, NOW_SEC).unwrap();
+        run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
 
         let updated = episodic::read_all(&root.episodic_jsonl()).unwrap();
         assert_eq!(updated.len(), 3);

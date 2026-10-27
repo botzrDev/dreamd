@@ -356,7 +356,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 Run a full dream cycle for the resolved project: consolidate episodic learnings into `LESSONS.md`, apply decay/pruning, update recurrence sidecar.
 
-**Not available on Windows.** The route stays mounted rather than vanishing from the route table, and returns `500` with `{"error":"dream cycle is unavailable on this platform: atomic file replacement is unsupported (see docs/windows.md)"}`. Consolidation, decay, the `LESSONS.md` rewrite and the recurrence sidecar all *replace* files through `io::write_atomic`, which is still `ErrorKind::Unsupported` there.
+**Not available on Windows.** The route stays mounted rather than vanishing from the route table, and returns `500` with `{"error":"dream cycle is unavailable on this platform: atomic file replacement is unsupported (see docs/windows.md)"}`. Consolidation, decay, the `LESSONS.md` rewrite and the recurrence sidecar are all staged and *renamed* into place, and the stage writer is `ErrorKind::Unsupported` there, like `io::write_atomic`.
 
 #### Request headers
 

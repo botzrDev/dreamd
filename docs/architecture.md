@@ -298,7 +298,7 @@ Phase order is fixed (`dream_cycle.rs` module doc): **consolidation → decay �
 index → autobiography.**
 
 **The lesson body has two producers.** Cluster selection, the exemplar, the
-pins, and the WAL intent are the same either way; only the prose, the
+pins, and the staged write are the same either way; only the prose, the
 `citations` list, and the frontmatter `prompt_version` differ
 (`consolidation::LessonBodySource`):
 
@@ -310,7 +310,7 @@ pins, and the WAL intent are the same either way; only the prose, the
   `dream_cycle::compose_lesson_body` builds a prompt from the promoted cluster,
   prices it against `cost_cap_usd`
   ([`llm-cost-accuracy.md`](llm-cost-accuracy.md)), and awaits the model
-  **inside** the WAL envelope. The completion must end in a `citations:`
+  **while the cycle stages**, before its commit point. The completion must end in a `citations:`
   trailer naming only events in the promoted cluster. `prompt_version` is then
   `llm::VERSIONED_PROMPT_ID`. Composition is infallible by construction: a
   missing key, an over-cap estimate, an unpriced model, a transport failure,
@@ -335,12 +335,13 @@ daemon proxy: the cycle runs in this process and takes the project writer lock
 first, so it refuses while `dreamd watch` or an in-process `dreamd mcp` holds
 the project.
 
-A real cycle also does two things that are not phases of their own, both
-inside the WAL envelope: `snapshot::create_autosnap` saves a pre-mutation copy
-of the live files under `.dreamd/branches/` (a `snap-*` ref; see
-[`branching.md`](branching.md)), and `provenance::record_cycle` appends
-`lesson_citation` / `recurrence` edges to `.dreamd/provenance/ledger.jsonl`
-(see [`provenance.md`](provenance.md)).
+A real cycle also does two things that are not phases of their own:
+`snapshot::stage_autosnap` saves a pre-mutation copy of the live files under
+`.dreamd/branches/` and stages its `snap-*` ref, which lands with the cycle's
+other outputs (see [`branching.md`](branching.md)), and the commit's
+`provenance::record_cycle` appends `lesson_citation` / `recurrence` edges to
+`.dreamd/provenance/ledger.jsonl` after the renames (see
+[`provenance.md`](provenance.md)).
 
 ### Clustering: a prefix tree over `skill_action`
 
@@ -367,8 +368,8 @@ A cluster qualifies for promotion when it holds at least
 trailing window (`WINDOW_7_DAYS_SEC`, `WINDOW_30_DAYS_SEC`; the OR-logic is in
 `compute_promoted_clusters`). Either window alone is
 sufficient — this catches both a burst inside a week and a slow drip across a
-month. The counts are written to `semantic/recurrence_counts.json` as
-`RecurrenceSidecar { schema_version: "1.0", clusters }` (`run_cluster_engine`).
+month. The counts are staged for `semantic/recurrence_counts.json` as
+`RecurrenceSidecar { schema_version: "1.0", clusters }` (`stage_cluster_engine`).
 
 Of the qualifying clusters, only the **single top cluster by `salience_sum`**
 is promoted to `LESSONS.md`, and it contributes exactly **one** `Lesson`, filed
@@ -376,7 +377,7 @@ under the exemplar's id (`select_lesson_or_retire`). `pick_exemplar` ranks
 salience → pain → importance → lowest `EventId`. A cycle is therefore a narrow
 instrument: at most one lesson per run, not a batch summarisation pass.
 
-A cycle that promotes **no** cluster **unlinks** `semantic/LESSONS.md` if it is
+A cycle that promotes **no** cluster stages the **unlink** of `semantic/LESSONS.md` if it is
 present (`select_lesson_or_retire`, `consolidation.rs`) rather than
 writing an empty file — the never-dreamed state and the retired state are both
 "the file is absent". Retirement is therefore structural, not scheduled: a
@@ -423,10 +424,10 @@ your head:
   (`DECAY_AGE_THRESHOLD_SEC`, `decay.rs`) — age alone, not age plus
   interest. Pinned records are **never** archived (the first check in
   `should_decay`). Archived records are appended to
-  `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl`, never deleted. Each archived
-  line is the log's line, byte for byte. A line whose id is already in that
-  day's file is not appended again, so re-running a cycle that crashed before
-  its log rewrite does not duplicate rows.
+  `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl`, never deleted. The day's file
+  is staged as a full copy beside the pruned log, so the two land together.
+  Each archived line is the log's line, byte for byte. A line whose id is
+  already in that day's file is not appended again.
 - `DECAY_SALIENCE_THRESHOLD = 2.0` is evaluated in `should_decay`
   but **cannot currently discriminate**. The pruner scores
   through `RecurrenceContext::decay()`, hardcoded to recurrence `0`
@@ -459,76 +460,97 @@ is skipped, with a WARN, and the skip is recorded in `state.json`
 
 ## WAL / crash recovery
 
-The dream cycle's filesystem phases run inside a write-ahead log at
-`.agent/.dreamd/dream_in_progress.wal`, resolved through
-`agent_root.wal_path()` (`wal.rs`, `layout.rs`).
+The dream cycle's filesystem phases stage their outputs, then commit them with
+one redo log at `.agent/.dreamd/dream_in_progress.wal`, resolved through
+`agent_root.wal_path()` (`wal.rs`, `stage.rs`, `layout.rs`).
 
-The file holds `DreamWal { schema_version, intents: Vec<WalIntent> }`
-as pretty JSON, where `WalIntent` is
-`ReplaceSemanticMemory { temp_file_path }` | `PruneEpisodicMemory { temp_file_path }`
-| `Commit`. Its `STATE_SCHEMA_VERSION = "1.0"` (defined in `daemon_state.rs`,
-re-exported from `wal.rs`) is versioned
-**independently** of the episodic record schema — see
+The file holds `RedoWal { schema_version, format: "redo/1", renames, unlinks }`
+as pretty JSON. Each rename is `{ from, to }`: `from` is a staged file under
+`.dreamd/stage/<cycle>/`, `to` a live path; each unlink is a live path. Every
+path is relative to `.agent/`. It has no `intents` key, so a pre-1.1.0 binary
+fails closed on it. Its `STATE_SCHEMA_VERSION = "1.0"` (defined in
+`daemon_state.rs`, re-exported from `wal.rs`) is versioned **independently** of
+the episodic record schema — see
 [`../ARCHITECTURE.md` §7](../ARCHITECTURE.md#7-schema-versioning).
 
 Lifecycle:
 
-- `begin_cycle` writes a fresh WAL with no intents and moves `state.json` to
-  `in_progress`. It refuses when `.agent/` does not exist rather than create a
-  store.
-- `guarded_replace` is the one destructive-replace seam (AILAB-164): it writes
-  and fsyncs the temp file, appends the intent naming **that** temp
-  (`append_intent` rewrites the whole WAL file atomically), then renames.
-  Callers pick a `GuardedReplaceKind` and never build a `temp_file_path`
-  themselves. The `LESSONS.md` write, the pin rewrite, and the decay prune
-  (the latter two via `episodic::rewrite_guarded`) all go through it.
-- `commit_cycle` appends `Commit`, moves state to `complete`, and deletes the
-  WAL.
+- `begin_cycle(agent_root, kind, now_sec)` moves `state.json` to `in_progress`
+  and opens an empty `Stage` at `.dreamd/stage/<kind>-<now_sec>/`. It writes no
+  WAL. It refuses when `.agent/` does not exist rather than create a store, and
+  refuses while a WAL is pending.
+- `Stage::put` writes each output into the stage dir under a fresh name and
+  fsyncs it; `Stage::unlink` records a removal; `Stage::read` reads through the
+  stage, so the pin pass sees the staged `LESSONS.md` and decay sees the staged
+  log. Nothing live changes while the cycle stages.
+- `commit_cycle` fsyncs the stage dir, writes the redo WAL with `write_atomic`
+  — the commit point — and applies it with `roll_forward`: the renames, then
+  the unlinks, an fsync of each target directory, `provenance::record_cycle`,
+  `state.json` to `complete`, and the WAL's deletion. It then removes the stage
+  dir.
 
 `state.json` is read and patched through the typed
 `daemon_state::{read_daemon_state, update_daemon_state}` pair (AILAB-167), so a
 status change does not wipe `last_dream_cycle_at` or the autobiography skip
 marker.
 
-**One WAL envelope spans both filesystem phases (ARCH-2).**
-`dream_cycle::filesystem_phases` is `begin_cycle → autosnap → consolidation →
-decay → provenance record → commit_cycle` — a single envelope, not one per
-phase. A phase
-error short-circuits through `?` *before* `commit_cycle`, leaving an
-uncommitted WAL for next-startup recovery. The regression test
-`seam_crash_after_consolidation_recovers_not_clean` (`dream_cycle.rs`)
-pins this: under the previous two-envelope shape, a crash between consolidation
-and decay let a half-finished cycle be silently recorded as a success.
+**One stage spans both filesystem phases (ARCH-2).**
+`dream_cycle::filesystem_phases` is `begin_cycle → autosnap ref → consolidation
+→ decay → commit_cycle` — one stage and one commit, not one per phase. A phase
+error short-circuits through `?` *before* the commit point, leaving only the
+stage dir for the next writer to wipe.
 
-**Recovery.** `wal::recover_if_needed(agent_root, now_sec)` returns
-`RecoveryOutcome::{Clean, Recovered { cleaned_files }, CommittedButUnclean}`.
-A WAL containing `Commit` means the cycle finished and only the
-file outlived it: state goes to `complete`, the WAL is deleted, and the outcome
-is `CommittedButUnclean`. Otherwise each intent's temp file and
-its `.tmp` neighbour are deleted, the WAL is deleted, state is set to
-**`failed`**, and the outcome is `Recovered`.
+**Recovery.** `wal::recover_if_needed(agent_root, ledger)` returns
+`RecoveryOutcome::{Clean, RolledForward { renamed, unlinked }, Recovered {
+cleaned_files }, CommittedButUnclean}`. It has three arms, and every one ends
+by wiping `.dreamd/stage/`:
+
+- **No WAL.** A WAL temp left by a crash inside the WAL's own write is
+  removed, any stage dir is wiped, and the outcome is `Clean`.
+- **A `redo/1` WAL.** The cycle reached its commit point, so `roll_forward`
+  finishes it — the same code `commit_cycle` runs. A rename whose `from` is
+  gone already happened and is skipped; an unlink of an absent file is done.
+  State goes to `complete`; the outcome is `RolledForward`.
+- **A legacy WAL** (`intents`, no `format`, written before 1.1.0) keeps its old
+  meaning: with `Commit`, state goes to `complete` and the outcome is
+  `CommittedButUnclean`; without it, each intent's temp file and its `.tmp`
+  neighbour are deleted, state is set to **`failed`**, and the outcome is
+  `Recovered`.
+
+Any other `format`, and any redo path that is absolute, contains `..`, or
+points at the wrong side of `.dreamd/stage/`, fails closed
+(`WalError::UnknownFormat`, `WalError::BadRedoPath`) and touches nothing.
+
 `recover_on_startup` has one caller, `WriterLock::acquire`. It therefore runs
 in every process that takes the project writer lock (`run_watch`, the daemon's
 lazy per-project open, in-process `dreamd mcp`, and the CLI writers), before
-any store access. Just before it, `acquire` resets a `state.json` left at
-`in_progress` with no WAL to `failed`: the lock was free, so no cycle can be
-running. Inside the lock holder, a concurrent trigger is refused rather than
-queued: `dream_cycle::ensure_not_in_progress` yields
-`DreamCycleError::InProgress` when `state.json` says `in_progress`, and the
-HTTP layer maps that to 409. The lock refuses a second process before it gets
-that far.
+any store access, with the lock's provenance ledger already open. Just before
+it, `acquire` resets a `state.json` left at `in_progress` with no WAL to
+`failed`: the lock was free, so no cycle can be running. Inside the lock
+holder, a concurrent trigger is refused rather than queued:
+`dream_cycle::ensure_not_in_progress` yields `DreamCycleError::InProgress` when
+`state.json` says `in_progress`, and the HTTP layer maps that to 409. The lock
+refuses a second process before it gets that far.
+
+The crash sweep (`crash_sweep.rs`) pins all of this. It crashes a promoting
+cycle, a retiring cycle, and two forgets at every crash point in turn,
+recovers, and asserts the store is byte-for-byte pre-cycle (and `failed`) or
+post-cycle (and `complete`), never a mix. A crash that left the WAL must end
+post-cycle, and so must a crash inside each recovery's own roll-forward.
 
 **Two carve-outs that must not be overstated:**
 
-1. Recovery is **compensating cleanup — a roll-back of temp files, not a
-   roll-forward.** A recovered cycle lands in `failed`, not `complete`. Nothing
-   replays the lost work; the next cycle starts over from the durable store.
+1. Recovery **rolls forward** a committed cycle (the WAL exists) to
+   `complete`. A crash before the commit point leaves only a stage directory,
+   which the next writer wipes; that cycle lands in `failed` and the next cycle
+   starts from the untouched store.
 2. **Tantivy index mutations are not WAL-protected** (`wal.rs` module doc;
    `ARCHITECTURE.md` §3). The "a reader never sees a mid-cycle store"
-   invariant holds for the **durable** store — the JSONL, `LESSONS.md`, and the
-   recurrence sidecar — **not** for the derived index. The index is a
-   rebuildable cache (see [Indexing and salience](#indexing-and-salience)) and
-   is allowed to lag or be rebuilt outright.
+   invariant holds for the **durable** store — the JSONL, `LESSONS.md`, the
+   recurrence sidecar, the decay archive and the autosnap ref — **not** for the
+   derived index. The index is a rebuildable cache (see
+   [Indexing and salience](#indexing-and-salience)) and is allowed to lag or be
+   rebuilt outright.
 
 Deep dives: [`architecture/durability.md`](architecture/durability.md) for the
 full durability argument, and
@@ -644,12 +666,12 @@ timeout, so in-process appends wait rather than shed.
 not beside it. `POST /api/v1/dream` sends `MemoryCoordinatorMsg::RunDreamCycle`
 over the same mpsc channel as appends; the actor loop dispatches it
 to `handle_run_dream_cycle`, which calls `run_filesystem_phases`
-(consolidation → decay, inside one WAL envelope, including any LLM call).
+(consolidation → decay, staged and committed by one redo WAL, including any LLM call).
 `dreamd forget` does not go through the coordinator: it runs `forget::cascade`
 in-process and refuses while a daemon is live.
 
-The reason is fd ownership (WEG-271). Both consolidation and decay can replace
-`AGENT_LEARNINGS.jsonl` by atomic rename, which orphans the coordinator's long-lived
+The reason is fd ownership (WEG-271). The cycle's commit can replace
+`AGENT_LEARNINGS.jsonl` by rename (a staged pin pass or prune), which orphans the coordinator's long-lived
 `File` — subsequent appends would land on an unlinked inode and be silently lost. Routing
 the cycle through the actor lets the handler reopen `self.file` (with `O_APPEND`) as
 part of the same message, on every exit path, error included, so there is no window

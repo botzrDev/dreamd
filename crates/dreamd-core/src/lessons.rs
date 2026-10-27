@@ -228,7 +228,12 @@ fn parse_lesson_block(
 /// malformed, a lesson's `cluster` attribute does not match the file-level
 /// `cluster_key`, or a close marker is absent.
 pub fn read_lessons_file(path: &Path) -> io::Result<LessonsFile> {
-    let raw = fs::read_to_string(path)?;
+    parse_lessons_file(&fs::read_to_string(path)?)
+}
+
+/// [`read_lessons_file`] on bytes already read, such as a staged `LESSONS.md`
+/// ([`crate::stage::Stage::read`]). Same errors, less the file's own.
+pub fn parse_lessons_file(raw: &str) -> io::Result<LessonsFile> {
     // `split('\n')` over a trailing-newline file yields a final empty element;
     // that's expected and the lesson loop skips blank lines.
     let lines: Vec<&str> = raw.split('\n').collect();
