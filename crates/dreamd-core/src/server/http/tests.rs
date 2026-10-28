@@ -1832,7 +1832,6 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
         &schema_fields,
         "zlorp aarch64 ring-prebuilt",
         5,
-        None,
         now_sec,
     )
     .expect("recall");
@@ -2084,8 +2083,7 @@ async fn learn_routes_to_owning_project_not_boot() {
 
     let (_, schema_fields) = crate::index::build_schema();
     let now_sec = chrono::Utc::now().timestamp();
-    let results =
-        crate::recall(&b_reader, &schema_fields, MARKER, 5, None, now_sec).expect("recall B");
+    let results = crate::recall(&b_reader, &schema_fields, MARKER, 5, now_sec).expect("recall B");
     assert!(
         results
             .iter()

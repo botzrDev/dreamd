@@ -143,10 +143,10 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
         "writer's minted id must match what the client received"
     );
 
-    // Socket file unlinked by writer's Drop guard.
+    // The writer unlinks the socket file before it exits.
     assert!(
         !socket.exists(),
-        "writer Drop must unlink the socket file (got: still present)"
+        "the writer unlinks the socket file before it exits (got: still present)"
     );
 
     // JSONL contains exactly one parseable AgentLearning whose id is the

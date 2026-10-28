@@ -9,9 +9,9 @@
 //!   3. On bind success, chmod the socket to `0600` so only the daemon user
 //!      can connect (paired with `SO_PEERCRED` validation in DR-407).
 //!
-//! Cleanup: the returned [`SocketGuard`] unlinks the socket file on drop.
-//! The supervisor holds it for the entire process lifetime; mid-process panic
-//! or graceful shutdown both run the same cleanup path.
+//! Cleanup: the bind does not own the file. `dreamd watch` unlinks it on
+//! shutdown (`watch.rs`); a file left by a crash or a `SIGKILL` is an orphan,
+//! which the next bind removes (step 2).
 //!
 //! Unix-only. Windows path is DR-121 / WEG-135, deferred to v0.1.1.
 
@@ -20,7 +20,7 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Reason a bind attempt did not become the writer-process.
 #[derive(Debug, thiserror::Error)]
@@ -36,48 +36,6 @@ pub enum UdsBindError {
     Io(#[from] io::Error),
 }
 
-/// Owns the bound `UnixListener` and the cleanup of the on-disk socket file.
-/// Dropping the guard unlinks the file — supervisor MUST keep the guard alive
-/// for the lifetime of the writer-process.
-#[derive(Debug)]
-pub struct SocketGuard {
-    listener: UnixListener,
-    path: PathBuf,
-    unlink_on_drop: bool,
-}
-
-impl SocketGuard {
-    pub fn listener(&self) -> &UnixListener {
-        &self.listener
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Skip the on-disk unlink that Drop would otherwise perform. Tests use
-    /// this to simulate an orphaned socket file: a previous writer-process
-    /// that crashed before cleanup left the path behind even though the
-    /// kernel socket is gone. Workspace forbids `unsafe_code`, so we can't
-    /// move the listener out and skip Drop — the disarm flag is the safe
-    /// equivalent. The listener inside the guard is still closed normally
-    /// when the guard drops, releasing the kernel resource.
-    #[cfg(test)]
-    pub(crate) fn disarm_unlink(&mut self) {
-        self.unlink_on_drop = false;
-    }
-}
-
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        if self.unlink_on_drop {
-            // Best-effort: an unlink failure (e.g., path already removed by an
-            // operator running `rm`) is not actionable here.
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
 /// Core bind logic: attempt to bind `path` as a `UnixListener`, handling
 /// `AddrInUse` by probing the existing socket for liveness.
 ///
@@ -86,8 +44,7 @@ impl Drop for SocketGuard {
 ///   connected stream.
 /// * Stale/orphaned file → unlinks and re-binds transparently.
 ///
-/// Exposed as `pub(crate)` so `uds_server` can call it directly without
-/// duplicating the bind-and-recover logic.
+/// `pub(crate)` for `uds_server::bind_api_socket`, the production bind.
 pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError> {
     match UnixListener::bind(path) {
         Ok(l) => {
@@ -120,30 +77,8 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
     }
 }
 
-/// Try to claim the writer-process socket at `path`.
-///
-/// On success, returns a [`SocketGuard`] owning the bound listener and
-/// responsible for cleanup. On a live competitor, returns
-/// [`UdsBindError::AlreadyBound`] with the connected stream so the caller can
-/// proceed as a client. Stale/orphaned sockets (file exists but `connect()`
-/// is refused) are silently unlinked and re-bound — this is the AC's
-/// "never error out on a stale socket" path.
-pub fn bind_writer_socket(path: &Path) -> Result<SocketGuard, UdsBindError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = bind_socket_raw(path)?;
-    Ok(SocketGuard {
-        listener,
-        path: path.to_path_buf(),
-        unlink_on_drop: true,
-    })
-}
-
-/// Open a client connection to the writer-process at `path`. Used by the
-/// `npx dreamd-mcp` client path after a `bind_writer_socket` call returns
-/// `AlreadyBound`, and by tests asserting client/writer wiring.
+/// Open a client connection to the socket at `path`. [`bind_socket_raw`] uses
+/// it to tell a live writer from an orphaned socket file.
 pub fn try_connect_existing(path: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
@@ -200,32 +135,31 @@ mod tests {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
 
-        let guard = bind_writer_socket(&sock).expect("first bind ok");
+        let listener = bind_socket_raw(&sock).expect("first bind ok");
         let meta = std::fs::metadata(&sock).expect("socket exists");
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket must be created with 0600 perms");
-        drop(guard);
-        assert!(!sock.exists(), "Drop must remove the socket file from disk");
+        drop(listener);
     }
 
     #[test]
     fn second_bind_returns_already_bound_with_connectable_stream() {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
-        let guard = bind_writer_socket(&sock).expect("first bind");
+        let listener = bind_socket_raw(&sock).expect("first bind");
 
         // Accept on the listener in a background thread so the second-bind's
         // connect() call returns.
-        let listener = guard.listener().try_clone().expect("clone listener");
+        let acceptor_listener = listener.try_clone().expect("clone listener");
         let acceptor = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
+            let (mut stream, _) = acceptor_listener.accept().expect("accept");
             let mut buf = [0u8; 5];
             stream.read_exact(&mut buf).expect("read");
             assert_eq!(&buf, b"hello");
             stream.write_all(b"world").expect("write");
         });
 
-        let err = bind_writer_socket(&sock).expect_err("second bind must not succeed");
+        let err = bind_socket_raw(&sock).expect_err("second bind must not succeed");
         let mut stream = match err {
             UdsBindError::AlreadyBound(s) => s,
             other => panic!("expected AlreadyBound, got {other:?}"),
@@ -236,7 +170,7 @@ mod tests {
         assert_eq!(&reply, b"world");
 
         acceptor.join().expect("acceptor joined");
-        drop(guard);
+        drop(listener);
     }
 
     #[test]
@@ -251,11 +185,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
 
-        {
-            let mut guard = bind_writer_socket(&sock).expect("first bind");
-            guard.disarm_unlink();
-            drop(guard);
-        }
+        drop(bind_socket_raw(&sock).expect("first bind"));
         assert!(sock.exists(), "stale socket file expected for the test");
         assert!(
             !is_daemon_socket_live(&sock),
@@ -267,12 +197,12 @@ mod tests {
     fn is_daemon_socket_live_true_for_bound_listener() {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
-        let guard = bind_writer_socket(&sock).expect("bind ok");
+        let listener = bind_socket_raw(&sock).expect("bind ok");
         assert!(
             is_daemon_socket_live(&sock),
             "bound listener must answer connect probe"
         );
-        drop(guard);
+        drop(listener);
     }
 
     #[test]
@@ -280,21 +210,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
 
-        // Simulate a stale socket file: bind, then drop the guard *without*
-        // its on-disk cleanup. The kernel socket goes away (listener drops),
-        // but the path remains, so subsequent connect() attempts will see
-        // ConnectionRefused — the exact AC scenario.
-        {
-            let mut guard = bind_writer_socket(&sock).expect("first bind");
-            guard.disarm_unlink();
-            drop(guard);
-        }
+        // Simulate a stale socket file: bind, then drop the listener. The
+        // kernel socket goes away, but the path remains, so subsequent
+        // connect() attempts will see ConnectionRefused — the exact AC scenario.
+        drop(bind_socket_raw(&sock).expect("first bind"));
         assert!(sock.exists(), "stale socket file expected for the test");
 
-        let guard = bind_writer_socket(&sock).expect("re-bind on orphaned socket");
+        let listener = bind_socket_raw(&sock).expect("re-bind on orphaned socket");
         assert!(sock.exists(), "re-bind must leave a fresh socket in place");
         let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        drop(guard);
+        drop(listener);
     }
 }

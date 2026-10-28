@@ -116,7 +116,7 @@ pub(crate) fn recall_to_json(
     now_sec: i64,
 ) -> tantivy::Result<String> {
     let (_, schema_fields) = crate::index::build_schema();
-    let results = crate::recall(reader, &schema_fields, query, k as usize, None, now_sec)?;
+    let results = crate::recall(reader, &schema_fields, query, k as usize, now_sec)?;
     Ok(RecallIngress::to_json(results))
 }
 

@@ -623,7 +623,7 @@ fn start_watch_and_probe(
 
     if daemon_is_live() {
         // Something is already serving the socket. A second `dreamd watch`
-        // would lose the `bind_writer_socket` race with `AlreadyBound` and exit
+        // would lose the `bind_api_socket` race with `AlreadyBound` and exit
         // 1 into fully nulled stdio — a guaranteed-doomed process nobody would
         // ever see. Report the daemon that is actually up instead.
         return Ok(true);

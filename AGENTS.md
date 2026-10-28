@@ -347,7 +347,38 @@ Locked 2026-10-24:
     - library: new module `recurrence` (`ClusterCounts`, `RecallReader`, `RecurrenceWarmer`, `RecurrenceTables`, `SegmentRecurrence`; `ClusterCounts` and `RecallReader` are re-exported at the crate root). `recall`, `recall_excluding`, `score_by_salience`, `salience_report::build_report`, `invariants::check_store` and `recall_to_json` take `&RecallReader`, and `TantivyIndexHandle::reader()` returns one. `SalienceCollector::new(k, now_sec, tables)`. `RecurrenceContext::RecallIndexFastfield` is now `RecallSubtreeCount`. Removed: `IndexerMsg::ApplyRecurrenceSidecar`, `TantivyIndexHandle::apply_recurrence_sidecar` and `memory_diff::DiffError::Sidecar`.
 
     Spec: `assignments/BZR-1242.v2.md`. Amendment 1 covers two existing assertions under the new definition, and moves the git greps onto `5b4f1e3`.
-13. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
+13. **BZR-1243** — on `main` (`cd575af` + `bd3ef26`). Four maintenance paths no longer cost O(store size) per call:
+    - `/health` on Unix reads two in-memory marks through `AppState::live_marks`:
+      - `AppendMark { tail_id, appended }`, kept by the coordinator: at open, after each durable append, after a cycle commit, and when `reopen_after_external_change` re-reads the log;
+      - `CommitMark { last_indexed_id, committed_appends }`, published at the end of a successful `IndexerPersist::commit`; after a coverage pass `committed_appends` is every `Append` received.
+
+      `live_index_freshness` combines them. Windows keeps `assess_index_freshness`.
+    - `provenance::Ledger` loads its triples once, at the first append, as SHA-256 keys. Keys are inserted only after the write and sync succeed.
+    - `registry::RegistryCache` (`AppState::registry`) parses `registry.toml` once per `(len, mtime, dev, ino)`. `agent_root_middleware` calls it on `spawn_blocking`. `resolve_project` stays for the CLI.
+    - `recall_excluding` turns the exclusion into `MustNot` clauses: a `TermSetQuery` on `event_id`, and per prefix a `TermQuery` plus a `RangeQuery [p::, p:;)` on `skill_action`. `SegmentExclusion` and `SalienceCollector::with_exclusion` are deleted. An empty exclusion searches the unchanged query.
+
+    PM verification:
+    - Workspace 1254 / 0 / 0. Red-first: L1 on `8588449`; H1 via M1.
+    - The PM re-ran M1, M6, M7, M9, M11, M16, M18 and M19–M21; each fails as named.
+    - Base vs HEAD benches show no regression (drift entry `subtree-bench-is-the-recurrence-gate`). Stripped `dreamd` 20,937,248 bytes.
+    - The user committed `cd575af` mid-ticket, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`). `bd3ef26` holds r1: T16–T18, the re-read `tail_id` update and a `router.rs` rustdoc reword.
+    - r0's gaps were the spec's: the coverage-pass rule and the publish-after-ledger order had no test (drift entry `an-ordering-test-must-fail-the-step-it-orders`).
+
+    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+    - `GET /api/v1/health` on Unix reads no file. It reports the running daemon's own marks:
+      - `jsonl_tail_id` is the largest id in the log as the daemon last read or wrote it;
+      - `last_indexed_id` is the largest committed id;
+      - `unindexed_count` is the appends this daemon made that the index has not committed;
+      - `stale` is `unindexed_count > 0`;
+    - a change to the log made outside the daemon no longer shows in `/health`; `dreamd doctor`'s `index_freshness` line reports it;
+    - `/health` for a registered project that is not loaded loads it, as recall does (user decision, 2026-10-28). A polled project stays loaded, and a registered root without `.agent/` gets 500;
+    - Windows `/health` is unchanged;
+    - the ledger appender reads `provenance/ledger.jsonl` once per process, at its first append, instead of on every append;
+    - the daemon caches `registry.toml` and re-reads it when its size, mtime or inode changes; the lookup no longer blocks an async worker thread;
+    - `exclude=` / `--without` / `--without-cluster` drop matches in the query instead of reading each match's stored fields. Results are unchanged;
+    - library: new `server::{AppendMark, CommitMark, live_index_freshness}`, `registry::RegistryCache`, `AppState::registry`, `Supervisor::append_mark`, `TantivyIndexHandle::commit_mark` and `MemoryCoordinator::append_mark_handle`. Removed: `SalienceCollector::with_exclusion`.
+
+    Spec: `assignments/BZR-1243.v2.md`. Amendment 1 covers resuming after the mid-ticket commit; Amendment 2 is r1.
 14. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
 15. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
 16. **BZR-1238** — 1.1.0 release prep: CHANGELOG, version bump, end-to-end smoke, no `BZR-12…` ignores left. Tag and publish stay human steps.
@@ -374,12 +405,12 @@ An empty backlog query on `dreamd-eng` is that move. Milestone progress there is
 2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
 3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). BZR-1232 superseded that: taking the project writer lock resets a no-WAL `in_progress` and runs recovery in every writer. HTTP opens the index sender before dispatch.
 4. **BZR-168** — on `main` (`979ddc3`, with BZR-172). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs:649`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
-5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stays the on-disk watermark.
+5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stayed the on-disk watermark until BZR-1243, which moved Unix `/health` to in-memory marks.
 6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`.
 7. **BZR-827** — on `main` (`187cc50`). `GrantedStore` / `ContextGrant` in `context_grant.rs` filter recall by `source` (`episodic` / `semantic`) and refuse an append when episodic is not granted. `ContextGrant::both()` returns the inner recall string unchanged. MCP is not wired. Spec: `assignments/BZR-827.v2.md`. Doc: `docs/context-grant.md`. Do not claim momo `MemoryRegion` objects. Do not reopen it.
 8. **BZR-198** — on `main` (`f400d82`). `explain=1` on `GET /api/v1/recall` adds a `citations` array; every other caller, including MCP `search_nodes`, keeps the body with no `citations` key. Spec: `assignments/BZR-198.v2.md`. Doc: `docs/observability.md`. Do not reopen it.
 9. **BZR-193** — on `main` (`63791b9`). `dreamd blame <query>` prints id, timestamp, skill_action, content, bm25, salience, total, layer. Default `-k` is 5. `--explain` reuses `explain_factors`. `--json` is one compact array. `dreamd recall` stays `-k` 10. Spec: `assignments/BZR-193.v2.md`. Do not start a second copy.
-10. **BZR-194** — on `main` (`260f37d`). `dreamd recall --without` / `--without-cluster`, and repeatable `exclude=` on `GET /api/v1/recall`. The filter runs inside the collector before the top-k heap. MCP `search_nodes` and `dreamd blame` do not take it. Spec: `assignments/BZR-194.v2.md`.
+10. **BZR-194** — on `main` (`260f37d`). `dreamd recall --without` / `--without-cluster`, and repeatable `exclude=` on `GET /api/v1/recall`. The filter ran inside the collector before the top-k heap; since BZR-1243 it is `MustNot` clauses of the query. MCP `search_nodes` and `dreamd blame` do not take it. Spec: `assignments/BZR-194.v2.md`.
 11. **BZR-195** — on `main` (`806b764`). `GET /api/v1/observability/salience` and `dreamd salience-drift`. Score is `salience()` with no BM25. Drift reads only the snapshot dated exactly seven UTC days earlier. Spec: `assignments/BZR-195.v2.md`.
 12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
 13. **BZR-160** — on `main` (`806b764`). `snapshot::create_autosnap` writes `branches/objects/<id>/` and a `snap-*` ref. It does not write `HEAD`. There is no `dreamd memory snapshot` command. Spec: `assignments/BZR-160.v2.md`.
@@ -707,6 +738,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** An anti-pattern grep for a banned *API* (`count_tokens`, a URL path) will also match rustdoc that explains why that API is unused, unless comment lines are filtered. The `do not|don't|never` negation filter does not catch "we do not call X" if X is on a different sentence-shape.
 - **Why:** AILAB-196 §4 originally grepped `count_tokens|count-tokens|messages/count` in `llm.rs`. Phase 1 rustdoc explaining the rejected remote token-count endpoint tripped it. Same family as `guards-vs-mandates-same-line`.
 - **How to apply:** Grep call syntax / URLs (`\.count_tokens\(`, `messages/count`) and drop `///` / `//!` / `//` lines. Do not ban the English words in docs.
+- **Recurred on BZR-1243.** §4 grep 3 banned `std::fs|fs::read|canonicalize` anywhere in `router.rs`. The dev's own rustdoc ("canonicalizes the path") tripped it, and the dev reworded the comment to pass. Ban `canonicalize\(` and drop comment lines instead.
 - **Cross-refs:** `guards-vs-mandates-same-line`
 
 ### spec-grep-file-wide-hits-the-tickets-own-fixtures
@@ -1042,7 +1074,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Semantic `lsn_` docs are not edges.
   - The ledger append is idempotent on `(kind, from, to)`.
   - `run_indexer` takes its state as one `IndexerState` argument: an eighth argument fails `cargo clippy -- -D warnings`.
-- **Cross-refs:** `indexer-shed-is-not-replay-healed`
+  - Since BZR-1243 the step ends by publishing the `CommitMark` that `/health` reads. A failure anywhere earlier, the ledger append included, publishes nothing.
+- **Cross-refs:** `indexer-shed-is-not-replay-healed`, `an-ordering-test-must-fail-the-step-it-orders`
 
 ### bisect-searches-snap-refs-not-a-parent-graph
 
@@ -1106,6 +1139,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** BZR-1242 moved recurrence from a fastfield to a table that a `Warmer` builds per searcher. The public bench's corpus has no keys, so it cannot show what the table costs or how ranking changed. The PM's spec claimed its docs still carried `i % 5 + 1`. At `5b4f1e3` that value came from the fastfield, which is now written as 0; CLeetus caught it (verify r0, ruling 2). Measured on the BZR-1242 tree:
   - `recall_subtree`: 1k 47,581, 10k 282,317, 100k 2,620,211 ns P50;
   - `recurrence_cold`: 10k 215,636, 100k 750,621 ns.
+
+  The BZR-1243 PM ran the base (`8588449`) and HEAD one after the other on this machine, each with its own target dir. Sample P50 in ns, base → HEAD:
+  - `recall`: 1k 43,703 → 42,748, 10k 257,399 → 253,019, 100k 2,564,137 → 2,368,113;
+  - `recall_subtree`: 1k 45,075 → 43,019, 10k 264,435 → 253,916, 100k 2,432,317 → 2,303,330;
+  - `recurrence_cold`: 10k 211,398 → 211,962, 100k 739,854 → 729,638.
+
+  Run-to-run noise is several percent, so compare against a base run made in the same session.
 - **How to apply:**
   - A ticket that touches the collector, the warmer, the reader or the query re-runs both benches with nothing else running and reports P50 per size against the numbers above.
   - Leave the public bench's corpus alone (`public-benchmark-is-the-in-ram-recall-bench`). PERF.md and `docs/benchmarks.md` describe it.
@@ -1327,3 +1367,25 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Keep `.in_current_span()` on the spawned task so its logs keep the request id.
   - A test drops the ticket and checks that the next prepare succeeds.
 - **Cross-refs:** `ailab-162-drain-not-sigterm`, `coordinator-not-mutex-file`
+
+### an-ordering-test-must-fail-the-step-it-orders
+
+- **Rule:** To test "X happens only after step Y succeeds", fail Y itself. A failpoint that fires before Y proves only that X waits for the earlier step. Write one test per step that X must follow.
+- **Why:** BZR-1243's persist step runs commit → `failpoint-after-commit` → ledger append → watermark → publish the `CommitMark`. H7 failed the persist through `failpoint-after-commit`, which returns before the ledger. A mutant that published right after that failpoint passed all 702 lib tests (PM P3), because no persist-level test failed the ledger append. The spec's own mutation row (M6) moved the publish above the failpoint, so it could not find the gap. CLeetus flagged the placement, and r1 added T17 with `failpoint-ledger-write`. The same round found a second surviving mutant: the coverage-pass rule (`committed_appends = received`), which needs an `add_document` failure that nothing could inject. A persist-level test that calls `receive()` without `push()` simulates it (T16).
+- **How to apply:**
+  - List the steps that come before the guarded action. For each one, the spec names a failpoint or a direct call that fails it, and a test asserting the action did not happen.
+  - When a row in the mutation table can only move code above an existing failpoint, add a row that moves it to between each later pair of steps.
+  - When a branch needs a failure the tree cannot inject, test the unit below it (here `IndexerPersist`) directly.
+- **Cross-refs:** `mutation-must-get-past-the-backstop`, `mutate-each-check-of-a-compound-guard-alone`, `replay-open-is-an-index-doc-writer`
+
+### mid-ticket-commit-keeps-the-ticket-base
+
+- **Rule:** When the user commits a ticket's tree before sign-off, the ticket's base sha does not move. Every diff, grep, red-first run and bench baseline still compares with the base. The dev resumes from `HEAD` as its own unverified work. If the dev session that wrote the code is gone, the new one reads every mutation site in the committed code before running anything, because the commit can capture a mutant left in place mid-run.
+- **Why:** It has happened on two tickets. On BZR-1242, `3a610fd` held a tree with two failing tests. On BZR-1243, `cd575af` was committed and pushed with no report, and that CLeetus session's context was lost when it restarted. Once committed, `git status` no longer lists the ticket's files. Greps written as `git status --porcelain` or `git diff --name-only` with no range then see nothing, and pass.
+- **How to apply:**
+  - Append an amendment to the spec. It keeps the base, adds a range to every scope command (`git diff --name-status <base> HEAD`, plus `--diff-filter=A` for new files), and asks for the mutation-site audit.
+  - Red-first runs use `git archive <base>` into a scratch copy. Never `checkout` or `restore`.
+  - Record the hash of every path changed since the base, not only the paths changed since `HEAD`, and check them at LANDED.
+  - Tell the user. A pushed partial commit means any rework lands as a follow-up commit.
+- **Cross-refs:** `git-diff-name-only-misses-untracked`, `report-back-paste-can-be-truncated`
+

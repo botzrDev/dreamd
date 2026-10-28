@@ -27,14 +27,13 @@
 //! ## `dreamd watch` does not detach — liveness is the `Child` handle
 //!
 //! `commands::watch::run` calls [`dreamd_core::server::run_watch`] on the
-//! calling thread and blocks. `dreamd-core` does carry a `detach_double_fork`
-//! helper, but nothing calls it — verified by grep, and confirmed here by the
-//! spawned `dreamd watch` having no children in `/proc`. The `Child` this suite
-//! spawns therefore **is** the daemon, so `Child::try_wait` is authoritative
-//! and does not lie the way it would over a double fork. The socket probe is
-//! asserted alongside it as the user-visible half of the same fact: a daemon
-//! that is alive but no longer answering would fail assertion 1 just as hard as
-//! a dead one.
+//! calling thread and blocks. dreamd has no daemonize path, which this suite
+//! confirms by the spawned `dreamd watch` having no children in `/proc`. The
+//! `Child` this suite spawns therefore **is** the daemon, so `Child::try_wait`
+//! is authoritative and does not lie the way it would over a double fork. The
+//! socket probe is asserted alongside it as the user-visible half of the same
+//! fact: a daemon that is alive but no longer answering would fail assertion 1
+//! just as hard as a dead one.
 //!
 //! ## Sandbox discipline
 //!

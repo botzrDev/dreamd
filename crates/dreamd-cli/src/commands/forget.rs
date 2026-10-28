@@ -516,7 +516,6 @@ mod tests {
                     &fields,
                     "unique forget needle",
                     10,
-                    None,
                     NOW_SEC,
                 )
                 .unwrap()

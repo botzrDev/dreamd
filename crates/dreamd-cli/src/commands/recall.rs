@@ -279,10 +279,9 @@ pub fn run(
         RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).map_err(RecallError::Search)?;
 
     let (_schema, fields) = dreamd_core::index::build_schema();
-    let results = dreamd_core::collector::recall_excluding(
-        &reader, &fields, query, k, None, exclusion, now_sec,
-    )
-    .map_err(RecallError::Search)?;
+    let results =
+        dreamd_core::collector::recall_excluding(&reader, &fields, query, k, exclusion, now_sec)
+            .map_err(RecallError::Search)?;
 
     write!(out, "{}", render_report(&results, now_sec, explain))?;
     Ok(())

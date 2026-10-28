@@ -212,8 +212,8 @@ pub fn run(
         RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).map_err(RecallError::Search)?;
 
     let (_schema, fields) = dreamd_core::index::build_schema();
-    let results = dreamd_core::recall(&reader, &fields, query, k, None, now_sec)
-        .map_err(RecallError::Search)?;
+    let results =
+        dreamd_core::recall(&reader, &fields, query, k, now_sec).map_err(RecallError::Search)?;
 
     if json {
         write!(out, "{}", render_json(&results, now_sec, explain))?;

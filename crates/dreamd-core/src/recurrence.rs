@@ -693,7 +693,7 @@ mod tests {
         writer.commit().expect("commit");
         reader.reload().expect("reload");
 
-        let results = recall(&reader, &fields, "quokka", 10, None, NOW).expect("recall");
+        let results = recall(&reader, &fields, "quokka", 10, NOW).expect("recall");
         let mut got: Vec<(String, u64)> = results
             .iter()
             .map(|r| (r.event_id.clone(), r.recurrence))

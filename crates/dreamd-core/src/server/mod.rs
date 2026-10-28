@@ -6,8 +6,8 @@
 //! `npx dreamd-mcp` install funnel stays one-line — no separately-installed
 //! daemon, no background install step.
 //!
-//! Crate placement decision (2026-05-14): UDS binding, double-fork, and the
-//! supervisor lifecycle live in `dreamd-core` behind `pub mod server`. No
+//! Crate placement decision (2026-05-14): UDS binding, the HTTP surface and
+//! the supervisor lifecycle live in `dreamd-core` behind `pub mod server`. No
 //! `dreamd-server` crate yet. Re-evaluation trigger is compile pressure or a
 //! second Rust binary consumer (see `docs/architecture.md`).
 //!
@@ -37,8 +37,7 @@
 //!     `~/.agent/dreamd.sock` with `0600` perms and orphaned-socket recovery.
 //!   * `uds_server` — **`#[cfg(unix)]`** — the async `bind_api_socket` wrapper
 //!     over `uds` plus the `serve_uds` accept loop that injects `PeerUid`.
-//!   * [`lifecycle`] — supervisor (owns `MemoryCoordinator` senders + handle)
-//!     and the Unix double-fork helper.
+//!   * [`lifecycle`] — the supervisor (owns `MemoryCoordinator` senders + handle).
 //!   * [`watch`] — the `dreamd watch` foreground daemon, on every target. One
 //!     public [`run_watch`] over two whole sequences: Unix binds the UDS and
 //!     waits SIGINT/SIGTERM; off Unix [`bind_listen`] takes `127.0.0.1:0` (or
@@ -76,9 +75,7 @@ pub use http::{build_router, AppState};
 pub use index_coverage::{assess_index_coverage, CoverageReport, IndexCoverage};
 pub use index_freshness::{live_index_freshness, AppendMark, CommitMark};
 pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
-pub use lifecycle::{
-    CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,
-};
+pub use lifecycle::{CoordinatorSendError, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 pub use project_resource_map::{ProjectMapResource, ProjectResourceMap, ProjectResourceMapConfig};
 pub use project_runtime::ProjectRuntime;
 pub use tantivy_handle::{
@@ -91,9 +88,7 @@ pub use tantivy_handle::{
 // type, so there is nothing to widen — Windows gets the loopback-TCP siblings
 // instead, not a portable version of these.
 #[cfg(unix)]
-pub use uds::{
-    bind_writer_socket, is_daemon_socket_live, try_connect_existing, SocketGuard, UdsBindError,
-};
+pub use uds::{is_daemon_socket_live, try_connect_existing, UdsBindError};
 // Cfg-free as of AILAB-192, in step with `watch.rs` dropping its file-level
 // `#![cfg(unix)]`: `dreamd watch` is now a real command on every target, so the
 // CLI imports one `run_watch` and one `WatchError` and does no cfg of its own.

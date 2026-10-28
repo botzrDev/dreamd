@@ -381,4 +381,4 @@ del %USERPROFILE%\AppData\Roaming\dreamd\dev.dreamd.dreamd.xml
 - [../GUIDE.md §5](../GUIDE.md#5-daemon-mode) — running `dreamd watch` by hand
 - [troubleshooting.md — Socket permission denied](./troubleshooting.md#socket-permission-denied)
 - [../SECURITY.md](../SECURITY.md) — threat model and socket auth
-- [../ARCHITECTURE.md §8.1](../ARCHITECTURE.md#81-vestigial--deferred-machinery-v01) — why the service supervises a foreground process and `detach_double_fork` stays unused
+- [../ARCHITECTURE.md §8](../ARCHITECTURE.md#8-unsafe-policy) — why the service supervises a foreground `dreamd watch`

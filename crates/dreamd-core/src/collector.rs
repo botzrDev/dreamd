@@ -346,16 +346,11 @@ fn hydrate_scored(
 /// `now_sec` is caller-provided so tests stay deterministic — same
 /// invariant as `LessonsFile` (drift entry `timestamps-caller-provided-no-utc-now`):
 /// no wall-clock call inside this function.
-///
-/// Layer filtering is wired as a `BooleanQuery` AND with a `TermQuery` on
-/// the `layer` field rather than inside the collector; the collector
-/// stays layer-agnostic.
 pub fn recall(
     reader: &RecallReader,
     fields: &SchemaFields,
     query_text: &str,
     k: usize,
-    layer: Option<Layer>,
     now_sec: i64,
 ) -> tantivy::Result<Vec<RecallResult>> {
     recall_excluding(
@@ -363,7 +358,6 @@ pub fn recall(
         fields,
         query_text,
         k,
-        layer,
         &RecallExclusion::default(),
         now_sec,
     )
@@ -384,7 +378,6 @@ pub fn recall_excluding(
     fields: &SchemaFields,
     query_text: &str,
     k: usize,
-    layer: Option<Layer>,
     exclusion: &RecallExclusion,
     now_sec: i64,
 ) -> tantivy::Result<Vec<RecallResult>> {
@@ -394,17 +387,7 @@ pub fn recall_excluding(
     let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
     let bm25_query = query_parser.parse_query(query_text)?;
 
-    let final_query: Box<dyn Query> = if let Some(l) = layer {
-        let term = Term::from_field_text(fields.layer, l.as_str());
-        let layer_query = TermQuery::new(term, IndexRecordOption::Basic);
-        Box::new(BooleanQuery::new(vec![
-            (Occur::Must, bm25_query),
-            (Occur::Must, Box::new(layer_query)),
-        ]))
-    } else {
-        bm25_query
-    };
-    let final_query = exclude(final_query, fields, exclusion);
+    let final_query = exclude(bm25_query, fields, exclusion);
 
     let collector = SalienceCollector::new(k, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
@@ -529,7 +512,7 @@ mod tests {
             .expect("add doc");
         writer.commit().expect("commit");
         let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
-        let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
+        let results = recall(&reader, &fields, "axum", 10, NOW_SEC).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].event_id, "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -549,7 +532,7 @@ mod tests {
             "rust::axum::error_handling",
             Layer::Episodic,
         )]);
-        let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
+        let results = recall(&reader, &fields, "axum", 10, NOW_SEC).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].score, 0.0, "pain=0 should zero the final score");
     }
@@ -571,38 +554,12 @@ mod tests {
             })
             .collect();
         let (_idx, fields, reader) = build_index_with(&entries);
-        let results = recall(&reader, &fields, "axum", 3, Some(Layer::Episodic), NOW_SEC).unwrap();
+        let results = recall(&reader, &fields, "axum", 3, NOW_SEC).unwrap();
         assert_eq!(results.len(), 3, "k=3 must evict to 3 results");
         // Returned in descending score order; with constant BM25 + pain + importance,
         // salience monotonically decays with age, so order matches age ascending.
         assert!(results[0].timestamp_sec >= results[1].timestamp_sec);
         assert!(results[1].timestamp_sec >= results[2].timestamp_sec);
-    }
-
-    #[test]
-    fn test_layer_filter_excludes_semantic() {
-        let (_idx, fields, reader) = build_index_with(&[
-            (
-                "axum bug episodic",
-                NOW_SEC - DAY_SECS,
-                5.0,
-                5.0,
-                "rust::axum::error_handling",
-                Layer::Episodic,
-            ),
-            (
-                "axum lesson semantic",
-                NOW_SEC - DAY_SECS,
-                5.0,
-                5.0,
-                "rust::axum::error_handling",
-                Layer::Semantic,
-            ),
-        ]);
-        let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
-        assert_eq!(results.len(), 1, "layer filter must drop semantic doc");
-        assert_eq!(results[0].layer, Layer::Episodic);
-        assert!(results[0].content.contains("bug"));
     }
 
     #[test]
@@ -627,15 +584,7 @@ mod tests {
                 Layer::Episodic,
             ),
         ]);
-        let results = recall(
-            &reader,
-            &fields,
-            "tokio",
-            10,
-            Some(Layer::Episodic),
-            NOW_SEC,
-        )
-        .unwrap();
+        let results = recall(&reader, &fields, "tokio", 10, NOW_SEC).unwrap();
         assert_eq!(results.len(), 2);
         assert!(
             results[0].score > results[1].score,
@@ -697,15 +646,7 @@ mod tests {
             ),
         ];
         let (_idx, fields, reader) = build_index_with(&entries);
-        let results = recall(
-            &reader,
-            &fields,
-            "axum error handling",
-            3,
-            Some(Layer::Episodic),
-            NOW_SEC,
-        )
-        .unwrap();
+        let results = recall(&reader, &fields, "axum error handling", 3, NOW_SEC).unwrap();
         insta::with_settings!({
             // Numeric fields are formula-derived f64s — filter all three so the
             // snapshot stays stable under irrelevant floating-point drift (DR-703).
@@ -901,15 +842,14 @@ mod tests {
                 Layer::Episodic,
             ),
         ]);
-        let baseline = recall(&reader, &fields, "axum", 1, None, NOW_SEC).unwrap();
+        let baseline = recall(&reader, &fields, "axum", 1, NOW_SEC).unwrap();
         assert_eq!(ids(&baseline), vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
 
         let exclusion = RecallExclusion {
             ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()],
             cluster_prefixes: Vec::new(),
         };
-        let results =
-            recall_excluding(&reader, &fields, "axum", 1, None, &exclusion, NOW_SEC).unwrap();
+        let results = recall_excluding(&reader, &fields, "axum", 1, &exclusion, NOW_SEC).unwrap();
         assert_eq!(ids(&results), vec!["evt_01BX5ZZKBKACTAV9WEVGEMMVRZ"]);
     }
 
@@ -961,8 +901,7 @@ mod tests {
             ids: Vec::new(),
             cluster_prefixes: vec!["rust::error_handling".to_string()],
         };
-        let results =
-            recall_excluding(&reader, &fields, "error", 10, None, &exclusion, NOW_SEC).unwrap();
+        let results = recall_excluding(&reader, &fields, "error", 10, &exclusion, NOW_SEC).unwrap();
         let mut got = ids(&results);
         got.sort_unstable();
         // Both layers drop; `rustacean` and `rust::errors` are not extensions.
@@ -1005,8 +944,7 @@ mod tests {
             ids: vec!["evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()],
             cluster_prefixes: Vec::new(),
         };
-        let results =
-            recall_excluding(&reader, &fields, "tokio", 10, None, &exclusion, NOW_SEC).unwrap();
+        let results = recall_excluding(&reader, &fields, "tokio", 10, &exclusion, NOW_SEC).unwrap();
         assert_eq!(ids(&results), vec!["lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
         assert_eq!(results[0].layer, Layer::Semantic);
     }
@@ -1039,13 +977,12 @@ mod tests {
                 Layer::Semantic,
             ),
         ]);
-        let plain = recall(&reader, &fields, "serde", 2, None, NOW_SEC).unwrap();
+        let plain = recall(&reader, &fields, "serde", 2, NOW_SEC).unwrap();
         let excluding = recall_excluding(
             &reader,
             &fields,
             "serde",
             2,
-            None,
             &RecallExclusion::default(),
             NOW_SEC,
         )
@@ -1080,7 +1017,7 @@ mod tests {
             .map(|&(id, key, pain, layer)| ("quokka", id, key, NOW_SEC - DAY_SECS, pain, layer))
             .collect();
         let (_idx, fields, reader) = build_exclusion_index(&entries);
-        let all = recall(&reader, &fields, "quokka", docs.len(), None, NOW_SEC).unwrap();
+        let all = recall(&reader, &fields, "quokka", docs.len(), NOW_SEC).unwrap();
         assert_eq!(
             ids(&all),
             docs.iter().map(|d| d.0).collect::<Vec<_>>(),
@@ -1092,12 +1029,11 @@ mod tests {
             cluster_prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
         };
         let cases = [
-            (exclusion(&["a"], &[]), None),
-            (exclusion(&["a::b"], &[]), None),
-            (exclusion(&["go"], &["evt_a_bc"]), None),
-            (exclusion(&[], &["lsn_evt_a_b"]), None),
-            (exclusion(&["a:b"], &[]), None),
-            (exclusion(&["a"], &[]), Some(Layer::Episodic)),
+            exclusion(&["a"], &[]),
+            exclusion(&["a::b"], &[]),
+            exclusion(&["go"], &["evt_a_bc"]),
+            exclusion(&[], &["lsn_evt_a_b"]),
+            exclusion(&["a:b"], &[]),
         ];
         let hits = |results: &[RecallResult]| -> Vec<(String, u64)> {
             results
@@ -1105,21 +1041,16 @@ mod tests {
                 .map(|r| (r.event_id.clone(), r.score.to_bits()))
                 .collect()
         };
-        for (exclusion, layer) in &cases {
+        for exclusion in &cases {
             let reference: Vec<RecallResult> =
-                recall(&reader, &fields, "quokka", docs.len(), *layer, NOW_SEC)
+                recall(&reader, &fields, "quokka", docs.len(), NOW_SEC)
                     .unwrap()
                     .into_iter()
                     .filter(|r| !exclusion.excludes(&r.event_id, &r.skill_action))
                     .take(4)
                     .collect();
-            let got = recall_excluding(&reader, &fields, "quokka", 4, *layer, exclusion, NOW_SEC)
-                .unwrap();
-            assert_eq!(
-                hits(&got),
-                hits(&reference),
-                "exclusion {exclusion:?}, layer {layer:?}"
-            );
+            let got = recall_excluding(&reader, &fields, "quokka", 4, exclusion, NOW_SEC).unwrap();
+            assert_eq!(hits(&got), hits(&reference), "exclusion {exclusion:?}");
         }
     }
 }

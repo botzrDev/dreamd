@@ -35,8 +35,7 @@
 //! designed to die — a logon trigger that first fires usefully *after* 192 is
 //! the entire point. Nothing on this backend detaches a process, tracks a PID
 //! of its own, or keeps a liveness ping; that was the pre-`watch`
-//! architecture (AILAB-210), and `detach_double_fork` keeps its zero
-//! production call sites here too.
+//! architecture (AILAB-210).
 //!
 //! `install` is also where the Windows bearer token is minted: 32
 //! cryptographically random bytes, hex-encoded into `DaemonHome::auth_json()`
@@ -106,13 +105,12 @@
 //! `KeepAlive=true`, which would restart after a clean SIGTERM). That choice
 //! shapes everything else in this module:
 //!
-//! - **`detach_double_fork` is not this module's call site — do not call it.**
-//!   Under `Type=simple` systemd tracks the process it spawned, launchd
-//!   tracks the `ProgramArguments` process the same way, and the Task
-//!   Scheduler tracks the `Actions/Exec` process it started; a double-fork
-//!   would leave the supervisor watching the intermediate parent while the
-//!   real daemon is reparented to init and escapes supervision entirely. The
-//!   helper keeps its zero production call sites (ARCHITECTURE.md §8.1).
+//! - **Do not daemonize.** Under `Type=simple` systemd tracks the process it
+//!   spawned, launchd tracks the `ProgramArguments` process the same way, and
+//!   the Task Scheduler tracks the `Actions/Exec` process it started; a
+//!   double-fork would leave the supervisor watching the intermediate parent
+//!   while the real daemon is reparented to init and escapes supervision
+//!   entirely. dreamd has no daemonize path (ARCHITECTURE.md §8).
 //! - **`WorkingDirectory` (unit line and plist key alike) is the [`AgentRoot`]
 //!   project root discovered from `cwd` at install time.** `run_watch` does
 //!   `AgentRoot::discover(cwd)` and exits 2 without a project root, so a

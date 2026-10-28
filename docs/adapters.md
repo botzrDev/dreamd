@@ -53,8 +53,6 @@ Point at an existing adapter rather than duplicating full JSON — each ships a
 - Cline → [`../adapters/cline/`](../adapters/cline/README.md)
 - Aider (documentation-first) → [`../adapters/aider/`](../adapters/aider/README.md)
   (CONVENTIONS.md template; append via UDS HTTP — no MCP)
-- Letta → [`../adapters/letta/`](../adapters/letta/README.md) (a code seam only,
-  nothing to install; a Letta agent that speaks MCP uses the same `npx` block)
 
 ### 2. Documentation-first (no MCP)
 

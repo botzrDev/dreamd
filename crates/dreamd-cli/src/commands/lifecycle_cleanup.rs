@@ -410,7 +410,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 ///
 /// Shells out to `kill(1)` rather than calling `libc::kill`: the workspace
 /// sets `unsafe_code = "forbid"` (root `Cargo.toml`, `[workspace.lints.rust]`)
-/// and the single ratified exception is `detach_double_fork` in `dreamd-core`.
+/// and no crate overrides it.
 /// A stop is best-effort, so paying one `fork`/`exec` per in-scope daemon —
 /// there is normally at most one `watch` and one `mcp` — is the cheap trade.
 /// Output is captured so `kill`'s own diagnostics do not interleave with the

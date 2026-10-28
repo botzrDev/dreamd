@@ -104,7 +104,6 @@ fn bench_recall_subtree(c: &mut Criterion) {
                     black_box(&fields),
                     black_box("rust error"),
                     black_box(10),
-                    black_box(None),
                     black_box(NOW_SEC),
                 )
                 .unwrap();

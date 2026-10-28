@@ -42,13 +42,11 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) under `.agent/.dreamd/branches/` — objects, refs, `HEAD`, the per-dream-cycle `snap-*` refs, `memory diff` and `memory bisect` |
 | [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) under `.agent/.dreamd/provenance/`. Edge recording, the read-only `dreamd doctor --provenance` check, and `dreamd forget` (with its `forget-receipt/1.0` file) are implemented; the signed proof and a standalone verifier are **not** |
 
-## Optional and library-only features
+## Optional features
 
 | Document | Audience | Purpose |
 |---|---|---|
-| [vectors.md](./vectors.md) | Contributors | Optional `vectors` Cargo feature (off by default) — `dreamd vectors enable` downloads the model on a `--features vectors` build and exits 2 on the default binary; **still no vector recall**. Also covers the unused `rrf::fuse` helper |
-| [context-grant.md](./context-grant.md) | Contributors | `GrantedStore` / `ContextGrant` — a prototype recall/append filter in `dreamd-core`; **not wired to MCP** or the CLI |
-| [../adapters/letta/README.md](../adapters/letta/README.md) | Contributors | `LettaStore` — a code seam only; nothing to install |
+| [vectors.md](./vectors.md) | Contributors | Optional `vectors` Cargo feature (off by default) — `dreamd vectors enable` downloads the model on a `--features vectors` build and exits 2 on the default binary; **still no vector recall** |
 
 ## Marketing & narrative
 

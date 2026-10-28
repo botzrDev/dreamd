@@ -271,7 +271,7 @@ async fn live_appended_docs_carry_the_subtree_recurrence() {
     let h = open(&root);
     let (_, fields) = build_schema();
     let now = chrono::Utc::now().timestamp();
-    let results = dreamd_core::recall(h.reader(), &fields, "quokka", 10, None, now).unwrap();
+    let results = dreamd_core::recall(h.reader(), &fields, "quokka", 10, now).unwrap();
     let recurrences: Vec<u64> = results.iter().map(|r| r.recurrence).collect();
     assert_eq!(results.len(), 3, "precondition: all three appends indexed");
     assert!(

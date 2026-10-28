@@ -219,18 +219,14 @@ Every persisted episodic record carries `schema_version: "1.0.0"`; daemon `state
 
 ### 8. `unsafe` policy
 
-Workspace lint is `unsafe_code = "forbid"`. `dreamd-core` has a scoped `"deny"` override for `detach_double_fork` only, with an explicit SAFETY contract. Do not widen the downgrade.
+Workspace lint is `unsafe_code = "forbid"`, and every crate inherits it (`[lints] workspace = true`); no crate overrides it, and there is no `unsafe` in the workspace. dreamd has no daemonize path: `dreamd watch` runs in the foreground, and `dreamd service install` supervises that process on all three backends (the systemd `--user` unit with `Type=simple`, AILAB-190; the macOS LaunchAgent, AILAB-169; the Windows logon scheduled task, AILAB-203). BZR-1244 deleted `detach_double_fork`, the unused `fork → setsid → fork` helper that was the one exception, with dreamd-core's `deny` override.
 
 #### 8.1 Vestigial / deferred machinery (v0.1)
 
-Modules and CLI surfaces that have **no production call sites** (or misleading docs) but are intentionally retained. Do not delete these during launch freeze without revisiting the decision here.
+CLI surfaces that are, or were, reserved. BZR-1244 deleted the items with no production caller that this table used to keep (`ServerConfig`, `SocketGuard` / `bind_writer_socket`, recall's `layer` parameter, `detach_double_fork`) together with `context_grant`, `letta` and `rrf`. Production stale-socket recovery is `bind_socket_raw` (`server/uds.rs`), which `bind_api_socket` runs on every `dreamd watch` start.
 
 | Item | What it is | Status (v0.1) | Decision | Revisit when |
 |---|---|---|---|---|
-| `detach_double_fork` (`server/lifecycle.rs`) | Unix `fork → setsid → fork` daemonization helper; sole `unsafe` block in `dreamd-core` (WEG-99–104) | **Zero call sites** — not invoked by `dreamd watch` or any shipped path | **Keep unused** — `dreamd service install` supervises foreground `dreamd watch` on all three backends: the systemd `--user` unit (AILAB-190, `Type=simple`), the macOS LaunchAgent (AILAB-169, `KeepAlive` + foreground `ProgramArguments`) and the Windows Task Scheduler logon task (AILAB-203, `schtasks /Create /XML`, `Actions/Exec` = `<this binary> watch` — a scheduled task, not a Windows Service, and no `CreateProcess` `DETACHED_PROCESS`), so none of them is this helper's call site; it still has **zero** call sites and is retained only for a possible non-systemd / non-launchd / non-schtasks background path | A non-systemd / non-launchd / non-schtasks background mode is scheduled (not AILAB-190 / AILAB-169 / AILAB-203) |
-| `ServerConfig` (`server/lifecycle.rs`) | Struct + `impl` for future daemon boot configuration | **Never constructed** in production | **Keep** — wiring type for a future `server::run` refactor; do not delete pre-launch | Second binary consumer or `server::run` extraction (see `docs/architecture.md` crate-split tripwires) |
-| `SocketGuard` / `bind_writer_socket` (`server/uds.rs`) | RAII UDS bind with Drop-unlink and orphan recovery | **Tested**; production uses `bind_api_socket` + manual unlink in `watch.rs` | **Keep** — production has not switched to the RAII bind as of 1.0.0, so a `SIGKILL` can still leave an orphan socket (`dreamd doctor --repair` unlinks it); note the production gap | Orphan-socket hardening ticket |
-| `layer` filter in `collector::recall` | `layer: Option<Layer>` param on BM25 recall | **All production callers pass `None`** (HTTP `/recall`, MCP `search_nodes`). Both layers are indexed (LESSONS.md lessons since v0.1.1, AILAB-205) and rank together; each hit carries `source` (`"episodic"` \| `"semantic"`) | **Keep** — test-only surface; no HTTP or MCP parameter exposes it | A layer-filtered recall surface is scheduled |
 | `--dry` on `dreamd dream` | Clap flag on the dream subcommand | **Implemented** (AILAB-341) — previews the would-be `LESSONS.md` on stdout, writes nothing, skips the daemon proxy | **Shipped** — no longer a reserved surface | n/a |
 | `--auto` on `dreamd dream` | Hidden clap flag on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for a future auto mode (not shipped as of 1.0.0; the dream cycle is manual-only); documented here, not only in `cli.rs` | An auto dream cycle is scheduled |
 
@@ -280,7 +276,7 @@ Log level comes from `DREAMD_LOG` (standard `EnvFilter` syntax, default `info`),
 
 The dream cycle is the re-encode-at-the-boundary step: producing harness-agnostic phrasing is an explicit goal of consolidation, not a side effect.
 
-**Guardrail for any embedding retrieval.** The shipped "semantic" layer (DR-211 / AILAB-205) is the `LESSONS.md` *document* layer in the same Tantivy index, scored by lexical BM25 × salience — it is not embeddings. Recall has no vector or hybrid path as of 1.0.0: the non-default `vectors` cargo feature only downloads a model, and `rrf::fuse` is a library function recall does not call. If embedding retrieval is ever wired in, the embedding is a **retrieval index only, never the stored or served payload**, and it must use a **single dreamd-controlled neutral encoder** — never each harness's own encoder. Per-harness embeddings reintroduce exactly the cross-geometry drift this decision exists to avoid.
+**Guardrail for any embedding retrieval.** The shipped "semantic" layer (DR-211 / AILAB-205) is the `LESSONS.md` *document* layer in the same Tantivy index, scored by lexical BM25 × salience — it is not embeddings. Recall has no vector or hybrid path as of 1.0.0: the non-default `vectors` cargo feature only downloads a model, and there is no fusion code. If embedding retrieval is ever wired in, the embedding is a **retrieval index only, never the stored or served payload**, and it must use a **single dreamd-controlled neutral encoder** — never each harness's own encoder. Per-harness embeddings reintroduce exactly the cross-geometry drift this decision exists to avoid.
 
 **Validation.** Portability is proven by a cross-harness out-of-distribution split — write with harness A, recall with an independent harness B that never touched the write (`scripts/alpha/`) — never by same-harness round-trip. Substring presence is the floor; frame-completeness (the recall payload carries `source_harness` + `skill_action`) and paraphrase recall are the portability metric.
 
@@ -343,8 +339,7 @@ All `dreamd-core` paths are under `crates/dreamd-core/src/`.
 | Provenance ledger | `provenance.rs` |
 | Registry (`~/.agent/registry.toml`) | `registry.rs` |
 | Config, redaction, first-run disclosure | `config.rs`, `redaction.rs`, `privacy.rs` |
-| Library-only stores (MCP not wired) | `context_grant.rs` (`GrantedStore`), `letta.rs` (`LettaStore`) |
-| Library-only, unused by recall | `rrf.rs`; `vectors.rs` (`vectors` feature) |
+| Model download, unused by recall (`vectors` feature) | `vectors.rs` |
 | Schema migration stub | `migrate.rs` |
 | Wire types | `crates/dreamd-protocol/src/lib.rs` |
 | CLI | `crates/dreamd-cli/src/cli.rs`, `crates/dreamd-cli/src/commands/` |

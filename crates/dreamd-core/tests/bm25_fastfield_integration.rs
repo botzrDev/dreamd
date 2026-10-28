@@ -179,7 +179,7 @@ fn query_a_rust_error_handling_top3_strict_ordering() {
     let (_idx, fields, reader) = build_index_from_fixture(&records);
 
     let results =
-        recall(&reader, &fields, "rust error handling", 3, None, NOW_SEC).expect("recall Query A");
+        recall(&reader, &fields, "rust error handling", 3, NOW_SEC).expect("recall Query A");
 
     assert_eq!(results.len(), 3, "Query A: expected top-3");
 
@@ -216,7 +216,7 @@ fn query_b_error_handling_rust_top3_set_membership() {
     let (_idx, fields, reader) = build_index_from_fixture(&records);
 
     let results =
-        recall(&reader, &fields, "error handling rust", 3, None, NOW_SEC).expect("recall Query B");
+        recall(&reader, &fields, "error handling rust", 3, NOW_SEC).expect("recall Query B");
 
     assert_eq!(results.len(), 3, "Query B: expected top-3");
 
@@ -266,7 +266,7 @@ fn query_b_error_handling_rust_top3_set_membership() {
 fn recall_results_are_score_descending() {
     let records = load_fixture();
     let (_idx, fields, reader) = build_index_from_fixture(&records);
-    let results = recall(&reader, &fields, "rust error handling", 5, None, NOW_SEC).unwrap();
+    let results = recall(&reader, &fields, "rust error handling", 5, NOW_SEC).unwrap();
     for pair in results.windows(2) {
         assert!(
             pair[0].score >= pair[1].score,

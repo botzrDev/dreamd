@@ -41,8 +41,8 @@ The workspace currently has three crates:
   `decay`, `wal`, `autobiography`. Forget, branches, provenance: `forget`,
   `snapshot`, `memory_diff`, `bisect`, `provenance`. Transport: `server`
   (HTTP + daemon), `mcp`, `client` / `daemon_client`, `observability`.
-  Library-only, not wired into recall or MCP: `context_grant`, `letta`, `rrf`,
-  and `vectors` (behind the non-default `vectors` feature).
+  Not wired into recall or MCP: `vectors` (behind the non-default `vectors`
+  feature).
 - `dreamd` (the CLI crate, package name `dreamd`, dir `dreamd-cli`) — clap
   definitions in `cli.rs`, one module per subcommand under `commands/`.
 
@@ -52,18 +52,17 @@ members. Future splits will happen exactly when their tripwires fire, not
 before:
 
 - **`dreamd-server`** — WEG-21 landed (2026-05-14) without extracting a
-  separate crate. Resolution: UDS binding, double-fork lifecycle, the HTTP
-  surface, and the `MemoryCoordinator` supervisor all live in `dreamd-core`
-  behind `pub mod server`. Module layout:
-  - `crates/dreamd-core/src/server/uds.rs` — `bind_writer_socket` with
-    orphan-recovery and 0600 perms; `SocketGuard` Drop-cleans the path.
-    Production `dreamd watch` uses `uds_server::bind_api_socket` instead
-    (manual unlink on shutdown); see ARCHITECTURE.md §8.1.
+  separate crate. Resolution: UDS binding, the HTTP surface, and the
+  `MemoryCoordinator` supervisor all live in `dreamd-core` behind
+  `pub mod server`. Module layout:
+  - `crates/dreamd-core/src/server/uds.rs` — `bind_socket_raw` with orphan
+    recovery and 0600 perms. `uds_server::bind_api_socket` wraps it for
+    `dreamd watch`, which unlinks the socket on shutdown.
   - `crates/dreamd-core/src/server/http/` — the Axum router and handlers
     behind `/api/v1/*`. There is no separate server crate to point at; this
     directory is the whole HTTP surface.
   - `crates/dreamd-core/src/server/lifecycle.rs` — `Supervisor` owning the
-    coordinator sender + handle, plus the Unix `detach_double_fork` helper.
+    coordinator sender + handle.
   - `crates/dreamd-core/src/server/index_map.rs` — `IndexHandle` trait,
     `IndexError`, and `ProjectIndexMap<H>` (LRU cap 10, idle eviction 30 min;
     the policy itself lives in `project_resource_map.rs` and is shared with
@@ -89,15 +88,8 @@ before:
   -p dreamd-core` story simple and the supervisor adjacent to the
   coordinator it manages.
 
-  Lint override: `dreamd-core/Cargo.toml` locally downgrades
-  `unsafe_code` from `forbid` (workspace) to `deny`. The sole authorised
-  callsite is `server::lifecycle::detach_double_fork`, which calls
-  `nix::unistd::fork` (an `unsafe fn`). **Zero production call sites in
-  any shipped path** — `dreamd service install` (systemd `--user` unit,
-  AILAB-190; macOS LaunchAgent, AILAB-169; Windows scheduled task,
-  AILAB-203) supervises the foreground `dreamd watch` it registers rather
-  than calling this helper (see `ARCHITECTURE.md` §8.1). All other modules in the crate still
-  surface unsafe usage at compile time.
+  Lints: every crate inherits the workspace `unsafe_code = "forbid"`
+  (`[lints] workspace = true`), and no crate overrides it.
 
 - **`dreamd-layout`** splits out when (and only when) a no-tokio consumer
   of layout appears. Today every layout caller already pulls in tokio
@@ -654,16 +646,10 @@ last uncommitted batch lands. The whole drain is bounded by `DRAIN_TIMEOUT`
 which the next open's coverage pass heals; it does not undo a JSONL line that
 was already acknowledged.
 
-`detach_double_fork()` performs the canonical `fork → setsid → fork` daemon
-dance. The first fork escapes the parent's process group; `setsid` makes
-the child a session leader; the second fork ensures the final process is
-not a session leader and therefore can never acquire a controlling
-terminal. The session-leader process exits, leaving the kernel to reap the
-final detached child via the grandparent (init / launchd / systemd).
-**Not called in production** — `dreamd watch` runs in the foreground, and
+There is no daemonize path. `dreamd watch` runs in the foreground, and
 `dreamd service install` (systemd `--user` unit, AILAB-190; macOS LaunchAgent,
-AILAB-169; Windows logon scheduled task, AILAB-203) supervises that foreground
-`watch` rather than calling this helper (ARCHITECTURE.md §8.1).
+AILAB-169; Windows logon scheduled task, AILAB-203) supervises that process
+(ARCHITECTURE.md §8).
 
 ## API backpressure
 

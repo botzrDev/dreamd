@@ -31,7 +31,6 @@ fn recall_to_json_excluding(
         &schema_fields,
         query,
         k as usize,
-        None,
         exclusion,
         now_sec,
     )?;

@@ -163,7 +163,7 @@ mod tests {
     fn daemon_running_when_socket_present() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
-        let guard = dreamd_core::server::bind_writer_socket(&sock).expect("bind listener");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind listener");
         let mut buf = Vec::new();
         let live = run(
             dir.path(),
@@ -176,7 +176,7 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(live, "live listener must report the daemon running");
         assert!(out.contains("daemon: running"), "got: {out}");
-        drop(guard);
+        drop(listener);
     }
 
     #[cfg(unix)]

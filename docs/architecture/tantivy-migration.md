@@ -119,8 +119,8 @@ the acceptance signal.
 Targets: the **next** Tantivy major beyond 0.26.1, and any future vector backend
 (WEG-155 / WEG-156 / WEG-158), which would introduce a second retrieval path
 alongside BM25 × salience. No such path exists today: recall is BM25 × salience
-only, the non-default `vectors` feature only downloads a model, and `rrf::fuse`
-is not called by recall.
+only, the non-default `vectors` feature only downloads a model, and there is no
+fusion code.
 
 Checklist a maintainer works before bumping:
 

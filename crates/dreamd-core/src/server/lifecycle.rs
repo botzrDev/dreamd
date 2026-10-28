@@ -1,30 +1,14 @@
 //! Writer-process lifecycle (WEG-21 / DR-118).
 //!
-//! Two layers live here:
-//!
-//! 1. [`detach_double_fork`] — the Unix `fork() → setsid() → fork()` daemon
-//!    pattern. The first fork escapes the parent's process group; `setsid`
-//!    makes the child a session leader; the second fork ensures the final
-//!    process is not a session leader and therefore can never acquire a
-//!    controlling terminal. Still zero production call sites, and deliberately
-//!    NOT the `dreamd service install` call site: the systemd user unit
-//!    (AILAB-190) supervises foreground `dreamd watch` under `Type=simple`,
-//!    so this helper is not used there; the macOS LaunchAgent (AILAB-169,
-//!    `KeepAlive` + foreground `ProgramArguments`) supervises that same
-//!    foreground `dreamd watch` and likewise does not call it. Kept only for
-//!    a possible future path with no OS supervisor. See ARCHITECTURE.md §8.1.
-//!
-//! 2. [`Supervisor`] — owns the [`MemoryCoordinator`] task handle plus all
-//!    senders into the actor channel. Shutdown-drain contract (decision
-//!    2026-05-14, option a): the lifecycle layer guarantees no append is in
-//!    flight when `Shutdown` is sent. We do this by dropping every sender
-//!    before sending `Shutdown` on the supervisor's retained sender.
-//!    `Shutdown` is terminal — any further send on a closed channel returns
-//!    a typed `SendError`, never a silent drop. `MemoryCoordinator::run()`
-//!    is NOT modified for this ticket; the invariant lives entirely in the
-//!    supervisor.
+//! [`Supervisor`] owns the [`MemoryCoordinator`] task handle plus all senders
+//! into the actor channel. Shutdown-drain contract (decision 2026-05-14,
+//! option a): the lifecycle layer guarantees no append is in flight when
+//! `Shutdown` is sent. We do this by dropping every sender before sending
+//! `Shutdown` on the supervisor's retained sender. `Shutdown` is terminal —
+//! any further send on a closed channel returns a typed `SendError`, never a
+//! silent drop. `MemoryCoordinator::run()` is NOT modified for this ticket;
+//! the invariant lives entirely in the supervisor.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,8 +16,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
-use crate::layout::{AgentRoot, DaemonHome};
+use crate::layout::AgentRoot;
 use crate::server::index_freshness::AppendMark;
+#[cfg(unix)]
 use crate::server::tantivy_handle::IndexerMsg;
 use crate::writer_lock::WriterLock;
 
@@ -70,8 +55,6 @@ pub enum ServerError {
     UdsBind(#[from] crate::server::uds::UdsBindError),
     #[error("coordinator open failed: {0}")]
     Coordinator(std::io::Error),
-    #[error("double-fork failed: {0}")]
-    Fork(String),
     #[error("other I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("index manifest check failed: {0}")]
@@ -79,46 +62,6 @@ pub enum ServerError {
     /// The token passed to [`Supervisor::start`] does not cover the project.
     #[error("{0}")]
     WriterLock(String),
-}
-
-/// Wiring config for the writer-process. `agent_root` selects the per-project
-/// JSONL; `daemon_home` selects the per-user UDS path. The pair lets
-/// `npx dreamd-mcp` resolve both without a separate config file.
-#[derive(Clone)]
-pub struct ServerConfig {
-    pub agent_root: AgentRoot,
-    pub daemon_home: DaemonHome,
-    /// Channel buffer between the UDS accept loop and the coordinator. A
-    /// small bound is enough — a single client RTT writes one message.
-    pub coordinator_channel_capacity: usize,
-    /// WEG-42 indexer hand-off. When `Some`, every successful coordinator
-    /// append awaits a `send` of an [`IndexerMsg::Append`] on this channel — a
-    /// full channel backpressures the coordinator, it never sheds. While the
-    /// coordinator is parked there it stops draining its own inbox, so the
-    /// `coordinator_channel_capacity` learns already in flight just wait (no
-    /// per-request timeout); only overflow past that inbox reaches
-    /// [`Supervisor::try_send`]'s [`COORDINATOR_SEND_TIMEOUT`] and 503s, and
-    /// only over HTTP — the in-process `dreamd mcp` path sends on the
-    /// coordinator channel without that timeout, so it waits. The
-    /// caller (`server::run` entry point) constructs a `TantivyIndexHandle`,
-    /// extracts its sender via [`crate::server::TantivyIndexHandle::sender`],
-    /// and threads it here.
-    pub indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
-}
-
-impl ServerConfig {
-    pub fn new(agent_root: AgentRoot, daemon_home: DaemonHome) -> Self {
-        Self {
-            agent_root,
-            daemon_home,
-            coordinator_channel_capacity: COORDINATOR_CHANNEL_CAPACITY,
-            indexer_tx: None,
-        }
-    }
-
-    pub fn socket_path(&self) -> PathBuf {
-        self.daemon_home.socket_path()
-    }
 }
 
 /// Supervisor: owns the coordinator task + the canonical sender into its
@@ -359,61 +302,6 @@ pub struct SupervisorSendError;
 impl<T> From<mpsc::error::SendError<T>> for SupervisorSendError {
     fn from(_: mpsc::error::SendError<T>) -> Self {
         Self
-    }
-}
-
-/// Run the Unix double-fork dance and return whether the caller is the
-/// final detached writer-process (`Ok(true)`) or the original launcher that
-/// should exit immediately (`Ok(false)`).
-///
-/// Pattern:
-///   * First `fork()`: parent exits with status `0` so the shell prompt
-///     returns; the child continues.
-///   * `setsid()`: detach from the controlling TTY by becoming a session
-///     leader.
-///   * Second `fork()`: the session leader exits, leaving the final child
-///     as a non-session-leader that can never re-acquire a TTY.
-///
-/// **Must be called before any tokio runtime is constructed.** The
-/// intermediate session-leader process exits via `std::process::exit(0)`,
-/// which skips Drop handlers — any live runtime worker threads would be
-/// torn down without orderly shutdown.
-///
-/// Unix-only. Windows is DR-121 / WEG-135.
-#[cfg(unix)]
-pub fn detach_double_fork() -> Result<bool, ServerError> {
-    use nix::unistd::{fork, setsid, ForkResult};
-
-    // SAFETY: nix::unistd::fork is `unsafe` because async-signal-safety
-    // demands the child do nothing but exec/exit until it has reset
-    // signal handlers and threads. We satisfy that here: the child path
-    // does only `setsid()` and a second `fork()`, both async-signal-safe,
-    // before returning into the supervisor.
-    //
-    // Workspace forbids `unsafe_code`, so we wrap the unsafe call in an
-    // `unsafe { ... }` block that is scoped to this function only. To keep
-    // the workspace-wide forbid in force everywhere else, we localize the
-    // override here. NOTE: if `unsafe_code = "forbid"` is ever escalated
-    // without an explicit allow on this fn, the build will fail loudly —
-    // exactly what we want.
-    #[allow(unsafe_code)]
-    let first = unsafe { fork() }.map_err(|e| ServerError::Fork(format!("first fork: {e}")))?;
-    match first {
-        ForkResult::Parent { .. } => return Ok(false),
-        ForkResult::Child => {}
-    }
-
-    setsid().map_err(|e| ServerError::Fork(format!("setsid: {e}")))?;
-
-    #[allow(unsafe_code)]
-    let second = unsafe { fork() }.map_err(|e| ServerError::Fork(format!("second fork: {e}")))?;
-    match second {
-        ForkResult::Parent { .. } => {
-            // Session leader exits; let the kernel reap the final child via
-            // its grandparent (init / launchd / systemd).
-            std::process::exit(0);
-        }
-        ForkResult::Child => Ok(true),
     }
 }
 

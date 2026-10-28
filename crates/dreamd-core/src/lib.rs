@@ -13,7 +13,6 @@ pub mod client;
 pub mod collector;
 pub mod config;
 pub mod consolidation;
-pub mod context_grant;
 pub mod coordinator;
 /// BZR-1239 — every cycle crashed at every crash point, then recovered.
 #[cfg(all(test, unix))]
@@ -39,7 +38,6 @@ pub mod invariants;
 pub mod io;
 pub mod layout;
 pub mod lessons;
-pub mod letta;
 /// AILAB-204 / DR-304 — LLM client wrapper with deterministic auto-fallback.
 pub mod llm;
 pub mod mcp;
@@ -54,7 +52,6 @@ pub mod provenance;
 pub mod recurrence;
 pub mod redaction;
 pub mod registry;
-pub mod rrf;
 pub mod salience;
 pub use salience::{salience_with_context, RecurrenceContext};
 #[cfg(test)]

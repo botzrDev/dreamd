@@ -15,9 +15,8 @@
 //!     one length-prefixed JSON AgentLearning. Prints the writer's stdout
 //!     reply (the minted EventId) on its own stdout. Exits `0` on success.
 //!
-//! No double-fork in this helper — the integration test wants the parent
-//! process visible so it can wait on the child PID. Detachment is exercised
-//! separately by the production `server::run()` path.
+//! The helper runs in the foreground, so the integration test can wait on the
+//! child PID.
 
 // AILAB-174: this helper is Unix-only — it binds a `std::os::unix::net`
 // socket and drives `dreamd_core::server`, which is `#[cfg(unix)]` in lib.rs.
@@ -41,7 +40,7 @@ use dreamd_core::coordinator::MemoryCoordinatorMsg;
 #[cfg(unix)]
 use dreamd_core::layout::AgentRoot;
 #[cfg(unix)]
-use dreamd_core::server::{bind_writer_socket, Supervisor};
+use dreamd_core::server::Supervisor;
 #[cfg(unix)]
 use dreamd_core::writer_lock::{WriterKind, WriterLock};
 #[cfg(unix)]
@@ -77,8 +76,8 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let guard = match bind_writer_socket(&socket_path) {
-        Ok(g) => g,
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("writer: bind failed: {e}");
             return ExitCode::from(2);
@@ -104,7 +103,6 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     };
 
     // Accept one connection (the test only spawns one client).
-    let listener: &UnixListener = guard.listener();
     listener
         .set_nonblocking(false)
         .expect("set_nonblocking false");
@@ -166,6 +164,7 @@ async fn run_writer(socket_path: PathBuf, agent_root: AgentRoot) -> ExitCode {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
     supervisor.shutdown().await;
+    let _ = std::fs::remove_file(&socket_path);
     println!("MINTED {minted}");
     ExitCode::SUCCESS
 }

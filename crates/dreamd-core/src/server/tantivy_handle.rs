@@ -1430,7 +1430,7 @@ mod tests {
 
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
-        let results = crate::recall(handle.reader(), &fields, "anchor marker", 5, None, now_sec)
+        let results = crate::recall(handle.reader(), &fields, "anchor marker", 5, now_sec)
             .expect("recall after migration rebuild");
 
         assert_eq!(results.len(), 1);
@@ -1747,7 +1747,7 @@ mod tests {
 
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
-        let hits = crate::recall(handle.reader(), &fields, unique, 5, None, now_sec)
+        let hits = crate::recall(handle.reader(), &fields, unique, 5, now_sec)
             .expect("recall after flush");
         assert!(
             !hits.is_empty(),
@@ -2247,7 +2247,7 @@ mod tests {
         let (_, fields) = build_schema();
         let now_sec = chrono::Utc::now().timestamp();
         let results =
-            crate::recall(handle.reader(), &fields, "quokka", 10, None, now_sec).expect("recall");
+            crate::recall(handle.reader(), &fields, "quokka", 10, now_sec).expect("recall");
         let mut got: Vec<(String, u64)> = results
             .iter()
             .map(|r| (r.event_id.clone(), r.recurrence))
