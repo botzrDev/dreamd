@@ -7,7 +7,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use dreamd_core::index::{build_schema, Layer, SchemaFields};
-use dreamd_core::recall;
+use dreamd_core::{recall, RecallReader};
 use std::hint::black_box;
 use tantivy::{doc, IndexWriter, TantivyDocument};
 
@@ -47,7 +47,7 @@ fn bench_recall(c: &mut Criterion) {
 
     for &n in &[1_000_usize, 10_000, 100_000] {
         let (index, fields) = build_corpus(n);
-        let reader = index.reader().unwrap();
+        let reader = RecallReader::open(&index, tantivy::ReloadPolicy::OnCommitWithDelay).unwrap();
 
         group.bench_with_input(BenchmarkId::new("n", n), &n, |b, _| {
             b.iter(|| {

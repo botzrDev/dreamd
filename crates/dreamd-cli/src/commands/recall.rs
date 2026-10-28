@@ -24,8 +24,8 @@ use std::path::Path;
 
 use dreamd_core::collector::RecallExclusion;
 use dreamd_core::salience::clamp_score;
-use dreamd_core::{AgentRoot, LayoutError, RecallResult};
-use tantivy::Index;
+use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
+use tantivy::{Index, ReloadPolicy};
 
 /// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
 ///
@@ -275,7 +275,8 @@ pub fn run(
             return Err(RecallError::IndexUnavailable(hint));
         }
     };
-    let reader = index.reader().map_err(RecallError::Search)?;
+    let reader =
+        RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).map_err(RecallError::Search)?;
 
     let (_schema, fields) = dreamd_core::index::build_schema();
     let results = dreamd_core::collector::recall_excluding(

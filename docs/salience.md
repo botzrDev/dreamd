@@ -10,7 +10,7 @@ Recall ranks every hit by one number:
 final_score = bm25 * salience
 ```
 
-Tantivy scores the candidate's `content` against the query with BM25; a custom collector then multiplies that by `salience`, computed at query time from four fastfields — `timestamp_sec` (age), `pain`, `importance`, and `recurrence`:
+Tantivy scores the candidate's `content` against the query with BM25; a custom collector then multiplies that by `salience`, computed at query time from three fastfields — `timestamp_sec` (age), `pain` and `importance` — and `recurrence`, which a per-searcher table supplies (`recurrence.rs`):
 
 ```
 salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + recurrence))
@@ -37,7 +37,7 @@ Each factor answers one question, and the arithmetic shape is deliberate.
 
 **Why `1 + ln(1 + recurrence)`.** The boost is logarithmic so that recurrence gives diminishing returns — going from 1 to 10 occurrences matters far more than from 100 to 110. The leading `1 +` keeps a first occurrence at full weight: `1 + ln(1 + 0) = 1.0`, not `0`. Dropping that wrapper would zero the score of every event that has not yet recurred.
 
-**Recurrence is not an event field.** `recurrence` is a per-cluster count, derived per phase rather than stored on the record. `RecurrenceContext` (`salience.rs`) names three policies: recall reads the Tantivy `recurrence` fastfield (bounded staleness); the dream cycle uses the live promoted-cluster size; the decay pruner passes 0 conservatively. Each phase owns its own definition of "how often".
+**Recurrence is not an event field.** `recurrence` is a per-cluster count, derived per phase rather than stored on the record. `RecurrenceContext` (`salience.rs`) names three policies. `RecallSubtreeCount` is recall's: the number of live episodic events whose `skill_action` equals the candidate's or extends it with `::`, all-time, computed once per searcher from the index (`recurrence.rs`). It counts the event itself, so an event scores at least 1, and a lesson gets the count of its `cluster_key`. `DreamCycleClusterSize` is the live promoted-cluster size the dream cycle ranks with, and `Decay` passes 0 conservatively. Each phase owns its own definition of "how often".
 
 **The recency term and the 90-day pruner are different mechanisms.** The `exp(-age_days / 14)` term is evaluated at query time and never moves a record on disk. The decay pruner (`decay.rs`) is what actually archives a record off the hot path, and its gate is `!pinned && age > 90 days` — age alone, not salience. Pinned records are never archived. Keep the two apart: one is a ranking multiplier, the other is a lifecycle decision.
 

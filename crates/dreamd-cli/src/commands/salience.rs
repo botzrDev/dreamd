@@ -13,8 +13,8 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::salience::report::{build_report, ReportError, SalienceReport};
-use dreamd_core::{AgentRoot, LayoutError};
-use tantivy::Index;
+use dreamd_core::{AgentRoot, LayoutError, RecallReader};
+use tantivy::{Index, ReloadPolicy};
 
 /// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
 ///
@@ -117,8 +117,7 @@ pub fn run(
             return Err(SalienceError::IndexUnavailable(hint));
         }
     };
-    let reader = index
-        .reader()
+    let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay)
         .map_err(|e| SalienceError::Report(ReportError::Search(e)))?;
 
     let report = build_report(&reader, now_sec, &root.dreamd_dir().join("observability"))

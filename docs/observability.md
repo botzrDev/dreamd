@@ -30,7 +30,7 @@ Each entry in `citations` is:
 | `age_days` | `(now - timestamp) / 86400`, floored at 0: the age the salience formula uses |
 | `pain` | Stored 0.0–10.0 subjective friction score — the raw value, not divided by 10 |
 | `importance` | Stored 0.0–10.0 long-term relevance score — the raw value, not divided by 10 |
-| `recurrence` | Cluster occurrence count from the index fastfield (bounded-staleness sidecar) |
+| `recurrence` | Live episodic events whose `skill_action` equals the hit's or extends it with `::`, counted from the index per searcher. An event counts itself; a lesson gets its `cluster_key`'s count |
 
 `layer` names the Tantivy document layer a hit was indexed under —
 `episodic` (raw events) or `semantic` (dream-cycle-consolidated lessons). It

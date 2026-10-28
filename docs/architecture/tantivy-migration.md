@@ -43,19 +43,23 @@ migration:
 | `timestamp_sec` | u64 | `INDEXED \| FAST` | collector salience input (age → recency decay); also range/term-queryable |
 | `pain` | f64 | `FAST` | collector salience input (subjective friction) |
 | `importance` | f64 | `FAST` | collector salience input (long-term relevance) |
-| `recurrence` | u64 | `FAST` | collector salience input (cluster occurrence count) |
+| `recurrence` | u64 | `FAST` | written as `0`; not read. Recall's recurrence comes from the per-searcher table (`recurrence.rs`) |
 | `layer` | text | `STRING \| STORED` | `"episodic"` or `"semantic"`; hydrated into the recall result (`source`); exact-match term for the whole-layer delete that replaces the semantic documents each cycle |
 | `last_updated_sec` | u64 | `FAST` | written (event timestamp for episodic docs, `LESSONS.md` `last_updated` for lessons); not read on the recall path |
-| `cited_event_count` | u64 | `FAST` | written (`0` for episodic docs, promoted-cluster size for lessons); not read on the recall path |
-| `event_id` | text | `STRING \| STORED` | exact-match term for delete-and-re-add (WEG-45) and decay / forget pruning; lessons use the `lsn_<lesson id>` namespace; STORED for hydration and for recall exclusion (`exclude=` / `--without`) |
-| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; hydrated into the recall result; read from the doc store for cluster exclusion (`--without-cluster`) |
+| `cited_event_count` | u64 | `FAST` | written as `0`; not read |
+| `event_id` | text | `STRING \| STORED` | exact-match term for the upsert every episodic add does (BZR-1236) and decay / forget pruning; lessons use the `lsn_<lesson id>` namespace; STORED for hydration and for recall exclusion (`exclude=` / `--without`) |
+| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; its terms build the recurrence table; hydrated into the recall result; read from the doc store for cluster exclusion (`--without-cluster`) |
 | `source_harness` | text | `STRING \| STORED` | provenance harness id; hydrated into the recall result |
 
-The **four salience FastFields** the collector reads per matching document are
-`timestamp_sec`, `pain`, `importance`, and `recurrence`. `timestamp_sec` is both
+The **three salience FastFields** the collector reads per matching document are
+`timestamp_sec`, `pain` and `importance`. `timestamp_sec` is both
 `INDEXED` (so it can be filtered/range-queried) and `FAST` (so the collector can read
-it as a column). The remaining FAST-only fields (`last_updated_sec`,
-`cited_event_count`) are written by the indexer and not read on the recall path.
+it as a column). The fourth salience input, `recurrence`, comes from the table
+`recurrence.rs` builds once per searcher from the `skill_action` terms: the number of
+alive episodic docs whose key equals the doc's or extends it with `::`. The remaining
+FAST-only fields (`last_updated_sec`, `recurrence`, `cited_event_count`) are written
+by the indexer and not read on the recall path; `recurrence` and `cited_event_count`
+are written as `0`.
 
 A semantic lesson has no native `pain` / `importance`: the indexer copies both
 from the exemplar event the lesson names and stamps `timestamp_sec` with the
@@ -80,8 +84,10 @@ assumptions it depends on:
   (`tantivy::collector::{Collector, SegmentCollector}`). Their signatures — how a
   segment collector is created per segment, how `collect(doc, score)` is called, and
   how `merge_fruits` combines per-segment results — are the primary break surface.
-- **FastField access via `tantivy::columnar::Column`.** The four salience fastfields
-  are read per matching doc through `columnar::Column`. Tantivy has reorganized its
+- **FastField access via `tantivy::columnar::Column`.** The three salience fastfields
+  are read per matching doc through `columnar::Column`. The recurrence table reads the
+  `skill_action` term dictionary and postings and attaches as a `Warmer`; both are
+  break surfaces too. Tantivy has reorganized its
   columnar/fastfield API across majors before; this accessor is the second break
   surface.
 - **BM25 `Score` is `f32`, widened to `f64`.** Tantivy hands the collector a raw BM25

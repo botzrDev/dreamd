@@ -4,9 +4,10 @@
 //! disk, or implement `IndexHandle`. Those responsibilities belong to WEG-42
 //! (`TantivyIndexHandle`) and the indexer that lives in `dreamd-core::server`.
 //!
-//! Key invariant (ARCHITECTURE.md decision #2): **no indexed score field.** All four
-//! salience inputs (`pain`, `importance`, `recurrence`, `timestamp_sec`) are
-//! stored as FastFields and reweighted at query time by `collector::recall`.
+//! Key invariant (ARCHITECTURE.md decision #2): **no indexed score field.** Three
+//! salience inputs (`pain`, `importance`, `timestamp_sec`) are stored as
+//! FastFields; the fourth, `recurrence`, is derived per searcher
+//! (`crate::recurrence`). `collector::recall` reweights at query time.
 //! Do NOT add an indexed `score` field without re-reading DR-202 §4.2 and
 //! updating `crate::collector::SalienceCollector`.
 
@@ -106,17 +107,19 @@ pub struct SchemaFields {
     pub pain: Field,
     /// `FAST` only -- 0.0..=10.0 long-term relevance score; salience input.
     pub importance: Field,
-    /// `FAST` only -- cluster occurrence count at index time; salience input.
+    /// `FAST` only -- written as 0 and read by nothing. Recall's recurrence
+    /// comes from the per-searcher table in `crate::recurrence` (BZR-1242).
     pub recurrence: Field,
     /// `STRING | STORED` -- raw-tokenized layer tag, e.g. `"episodic"`. Used
     /// by `collector::recall` to filter results by [`Layer`].
     pub layer: Field,
     /// `FAST` only -- Unix seconds of last cluster reconciliation (future use).
     pub last_updated_sec: Field,
-    /// `FAST` only -- number of times this event has been cited (future use).
+    /// `FAST` only -- written as 0 and read by nothing (BZR-1242).
     pub cited_event_count: Field,
-    /// `STRING | STORED` -- daemon-assigned `EventId` (`evt_` + ULID) for
-    /// targeted delete-and-re-add during recurrence sidecar application (WEG-45).
+    /// `STRING | STORED` -- daemon-assigned `EventId` (`evt_` + ULID), or
+    /// `lsn_<lesson id>` for a lesson. The upsert key: every episodic add
+    /// deletes this term first (BZR-1236).
     pub event_id: Field,
     /// `STRING | STORED` -- hierarchical clustering key from `AgentLearning::skill_action`.
     pub skill_action: Field,
@@ -193,11 +196,10 @@ impl IndexManifest {
 /// `.dreamd/` directory. Used by WEG-42 to write and WEG-49 to read.
 pub const INDEX_MANIFEST_FILENAME: &str = "index_manifest.json";
 
-/// On-disk sidecar that records per-cluster recurrence counts, written by the
-/// dream cycle (WEG-45 / DR-205′). Consumed by
-/// [`crate::server::tantivy_handle::TantivyIndexHandle::apply_recurrence_sidecar`]
-/// which performs a delete-and-re-add pass to refresh the `recurrence`
-/// FastField on all documents in each cluster.
+/// On-disk sidecar that records per-cluster recurrence counts: the dream
+/// cycle's promotion report (WEG-45 / DR-205′), its windowed, deepest-prefix
+/// counts. Read by doctor `--cluster-health` and the provenance `recurrence`
+/// edges. Recall does not read it; recall's recurrence is `crate::recurrence`.
 ///
 /// Canonical path: `<agent_root>/.agent/semantic/recurrence_counts.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

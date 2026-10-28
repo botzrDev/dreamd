@@ -242,7 +242,6 @@ async fn open_indexes_an_event_merged_in_below_the_watermark() {
 /// Three live appends under one key must all carry that key's subtree count,
 /// the same value a replay of the same log would give them.
 #[tokio::test]
-#[ignore = "BZR-1242: recurrence depends on the path that indexed it"]
 async fn live_appended_docs_carry_the_subtree_recurrence() {
     let dir = tempfile::tempdir().unwrap();
     let root = AgentRoot::new(dir.path());

@@ -98,7 +98,9 @@ forward and wipes any stage directory (`wal::recover_on_startup`; its one caller
 sweep (`crash_sweep.rs`) pins that. Each operation reads the log and `LESSONS.md` once and
 plans every output, ledger edges included, with a pure function (`plan::plan_cycle` /
 `plan_forget`, BZR-1240). The redo WAL carries those edges, and the commit appends exactly
-them.
+them. The model call that composes a lesson runs before the stage opens and outside the
+coordinator: the daemon sends `PrepareCycle`, composes in the request's task, then sends
+`CommitCycle` (BZR-1241).
 
 **`unsafe` policy.**
 `unsafe_code = "forbid"` at workspace level. `dreamd-core` has a scoped `deny` override
@@ -290,7 +292,30 @@ Locked 2026-10-24:
     - on a store where none of the four autosnap inputs exists, every dream cycle fails writing `<id>.partial/manifest.json`, because the `.partial` dir is only created as a side effect of writing an entry. It has been there since BZR-160 (`806b764`).
 
     Left for BZR-1241: clustering runs twice per cycle, in `filesystem_phases` for the model prompt and again in `plan_cycle`. Spec: `assignments/BZR-1240.v2.md` (Amendment 1 added the round trip and the unreadable-file test).
-11. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
+11. **BZR-1241** — on `main` (`5b4f1e3`). The dream cycle's model call runs outside the coordinator:
+    - `RunDreamCycle` is gone. `PrepareCycle { now_sec }` reads the log once in the actor, selects the lesson, keeps the lines as its `OpenCycle` and returns the selection with a `CycleTicket`. The handler's task composes (`dream_cycle::compose`). `CommitCycle { ticket, cycle_date, body }` plans over the prepared lines plus the bytes the actor appended since (`log_since`), stages, commits and reopens the fd.
+    - In-progress is the actor's open cycle plus `state.json`, both checked in Prepare. The ticket holds an `Arc<()>` lease and the actor a `Weak`, so a dropped caller frees the next Prepare. `post_dream` runs the sequencer on `tokio::spawn` because axum drops a handler on disconnect (drift entry `split-actor-protocol-needs-a-lease-and-a-spawned-handler`).
+    - `log_since` returns `None` on any outside change: the `outside_changes` counter, the identity at the path, dev/ino, length, or a prepared read that does not end on a line. `None` re-reads the log (after `ensure_live_log`) and writes the deterministic body.
+    - `dream_cycle::{prepare, select, compose, commit, gate_at_commit}` and `plan::plan_cycle_with`. `gate_at_commit` keeps a model body only for the same `cluster_key` with every citation still a member. `run_filesystem_phases(_with_backend)` run the same three steps in-process with unchanged signatures.
+
+    PM verification:
+    - Two harnesses ran 26 stores each through `1953ef5` and the new tree, one in-process and one through the actor (`RunDreamCycle` against Prepare + Commit). Both came out byte-identical.
+    - Workspace 1224 passed / 0 failed / 1 ignored. Crash sweep k is unchanged (17/6, 16/5, 13/4, 12/3). M1–M14 fail as named. Stripped `dreamd` is 20,897,280 bytes.
+    - Round 1 added the counter test after PM-only P1 survived (drift entry `mutate-each-check-of-a-compound-guard-alone`).
+    - The V4 red repro failed on `1953ef5` (two queued cycles, both Ok).
+
+    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+    - the model call no longer runs inside the coordinator: appends land while it runs and the commit includes them, so a slow or retried model call no longer makes `POST /learn` wait or return 503;
+    - a second `POST /api/v1/dream` while one is composing gets 409 instead of running after it (audit V4);
+    - `state.json` says `in_progress` only during the commit, so `dreamd status` shows the previous cycle's status while the model runs;
+    - when the top cluster moves, or a cited record leaves it, during the model call, the cycle writes the deterministic lesson for the cluster on top at the commit. An outside change to the log during the model call makes the commit re-read it and write the deterministic lesson;
+    - the autosnap is taken at the commit and includes records appended during the model call;
+    - the shutdown drain no longer waits behind a model call; a cycle that is mid-compose at shutdown commits nothing, and its `POST /dream` returns 500;
+    - an unreadable episodic log fails a cycle before `state.json` or the stage is touched;
+    - a cycle that promotes nothing no longer reads `config.toml`, so a broken config no longer logs a warning on it;
+    - library: `MemoryCoordinatorMsg::{PrepareCycle, CommitCycle}` replace `RunDreamCycle`. New: `PreparedCycle`, `CycleTicket`, `CoordinatorError::CycleInProgress`, `dream_cycle::{Prepared, select, prepare, compose, commit}` and `plan::plan_cycle_with`.
+
+    Left as is: `examples/crash-recovery/README.md:48` still says the daemon "serializes cycles", which stays true because the second trigger gets 409. Spec: `assignments/BZR-1241.v2.md`.
 12. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
 13. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
 14. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
@@ -373,7 +398,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### coordinator-not-mutex-file
 
-- **Rule:** All JSONL mutations go through `MemoryCoordinator` actor messages (`AppendLearning` / `RunDreamCycle` / `Shutdown`). There is no `Mutex<File>` writer.
+- **Rule:** All JSONL mutations go through `MemoryCoordinator` actor messages (`AppendLearning` / `PrepareCycle` / `CommitCycle` / `Shutdown`). There is no `Mutex<File>` writer. A dream cycle's model call runs between `PrepareCycle` and `CommitCycle`, outside the actor (BZR-1241).
 - **Why:** Linear/older docs still say “Mutex&lt;File&gt; + fdatasync”; live code serializes via `&mut self` on the actor run loop (`coordinator.rs`, ARCHITECTURE.md §1).
 - **How to apply:**
   - Spawn via `MemoryCoordinator::open` / `open_at` + `tokio::spawn(coordinator.run())`, or `Supervisor::start`.
@@ -545,7 +570,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### ailab-162-drain-not-sigterm
 
 - **Rule:** SIGTERM + socket unlink shipped in AILAB-301 / WEG-268. The remaining AILAB-162 hole was the post-`select!` coordinator/indexer drain (the comment that named it WEG-283). That drain is now in the working tree: unlink first, then `drain_daemon` (coordinator `Shutdown`, then index `try_unwrap`→`shutdown` or `flush`). Do not re-queue "add SIGTERM".
-- **Why:** 2026-08-18 look-ahead almost re-queued SIGTERM over `weg268_sigterm_socket`. The drain itself shipped unbounded (Shutdown can sit behind `RunDreamCycle`). Bounding that drain is **AILAB-748**, not AILAB-210 — 210 is Mode-X client refcount / idle-exit (Backlog). Do not conflate the two grace windows.
+- **Why:** 2026-08-18 look-ahead almost re-queued SIGTERM over `weg268_sigterm_socket`. The drain itself shipped unbounded: until BZR-1241, `Shutdown` could sit behind a dream cycle's model call. Since then it waits at most behind one `PrepareCycle` or `CommitCycle`, which are file I/O. Bounding that drain is **AILAB-748**, not AILAB-210 — 210 is Mode-X client refcount / idle-exit (Backlog). Do not conflate the two grace windows.
 - **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown evicted map entries: `ProjectRuntime::release` (BZR-1232; `supervisor_map` is gone) drops the supervisor and `try_unwrap`→`close`s the index synchronously, and the tasks' lock clones keep the project held until both tasks end. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `no-hoisted-stdio-lock-across-tantivy`, `indexer-shed-is-not-replay-healed`, AILAB-748
 
@@ -630,7 +655,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `--no-llm` threads through `POST /api/v1/dream` as `x-dreamd-no-llm: 1`. It does not skip the daemon proxy. Only `--no-commit` skips the proxy (existing CI path).
 - **Why:** Skipping the proxy while `dreamd watch` owns the JSONL races the coordinator (WEG-271). Linear AILAB-204 asked for a CLI flag without an HTTP channel; the live proxy POSTs an empty body.
-- **How to apply:** `client::proxy_dream_cycle(..., no_llm)` sets the header; `RunDreamCycle { no_llm, ... }` on the coordinator. See `assignments/AILAB-204.v2.md`.
+- **How to apply:** `client::proxy_dream_cycle(..., no_llm)` sets the header. Since BZR-1241, `post_dream` passes `no_llm` to `dispatch_cycle`, which hands it to `dream_cycle::compose` in the handler's task. The coordinator's `CommitCycle` carries the composed body, not the flag. See `assignments/AILAB-204.v2.md`.
 - **Cross-refs:** `coordinator-not-mutex-file`
 
 ### nfr-2-stripped-binary-is-20mb
@@ -966,7 +991,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### in-process-dream-now-honors-the-409-guard
 
-- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. Since BZR-1232 a stale `in_progress` never reaches that guard: `WriterLock::acquire` resets it to `failed` when there is no WAL and runs `wal::recover_on_startup` when there is one. The guard now fires only for a cycle that is live inside the lock holder (HTTP 409 through the daemon).
+- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. Since BZR-1232 a stale `in_progress` never reaches that guard: `WriterLock::acquire` resets it to `failed` when there is no WAL and runs `wal::recover_on_startup` when there is one. The guard now fires only for a cycle that is live inside the lock holder (HTTP 409 through the daemon). Since BZR-1241 the daemon's authoritative check is `PrepareCycle`, inside the actor. It refuses while another cycle's ticket is alive or `state.json` says `in_progress`.
 - **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. BZR-172 made the 409 rule apply to the CLI, which left a no-WAL `in_progress` as a hand edit of `state.json`. BZR-1232 moved the reset into lock acquisition: a free lock proves no cycle is running.
 - **How to apply:** Do not remove the guard from `run_in_process`. Do not add a second stale-status reset outside `acquire`, and do not tell operators to hand-edit `state.json` (the 2026-10-25 docs amendment removed that advice). `ForgetCliError::InProgress` is effectively unreachable from the CLI; its test is a mapping unit test.
 - **Cross-refs:** `remaining-build-order-2026-09-24`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
@@ -1229,3 +1254,33 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - List every value that used to come back from disk, and find the inputs where render and parse disagree. Free text that can hold the format's delimiters is the usual case.
   - Pin the round trip with a test that feeds such an input and asserts the exact log bytes and edge list.
 - **Cross-refs:** `refactor-oracle-is-byte-equivalence-with-the-base`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
+
+### mutate-each-check-of-a-compound-guard-alone
+
+- **Rule:** When a guard ORs several checks, the mutation table has one row per check that can be the only one to fire. Each row turns off that check alone and fails a test built so that every other check passes. A row that turns off all the checks at once proves only that the guard exists. A check that is redundant by design is named as redundant in the spec, not left untested without comment.
+- **Why:** BZR-1241's `log_since` refuses the tail read on any of five checks: the `outside_changes` counter, the identity at the path, dev/ino, length, and a line boundary. The spec's M5 turned off all five together and failed the rename test. PM-only P1 turned off only the counter, and the whole dreamd-core lib suite still passed (675). A probe showed what P1 breaks:
+  - an outside writer truncates and rewrites the log in place (same inode), and an actor append then handles that change;
+  - the identity, inode and length checks then all pass;
+  - the commit splices the rewritten bytes onto the prepared lines, which brings back a record the rewrite removed and loses one it added.
+
+  Round 1 added the test and M14. The gap was the spec's.
+- **How to apply:**
+  - For each OR term, build the input where every other term passes.
+  - For stat identity, three faults need three inputs: a rename (new inode), an in-place rewrite (same inode), and an append by another process (length).
+  - In `log_since`, the dev/ino and `len < at.len` terms are redundant with the counter: every identity change goes through `reopen_after_external_change` or the actor's own writes, and no open cycle spans a commit. Say so where a spec lists them.
+- **Cross-refs:** `mutation-must-get-past-the-backstop`, `un-ignore-ac-can-name-tests-never-written`, `crash-sweep-oracle-is-the-image-not-the-wal`
+
+### split-actor-protocol-needs-a-lease-and-a-spawned-handler
+
+- **Rule:** When an axum handler drives a multi-message actor protocol (prepare in the actor, work in the handler, commit in the actor), two things are needed:
+  - the in-progress state is a lease the caller owns: an `Arc` in the ticket and a `Weak` in the actor, not a flag the commit clears;
+  - the handler runs the sequence on `tokio::spawn` and awaits the `JoinHandle`.
+- **Why:**
+  - BZR-1241's AC asked for "an in-memory actor flag" between Prepare and Commit. axum drops a handler future when its client disconnects, so a flag set at Prepare would never be cleared, and every later `POST /dream` would get 409 until restart.
+  - The single `RunDreamCycle` message never had this problem: once it was in the inbox, the actor ran it whether or not the handler was still waiting.
+- **How to apply:**
+  - See `CycleTicket` / `OpenCycle` / `handle_prepare_cycle` in `coordinator.rs` and `post_dream` / `dispatch_cycle` in `handlers/dream.rs`.
+  - Put the ticket inside the commit message, so the lease stays alive while the commit is queued.
+  - Keep `.in_current_span()` on the spawned task so its logs keep the request id.
+  - A test drops the ticket and checks that the next prepare succeeds.
+- **Cross-refs:** `ailab-162-drain-not-sigterm`, `coordinator-not-mutex-file`

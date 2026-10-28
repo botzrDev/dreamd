@@ -12,9 +12,8 @@
 //! see). `--dry-run` writes nothing, does not probe and takes no lock.
 //!
 //! **Index:** after a removal, when `.agent/.dreamd/index` already exists, the
-//! command opens it and sends the three messages the coordinator sends after a
-//! forget: recurrence sidecar (when present), prune this one event id, re-index
-//! the lesson layer. An absent index directory is left absent. Off Unix there
+//! command opens it, prunes this one event id and re-indexes the lesson layer.
+//! An absent index directory is left absent. Off Unix there
 //! is no index step (the cascade itself returns `Unsupported` there, inherited
 //! from `write_atomic`).
 //!
@@ -222,9 +221,6 @@ fn refresh_index(
         let handle =
             TantivyIndexHandle::open(root, lock, DEFAULT_COMMIT_CADENCE).map_err(index_err)?;
         let phases = async {
-            if root.semantic_dir().join("recurrence_counts.json").exists() {
-                handle.apply_recurrence_sidecar(root).await?;
-            }
             handle.prune_decayed_events(vec![event_id.clone()]).await?;
             handle.index_semantic_lessons(root.clone()).await
         }

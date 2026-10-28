@@ -72,7 +72,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 |---|---|---|
 | `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop duplicate appends. The reference implementation accepts it per request (MCP `append_node`, or the `X-Client-Dedup-Key` header) and does not write it into the JSONL line. The drop lasts for the life of that writer process. |
 
-`recurrence` is **not** an event field. It is a per-cluster count (events sharing a `skill_action`) computed by the dream cycle and stored separately by the implementation.
+`recurrence` is **not** an event field. For recall it is derived from the store: the number of live events whose `skill_action` equals the candidate's or extends it with `::`. Promotion uses its own windowed count.
 
 **Pain and importance rubric (informative).** The 0.0–10.0 ranges are intentionally open. A starting rubric:
 
@@ -100,7 +100,7 @@ final_score = bm25 * salience
 
 The factor-by-factor derivation and lineage of this formula live in [`docs/salience.md`](docs/salience.md).
 
-`bm25` is the standard full-text relevance score for the query against `content`. `age_days` is derived from `timestamp` at query time; salience MUST NOT be pre-computed and stored, because the decay term changes continuously. `recurrence` is the count of events sharing the candidate's `skill_action` over a window the implementation defines.¹
+`bm25` is the standard full-text relevance score for the query against `content`. `age_days` is derived from `timestamp` at query time; salience MUST NOT be pre-computed and stored, because the decay term changes continuously. `recurrence` is the number of live events whose `skill_action` equals the candidate's or extends it with `::`.¹
 
 ## Dream cycle
 

@@ -7,11 +7,12 @@
 //!
 //! Events are compared by `AgentLearning.id`. Salience is the query-time
 //! formula without the BM25 term, scored with one `now_sec` for both sides,
-//! so an unchanged record whose cluster count is unchanged has delta 0.
+//! so an unchanged record whose subtree count in its own object's log is
+//! unchanged has delta 0 ([`ClusterCounts`], the recall rule).
 //! `LESSONS.md`, `PREFERENCES.md`, and `recurrence_counts.json` are compared
 //! as raw bytes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +20,8 @@ use std::path::{Path, PathBuf};
 use dreamd_protocol::AgentLearning;
 
 use crate::episodic::{self, EpisodicError};
-use crate::index::RecurrenceSidecar;
 use crate::layout::AgentRoot;
+use crate::recurrence::ClusterCounts;
 use crate::salience::salience;
 
 const EPISODIC_PATH: &str = "episodic/AGENT_LEARNINGS.jsonl";
@@ -45,12 +46,6 @@ pub enum DiffError {
         path: PathBuf,
         #[source]
         source: EpisodicError,
-    },
-    #[error("{path}: invalid recurrence sidecar: {source}")]
-    Sidecar {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
     },
 }
 
@@ -96,8 +91,8 @@ pub fn diff_objects(
 
     let from_events = load_events(&from_dir)?;
     let to_events = load_events(&to_dir)?;
-    let from_counts = load_counts(&from_dir)?;
-    let to_counts = load_counts(&to_dir)?;
+    let from_counts = ClusterCounts::from_events(from_events.values());
+    let to_counts = ClusterCounts::from_events(to_events.values());
 
     let events_added = to_events
         .keys()
@@ -158,23 +153,8 @@ fn load_events(dir: &Path) -> Result<BTreeMap<String, AgentLearning>, DiffError>
         .collect())
 }
 
-/// `skill_action` → sidecar count. Absent sidecar is empty; invalid JSON errors.
-fn load_counts(dir: &Path) -> Result<HashMap<String, u32>, DiffError> {
-    let path = dir.join(RECURRENCE_PATH);
-    let Some(bytes) = read_optional(&path)? else {
-        return Ok(HashMap::new());
-    };
-    let sidecar: RecurrenceSidecar =
-        serde_json::from_slice(&bytes).map_err(|source| DiffError::Sidecar { path, source })?;
-    Ok(sidecar
-        .clusters
-        .into_iter()
-        .map(|c| (c.skill_action, c.count))
-        .collect())
-}
-
-fn score(ev: &AgentLearning, counts: &HashMap<String, u32>, now_sec: i64) -> f64 {
-    let recurrence = counts.get(&ev.skill_action).copied().unwrap_or(0);
+fn score(ev: &AgentLearning, counts: &ClusterCounts, now_sec: i64) -> f64 {
+    let recurrence = counts.subtree(&ev.skill_action);
     salience(
         now_sec,
         ev.timestamp.timestamp(),
@@ -272,14 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn higher_sidecar_count_on_to_is_one_salience_row() {
+    fn a_descendant_added_on_to_is_one_salience_row() {
         let (_d, root) = root();
-        let jsonl = format!("{}{}", line(ID_A, "rust::a"), line(ID_B, "rust::b"));
+        let from = format!("{}{}", line(ID_A, "rust::a"), line(ID_B, "rust::b"));
+        let to = format!("{from}{}", line(ID_C, "rust::a::x"));
         write_object(
             &root,
             &obj_id(1),
             &[
-                (EPISODIC_PATH, &jsonl),
+                (EPISODIC_PATH, &from),
                 (RECURRENCE_PATH, &sidecar("rust::a", 1)),
             ],
         );
@@ -287,7 +268,7 @@ mod tests {
             &root,
             &obj_id(2),
             &[
-                (EPISODIC_PATH, &jsonl),
+                (EPISODIC_PATH, &to),
                 (RECURRENCE_PATH, &sidecar("rust::a", 4)),
             ],
         );
@@ -296,11 +277,11 @@ mod tests {
         let expected = SalienceChange {
             id: ID_A.to_string(),
             from: salience(NOW, TS, 6.0, 7.0, 1),
-            to: salience(NOW, TS, 6.0, 7.0, 4),
+            to: salience(NOW, TS, 6.0, 7.0, 2),
         };
         assert!(expected.to > expected.from);
         assert_eq!(diff.events_salience_changed, vec![expected]);
-        assert!(diff.events_added.is_empty());
+        assert_eq!(diff.events_added, vec![ID_C.to_string()]);
         assert!(diff.events_removed.is_empty());
         assert_eq!(diff.recurrence, FileChange::Modified);
     }
@@ -406,11 +387,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_sidecar_json_is_an_error() {
+    fn an_invalid_sidecar_is_compared_as_bytes() {
         let (_d, root) = root();
         write_object(&root, &obj_id(1), &[]);
         write_object(&root, &obj_id(2), &[(RECURRENCE_PATH, "not json")]);
-        let err = diff_objects(&root, &obj_id(1), &obj_id(2), NOW).unwrap_err();
-        assert!(matches!(err, DiffError::Sidecar { .. }));
+        let diff = diff_objects(&root, &obj_id(1), &obj_id(2), NOW).unwrap();
+        assert_eq!(diff.recurrence, FileChange::Added);
     }
 }

@@ -149,8 +149,7 @@ pub struct CoverageReport {
 /// Close the difference between `events` and the index on `writer`.
 ///
 /// `reader` must be a Manual-reload reader over the writer's index; it is
-/// reloaded here, so it sees the last commit and nothing after it. `clusters`
-/// is the pass-1 count of `events` by `skill_action`.
+/// reloaded here, so it sees the last commit and nothing after it.
 ///
 /// Deletes are skipped, with one `warn!`, when the log has no records, or when
 /// they would remove more than half of the indexed ids and at least
@@ -161,24 +160,18 @@ pub(crate) fn cover(
     fields: &SchemaFields,
     reader: &IndexReader,
     events: &[AgentLearning],
-    clusters: &HashMap<String, u32>,
 ) -> Result<CoverageReport, IndexError> {
     reader.reload().map_err(tantivy_to_index)?;
     let indexed = scan_indexed(reader, fields.event_id).map_err(tantivy_to_index)?;
     let diff = diff(events, &indexed);
 
-    let recurrence = |event: &AgentLearning| -> u32 {
-        *clusters
-            .get(&event.skill_action)
-            .expect("pass-1 counts every skill_action in the log")
-    };
     let mut report = CoverageReport::default();
     for event in &diff.missing {
-        add_document(writer, fields, event, recurrence(event))?;
+        add_document(writer, fields, event)?;
         report.added += 1;
     }
     for event in &diff.duplicated {
-        add_document(writer, fields, event, recurrence(event))?;
+        add_document(writer, fields, event)?;
         report.healed += 1;
     }
 
@@ -280,7 +273,6 @@ pub fn assess_index_coverage(agent_root: &AgentRoot) -> Result<IndexCoverage, In
 mod tests {
     use super::*;
     use crate::index::{build_schema, Layer};
-    use crate::server::indexer_actor::count_clusters;
     use chrono::DateTime;
     use dreamd_protocol::EventId;
     use tantivy::collector::Count;
@@ -339,20 +331,13 @@ mod tests {
     impl Fixture {
         fn index(&mut self, events: &[AgentLearning]) {
             for event in events {
-                add_document(&mut self.writer, &self.fields, event, 1).unwrap();
+                add_document(&mut self.writer, &self.fields, event).unwrap();
             }
             self.writer.commit().unwrap();
         }
 
         fn cover(&mut self, log: &[AgentLearning]) -> CoverageReport {
-            let report = cover(
-                &mut self.writer,
-                &self.fields,
-                &self.reader,
-                log,
-                &count_clusters(log),
-            )
-            .unwrap();
+            let report = cover(&mut self.writer, &self.fields, &self.reader, log).unwrap();
             self.writer.commit().unwrap();
             self.reader.reload().unwrap();
             report
@@ -449,9 +434,9 @@ mod tests {
     fn cover_adds_nothing_when_the_index_matches_the_log() {
         let mut f = fixture();
         let log = evs([0, 1]);
-        add_document(&mut f.writer, &f.fields, &log[0], 1).unwrap();
-        add_document(&mut f.writer, &f.fields, &log[0], 1).unwrap();
-        add_document(&mut f.writer, &f.fields, &log[1], 1).unwrap();
+        add_document(&mut f.writer, &f.fields, &log[0]).unwrap();
+        add_document(&mut f.writer, &f.fields, &log[0]).unwrap();
+        add_document(&mut f.writer, &f.fields, &log[1]).unwrap();
         f.writer.commit().unwrap();
 
         let report = f.cover(&log);

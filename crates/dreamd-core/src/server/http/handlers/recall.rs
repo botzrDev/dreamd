@@ -2,10 +2,10 @@
 
 use axum::extract::{Extension, RawQuery, State};
 use axum::response::IntoResponse;
-use tantivy::IndexReader;
 
 use crate::collector::RecallExclusion;
 use crate::ingress::RecallIngress;
+use crate::recurrence::RecallReader;
 use crate::registry::ProjectEntry;
 
 use super::super::router::{error_400, error_500};
@@ -18,7 +18,7 @@ use super::super::types::RecallParams;
 /// this handler. With no `exclude` and no `explain` the body is byte-identical
 /// to `recall_to_json`.
 fn recall_to_json_excluding(
-    reader: &IndexReader,
+    reader: &RecallReader,
     query: &str,
     k: u32,
     exclusion: &RecallExclusion,
@@ -73,7 +73,7 @@ pub(crate) async fn get_recall(
     // Resolve the reader for this project: the pinned primary handle when this
     // is the daemon's booted project (so recall sees the coordinator's live
     // appends — WEG-264 Defect 2), else the index of the project's
-    // lazily-opened runtime (`AppState::runtimes`). IndexReader is Clone
+    // lazily-opened runtime (`AppState::runtimes`). RecallReader is Clone
     // (Arc-backed); we clone it so the `runtimes` mutex is never held across
     // the Tantivy search.
     let reader =

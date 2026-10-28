@@ -5,9 +5,10 @@
 //! dream cycle talk to it only through [`IndexerMsg`]. Everything that mutates
 //! the writer lives here: episodic `add_document` (an upsert), the cadence and
 //! [`IndexerMsg::Flush`] commits, the coverage pass on [`IndexerMsg::Resync`],
-//! the recurrence sidecar, the decay prune, and the semantic (LESSONS.md) pass
-//! that `TantivyIndexHandle::open` also runs. Every commit goes through
-//! [`IndexerPersist::commit`] (BZR-1236).
+//! the decay prune, and the semantic (LESSONS.md) pass that
+//! `TantivyIndexHandle::open` also runs. Every commit goes through
+//! [`IndexerPersist::commit`] (BZR-1236). Recall's recurrence is not written
+//! here: it is derived per searcher (`crate::recurrence`, BZR-1242).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use tokio::task::JoinHandle;
 
 #[cfg(unix)]
 use crate::coordinator::LogIdentity;
-use crate::index::{ClusterCount, Layer, RecurrenceSidecar, SchemaFields};
+use crate::index::{Layer, SchemaFields};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::provenance::{Kind, Ledger};
@@ -100,10 +101,10 @@ pub fn read_semantic_pass_record(
 pub enum IndexerMsg {
     /// Coordinator → indexer hand-off after a durable JSONL append.
     ///
-    /// Older docs in a cluster intentionally carry the recurrence value at
-    /// their index time, not the live cluster count. This is bounded
-    /// staleness — stale rows underweight their cluster, never overweight.
-    /// Reconciliation is a dream-cycle concern, not a v0.1 indexer concern.
+    /// The doc's `recurrence` field is written as 0. Recall's recurrence is
+    /// derived per searcher from the docs it holds (`crate::recurrence`), so
+    /// an append raises the count of every doc in its key's subtree at the
+    /// next commit and reload.
     Append {
         event_id: EventId,
         learning: AgentLearning,
@@ -114,13 +115,6 @@ pub enum IndexerMsg {
     /// if either step failed.
     Flush {
         ack: oneshot::Sender<Result<(), IndexError>>,
-    },
-    /// Dream-cycle hook (WEG-45 / DR-205′): read `semantic/recurrence_counts.json`,
-    /// walk the JSONL, delete-and-re-add each event with the authoritative
-    /// cluster count, then commit. Resolves after the commit completes.
-    ApplyRecurrenceSidecar {
-        agent_root: AgentRoot,
-        response: oneshot::Sender<Result<(), IndexError>>,
     },
     /// Decay pruner hook (WEG-62 / DR-309): delete decayed event IDs from the index.
     /// Does not touch the JSONL — the JSONL rewrite is the cycle's plan
@@ -261,8 +255,8 @@ impl IndexerPersist {
 }
 
 /// Everything the indexer task owns besides the writer, the schema fields, its
-/// inbox, the cadence and the cluster counts. One argument, so [`run_indexer`]
-/// stays within clippy's argument limit.
+/// inbox and the cadence. One argument, so [`run_indexer`] stays within
+/// clippy's argument limit.
 pub(crate) struct IndexerState {
     pub(crate) persist: IndexerPersist,
     /// Manual-reload reader over the writer's index, for the coverage pass.
@@ -271,15 +265,6 @@ pub(crate) struct IndexerState {
     /// The log's device, inode and length as of the last tick or coverage pass.
     #[cfg(unix)]
     pub(crate) log: Option<LogIdentity>,
-}
-
-/// Count `events` by `skill_action`: pass 1 of every coverage pass.
-pub(crate) fn count_clusters(events: &[AgentLearning]) -> HashMap<String, u32> {
-    let mut clusters: HashMap<String, u32> = HashMap::new();
-    for ev in events {
-        *clusters.entry(ev.skill_action.clone()).or_insert(0) += 1;
-    }
-    clusters
 }
 
 /// The indexer task: owns the `IndexWriter`, upserts appends, commits on the
@@ -291,7 +276,6 @@ pub(crate) async fn run_indexer(
     fields: SchemaFields,
     mut rx: mpsc::Receiver<IndexerMsg>,
     commit_cadence: Duration,
-    mut clusters: HashMap<String, u32>,
     mut state: IndexerState,
 ) {
     let mut interval = tokio::time::interval(commit_cadence);
@@ -305,12 +289,7 @@ pub(crate) async fn run_indexer(
             msg = rx.recv() => {
                 match msg {
                     Some(IndexerMsg::Append { event_id, learning }) => {
-                        let counter = clusters
-                            .entry(learning.skill_action.clone())
-                            .or_insert(0);
-                        *counter += 1;
-                        let recurrence = *counter;
-                        if let Err(e) = add_document(&mut writer, &fields, &learning, recurrence) {
+                        if let Err(e) = add_document(&mut writer, &fields, &learning) {
                             tracing::warn!(error = ?e, "indexer add_document failed");
                             continue;
                         }
@@ -325,15 +304,6 @@ pub(crate) async fn run_indexer(
                             Ok(())
                         };
                         let _ = ack.send(result);
-                    }
-                    Some(IndexerMsg::ApplyRecurrenceSidecar { agent_root, response }) => {
-                        let result = apply_recurrence_sidecar_inner(
-                            &mut writer,
-                            &fields,
-                            &agent_root,
-                            &mut state.persist,
-                        );
-                        let _ = response.send(result);
                     }
                     Some(IndexerMsg::IndexSemanticLessons { agent_root, response }) => {
                         let result = (|| -> Result<(), IndexError> {
@@ -356,7 +326,7 @@ pub(crate) async fn run_indexer(
                         let _ = response.send(state.persist.commit(&mut writer));
                     }
                     Some(IndexerMsg::Resync { ack }) => {
-                        let result = resync(&mut writer, &fields, &mut clusters, &mut state);
+                        let result = resync(&mut writer, &fields, &mut state);
                         match ack {
                             Some(ack) => {
                                 let _ = ack.send(result);
@@ -393,7 +363,7 @@ pub(crate) async fn run_indexer(
                     if changed {
                         // On success the pass records the identity it read;
                         // on failure the old one stays, so the next tick retries.
-                        if let Err(e) = resync(&mut writer, &fields, &mut clusters, &mut state) {
+                        if let Err(e) = resync(&mut writer, &fields, &mut state) {
                             tracing::warn!(error = ?e, "indexer resync after a log change failed");
                         }
                     } else {
@@ -411,12 +381,11 @@ pub(crate) async fn run_indexer(
 }
 
 /// The [`IndexerMsg::Resync`] handler: commit pending work (a reader cannot see
-/// uncommitted docs), read the log, recount clusters, run the coverage pass,
-/// and commit with every log id pending.
+/// uncommitted docs), read the log, run the coverage pass, and commit with
+/// every log id pending.
 fn resync(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
-    clusters: &mut HashMap<String, u32>,
     state: &mut IndexerState,
 ) -> Result<CoverageReport, IndexError> {
     if state.persist.has_pending() {
@@ -428,8 +397,7 @@ fn resync(
     #[cfg(unix)]
     let seen = LogIdentity::at(&jsonl).map_err(|e| IndexError::Io(e.to_string()))?;
     let events = read_jsonl_events(&jsonl)?;
-    *clusters = count_clusters(&events);
-    let report = cover(writer, fields, &state.coverage, &events, clusters)?;
+    let report = cover(writer, fields, &state.coverage, &events)?;
     state.persist.cover_all(&events);
     state.persist.commit(writer)?;
     #[cfg(unix)]
@@ -437,63 +405,6 @@ fn resync(
         state.log = seen;
     }
     Ok(report)
-}
-
-/// Implements the delete-and-re-add recurrence update triggered by
-/// [`IndexerMsg::ApplyRecurrenceSidecar`] (WEG-45 / DR-205′).
-///
-/// Algorithm:
-/// 1. Read `<agent_root>/.agent/semantic/recurrence_counts.json`.
-/// 2. Parse every line of the JSONL into a per-`skill_action` bucket.
-/// 3. For each cluster in the sidecar: upsert every matching event with the
-///    sidecar's authoritative `count` as the `recurrence` FastField value.
-/// 4. Commit once, through the persist step, after all clusters are processed.
-pub(crate) fn apply_recurrence_sidecar_inner(
-    writer: &mut IndexWriter<TantivyDocument>,
-    fields: &SchemaFields,
-    agent_root: &AgentRoot,
-    persist: &mut IndexerPersist,
-) -> Result<(), IndexError> {
-    // 1. Read and parse the sidecar.
-    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-    let sidecar_json = std::fs::read_to_string(&sidecar_path)
-        .map_err(|e| IndexError::Other(format!("read recurrence_counts.json: {e}")))?;
-    let sidecar: RecurrenceSidecar = serde_json::from_str(&sidecar_json)
-        .map_err(|e| IndexError::Other(format!("parse recurrence_counts.json: {e}")))?;
-
-    // 2. Walk the JSONL (shared episodic scan, WEG-378) and bucket by skill_action.
-    let jsonl_path = agent_root.episodic_jsonl();
-    let events = read_jsonl_events(&jsonl_path)?;
-    if events.is_empty() {
-        // Nothing indexed yet — sidecar application is a no-op.
-        return Ok(());
-    }
-    let mut by_skill: HashMap<String, Vec<AgentLearning>> = HashMap::new();
-    for learning in events {
-        by_skill
-            .entry(learning.skill_action.clone())
-            .or_default()
-            .push(learning);
-    }
-
-    // 3. Upsert each event in a cluster the sidecar lists.
-    for ClusterCount {
-        skill_action,
-        count,
-    } in &sidecar.clusters
-    {
-        let events = match by_skill.get(skill_action) {
-            Some(v) => v,
-            None => continue,
-        };
-        for event in events {
-            // Re-add with the sidecar-authoritative recurrence count.
-            add_document(writer, fields, event, *count)?;
-        }
-    }
-
-    // 4. Commit once after all clusters.
-    persist.commit(writer)
 }
 
 /// What one semantic (LESSONS.md) indexing pass did.
@@ -515,31 +426,15 @@ pub(crate) struct SemanticPassOutcome {
 /// Identity token for a lesson document: the exemplar's id in a distinct
 /// namespace (DR-211 / AILAB-205).
 ///
-/// Load-bearing, not cosmetic. Both existing delete sites key on the raw
-/// `event_id` term — the decay pruner and the recurrence sidecar — so a lesson
+/// Load-bearing, not cosmetic. Both delete sites key on the raw `event_id`
+/// term — the decay pruner and the upsert in [`add_document`] — so a lesson
 /// carrying its exemplar's id verbatim would be deleted alongside the event,
-/// and the sidecar would re-add only the episodic document. A separate
+/// and the upsert would put back only the episodic document. A separate
 /// namespace keeps both paths correct without touching either. It also keeps
 /// lessons out of decay entirely: the pruner's candidate ids come from the
 /// JSONL, which holds no `lsn_` records.
 pub(crate) fn semantic_event_id(lesson_id: &str) -> String {
     format!("lsn_{lesson_id}")
-}
-
-/// Count the episodic events belonging to `cluster_key`, using the same prefix
-/// semantics `consolidation` promotes with.
-///
-/// `compute_promoted_clusters` promotes at the *deepest* prefix that met the
-/// threshold, so member events routinely carry longer leaf keys — three events
-/// under `rust::eh::unwrap` and two under `rust::eh::expect` can promote as
-/// `rust::eh`. An exact-match count would report 0 members for exactly those
-/// clusters, and `recurrence` feeds the salience product.
-pub(crate) fn cluster_member_count(events: &[AgentLearning], cluster_key: &str) -> u64 {
-    let child_prefix = format!("{cluster_key}::");
-    events
-        .iter()
-        .filter(|ev| ev.skill_action == cluster_key || ev.skill_action.starts_with(&child_prefix))
-        .count() as u64
 }
 
 /// Index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
@@ -628,7 +523,6 @@ pub(crate) fn index_semantic_lessons(
     let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
     let exemplars: HashMap<&str, &AgentLearning> =
         events.iter().map(|ev| (ev.id.as_str(), ev)).collect();
-    let member_count = cluster_member_count(&events, &lessons_file.cluster_key);
 
     // `layer` is STRING (raw-tokenized), so this exact-match term hits every
     // semantic document and zero episodic ones. Deleting by the file's
@@ -659,14 +553,7 @@ pub(crate) fn index_semantic_lessons(
             skipped_lesson_ids.push(lesson.id.clone());
             continue;
         };
-        add_semantic_document(
-            writer,
-            fields,
-            &lessons_file,
-            lesson,
-            exemplar,
-            member_count,
-        )?;
+        add_semantic_document(writer, fields, &lessons_file, lesson, exemplar)?;
         outcome.indexed += 1;
     }
 
@@ -704,13 +591,16 @@ pub(crate) fn index_semantic_lessons(
 /// harness — a promoted cluster spans harnesses, so attributing the synthesized
 /// lesson to one contributor would misreport provenance. The exemplar (and its
 /// harness) stay one hop away through `event_id`.
+///
+/// `recurrence` and `cited_event_count` are written as 0 and read by nothing.
+/// A lesson's recall recurrence is the subtree count of its `cluster_key`
+/// (`crate::recurrence`).
 fn add_semantic_document(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
     lessons_file: &crate::lessons::LessonsFile,
     lesson: &crate::lessons::Lesson,
     exemplar: &AgentLearning,
-    member_count: u64,
 ) -> Result<(), IndexError> {
     // Consolidation time, not the exemplar's timestamp — see the fn docs.
     let last_updated_sec = lessons_file.last_updated.timestamp() as u64;
@@ -719,10 +609,10 @@ fn add_semantic_document(
         fields.timestamp_sec => last_updated_sec,
         fields.pain => exemplar.pain as f64,
         fields.importance => exemplar.importance as f64,
-        fields.recurrence => member_count,
+        fields.recurrence => 0u64,
         fields.layer => Layer::Semantic.as_str().to_string(),
         fields.last_updated_sec => last_updated_sec,
-        fields.cited_event_count => member_count,
+        fields.cited_event_count => 0u64,
         fields.event_id => semantic_event_id(&lesson.id),
         fields.skill_action => lessons_file.cluster_key.clone(),
         fields.source_harness => SEMANTIC_SOURCE_HARNESS.to_string(),
@@ -742,12 +632,12 @@ const SEMANTIC_SOURCE_HARNESS: &str = "dreamd";
 ///
 /// `layer` is always [`Layer::Episodic`]. Lesson documents are added by the
 /// semantic pass, not by this function. `event_id` is `STRING | STORED`, so
-/// the delete matches exactly one id.
+/// the delete matches exactly one id. `recurrence` is written as 0; recall
+/// derives it per searcher (`crate::recurrence`).
 pub(crate) fn add_document(
     writer: &mut IndexWriter<TantivyDocument>,
     fields: &SchemaFields,
     learning: &AgentLearning,
-    recurrence: u32,
 ) -> Result<(), IndexError> {
     let ts = learning.timestamp.timestamp() as u64;
     let layer_str = Layer::Episodic.as_str().to_string();
@@ -757,7 +647,7 @@ pub(crate) fn add_document(
         fields.timestamp_sec => ts,
         fields.pain => learning.pain as f64,
         fields.importance => learning.importance as f64,
-        fields.recurrence => recurrence as u64,
+        fields.recurrence => 0u64,
         fields.layer => layer_str,
         fields.last_updated_sec => ts,
         fields.cited_event_count => 0u64,
@@ -829,9 +719,9 @@ mod tests {
             content: "indexed twice".to_string(),
         };
 
-        add_document(&mut writer, &fields, &learning, 1).unwrap();
+        add_document(&mut writer, &fields, &learning).unwrap();
         writer.commit().unwrap();
-        add_document(&mut writer, &fields, &learning, 2).unwrap();
+        add_document(&mut writer, &fields, &learning).unwrap();
         writer.commit().unwrap();
 
         let reader = index.reader().unwrap();

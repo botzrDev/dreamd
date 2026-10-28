@@ -51,6 +51,7 @@ pub mod observability;
 pub mod plan;
 pub mod privacy;
 pub mod provenance;
+pub mod recurrence;
 pub mod redaction;
 pub mod registry;
 pub mod rrf;
@@ -63,6 +64,7 @@ pub mod writer_lock;
 
 pub use collector::{recall, score_by_salience, RecallResult, SalienceCollector};
 pub use migrate::{IdentityMigration, MigrateError, Migration, MigrationRegistry};
+pub use recurrence::{ClusterCounts, RecallReader};
 
 // WEG-21 / DR-118: per-user writer-process lifecycle. The module graph compiles
 // on every target as of AILAB-192 — the axum router, `AppState`, `Supervisor`

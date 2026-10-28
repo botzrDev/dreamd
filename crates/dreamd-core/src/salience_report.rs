@@ -3,7 +3,8 @@
 //! Shared by `GET /api/v1/observability/salience` and `dreamd salience-drift`.
 //! Every episodic document is scored with [`super::salience`] alone — there is
 //! no query, so there is no BM25 term. `score_by_salience` is not used: it is a
-//! top-k collector and a histogram needs every doc.
+//! top-k collector and a histogram needs every doc. Recurrence comes from the
+//! searcher's table ([`crate::recurrence`]), as it does for recall.
 //!
 //! Lesson documents (`event_id` starting with `lsn_`) are derived, not events,
 //! and are skipped.
@@ -16,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -23,12 +25,12 @@ use tantivy::columnar::Column;
 use tantivy::query::AllQuery;
 use tantivy::schema::{Field, TantivyDocument, Value};
 use tantivy::store::StoreReader;
-use tantivy::{DocId, IndexReader, Score, SegmentOrdinal, SegmentReader};
+use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
 
 use crate::index::{
-    EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, RECURRENCE_FIELD, SKILL_ACTION_FIELD,
-    TIMESTAMP_SEC_FIELD,
+    EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, SKILL_ACTION_FIELD, TIMESTAMP_SEC_FIELD,
 };
+use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
 
 use super::salience;
 
@@ -118,7 +120,7 @@ fn bucket(score: f64) -> usize {
 /// Build the report over every episodic doc, write today's snapshot, and fill
 /// `drift` from the snapshot dated exactly [`DRIFT_DAYS`] earlier.
 pub fn build_report(
-    reader: &IndexReader,
+    reader: &RecallReader,
     now_sec: i64,
     observability_dir: &Path,
 ) -> Result<SalienceReport, ReportError> {
@@ -131,9 +133,15 @@ pub fn build_report(
     let date = today.format("%Y-%m-%d").to_string();
     let drift_against = against.format("%Y-%m-%d").to_string();
 
-    let scored = reader
-        .searcher()
-        .search(&AllQuery, &FullScanCollector { now_sec })?;
+    let searcher = reader.searcher();
+    let recurrence = reader.recurrence(&searcher)?;
+    let scored = searcher.search(
+        &AllQuery,
+        &FullScanCollector {
+            now_sec,
+            recurrence,
+        },
+    )?;
 
     let mut histogram = [0u64; HISTOGRAM_BUCKETS];
     let mut sum = 0.0;
@@ -194,13 +202,14 @@ pub fn build_report(
 /// Visits every doc and yields `(skill_action, salience)` for each episodic one.
 struct FullScanCollector {
     now_sec: i64,
+    recurrence: Arc<RecurrenceTables>,
 }
 
 struct FullScanSegmentCollector {
     timestamp_col: Column<u64>,
     pain_col: Column<f64>,
     importance_col: Column<f64>,
-    recurrence_col: Column<u64>,
+    recurrence: Arc<SegmentRecurrence>,
     store: StoreReader,
     event_id: Field,
     skill_action: Field,
@@ -227,11 +236,11 @@ impl SegmentCollector for FullScanSegmentCollector {
             return;
         }
 
-        // Same fastfield reads as `collector.rs`.
+        // Same fastfield and table reads as `collector.rs`.
         let ts = self.timestamp_col.first(doc).unwrap_or(0) as i64;
         let p = self.pain_col.first(doc).unwrap_or(0.0);
         let imp = self.importance_col.first(doc).unwrap_or(0.0);
-        let rec = self.recurrence_col.first(doc).unwrap_or(0);
+        let rec = u64::from(self.recurrence.get(doc));
 
         let score = salience(self.now_sec, ts, p, imp, rec);
         self.out.push((text(self.skill_action), score));
@@ -253,11 +262,22 @@ impl Collector for FullScanCollector {
     ) -> tantivy::Result<FullScanSegmentCollector> {
         let ff = segment.fast_fields();
         let schema = segment.schema();
+        // Built from this searcher, as in `collector.rs`: a missing segment is
+        // a bug, never recurrence 0.
+        let recurrence = self
+            .recurrence
+            .segment(segment.segment_id())
+            .ok_or_else(|| {
+                TantivyError::InternalError(format!(
+                    "segment {} has no recurrence table",
+                    segment.segment_id().uuid_string()
+                ))
+            })?;
         Ok(FullScanSegmentCollector {
             timestamp_col: ff.u64(TIMESTAMP_SEC_FIELD)?,
             pain_col: ff.f64(PAIN_FIELD)?,
             importance_col: ff.f64(IMPORTANCE_FIELD)?,
-            recurrence_col: ff.u64(RECURRENCE_FIELD)?,
+            recurrence,
             store: segment.get_store_reader(1)?,
             event_id: schema.get_field(EVENT_ID_FIELD)?,
             skill_action: schema.get_field(SKILL_ACTION_FIELD)?,
@@ -279,20 +299,20 @@ impl Collector for FullScanCollector {
 mod tests {
     use super::*;
     use crate::index::{build_schema, Layer};
-    use tantivy::{doc, Index};
+    use tantivy::{doc, Index, ReloadPolicy};
 
     /// 2026-09-29T12:00:00Z.
     const NOW_SEC: i64 = 1_790_683_200;
     const DAY_SECS: i64 = 86_400;
 
-    /// `(event_id, skill_action, timestamp, pain, importance, recurrence)`.
-    type Row<'a> = (&'a str, &'a str, i64, f64, f64, u64);
+    /// `(event_id, skill_action, timestamp, pain, importance)`.
+    type Row<'a> = (&'a str, &'a str, i64, f64, f64);
 
-    fn build_index(rows: &[Row]) -> (Index, IndexReader) {
+    fn build_index(rows: &[Row]) -> (Index, RecallReader) {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         let mut writer = index.writer(15_000_000).unwrap();
-        for &(id, skill, ts, pain, imp, rec) in rows {
+        for &(id, skill, ts, pain, imp) in rows {
             let layer = if id.starts_with(LESSON_ID_PREFIX) {
                 Layer::Semantic
             } else {
@@ -304,7 +324,6 @@ mod tests {
                     fields.timestamp_sec => ts as u64,
                     fields.pain => pain,
                     fields.importance => imp,
-                    fields.recurrence => rec,
                     fields.layer => layer.as_str(),
                     fields.event_id => id,
                     fields.skill_action => skill,
@@ -312,7 +331,7 @@ mod tests {
                 .unwrap();
         }
         writer.commit().unwrap();
-        let reader = index.reader().unwrap();
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).unwrap();
         reader.reload().unwrap();
         (index, reader)
     }
@@ -328,27 +347,21 @@ mod tests {
 
     #[test]
     fn hand_computed_doc_lands_in_its_bucket_and_lsn_is_excluded() {
-        // age 14 days, pain 10, importance 10, recurrence 0 → e^-1 ≈ 0.3679.
+        // age 14 days, pain 10, importance 10, recurrence 1 (the doc itself)
+        // → e^-1 · (1 + ln 2) ≈ 0.6229.
         let (_idx, reader) = build_index(&[
-            (
-                "evt_a",
-                "rust::tokio",
-                NOW_SEC - 14 * DAY_SECS,
-                10.0,
-                10.0,
-                0,
-            ),
-            ("lsn_evt_a", "rust::tokio", NOW_SEC, 10.0, 10.0, 5),
+            ("evt_a", "rust::tokio", NOW_SEC - 14 * DAY_SECS, 10.0, 10.0),
+            ("lsn_evt_a", "rust::tokio", NOW_SEC, 10.0, 10.0),
         ]);
         let dir = tempfile::tempdir().unwrap();
         let report = build_report(&reader, NOW_SEC, dir.path()).unwrap();
 
-        let expected = salience(NOW_SEC, NOW_SEC - 14 * DAY_SECS, 10.0, 10.0, 0);
-        assert!((expected - (-1.0_f64).exp()).abs() < 1e-12);
+        let expected = salience(NOW_SEC, NOW_SEC - 14 * DAY_SECS, 10.0, 10.0, 1);
+        assert!((expected - (-1.0_f64).exp() * (1.0 + 2.0_f64.ln())).abs() < 1e-12);
         assert_eq!(report.total, 1, "lsn_ doc must not count");
         assert!((report.mean - expected).abs() < 1e-12);
         let mut want = [0u64; HISTOGRAM_BUCKETS];
-        want[3] = 1;
+        want[6] = 1;
         assert_eq!(report.histogram, want);
         assert_eq!(report.top_clusters.len(), 1);
         assert_eq!(report.top_clusters[0].skill_action, "rust::tokio");
@@ -385,13 +398,13 @@ mod tests {
     fn top_clusters_sort_by_mean_then_name_and_cap_at_five() {
         let ts = NOW_SEC;
         let (_idx, reader) = build_index(&[
-            ("evt_1", "b", ts, 5.0, 5.0, 0),
-            ("evt_2", "a", ts, 5.0, 5.0, 0),
-            ("evt_3", "c", ts, 9.0, 9.0, 0),
-            ("evt_4", "c", ts, 1.0, 1.0, 0),
-            ("evt_5", "d", ts, 2.0, 2.0, 0),
-            ("evt_6", "e", ts, 1.0, 1.0, 0),
-            ("evt_7", "f", ts, 1.0, 1.0, 0),
+            ("evt_1", "b", ts, 5.0, 5.0),
+            ("evt_2", "a", ts, 5.0, 5.0),
+            ("evt_3", "c", ts, 9.0, 9.0),
+            ("evt_4", "c", ts, 1.0, 1.0),
+            ("evt_5", "d", ts, 2.0, 2.0),
+            ("evt_6", "e", ts, 1.0, 1.0),
+            ("evt_7", "f", ts, 1.0, 1.0),
         ]);
         let dir = tempfile::tempdir().unwrap();
         let report = build_report(&reader, NOW_SEC, dir.path()).unwrap();
@@ -407,7 +420,7 @@ mod tests {
 
     #[test]
     fn same_day_calls_leave_one_snapshot_without_drift_fields() {
-        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0, 0)]);
+        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0)]);
         let dir = tempfile::tempdir().unwrap();
         build_report(&reader, NOW_SEC, dir.path()).unwrap();
         build_report(&reader, NOW_SEC + 3600, dir.path()).unwrap();
@@ -431,7 +444,7 @@ mod tests {
 
     #[test]
     fn drift_uses_the_file_dated_exactly_seven_days_earlier() {
-        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0, 0)]);
+        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0)]);
         let dir = tempfile::tempdir().unwrap();
         write_snapshot_mean(dir.path(), "2026-09-22", 0.05);
 
@@ -443,7 +456,7 @@ mod tests {
 
     #[test]
     fn drift_is_null_without_the_seven_day_file() {
-        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0, 0)]);
+        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0)]);
         let dir = tempfile::tempdir().unwrap();
         let report = build_report(&reader, NOW_SEC, dir.path()).unwrap();
         assert_eq!(report.drift, None);
@@ -455,7 +468,7 @@ mod tests {
 
     #[test]
     fn drift_ignores_six_and_eight_day_files() {
-        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0, 0)]);
+        let (_idx, reader) = build_index(&[("evt_a", "x", NOW_SEC, 5.0, 5.0)]);
         let dir = tempfile::tempdir().unwrap();
         write_snapshot_mean(dir.path(), "2026-09-23", 0.05);
         write_snapshot_mean(dir.path(), "2026-09-21", 0.05);

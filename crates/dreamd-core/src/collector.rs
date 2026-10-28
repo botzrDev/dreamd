@@ -3,9 +3,10 @@
 //! Tantivy's built-in `TopDocs` collector ranks by BM25 alone. dreamd needs
 //! BM25 _multiplied by_ a query-time salience score (ARCHITECTURE.md decision #2,
 //! PRD FR-4.2), so the score is never indexed. This module implements the
-//! [`Collector`]/[`SegmentCollector`] pair that fetches the four salience
-//! fastfields per matching doc, reweights the score with [`salience`], and
-//! evicts via a min-heap of size `k`.
+//! [`Collector`]/[`SegmentCollector`] pair that fetches the three salience
+//! fastfields and the searcher's recurrence table (`crate::recurrence`) per
+//! matching doc, reweights the score with [`salience`], and evicts via a
+//! min-heap of size `k`.
 //!
 //! Production path (WEG-69): HTTP/MCP recall → `TantivyIndexHandle::reader`
 //! → [`recall`]. This module owns the collector engine; the write path is
@@ -13,6 +14,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
@@ -20,12 +22,13 @@ use tantivy::columnar::Column;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Term, Value};
 use tantivy::store::StoreReader;
-use tantivy::{DocAddress, DocId, IndexReader, Score, SegmentOrdinal, SegmentReader};
+use tantivy::{DocAddress, DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
 
 use crate::index::{
-    Layer, SchemaFields, EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, RECURRENCE_FIELD,
-    SKILL_ACTION_FIELD, TIMESTAMP_SEC_FIELD,
+    Layer, SchemaFields, EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, SKILL_ACTION_FIELD,
+    TIMESTAMP_SEC_FIELD,
 };
+use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
 use crate::salience::{salience_with_context, RecurrenceContext};
 
 /// One hydrated result from a salience-scored recall query. Score is
@@ -44,7 +47,8 @@ pub struct RecallResult {
     pub pain: f64,
     /// 0.0..=10.0 long-term relevance score as stored at index time.
     pub importance: f64,
-    /// Cluster occurrence count as stored at index time (bounded-staleness; see WEG-42).
+    /// Alive episodic docs in the searcher whose `skill_action` equals this
+    /// doc's or extends it with `::` (`crate::recurrence`, BZR-1242).
     pub recurrence: u64,
     /// Memory layer the document was indexed under.
     pub layer: Layer,
@@ -77,7 +81,8 @@ pub struct ScoredDoc {
     recurrence: u64,
     /// Raw BM25 score captured before the salience multiply (Tantivy's `f32 Score` widened to `f64`).
     pub bm25: f64,
-    /// Salience multiplier computed at `collect()` time from the four `FastFields`.
+    /// Salience multiplier computed at `collect()` time from the three `FastFields`
+    /// and the recurrence table.
     pub salience: f64,
 }
 
@@ -146,7 +151,7 @@ pub struct SalienceSegmentCollector {
     timestamp_col: Column<u64>,
     pain_col: Column<f64>,
     importance_col: Column<f64>,
-    recurrence_col: Column<u64>,
+    recurrence: Arc<SegmentRecurrence>,
     now_sec: i64,
     /// Present only when the exclusion is non-empty, so the default recall
     /// path never touches the doc store.
@@ -195,7 +200,7 @@ impl SegmentCollector for SalienceSegmentCollector {
         let ts = self.timestamp_col.first(doc).unwrap_or(0) as i64;
         let p = self.pain_col.first(doc).unwrap_or(0.0);
         let imp = self.importance_col.first(doc).unwrap_or(0.0);
-        let rec = self.recurrence_col.first(doc).unwrap_or(0);
+        let rec = u64::from(self.recurrence.get(doc));
 
         // Capture bm25 and salience before multiplying — after the product they are
         // unrecoverable (0*anything=0; needed for the --explain formatter, DR-703).
@@ -230,19 +235,24 @@ impl SegmentCollector for SalienceSegmentCollector {
 }
 
 /// Top-level collector handed to `Searcher::search`. Stateless apart from
-/// `k` and `now_sec`; per-segment work happens in [`SalienceSegmentCollector`].
+/// `k`, `now_sec` and the searcher's recurrence table; per-segment work
+/// happens in [`SalienceSegmentCollector`].
 pub struct SalienceCollector {
     k: usize,
     now_sec: i64,
     exclusion: RecallExclusion,
+    recurrence: Arc<RecurrenceTables>,
 }
 
 impl SalienceCollector {
-    pub fn new(k: usize, now_sec: i64) -> Self {
+    /// `recurrence` must be the table of the searcher this collector runs on
+    /// ([`RecallReader::recurrence`]).
+    pub fn new(k: usize, now_sec: i64, recurrence: Arc<RecurrenceTables>) -> Self {
         Self {
             k,
             now_sec,
             exclusion: RecallExclusion::default(),
+            recurrence,
         }
     }
 
@@ -263,6 +273,17 @@ impl Collector for SalienceCollector {
         segment: &SegmentReader,
     ) -> tantivy::Result<SalienceSegmentCollector> {
         let ff = segment.fast_fields();
+        // The table is built from this searcher, so a segment it lacks is a
+        // bug, never recurrence 0.
+        let recurrence = self
+            .recurrence
+            .segment(segment.segment_id())
+            .ok_or_else(|| {
+                TantivyError::InternalError(format!(
+                    "segment {} has no recurrence table",
+                    segment.segment_id().uuid_string()
+                ))
+            })?;
         // Empty exclusion (every caller but counterfactual recall) never opens
         // the doc store. SegmentReader has no `doc()` in Tantivy 0.26.
         let exclusion = if self.exclusion.is_empty() {
@@ -284,7 +305,7 @@ impl Collector for SalienceCollector {
             timestamp_col: ff.u64(TIMESTAMP_SEC_FIELD)?,
             pain_col: ff.f64(PAIN_FIELD)?,
             importance_col: ff.f64(IMPORTANCE_FIELD)?,
-            recurrence_col: ff.u64(RECURRENCE_FIELD)?,
+            recurrence,
             now_sec: self.now_sec,
             exclusion,
         })
@@ -385,7 +406,7 @@ fn hydrate_scored(
 /// the `layer` field rather than inside the collector; the collector
 /// stays layer-agnostic.
 pub fn recall(
-    reader: &IndexReader,
+    reader: &RecallReader,
     fields: &SchemaFields,
     query_text: &str,
     k: usize,
@@ -409,7 +430,7 @@ pub fn recall(
 /// top-k heap, so up to `k` of the remaining hits come back. The index is not
 /// modified. An empty exclusion is exactly [`recall`].
 pub fn recall_excluding(
-    reader: &IndexReader,
+    reader: &RecallReader,
     fields: &SchemaFields,
     query_text: &str,
     k: usize,
@@ -418,6 +439,7 @@ pub fn recall_excluding(
     now_sec: i64,
 ) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
+    let recurrence = reader.recurrence(&searcher)?;
 
     let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
     let bm25_query = query_parser.parse_query(query_text)?;
@@ -433,7 +455,8 @@ pub fn recall_excluding(
         bm25_query
     };
 
-    let collector = SalienceCollector::new(k, now_sec).with_exclusion(exclusion.clone());
+    let collector =
+        SalienceCollector::new(k, now_sec, recurrence).with_exclusion(exclusion.clone());
     let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
     hydrate_scored(searcher, fields, top_docs)
 }
@@ -446,13 +469,14 @@ pub fn recall_excluding(
 ///
 /// `now_sec` is caller-provided (same invariant as [`recall`]).
 pub fn score_by_salience(
-    reader: &IndexReader,
+    reader: &RecallReader,
     fields: &SchemaFields,
     n: usize,
     now_sec: i64,
 ) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
-    let collector = SalienceCollector::new(n, now_sec);
+    let recurrence = reader.recurrence(&searcher)?;
+    let collector = SalienceCollector::new(n, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&AllQuery, &collector)?;
     hydrate_scored(searcher, fields, top_docs)
 }
@@ -462,37 +486,36 @@ mod tests {
     use super::*;
     use crate::index::build_schema;
     use tantivy::doc;
-    use tantivy::Index;
+    use tantivy::{Index, ReloadPolicy};
 
     const DAY_SECS: i64 = 86_400;
     const NOW_SEC: i64 = 1_750_000_000;
 
     /// Build an in-RAM index + a populated reader for one test. Each entry
-    /// is `(content, timestamp_sec, pain, importance, recurrence, layer)`.
+    /// is `(content, timestamp_sec, pain, importance, skill_action, layer)`.
     fn build_index_with(
-        entries: &[(&str, i64, f64, f64, u64, Layer)],
-    ) -> (Index, SchemaFields, IndexReader) {
+        entries: &[(&str, i64, f64, f64, &str, Layer)],
+    ) -> (Index, SchemaFields, RecallReader) {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         let mut writer = index.writer(15_000_000).expect("create writer");
-        for (content, ts, pain, importance, recurrence, layer) in entries {
+        for (content, ts, pain, importance, skill_action, layer) in entries {
             writer
                 .add_document(doc!(
                     fields.content => *content,
                     fields.timestamp_sec => *ts as u64,
                     fields.pain => *pain,
                     fields.importance => *importance,
-                    fields.recurrence => *recurrence,
                     fields.layer => layer.as_str(),
                     fields.last_updated_sec => *ts as u64,
                     fields.cited_event_count => 0u64,
-                    fields.skill_action => "rust::axum::error_handling",
+                    fields.skill_action => *skill_action,
                     fields.source_harness => "claude-code",
                 ))
                 .expect("add doc");
         }
         writer.commit().expect("commit");
-        let reader = index.reader().expect("reader");
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
         (index, fields, reader)
     }
 
@@ -509,7 +532,6 @@ mod tests {
                 fields.timestamp_sec => (NOW_SEC - DAY_SECS) as u64,
                 fields.pain => 8.0_f64,
                 fields.importance => 9.0_f64,
-                fields.recurrence => 3_u64,
                 fields.layer => Layer::Episodic.as_str(),
                 fields.last_updated_sec => (NOW_SEC - DAY_SECS) as u64,
                 fields.cited_event_count => 0_u64,
@@ -519,7 +541,7 @@ mod tests {
             ))
             .expect("add doc");
         writer.commit().expect("commit");
-        let reader = index.reader().expect("reader");
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
         let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -537,7 +559,7 @@ mod tests {
             NOW_SEC - DAY_SECS,
             0.0,
             9.0,
-            3,
+            "rust::axum::error_handling",
             Layer::Episodic,
         )]);
         let results = recall(&reader, &fields, "axum", 10, Some(Layer::Episodic), NOW_SEC).unwrap();
@@ -549,14 +571,14 @@ mod tests {
     fn test_top_k_eviction() {
         // Six matching docs at decreasing recency → with k=3, the three
         // most-recent (highest salience) survive.
-        let entries: Vec<(&str, i64, f64, f64, u64, Layer)> = (0..6)
+        let entries: Vec<(&str, i64, f64, f64, &str, Layer)> = (0..6)
             .map(|i| {
                 (
                     "axum handler error pattern",
                     NOW_SEC - (i as i64) * DAY_SECS,
                     5.0,
                     5.0,
-                    3,
+                    "rust::axum::error_handling",
                     Layer::Episodic,
                 )
             })
@@ -578,7 +600,7 @@ mod tests {
                 NOW_SEC - DAY_SECS,
                 5.0,
                 5.0,
-                3,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
             (
@@ -586,7 +608,7 @@ mod tests {
                 NOW_SEC - DAY_SECS,
                 5.0,
                 5.0,
-                3,
+                "rust::axum::error_handling",
                 Layer::Semantic,
             ),
         ]);
@@ -606,7 +628,7 @@ mod tests {
                 NOW_SEC - DAY_SECS,
                 3.0,
                 5.0,
-                2,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
             (
@@ -614,7 +636,7 @@ mod tests {
                 NOW_SEC - DAY_SECS,
                 9.0,
                 5.0,
-                2,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
         ]);
@@ -645,13 +667,13 @@ mod tests {
     fn test_recall_snapshot() {
         // Hand-authored 5-event corpus, two skill_action clusters. NOW_SEC
         // is hardcoded so the salience decay is deterministic across runs.
-        let entries: Vec<(&str, i64, f64, f64, u64, Layer)> = vec![
+        let entries: Vec<(&str, i64, f64, f64, &str, Layer)> = vec![
             (
                 "axum requires IntoResponse on error types",
                 NOW_SEC - DAY_SECS,
                 8.0,
                 9.0,
-                3,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
             (
@@ -659,7 +681,7 @@ mod tests {
                 NOW_SEC - 7 * DAY_SECS,
                 6.0,
                 7.0,
-                3,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
             (
@@ -667,7 +689,7 @@ mod tests {
                 NOW_SEC - 30 * DAY_SECS,
                 5.0,
                 5.0,
-                3,
+                "rust::axum::error_handling",
                 Layer::Episodic,
             ),
             (
@@ -675,7 +697,7 @@ mod tests {
                 NOW_SEC - 2 * DAY_SECS,
                 7.0,
                 7.0,
-                2,
+                "rust::tokio::select",
                 Layer::Episodic,
             ),
             (
@@ -683,7 +705,7 @@ mod tests {
                 NOW_SEC - 14 * DAY_SECS,
                 5.0,
                 6.0,
-                2,
+                "rust::tokio::select",
                 Layer::Episodic,
             ),
         ];
@@ -725,7 +747,6 @@ mod tests {
                 fields.timestamp_sec => (NOW_SEC - DAY_SECS) as u64,
                 fields.pain => 9.0_f64,
                 fields.importance => 9.0_f64,
-                fields.recurrence => 3_u64,
                 fields.layer => Layer::Episodic.as_str(),
                 fields.last_updated_sec => (NOW_SEC - DAY_SECS) as u64,
                 fields.cited_event_count => 0_u64,
@@ -741,7 +762,6 @@ mod tests {
                 fields.timestamp_sec => (NOW_SEC - 7 * DAY_SECS) as u64,
                 fields.pain => 6.0_f64,
                 fields.importance => 6.0_f64,
-                fields.recurrence => 2_u64,
                 fields.layer => Layer::Episodic.as_str(),
                 fields.last_updated_sec => (NOW_SEC - 7 * DAY_SECS) as u64,
                 fields.cited_event_count => 0_u64,
@@ -757,7 +777,6 @@ mod tests {
                 fields.timestamp_sec => (NOW_SEC - 30 * DAY_SECS) as u64,
                 fields.pain => 2.0_f64,
                 fields.importance => 2.0_f64,
-                fields.recurrence => 1_u64,
                 fields.layer => Layer::Episodic.as_str(),
                 fields.last_updated_sec => (NOW_SEC - 30 * DAY_SECS) as u64,
                 fields.cited_event_count => 0_u64,
@@ -767,7 +786,7 @@ mod tests {
             ))
             .expect("add low");
         writer.commit().expect("commit");
-        let reader = index.reader().expect("reader");
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
 
         let results = score_by_salience(&reader, &fields, 2, NOW_SEC).expect("score");
         assert_eq!(results.len(), 2, "n=2 must cap to 2 hits across all docs");
@@ -814,7 +833,16 @@ mod tests {
     /// iteration order, which is not score order.
     #[test]
     fn merge_fruits_keeps_global_top_k_across_segments() {
-        let collector = SalienceCollector::new(3, NOW_SEC);
+        let empty = RecallReader::open(
+            &Index::create_in_ram(build_schema().0),
+            ReloadPolicy::Manual,
+        )
+        .expect("reader");
+        let collector = SalienceCollector::new(
+            3,
+            NOW_SEC,
+            empty.recurrence(&empty.searcher()).expect("tables"),
+        );
         let seg_a = vec![scored(0.9, 0), scored(0.2, 1), scored(0.5, 2)];
         let seg_b = vec![scored(0.7, 3), scored(0.1, 4), scored(0.8, 5)];
 
@@ -834,7 +862,7 @@ mod tests {
     /// `build_index_with` never sets `event_id`, so exclusion tests build their own.
     fn build_exclusion_index(
         entries: &[(&str, &str, &str, i64, f64, Layer)],
-    ) -> (Index, SchemaFields, IndexReader) {
+    ) -> (Index, SchemaFields, RecallReader) {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         let mut writer = index.writer(15_000_000).expect("create writer");
@@ -845,7 +873,6 @@ mod tests {
                     fields.timestamp_sec => *ts as u64,
                     fields.pain => *pain,
                     fields.importance => 9.0_f64,
-                    fields.recurrence => 1_u64,
                     fields.layer => layer.as_str(),
                     fields.last_updated_sec => *ts as u64,
                     fields.cited_event_count => 0_u64,
@@ -856,7 +883,7 @@ mod tests {
                 .expect("add doc");
         }
         writer.commit().expect("commit");
-        let reader = index.reader().expect("reader");
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
         (index, fields, reader)
     }
 

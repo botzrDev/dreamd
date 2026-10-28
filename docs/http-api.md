@@ -234,7 +234,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 | `content` | Matched text |
 | `metadata.timestamp_sec` | Unix seconds: the event's timestamp, or for a lesson the time it was consolidated |
 | `metadata.pain`, `metadata.importance` | Stored `0.0`–`10.0` scores |
-| `metadata.recurrence` | Cluster recurrence count from index fast field (see below) |
+| `metadata.recurrence` | Live episodic events whose `skill_action` equals the hit's or extends it with `::`, computed from the index per searcher (see below) |
 | `metadata.skill_action` | Hierarchical cluster key of the matched learning (e.g. `rust::error_handling::axum_rejection`) |
 | `metadata.source_harness` | Harness that authored the learning (e.g. `"cursor"`, `"claude-code"`) — makes recall cross-harness-attributable |
 
@@ -530,13 +530,13 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ---
 
-## Recurrence sidecar
+## Recurrence and the sidecar
 
-`metadata.recurrence` in recall results comes from the Tantivy index fast field, not from the JSONL line at query time.
+`metadata.recurrence` in recall results is computed from the index, once per searcher: the number of live episodic events whose `skill_action` equals the hit's or extends it with `::`, all-time. An event counts itself, so it is at least 1. A lesson hit gets the count of its `cluster_key`. A new event raises the count of every event in its key's subtree at the next index commit.
 
-After each dream cycle, the coordinator writes `.agent/semantic/recurrence_counts.json` mapping `skill_action` → count. The indexer applies this sidecar by re-indexing affected documents with the authoritative recurrence value. Until the next dream cycle (or indexer sidecar apply), recurrence may reflect the value at index time.
+`.agent/semantic/recurrence_counts.json` is the dream cycle's promotion report: windowed counts at the deepest qualifying prefix. Recall does not read it; `dreamd doctor --cluster-health` and the provenance `recurrence` edges do.
 
-See `crates/dreamd-core/src/server/tantivy_handle.rs` (`apply_recurrence_sidecar`) and [architecture/durability.md](./architecture/durability.md).
+See `crates/dreamd-core/src/recurrence.rs` and [architecture/durability.md](./architecture/durability.md).
 
 ---
 

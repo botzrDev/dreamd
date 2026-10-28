@@ -28,8 +28,10 @@ never pretty-printed, one whole record per `\n`-terminated line:
 the record: it takes the key per request (the `X-Client-Dedup-Key` header, or
 the `client_dedup_key` argument of `append_node`) and uses it only to drop a
 duplicate append for as long as that writer process keeps running. `recurrence` is **not** a field on
-the record — it is a per-cluster count the dream cycle computes. dreamd keeps
-those counts in `semantic/recurrence_counts.json`.
+the record. For recall it is the number of live events whose `skill_action`
+equals the candidate's or extends it with `::`, which dreamd counts from the
+index. Promotion uses its own windowed count, which the dream cycle writes to
+`semantic/recurrence_counts.json`.
 
 dreamd writes the fields in the order `schema_version`, `id`, `timestamp`,
 `pain`, `importance`, `pinned`, `skill_action`, `source_harness`, `content`, and

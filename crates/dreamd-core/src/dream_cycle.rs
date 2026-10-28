@@ -3,7 +3,7 @@
 //! Phase order (load-bearing):
 //!   1. Consolidation — cluster → lesson body → LESSONS.md → pin/unpin
 //!   2. Decay — archive + JSONL prune
-//!   3. Index — recurrence sidecar apply → prune decayed docs
+//!   3. Index — prune decayed docs → re-index the lesson layer
 //!   4. Autobiography — best-effort git commit
 //!
 //! A cycle's filesystem phases are three steps (BZR-1241):
@@ -824,7 +824,6 @@ async fn run_index_phases(
     match index {
         IndexBackend::Skip => Ok(()),
         IndexBackend::Sender(sender) => {
-            apply_recurrence_sidecar_if_present(agent_root, &sender).await?;
             if !decay_result.decayed_ids.is_empty() {
                 prune_decayed_events(&sender, decay_result.decayed_ids.clone()).await?;
             }
@@ -837,57 +836,27 @@ async fn run_index_phases(
             use crate::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
             let handle = TantivyIndexHandle::open(agent_root, &lock, DEFAULT_COMMIT_CADENCE)?;
-            let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-            if sidecar_path.exists() {
-                handle.apply_recurrence_sidecar(agent_root).await?;
-            }
             if !decay_result.decayed_ids.is_empty() {
                 handle
                     .prune_decayed_events(decay_result.decayed_ids.clone())
                     .await?;
             }
             // `open()` above already ran the semantic pass; re-running it after
-            // the sidecar and prune commits is idempotent (delete every semantic
-            // document, re-add the current lesson set).
+            // the prune commit is idempotent (delete every semantic document,
+            // re-add the current lesson set).
             handle.index_semantic_lessons(agent_root.clone()).await?;
             Ok(())
         }
     }
 }
 
-#[cfg(unix)]
-async fn apply_recurrence_sidecar_if_present(
-    agent_root: &AgentRoot,
-    sender: &tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>,
-) -> Result<(), DreamCycleError> {
-    use crate::server::tantivy_handle::IndexerMsg;
-    use tokio::sync::oneshot;
-
-    let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-    if !sidecar_path.exists() {
-        return Ok(());
-    }
-
-    let (tx, rx) = oneshot::channel();
-    sender
-        .send(IndexerMsg::ApplyRecurrenceSidecar {
-            agent_root: agent_root.clone(),
-            response: tx,
-        })
-        .await
-        .map_err(|_| crate::server::index_map::IndexError::ChannelClosed)?;
-    rx.await
-        .map_err(|_| crate::server::index_map::IndexError::TaskDropped)??;
-    Ok(())
-}
-
 /// Ask the live indexer to re-index `semantic/LESSONS.md` (DR-211 / AILAB-205).
 /// Sender-only mirror of [`TantivyIndexHandle::index_semantic_lessons`] for the
 /// daemon path, which holds a channel rather than the handle.
 ///
-/// Unconditional: unlike the recurrence sidecar there is no "file present"
-/// pre-check, because the pass must also run to clear stale semantic documents
-/// after a cycle that removed LESSONS.md.
+/// Unconditional: there is no "file present" pre-check, because the pass must
+/// also run to clear stale semantic documents after a cycle that removed
+/// LESSONS.md.
 ///
 /// [`TantivyIndexHandle::index_semantic_lessons`]: crate::server::TantivyIndexHandle::index_semantic_lessons
 #[cfg(unix)]

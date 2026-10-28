@@ -3,7 +3,9 @@
 //! [`check_store`] is the oracle tests run after every step that touches a
 //! store: an append, a dream cycle, a recovery, an index open. It reads the
 //! episodic log, `LESSONS.md`, `state.json`, the WAL's presence, and (when
-//! given) a committed index reader, and reports every way they disagree.
+//! given) a committed index reader, and reports every way they disagree:
+//! duplicate ids, the index's coverage of the log, the lesson documents, each
+//! document's recall recurrence, a stuck cycle and unpinned citations.
 //!
 //! It opens no writer, writes nothing, and reads no clock, so calling it can
 //! never change the answer to the next call.
@@ -13,12 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use tantivy::collector::DocSetCollector;
 use tantivy::query::AllQuery;
 use tantivy::schema::{TantivyDocument, Value};
-use tantivy::IndexReader;
+use tantivy::TantivyError;
 
 use crate::daemon_state::read_daemon_state;
 use crate::index::{build_schema, Layer};
 use crate::layout::AgentRoot;
 use crate::lessons::{read_lessons_file, LessonsFile};
+use crate::recurrence::{ClusterCounts, RecallReader};
 use crate::server::indexer_actor::semantic_event_id;
 
 /// One way the store disagrees with itself.
@@ -46,6 +49,14 @@ pub enum Violation {
     UnpinnedCitation { id: String },
     /// `LESSONS.md` exists but could not be read or parsed.
     LessonsUnreadable { reason: String },
+    /// A document's recall recurrence differs from the log's subtree count for
+    /// its `skill_action`. `id` is the document id (`evt_…` or `lsn_…`).
+    RecurrenceMismatch {
+        id: String,
+        skill_action: String,
+        index: u32,
+        log: u32,
+    },
 }
 
 impl Violation {
@@ -70,14 +81,19 @@ pub enum InvariantError {
 
 /// Check `agent_root` against the invariants of a healthy store.
 ///
-/// Checks run in a fixed order — log, index, semantic layer, state,
-/// citations — and each emits its ids sorted, so equal stores give equal
-/// output.
+/// Checks run in a fixed order — log, index, semantic layer, recurrence,
+/// state, citations — and each emits its ids sorted, so equal stores give
+/// equal output.
 ///
-/// The index and semantic checks run only when `index` is `Some`. The caller
-/// owns that reader's freshness: it must see a committed, reloaded view.
-/// Appends still sitting in the indexer's uncommitted batch show up as
+/// The index, semantic and recurrence checks run only when `index` is `Some`.
+/// The caller owns that reader's freshness: it must see a committed, reloaded
+/// view. Appends still sitting in the indexer's uncommitted batch show up as
 /// [`Violation::MissingFromIndex`].
+///
+/// The recurrence check runs only when the index covers the log exactly: no
+/// duplicate log id, no missing, extra or duplicated index document. Each of
+/// those already names the fault, and every count in its cluster would
+/// disagree too.
 ///
 /// An error means the log, `state.json` or the index could not be read. A
 /// `LESSONS.md` that exists but cannot be read or parsed is not an error: it
@@ -85,7 +101,7 @@ pub enum InvariantError {
 /// semantic and citation checks skip it.
 pub fn check_store(
     agent_root: &AgentRoot,
-    index: Option<&IndexReader>,
+    index: Option<&RecallReader>,
 ) -> Result<Vec<Violation>, InvariantError> {
     let mut out = Vec::new();
 
@@ -116,7 +132,11 @@ pub fn check_store(
     };
 
     if let Some(reader) = index {
-        let (episodic_docs, semantic_docs) = read_index_ids(reader)?;
+        let IndexDocs {
+            episodic: episodic_docs,
+            semantic: semantic_docs,
+            mut recurrence,
+        } = read_index_docs(reader)?;
 
         // Index.
         for (id, &count) in &episodic_docs {
@@ -156,6 +176,32 @@ pub fn check_store(
                 out.push(Violation::StaleLessonDoc { id: id.clone() });
             }
         }
+
+        // Recurrence, only over an index that covers the log exactly.
+        let covered = !out.iter().any(|v| {
+            matches!(
+                v,
+                Violation::DuplicateEventId { .. }
+                    | Violation::MissingFromIndex { .. }
+                    | Violation::NotInLog { .. }
+                    | Violation::DuplicateIndexDoc { .. }
+            )
+        });
+        if covered {
+            let counts = ClusterCounts::from_events(&events);
+            recurrence.sort_by(|a, b| a.id.cmp(&b.id));
+            for doc in recurrence {
+                let log = counts.subtree(&doc.skill_action);
+                if doc.recurrence != log {
+                    out.push(Violation::RecurrenceMismatch {
+                        id: doc.id,
+                        skill_action: doc.skill_action,
+                        index: doc.recurrence,
+                        log,
+                    });
+                }
+            }
+        }
     }
 
     // Reported with or without an index: it is also why the citation check
@@ -184,32 +230,64 @@ pub fn check_store(
     Ok(out)
 }
 
-/// Every alive document's stored `event_id`, split by `layer`. Episodic ids
-/// carry a count so duplicates are visible; semantic ids are a set.
-fn read_index_ids(
-    reader: &IndexReader,
-) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), tantivy::TantivyError> {
+/// What [`read_index_docs`] reads from one searcher.
+struct IndexDocs {
+    /// Episodic ids, with a count so duplicates are visible.
+    episodic: BTreeMap<String, usize>,
+    /// Semantic ids.
+    semantic: BTreeSet<String>,
+    /// Every alive document's recall recurrence, from the same searcher.
+    recurrence: Vec<DocRecurrence>,
+}
+
+struct DocRecurrence {
+    id: String,
+    skill_action: String,
+    recurrence: u32,
+}
+
+/// Every alive document's stored `event_id`, split by `layer`, and its recall
+/// recurrence from the table of the searcher the ids were read from.
+fn read_index_docs(reader: &RecallReader) -> Result<IndexDocs, TantivyError> {
     let (_, fields) = build_schema();
     let searcher = reader.searcher();
-    let mut episodic: BTreeMap<String, usize> = BTreeMap::new();
-    let mut semantic: BTreeSet<String> = BTreeSet::new();
+    let tables = reader.recurrence(&searcher)?;
+    let mut docs = IndexDocs {
+        episodic: BTreeMap::new(),
+        semantic: BTreeSet::new(),
+        recurrence: Vec::new(),
+    };
     for addr in searcher.search(&AllQuery, &DocSetCollector)? {
         let doc: TantivyDocument = searcher.doc(addr)?;
+        let text = |field| {
+            doc.get_first(field)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
         let layer = doc.get_first(fields.layer).and_then(|v| v.as_str());
         // A document with no stored id keeps the empty string, the same
         // fallback recall uses, so it still surfaces as `NotInLog`.
-        let id = doc
-            .get_first(fields.event_id)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned();
+        let id = text(fields.event_id);
+        let segment = searcher.segment_reader(addr.segment_ord).segment_id();
+        let table = tables.segment(segment).ok_or_else(|| {
+            TantivyError::InternalError(format!(
+                "segment {} has no recurrence table",
+                segment.uuid_string()
+            ))
+        })?;
+        docs.recurrence.push(DocRecurrence {
+            id: id.clone(),
+            skill_action: text(fields.skill_action),
+            recurrence: table.get(addr.doc_id),
+        });
         if layer == Some(Layer::Episodic.as_str()) {
-            *episodic.entry(id).or_insert(0) += 1;
+            *docs.episodic.entry(id).or_insert(0) += 1;
         } else if layer == Some(Layer::Semantic.as_str()) {
-            semantic.insert(id);
+            docs.semantic.insert(id);
         }
     }
-    Ok((episodic, semantic))
+    Ok(docs)
 }
 
 /// `lessons[].id` ∪ `citations`, sorted. This is the set the dream cycle pins.
@@ -230,6 +308,7 @@ mod tests {
     use dreamd_protocol::{AgentLearning, EventId};
     use std::fs;
     use std::io::Write;
+    use tantivy::doc;
 
     const ULID_BASE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA";
     const NOW_SEC: i64 = 1_780_000_000;
@@ -444,5 +523,51 @@ mod tests {
         );
         assert_eq!(check_store(&root, None).unwrap(), vec![]);
         h.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn recurrence_mismatch_names_each_doc_whose_count_differs() {
+        let (a, b, c) = (id('0'), id('1'), id('2'));
+        let (root, _guard) = scaffold(
+            "inv-recurrence",
+            &[
+                learning(&a, "first", false),
+                learning(&b, "second", false),
+                learning(&c, "third", false),
+            ],
+        );
+        // The ids match the log, so no coverage violation fires. C's key does
+        // not.
+        let (schema, fields) = build_schema();
+        let index = tantivy::Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        for (doc_id, skill_action) in [(&a, "rust::eh"), (&b, "rust::eh"), (&c, "go::x")] {
+            writer
+                .add_document(doc!(
+                    fields.layer => Layer::Episodic.as_str(),
+                    fields.event_id => doc_id.as_str(),
+                    fields.skill_action => skill_action,
+                ))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let reader = RecallReader::open(&index, tantivy::ReloadPolicy::Manual).unwrap();
+        reader.reload().unwrap();
+
+        let mismatch =
+            |doc_id: &str, skill_action: &str, index, log| Violation::RecurrenceMismatch {
+                id: doc_id.to_owned(),
+                skill_action: skill_action.to_owned(),
+                index,
+                log,
+            };
+        assert_eq!(
+            check_store(&root, Some(&reader)).unwrap(),
+            vec![
+                mismatch(&a, "rust::eh", 2, 3),
+                mismatch(&b, "rust::eh", 2, 3),
+                mismatch(&c, "go::x", 1, 0),
+            ]
+        );
     }
 }

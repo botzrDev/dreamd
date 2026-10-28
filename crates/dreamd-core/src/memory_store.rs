@@ -33,12 +33,12 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use http_body_util::Full;
-use tantivy::IndexReader;
 use tokio::sync::mpsc;
 
 use crate::config::load_config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::ingress::{LearnIngress, LearnResponse, RecallIngress};
+use crate::recurrence::RecallReader;
 use crate::AgentRoot;
 
 #[cfg(not(unix))]
@@ -110,7 +110,7 @@ pub trait MemoryStore: Send + Sync {
 /// `{"results":[...]}` string. The single recall body shared by the in-process
 /// adapter and `GET /api/v1/recall`; each caller chooses its own reader.
 pub(crate) fn recall_to_json(
-    reader: &IndexReader,
+    reader: &RecallReader,
     query: &str,
     k: u32,
     now_sec: i64,

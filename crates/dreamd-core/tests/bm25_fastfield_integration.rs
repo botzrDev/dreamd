@@ -22,11 +22,11 @@ use tantivy::collector::TopDocs;
 use tantivy::doc;
 use tantivy::query::QueryParser;
 use tantivy::schema::{TantivyDocument, Value};
-use tantivy::{Index, IndexReader};
+use tantivy::{Index, ReloadPolicy};
 
 use dreamd_core::index::{build_schema, Layer, SchemaFields};
 use dreamd_core::salience::{salience_with_context, RecurrenceContext};
-use dreamd_core::{recall, RecallResult};
+use dreamd_core::{recall, RecallReader, RecallResult};
 
 /// Reference clock from EXPECTED.md §Reference clock: 2026-06-02T12:00:00Z.
 /// All age computations resolve against this; no `Utc::now()` in this test.
@@ -74,39 +74,33 @@ fn load_fixture() -> Vec<FixtureRecord> {
         .collect()
 }
 
-/// Build an in-RAM Tantivy index from the fixture and derive `recurrence`
-/// per `skill_action` cluster from the count of records sharing it. The
-/// production indexer reads `semantic/recurrence_counts.json`. This fixture
-/// ships no sidecar, so the test counts locally
-/// (demo-corpus/README.md "Recurrence note").
-fn build_index_from_fixture(records: &[FixtureRecord]) -> (Index, SchemaFields, IndexReader) {
+/// Build an in-RAM Tantivy index from the fixture. Each doc carries its
+/// `skill_action`, and recall derives `recurrence` from the index: the count
+/// of docs whose key equals it or extends it with `::` (BZR-1242). No fixture
+/// key is a `::` prefix of another, so that is the count of records sharing
+/// the key (demo-corpus/README.md "Recurrence note").
+fn build_index_from_fixture(records: &[FixtureRecord]) -> (Index, SchemaFields, RecallReader) {
     let (schema, fields) = build_schema();
     let index = Index::create_in_ram(schema);
-
-    let mut cluster_counts: HashMap<&str, u64> = HashMap::new();
-    for r in records {
-        *cluster_counts.entry(r.skill_action.as_str()).or_default() += 1;
-    }
 
     let mut writer = index.writer(15_000_000).expect("index writer");
     for r in records {
         let ts = r.timestamp.timestamp() as u64;
-        let recurrence = cluster_counts[r.skill_action.as_str()];
         writer
             .add_document(doc!(
                 fields.content => r.content.clone(),
                 fields.timestamp_sec => ts,
                 fields.pain => r.pain,
                 fields.importance => r.importance,
-                fields.recurrence => recurrence,
                 fields.layer => Layer::Episodic.as_str(),
                 fields.last_updated_sec => ts,
                 fields.cited_event_count => 0u64,
+                fields.skill_action => r.skill_action.clone(),
             ))
             .expect("add doc");
     }
     writer.commit().expect("commit");
-    let reader = index.reader().expect("reader");
+    let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
     (index, fields, reader)
 }
 
@@ -115,7 +109,7 @@ fn build_index_from_fixture(records: &[FixtureRecord]) -> (Index, SchemaFields, 
 /// fixture record's content is unique). Limit is `records.len()` so no
 /// salience-favored doc can be evicted before the join.
 fn bm25_by_content(
-    reader: &IndexReader,
+    reader: &RecallReader,
     fields: &SchemaFields,
     query_text: &str,
     limit: usize,

@@ -28,9 +28,11 @@ the same commit and re-run that test. Local production notes, if any, are in
 
 ## Recurrence note
 
-`recurrence` is **not** stored on episodic events. For this fixture the
-integration test derives it itself, as the count of fixture records sharing the
-exact `skill_action`, and EXPECTED.md cites those values (cluster sizes
-4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1). The daemon does not count at index time:
-it takes recurrence from `semantic/recurrence_counts.json`, which the dream
-cycle writes, and this fixture ships no such file.
+`recurrence` is **not** stored on episodic events. Recall counts it from the
+index: the number of live events whose `skill_action` equals the candidate's or
+extends it with `::`. No key in this fixture extends another, so that is the
+count of fixture records sharing the exact `skill_action`, and EXPECTED.md cites
+those values (cluster sizes 4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1). The integration
+test indexes each record's `skill_action` and reads recall's count. The dream
+cycle's `semantic/recurrence_counts.json` is its promotion report; recall does
+not read it, and this fixture ships no such file.

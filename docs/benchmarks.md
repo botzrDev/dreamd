@@ -2,7 +2,7 @@
 
 This page explains how to re-run dreamd's recall latency bench and read its
 results. It uses the existing Criterion bench, `crates/dreamd-core/benches/recall.rs`.
-There is no second bench target and no CI job that runs it.
+A second target, `recall_subtree`, is described below. No CI job runs either.
 
 ## Running it
 
@@ -38,6 +38,20 @@ Criterion stores each sample in `sample.json` as the total nanoseconds
 reports the sample P50 and P99. The index is `int((p / 100) * (n - 1) + 0.5)`,
 which rounds halves up. The printer does not read `estimates.json`, because
 its median is a bootstrap estimate and not a sample percentile.
+
+## The recall_subtree bench
+
+`cargo bench -p dreamd-core --bench recall_subtree` (`benches/recall_subtree.rs`)
+measures recall with realistic keys and the recurrence table. Its corpora (1000,
+10000 and 100000 documents, in RAM) have the same content and query as `recall`,
+plus 120 three-segment `skill_action` keys under 6 first segments, assigned with
+a fixed skew, and about 1% lesson documents keyed at two-segment prefixes. Group
+`recall_subtree` times `recall()` over a `RecallReader` whose table was warmed
+when the reader opened. Its gate is a sample P50 under 1 ms at 10000. Group
+`recurrence_cold` (10000 and 100000) times a fresh `RecurrenceWarmer` building the
+table for the whole index; it is informational. The samples land under
+`target/criterion/recall_subtree/` and `target/criterion/recurrence_cold/`, and
+`recall_summary.py` does not read them.
 
 ## Where the samples are
 

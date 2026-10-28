@@ -17,8 +17,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use dreamd_core::{AgentRoot, LayoutError, RecallResult};
-use tantivy::Index;
+use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
+use tantivy::{Index, ReloadPolicy};
 
 use crate::commands::recall::{explain_factors, truncate_content, RecallError};
 
@@ -208,7 +208,8 @@ pub fn run(
             return Err(RecallError::IndexUnavailable(hint));
         }
     };
-    let reader = index.reader().map_err(RecallError::Search)?;
+    let reader =
+        RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).map_err(RecallError::Search)?;
 
     let (_schema, fields) = dreamd_core::index::build_schema();
     let results = dreamd_core::recall(&reader, &fields, query, k, None, now_sec)

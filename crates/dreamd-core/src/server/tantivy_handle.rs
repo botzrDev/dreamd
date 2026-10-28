@@ -60,14 +60,15 @@ use crate::index::{
 };
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
+use crate::recurrence::RecallReader;
 use crate::server::index_coverage::cover;
 use crate::server::index_freshness::{read_jsonl_events, read_progress};
 use crate::server::index_map::{
     io_to_index, tantivy_io_to_index, tantivy_to_index, IndexError, IndexHandle,
 };
 use crate::server::indexer_actor::{
-    count_clusters, index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist,
-    IndexerState, DEFAULT_INDEXER_CHANNEL_CAPACITY,
+    index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist, IndexerState,
+    DEFAULT_INDEXER_CHANNEL_CAPACITY,
 };
 use crate::writer_lock::WriterLock;
 
@@ -101,7 +102,7 @@ pub const INDEX_DIR_NAME: &str = "index";
 pub struct TantivyIndexHandle {
     last_used: Mutex<Instant>,
     indexer: IndexerHandle,
-    reader: IndexReader,
+    reader: RecallReader,
 }
 
 impl TantivyIndexHandle {
@@ -167,7 +168,9 @@ impl TantivyIndexHandle {
         let (schema, fields) = build_schema();
         let index = open_or_create_index(&index_dir, schema, &manifest_path, &progress_path)?;
         write_manifest_if_absent(&manifest_path)?;
-        let reader = index.reader().map_err(tantivy_to_index)?;
+        // `Index::reader()` uses the same policy, so recall reloads as before.
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay)
+            .map_err(tantivy_to_index)?;
         let mut writer: IndexWriter<TantivyDocument> =
             index.writer(WRITER_HEAP_BYTES).map_err(tantivy_to_index)?;
 
@@ -184,17 +187,15 @@ impl TantivyIndexHandle {
         //    either in the read or seen by the indexer's first tick.
         #[cfg(unix)]
         let log = LogIdentity::at(&jsonl_path).map_err(io_to_index)?;
-        // 2. Pass 1: cluster counts over the whole log.
+        // 2. The set difference between the log and the index.
         let events = read_jsonl_events(&jsonl_path)?;
-        let clusters = count_clusters(&events);
-        // 3. The set difference between the log and the index.
-        cover(&mut writer, &fields, &coverage, &events, &clusters)?;
-        // 4. DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same
+        cover(&mut writer, &fields, &coverage, &events)?;
+        // 3. DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same
         //    commit. One insertion point covers three recovery paths — cold
         //    start, the schema-migration rebuild above, and `dreamd doctor
         //    --repair` (which reopens through this same function).
         index_semantic_lessons(&mut writer, &fields, agent_root)?;
-        // 5–6. Every log id is pending, so the commit backfills any `index_doc`
+        // 4–5. Every log id is pending, so the commit backfills any `index_doc`
         //    edge a crash skipped, and the watermark becomes the log's largest
         //    id. Semantic lesson docs are not edges.
         let mut persist = IndexerPersist::new(
@@ -204,7 +205,7 @@ impl TantivyIndexHandle {
         );
         persist.cover_all(&events);
         persist.commit(&mut writer)?;
-        // 7. The reader was created before this commit and uses the default
+        // 6. The reader was created before this commit and uses the default
         //    `ReloadPolicy::OnCommitWithDelay`, so the first query after open
         //    would otherwise see a stale view until the background reload
         //    fires. Force a synchronous reload so recall reflects the commit
@@ -214,8 +215,7 @@ impl TantivyIndexHandle {
         //    up by OnCommitWithDelay. (WEG-264 Defect 1.)
         reader.reload().map_err(tantivy_to_index)?;
 
-        // 8. The indexer task. `clusters` already counts the whole log, which
-        //    is the live state new appends count from.
+        // 7. The indexer task.
         let (tx, rx) = mpsc::channel::<IndexerMsg>(DEFAULT_INDEXER_CHANNEL_CAPACITY);
         let state = IndexerState {
             persist,
@@ -227,7 +227,7 @@ impl TantivyIndexHandle {
         let lock = lock.clone();
         let join = tokio::spawn(async move {
             let _lock = lock;
-            run_indexer(writer, fields, rx, commit_cadence, clusters, state).await
+            run_indexer(writer, fields, rx, commit_cadence, state).await
         });
 
         Ok(Self {
@@ -243,9 +243,9 @@ impl TantivyIndexHandle {
         self.indexer.sender()
     }
 
-    /// Returns a reference to the Tantivy `IndexReader` for this project.
-    /// Used by HTTP handlers to execute recall queries (WEG-69).
-    pub fn reader(&self) -> &IndexReader {
+    /// Returns this project's reader, with the recurrence warmer attached
+    /// (BZR-1242). Used by HTTP handlers to execute recall queries (WEG-69).
+    pub fn reader(&self) -> &RecallReader {
         &self.reader
     }
 
@@ -253,26 +253,6 @@ impl TantivyIndexHandle {
     /// each access through `ProjectIndexMap::get_or_open`.
     pub fn touch(&self) {
         *self.last_used.lock().expect("last_used mutex poisoned") = Instant::now();
-    }
-
-    /// Apply the on-disk recurrence sidecar (`semantic/recurrence_counts.json`)
-    /// to the Tantivy index. For each cluster listed in the sidecar, every
-    /// event belonging to that `skill_action` is deleted and re-added with the
-    /// authoritative `count` as its `recurrence` FastField value. A single
-    /// commit is issued after all clusters are processed.
-    ///
-    /// Called by the dream cycle after it writes the sidecar (WEG-45 / DR-205′).
-    pub async fn apply_recurrence_sidecar(&self, agent_root: &AgentRoot) -> Result<(), IndexError> {
-        let (tx, rx) = oneshot::channel();
-        self.indexer
-            .sender()
-            .send(IndexerMsg::ApplyRecurrenceSidecar {
-                agent_root: agent_root.clone(),
-                response: tx,
-            })
-            .await
-            .map_err(|_| IndexError::ChannelClosed)?;
-        rx.await.map_err(|_| IndexError::TaskDropped)?
     }
 
     /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
@@ -488,8 +468,7 @@ mod tests {
     use crate::server::index_freshness::{write_progress, IndexProgress};
     use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
     use crate::server::indexer_actor::{
-        add_document, cluster_member_count, semantic_event_id, write_semantic_pass_record,
-        SemanticPassOutcome,
+        add_document, semantic_event_id, write_semantic_pass_record, SemanticPassOutcome,
     };
     use crate::test_support::{unique_tmpdir, DirGuard};
     use crate::writer_lock::WriterKind;
@@ -547,29 +526,23 @@ mod tests {
         path
     }
 
-    /// Open a fresh Tantivy reader at the on-disk index dir and pull every
-    /// document's `recurrence` value via FastFields. Returns one `u64` per
-    /// indexed document, in segment order.
+    /// Open a fresh reader at the on-disk index dir and read every alive
+    /// document's recall recurrence from its table (BZR-1242). Returns one
+    /// `u64` per alive document, in segment order.
     fn read_recurrence_values(agent_root: &AgentRoot) -> Vec<u64> {
         let index_dir = agent_root.dreamd_dir().join(INDEX_DIR_NAME);
         let index = Index::open_in_dir(&index_dir).expect("open index for read");
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .expect("reader builder");
+        let reader = RecallReader::open(&index, ReloadPolicy::Manual).expect("reader");
         reader.reload().expect("reload reader");
         let searcher = reader.searcher();
+        let tables = reader.recurrence(&searcher).expect("recurrence tables");
         let mut out = Vec::new();
         for segment_reader in searcher.segment_readers() {
-            let column = segment_reader
-                .fast_fields()
-                .u64("recurrence")
-                .expect("recurrence fast column");
-            for doc_id in 0..segment_reader.num_docs() {
-                if let Some(v) = column.first(doc_id) {
-                    out.push(v);
-                }
+            let table = tables
+                .segment(segment_reader.segment_id())
+                .expect("a table for every segment");
+            for doc_id in segment_reader.doc_ids_alive() {
+                out.push(u64::from(table.get(doc_id)));
             }
         }
         out
@@ -687,10 +660,10 @@ mod tests {
         assert_eq!(values, vec![3, 3, 3]);
     }
 
-    // AC-3 — steady-state recurrence + bounded-staleness
+    // AC-3 — steady-state recurrence is the all-time count (BZR-1242)
 
     #[tokio::test]
-    async fn steady_state_increments_counter_per_skill_action() {
+    async fn live_appends_carry_the_all_time_count() {
         let dir = unique_tmpdir("steady-counter");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -721,13 +694,13 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(
             sorted,
-            vec![1, 2, 3],
-            "steady-state appends carry incrementing recurrence"
+            vec![3, 3, 3],
+            "steady-state appends carry the all-time count"
         );
     }
 
     #[tokio::test]
-    async fn old_docs_not_rewritten_on_new_append_in_cluster() {
+    async fn an_older_doc_sees_a_later_append_in_its_cluster() {
         let dir = unique_tmpdir("staleness");
         let _g = DirGuard(dir.clone());
         let agent_root = AgentRoot::new(&dir);
@@ -738,7 +711,7 @@ mod tests {
             TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
         let tx = handle.sender();
 
-        // First append: doc gets recurrence=1.
+        // First append: the cluster holds one doc.
         let id1 = make_event_id('A');
         tx.send(IndexerMsg::Append {
             event_id: id1.clone(),
@@ -748,8 +721,8 @@ mod tests {
         .unwrap();
         flush(&handle).await.expect("flush 1");
 
-        // Second append: doc gets recurrence=2. First doc must NOT be
-        // rewritten to recurrence=2.
+        // Second append: both docs read the cluster's count, 2. The first doc
+        // is not rewritten; its count is derived.
         let id2 = make_event_id('B');
         tx.send(IndexerMsg::Append {
             event_id: id2.clone(),
@@ -765,8 +738,8 @@ mod tests {
         values.sort_unstable();
         assert_eq!(
             values,
-            vec![1, 2],
-            "older doc keeps its index-time recurrence (bounded staleness)"
+            vec![2, 2],
+            "an older doc reads the cluster's count after a later append"
         );
     }
 
@@ -1338,104 +1311,6 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // WEG-45 — apply_recurrence_sidecar (delete-and-re-add)
-
-    /// Verify that `apply_recurrence_sidecar` updates the `recurrence` FastField
-    /// for all documents in a cluster from their original values to the sidecar's
-    /// authoritative count.
-    ///
-    /// Setup:
-    ///   3 "deploy" events with recurrence 1, 2, 3 from the steady-state counter.
-    /// After sidecar with count=42:
-    ///   All 3 events should carry recurrence=42 (old docs deleted, new added).
-    #[tokio::test]
-    async fn apply_recurrence_sidecar_updates_fastfield() {
-        use crate::index::RecurrenceSidecar;
-
-        let dir = unique_tmpdir("sidecar");
-        let _g = DirGuard(dir.clone());
-        let agent_root = AgentRoot::new(&dir);
-
-        // No JSONL primed — start clean, then append via steady-state path.
-        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
-        // The sidecar path is under semantic/; create the dir explicitly.
-        std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
-
-        let lock = writer_lock(&agent_root);
-        let handle =
-            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(60)).expect("open");
-        let tx = handle.sender();
-
-        // Append 3 "deploy" events — steady-state counter gives recurrence 1, 2, 3.
-        // We also write them to the JSONL so the sidecar handler can re-parse.
-        let mut learnings = Vec::new();
-        for c in ['0', '1', '2'] {
-            let id = make_event_id(c);
-            let learning = sample_learning(id.clone(), "deploy", "deploy body");
-            learnings.push(learning.clone());
-            tx.send(IndexerMsg::Append {
-                event_id: id,
-                learning,
-            })
-            .await
-            .expect("send append");
-        }
-        flush(&handle).await.expect("flush after appends");
-
-        // Write the JSONL so apply_recurrence_sidecar_inner can re-read events.
-        prime_jsonl(&dir, &learnings);
-
-        // Verify pre-sidecar recurrence values are {1, 2, 3}.
-        let values_before = read_recurrence_values(&agent_root);
-        let mut sorted_before = values_before.clone();
-        sorted_before.sort_unstable();
-        assert_eq!(
-            sorted_before,
-            vec![1, 2, 3],
-            "pre-sidecar: steady-state counter produces 1,2,3"
-        );
-
-        // Write the sidecar: count=42 for "deploy".
-        let sidecar = RecurrenceSidecar {
-            schema_version: "1.0".to_string(),
-            clusters: vec![crate::index::ClusterCount {
-                skill_action: "deploy".to_string(),
-                count: 42,
-            }],
-        };
-        let sidecar_json = serde_json::to_string(&sidecar).unwrap();
-        let sidecar_path = agent_root.semantic_dir().join("recurrence_counts.json");
-        std::fs::write(&sidecar_path, sidecar_json.as_bytes()).unwrap();
-
-        // Apply the sidecar.
-        handle
-            .apply_recurrence_sidecar(&agent_root)
-            .await
-            .expect("apply_recurrence_sidecar");
-
-        drop(tx);
-        handle.shutdown().await.expect("shutdown");
-
-        // Read recurrence values after: Tantivy delete-and-re-add leaves the
-        // old (soft-deleted) docs in their segments AND adds new docs. The
-        // `read_recurrence_values` helper walks all segment readers and returns
-        // ALL stored FastField values — including soft-deleted rows. After the
-        // sidecar commit, we expect 3 new docs with recurrence=42. The old
-        // soft-deleted docs still occupy slots with values 1, 2, or 3 until
-        // compaction. We assert that 42 appears at least 3 times (the new
-        // docs) and that no value other than 1, 2, 3, or 42 is present.
-        let values_after = read_recurrence_values(&agent_root);
-        let count_42 = values_after.iter().filter(|&&v| v == 42).count();
-        assert!(
-            count_42 >= 3,
-            "expected at least 3 docs with recurrence=42 after sidecar, got: {values_after:?}"
-        );
-        assert!(
-            values_after.iter().all(|&v| matches!(v, 1 | 2 | 3 | 42)),
-            "unexpected recurrence values after sidecar: {values_after:?}"
-        );
-    }
-
     // WEG-62 — prune_decayed_events removes docs from index
 
     #[tokio::test]
@@ -1900,14 +1775,10 @@ mod tests {
     }
 
     /// A committed view of the on-disk index, opened fresh.
-    fn fresh_reader(agent_root: &AgentRoot) -> IndexReader {
+    fn fresh_reader(agent_root: &AgentRoot) -> RecallReader {
         let index = Index::open_in_dir(agent_root.dreamd_dir().join(INDEX_DIR_NAME))
             .expect("open index for read");
-        let reader: IndexReader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .expect("reader builder");
+        let reader = RecallReader::open(&index, ReloadPolicy::Manual).expect("reader");
         reader.reload().expect("reload reader");
         reader
     }
@@ -2287,23 +2158,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cluster_member_count_counts_children_by_prefix() {
-        // consolidation promotes at the deepest prefix that met the threshold,
-        // so leaf events must count toward the promoted parent.
-        let events = vec![
-            sample_learning(make_event_id('0'), "rust::eh", "a"),
-            sample_learning(make_event_id('1'), "rust::eh::unwrap", "b"),
-            sample_learning(make_event_id('2'), "rust::eh::expect", "c"),
-            // Sibling with a shared textual prefix but a different segment —
-            // must NOT count.
-            sample_learning(make_event_id('3'), "rust::ehlers", "d"),
-            sample_learning(make_event_id('4'), "python::pytest", "e"),
-        ];
-        assert_eq!(cluster_member_count(&events, "rust::eh"), 3);
-        assert_eq!(cluster_member_count(&events, "rust::eh::unwrap"), 1);
-        assert_eq!(cluster_member_count(&events, "python::pytest"), 1);
-        assert_eq!(cluster_member_count(&events, "go::testing"), 0);
+    /// BZR-1242: a lesson's recall recurrence is its `cluster_key`'s subtree
+    /// count, and each episodic doc's is its own key's.
+    #[tokio::test]
+    async fn lesson_doc_recurrence_is_its_cluster_subtree() {
+        let dir = unique_tmpdir("lesson-subtree");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let unwrap: Vec<EventId> = ['0', '1', '2'].map(make_event_id).to_vec();
+        let expect: Vec<EventId> = ['3', '4'].map(make_event_id).to_vec();
+        let events: Vec<AgentLearning> = unwrap
+            .iter()
+            .map(|id| sample_learning(id.clone(), "rust::eh::unwrap", "quokka unwrap"))
+            .chain(
+                expect
+                    .iter()
+                    .map(|id| sample_learning(id.clone(), "rust::eh::expect", "quokka expect")),
+            )
+            .collect();
+        prime_jsonl(&dir, &events);
+        write_lessons(
+            &agent_root,
+            "rust::eh",
+            vec![lesson(unwrap[0].as_str(), "quokka: prefer ? over unwrap")],
+        );
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
+        let (_, fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let results =
+            crate::recall(handle.reader(), &fields, "quokka", 10, None, now_sec).expect("recall");
+        let mut got: Vec<(String, u64)> = results
+            .iter()
+            .map(|r| (r.event_id.clone(), r.recurrence))
+            .collect();
+        got.sort();
+        let mut want: Vec<(String, u64)> = vec![(semantic_event_id(unwrap[0].as_str()), 5)];
+        want.extend(unwrap.iter().map(|id| (id.as_str().to_owned(), 3)));
+        want.extend(expect.iter().map(|id| (id.as_str().to_owned(), 2)));
+        want.sort();
+        assert_eq!(got, want);
+        handle.shutdown().await.expect("shutdown");
     }
 
     #[test]
@@ -2390,7 +2287,7 @@ mod tests {
         );
         let (index, mut writer, fields) = ram_writer();
         for event in &events {
-            add_document(&mut writer, &fields, event, 1).expect("index episodic event");
+            add_document(&mut writer, &fields, event).expect("index episodic event");
         }
 
         index_semantic_lessons(&mut writer, &fields, &agent_root).expect("first pass ok");

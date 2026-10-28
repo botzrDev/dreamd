@@ -171,15 +171,17 @@ stay non-breaking for downstream `match` consumers. Its variants today are
 
 Tantivy 0.26.1 backs episodic recall. The schema is defined in
 `dreamd-core::index::build_schema()` — eleven fields: one TEXT field
-(`content`), four FastFields for the salience inputs (`timestamp_sec`, `pain`,
-`importance`, `recurrence`), two more FastFields that are written but not read
-on the recall path (`last_updated_sec`, `cited_event_count`), and four
-exact-match `STRING | STORED` fields (`layer`, `event_id`, `skill_action`,
-`source_harness`). One index holds two document layers: `episodic` events and
+(`content`), three FastFields for the salience inputs (`timestamp_sec`, `pain`,
+`importance`), three more FastFields that are not read on the recall path
+(`last_updated_sec`, and `recurrence` and `cited_event_count`, which are written
+as 0), and four exact-match `STRING | STORED` fields (`layer`, `event_id`,
+`skill_action`, `source_harness`). The fourth salience input, `recurrence`, comes
+from a table built once per searcher from the `skill_action` terms
+(`recurrence.rs`, `RecallReader`). One index holds two document layers: `episodic` events and
 `semantic` lessons from `LESSONS.md` (AILAB-205, ids `lsn_<lesson id>`). The
 semantic layer is still lexical BM25 × salience — not embeddings. Salience is
 computed at query time by a custom collector (WEG-43) that reads the FastFields
-and combines BM25 × `exp(-age/14) × ...` — no indexed score, no nightly
+and the recurrence table and combines BM25 × `exp(-age/14) × ...` — no indexed score, no nightly
 re-rank (see `ARCHITECTURE.md` load-bearing decision #2).
 
 The per-project index manifest at `<project>/.agent/.dreamd/index_manifest.json`
@@ -377,7 +379,10 @@ sufficient — this catches both a burst inside a week and a slow drip across a
 month. The counts are planned for `semantic/recurrence_counts.json` as
 `RecurrenceSidecar { schema_version: "1.0", clusters }` (`plan::plan_cycle`,
 through `consolidation::sidecar_bytes`), and staged with the cycle's other
-outputs.
+outputs. Recall does not read that file. Its `recurrence` is all-time and per
+subtree: the number of alive episodic docs whose `skill_action` equals the
+candidate's or extends it with `::` (`recurrence.rs`), where promotion counts a
+window and keeps the deepest qualifying prefix.
 
 Of the qualifying clusters, only the **single top cluster by `salience_sum`**
 is promoted to `LESSONS.md`, and it contributes exactly **one** `Lesson`, filed
@@ -724,7 +729,7 @@ The compose and the post-filesystem phases run outside the coordinator. Index wo
 indexer task over its own bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`,
 `server/indexer_actor.rs`), and the autobiography commit runs after it in `run_post_phases`
 (`dream_cycle.rs`) — outside the coordinator and best-effort. It is not, however,
-insulated from appends: the indexer is a single task, so an `ApplyRecurrenceSidecar`,
+insulated from appends: the indexer is a single task, so a `Resync`,
 `IndexSemanticLessons`, or `PruneDecayedEvents` pass occupies it while appends queue, and
 an append that finds the 1024-slot channel full now parks the coordinator on its awaited
 `send` until the indexer takes the message (`coordinator.rs::route_to_indexer`).

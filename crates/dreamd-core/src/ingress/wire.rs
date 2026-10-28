@@ -107,7 +107,7 @@ pub struct RecallResultJson {
     pub metadata: RecallMeta,
 }
 
-/// Fastfield / sidecar metadata echoed beside each recall hit.
+/// Fastfield and recurrence-table metadata echoed beside each recall hit.
 #[derive(serde::Serialize)]
 pub struct RecallMeta {
     /// Unix seconds at index time (`AgentLearning::timestamp`).
@@ -116,7 +116,8 @@ pub struct RecallMeta {
     pub pain: f64,
     /// Long-term relevance 0.0..=10.0.
     pub importance: f64,
-    /// Cluster occurrence count (bounded-staleness sidecar).
+    /// Alive episodic docs whose `skill_action` equals this hit's or extends it
+    /// with `::`, computed per searcher (`crate::recurrence`).
     pub recurrence: u64,
     /// Hierarchical clustering key (language-first `::` segments).
     pub skill_action: String,
@@ -151,7 +152,8 @@ pub struct CitationJson {
     /// The stored importance score, before the formula clamps it to 0.0..=10.0
     /// and divides it by 10.
     pub importance: f64,
-    /// Cluster occurrence count (bounded-staleness sidecar).
+    /// Alive episodic docs whose `skill_action` equals this hit's or extends it
+    /// with `::`, computed per searcher (`crate::recurrence`).
     pub recurrence: u64,
 }
 

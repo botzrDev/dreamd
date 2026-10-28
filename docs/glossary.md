@@ -11,7 +11,7 @@ Domain terms used across SPEC, ARCHITECTURE, CLI help, and agent skills.
 | **semantic** | Distilled layer: `semantic/LESSONS.md` — promoted cluster lessons from the dream cycle. Indexed as documents and scored lexically like everything else; "semantic" here does not mean embeddings. |
 | **layer / `source`** | Which of the two a recall hit came from: `episodic` (a raw event) or `semantic` (a lesson, id `lsn_<event id>`). Shown as `source` in recall JSON and `layer` in `dreamd blame` and citations. |
 | **pinned** | JSONL flag (`"pinned":true`). Pinned events survive decay pruning. Promotion sets the exemplar event pinned; `dreamd archive --force-unpin` clears it. |
-| **recurrence** | Count of events sharing a `skill_action` cluster. Stored in `semantic/recurrence_counts.json`; indexed as a Tantivy fast field. |
+| **recurrence** | For recall: the number of live events whose `skill_action` equals the candidate's or extends it with `::`, counted from the index per searcher. The dream cycle's promotion uses its own windowed count and writes it to `semantic/recurrence_counts.json`. |
 | **decay snapshot** | `.agent/.dreamd/snapshots/<date>.jsonl` — where the dream cycle's decay pruner archives stale unpinned events. Not a memory branch. |
 | **memory branch / `snap-*`** | A named snapshot of the memory files under `.agent/.dreamd/branches/` (`dreamd memory …`). Each dream cycle also writes an automatic `snap-<UTC timestamp>` ref. See [branching-guide.md](./branching-guide.md). |
 | **provenance ledger** | Append-only `.agent/.dreamd/provenance/ledger.jsonl` — derivation edges (event → index document, lesson citation, recurrence). Checked by `dreamd doctor --provenance`. Unsigned; records derivation, not trust. See [provenance.md](./provenance.md). |

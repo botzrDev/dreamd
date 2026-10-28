@@ -17,8 +17,8 @@
 //!
 //! [`RecurrenceContext`] centralizes per-phase recurrence policy. Per SPEC.md,
 //! `recurrence` is not an event field — each consumer derives the `u64` fed
-//! into [`salience`] separately. Bugs in call-site policy (index-time
-//! staleness vs live cluster size vs decay conservatism) are invisible to
+//! into [`salience`] separately. Bugs in call-site policy (the recall subtree
+//! count vs live cluster size vs decay conservatism) are invisible to
 //! [`salience`] unit tests; they surface here instead.
 //!
 //! Monotonicity properties over the valid input ranges are enforced by the
@@ -37,11 +37,12 @@ pub mod report;
 /// into [`salience_with_context`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecurrenceContext {
-    /// Recall / `--explain`: Tantivy `recurrence` fastfield at index time.
-    ///
-    /// Bounded staleness — older docs in a cluster may carry a lower count than
-    /// the live cluster size until the dream-cycle sidecar re-indexes them.
-    RecallIndexFastfield(u64),
+    /// Recall / `--explain`: the number of alive episodic docs in the searcher
+    /// whose `skill_action` equals the doc's or extends it with `::`. It counts
+    /// the doc itself, so an episodic doc is at least 1, and it is all-time,
+    /// unlike promotion's windowed count. Computed per searcher by
+    /// [`crate::recurrence`] (BZR-1242).
+    RecallSubtreeCount(u64),
     /// Dream-cycle cluster ranking: live member count of the promoted cluster.
     DreamCycleClusterSize(usize),
     /// Decay pruner: recurrence cannot rescue records older than 90 days, so
@@ -50,10 +51,10 @@ pub enum RecurrenceContext {
 }
 
 impl RecurrenceContext {
-    /// Recurrence from the Tantivy index fastfield (bounded staleness).
+    /// Recurrence from the recall subtree count ([`crate::recurrence`]).
     #[must_use]
-    pub const fn recall(index_fastfield: u64) -> Self {
-        Self::RecallIndexFastfield(index_fastfield)
+    pub const fn recall(subtree_count: u64) -> Self {
+        Self::RecallSubtreeCount(subtree_count)
     }
 
     /// Recurrence from the live promoted-cluster member count.
@@ -70,7 +71,7 @@ impl RecurrenceContext {
 
     fn as_u64(self) -> u64 {
         match self {
-            Self::RecallIndexFastfield(n) => n,
+            Self::RecallSubtreeCount(n) => n,
             Self::DreamCycleClusterSize(n) => n as u64,
             Self::Decay => 0,
         }
