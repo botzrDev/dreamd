@@ -787,4 +787,119 @@ mod tests {
             "a second add of the same id must replace the first"
         );
     }
+
+    /// BZR-1243: after a coverage pass, `committed_appends` is every `Append`
+    /// received, including one whose `add_document` failed. The failure is
+    /// simulated at the persist level: `receive()` without `push()`.
+    #[test]
+    fn a_coverage_pass_counts_every_received_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        let mark = Arc::new(Mutex::new(CommitMark::default()));
+        let mut persist = IndexerPersist::new(
+            dir.path().join("index_progress.json"),
+            Ledger::open(dir.path().join("ledger.jsonl")),
+            &IndexProgress::default(),
+            Arc::clone(&mark),
+        );
+        let learning = |tail: char| AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{tail}")).unwrap(),
+            timestamp: DateTime::from_timestamp(1_780_000_000, 0).unwrap(),
+            pain: 6.0,
+            importance: 6.0,
+            pinned: false,
+            skill_action: "rust::eh".to_string(),
+            source_harness: "test-harness".to_string(),
+            content: "probe".to_string(),
+        };
+        let (a, b, c) = (learning('A'), learning('B'), learning('C'));
+
+        // Two `Append`s received; A's add "failed", so only B is pushed.
+        persist.receive();
+        persist.receive();
+        add_document(&mut writer, &fields, &b).unwrap();
+        persist.push(b.id.clone());
+        persist.commit(&mut writer).unwrap();
+        assert_eq!(mark.lock().unwrap().committed_appends, 1, "live persist");
+
+        // The coverage pass indexes every log id, A included.
+        add_document(&mut writer, &fields, &a).unwrap();
+        persist.cover_all(&[a.clone(), b.clone()]);
+        persist.commit(&mut writer).unwrap();
+        assert_eq!(
+            mark.lock().unwrap().committed_appends,
+            2,
+            "a coverage pass covers every received Append"
+        );
+
+        // A later live persist counts its own pushes again.
+        persist.receive();
+        add_document(&mut writer, &fields, &c).unwrap();
+        persist.push(c.id.clone());
+        persist.commit(&mut writer).unwrap();
+        assert_eq!(
+            *mark.lock().unwrap(),
+            CommitMark {
+                last_indexed_id: Some(c.id.clone()),
+                committed_appends: 3,
+            }
+        );
+    }
+
+    /// BZR-1243: a persist whose ledger append fails publishes nothing, and
+    /// the retry publishes the whole step.
+    #[test]
+    fn a_ledger_failure_in_the_persist_step_publishes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        let mark = Arc::new(Mutex::new(CommitMark::default()));
+        let mut persist = IndexerPersist::new(
+            dir.path().join("index_progress.json"),
+            Ledger::open(dir.path().join("ledger.jsonl")),
+            &IndexProgress::default(),
+            Arc::clone(&mark),
+        );
+        let a = AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAA").unwrap(),
+            timestamp: DateTime::from_timestamp(1_780_000_000, 0).unwrap(),
+            pain: 6.0,
+            importance: 6.0,
+            pinned: false,
+            skill_action: "rust::eh".to_string(),
+            source_harness: "test-harness".to_string(),
+            content: "ledger failure".to_string(),
+        };
+        let failpoint = dir.path().join("failpoint-ledger-write");
+
+        persist.receive();
+        add_document(&mut writer, &fields, &a).unwrap();
+        persist.push(a.id.clone());
+        std::fs::write(&failpoint, b"").unwrap();
+        let before = mark.lock().unwrap().clone();
+        assert!(
+            persist.commit(&mut writer).is_err(),
+            "the ledger append fails"
+        );
+        assert_eq!(
+            *mark.lock().unwrap(),
+            before,
+            "a failed persist publishes nothing"
+        );
+
+        std::fs::remove_file(&failpoint).unwrap();
+        persist.commit(&mut writer).unwrap();
+        assert_eq!(
+            *mark.lock().unwrap(),
+            CommitMark {
+                last_indexed_id: Some(a.id.clone()),
+                committed_appends: 1,
+            }
+        );
+    }
 }

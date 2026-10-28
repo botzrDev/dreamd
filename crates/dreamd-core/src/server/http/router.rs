@@ -216,8 +216,8 @@ fn http_on_response<B>(
 ///
 /// The lookup goes through [`AppState::registry`], which parses the file once
 /// per file identity, and runs on `spawn_blocking`, because it stats the file
-/// and canonicalizes the path (BZR-1243). Inserts [`ProjectEntry`] into
-/// request extensions on success.
+/// and resolves the path to its canonical form (BZR-1243). Inserts
+/// [`ProjectEntry`] into request extensions on success.
 ///
 /// # Errors
 /// * `400` — header missing or non-UTF-8

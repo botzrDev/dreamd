@@ -728,6 +728,12 @@ impl MemoryCoordinator {
         let records = episodic::read_all(&self.jsonl_path)?;
         self.minter
             .observe(records.iter().map(|r| &r.id), SystemTime::now());
+        // The tail is the log as this coordinator last read it; `appended`
+        // counts its own appends and stays (BZR-1243).
+        self.append_mark
+            .lock()
+            .expect("append mark poisoned")
+            .tail_id = records.iter().map(|r| &r.id).max().cloned();
         self.identity = LogIdentity::of(&self.file.metadata()?);
         tracing::warn!(
             path = %self.jsonl_path.display(),
@@ -1392,6 +1398,61 @@ mod tests {
                 appended: 1
             }
         );
+    }
+
+    /// BZR-1243: a re-read after an outside change moves the tail to the
+    /// file's largest id and leaves `appended` alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_mark_follows_a_reread_after_an_outside_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let (a, b) = (eh_id("FA0"), eh_id("FA1"));
+        let line = |id: &EventId| {
+            jsonl_line(&learning_with(
+                id,
+                "rust::eh",
+                "mark fixture",
+                CYCLE_NOW_SEC,
+            ))
+        };
+        std::fs::write(root.episodic_jsonl(), line(&a) + &line(&b)).unwrap();
+
+        let (c, tx, _lock) = open_coordinator(&root);
+        let mark = c.append_mark_handle();
+        let read = || mark.lock().unwrap().clone();
+        let handle = tokio::spawn(c.run());
+        let minted = append_via(&tx, sample_learning()).await;
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(minted),
+                appended: 1
+            },
+            "precondition: one append"
+        );
+
+        // A `git checkout` to an older log that holds only A.
+        replace_by_rename(&root.episodic_jsonl(), line(&a).as_bytes());
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::PrepareCycle {
+            now_sec: CYCLE_NOW_SEC,
+            response_tx,
+        })
+        .await
+        .unwrap();
+        drop(response_rx.await.unwrap().expect("prepare"));
+
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(a),
+                appended: 1
+            },
+            "the tail is the re-read log's largest id"
+        );
+        shutdown(tx, handle).await;
     }
 
     // ── BZR-1241: PrepareCycle / CommitCycle ─────────────────────────────────
