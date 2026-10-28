@@ -1,14 +1,19 @@
-//! On-disk index freshness (WEG-42 / DR-202), split out of `tantivy_handle`
-//! by BZR-170.
+//! Index freshness (WEG-42 / DR-202), split out of `tantivy_handle` by
+//! BZR-170.
 //!
-//! Owns the commit watermark (`index_progress.json`) and the one function that
-//! compares it to the JSONL tail. Nothing here opens Tantivy or reads the live
-//! reader: freshness is what has been *committed to disk*, which is the only
-//! answer that is still true after a crash.
+//! Owns the commit watermark (`index_progress.json`) and two ways to compare
+//! the index with the log:
+//!
+//! - [`assess_index_freshness`] reads the log and the watermark from disk.
+//!   Nothing in it opens Tantivy, so it still answers after a crash. Windows
+//!   `GET /api/v1/health` uses it.
+//! - [`live_index_freshness`] reads the in-memory marks a running coordinator
+//!   ([`AppendMark`]) and its indexer ([`CommitMark`]) keep, so Unix
+//!   `GET /api/v1/health` reads no file (BZR-1243).
 
 use std::path::Path;
 
-use dreamd_protocol::AgentLearning;
+use dreamd_protocol::{AgentLearning, EventId};
 use serde::{Deserialize, Serialize};
 
 use crate::io::write_atomic;
@@ -38,6 +43,9 @@ pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 /// The watermark is the largest committed id, so an event merged in below it
 /// does not show here. `dreamd doctor` reports the full set difference through
 /// [`assess_index_coverage`](crate::server::index_coverage::assess_index_coverage).
+///
+/// [`live_index_freshness`] fills the same shape from a running daemon's
+/// marks (BZR-1243).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IndexFreshness {
     /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
@@ -52,10 +60,46 @@ pub struct IndexFreshness {
     pub unindexed_count: usize,
 }
 
+/// What a coordinator has appended (BZR-1243). Shared with its `Supervisor`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppendMark {
+    /// The largest id in the log as the coordinator last read or wrote it.
+    pub tail_id: Option<EventId>,
+    /// Appends this coordinator has made since it opened. A dedup-key hit is
+    /// not an append.
+    pub appended: u64,
+}
+
+/// What an indexer has committed (BZR-1243). Shared with its handle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitMark {
+    /// The persist step's watermark: the largest committed id.
+    pub last_indexed_id: Option<EventId>,
+    /// `IndexerMsg::Append`s that a successful persist step has covered.
+    pub committed_appends: u64,
+}
+
+/// `/health` from the marks. Read `commit` before `append`, so `appended` is
+/// never older than `committed_appends`.
+pub fn live_index_freshness(commit: &CommitMark, append: &AppendMark) -> IndexFreshness {
+    let unindexed = append.appended.saturating_sub(commit.committed_appends);
+    IndexFreshness {
+        stale: unindexed > 0,
+        jsonl_tail_id: append.tail_id.as_ref().map(|id| id.as_str().to_owned()),
+        last_indexed_id: commit
+            .last_indexed_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned()),
+        unindexed_count: unindexed as usize,
+    }
+}
+
 /// Assess on-disk index freshness for `agent_root` without opening Tantivy.
 ///
-/// Operators and `GET /api/v1/health` use this to detect recall lag relative to
-/// the JSONL source of truth. Does not consult the live indexer channel.
+/// Windows `GET /api/v1/health` uses this to detect recall lag relative to
+/// the JSONL source of truth. It reads the whole log; Unix `/health` uses
+/// [`live_index_freshness`] instead, and `dreamd doctor` uses
+/// [`assess_index_coverage`](crate::server::index_coverage::assess_index_coverage).
 pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, IndexError> {
     let progress_path = agent_root.dreamd_dir().join(INDEX_PROGRESS_FILENAME);
     let progress = read_progress(&progress_path)?;

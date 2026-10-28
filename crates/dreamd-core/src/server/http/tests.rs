@@ -9,6 +9,7 @@ use super::{build_router, AppState, PeerUid};
 use crate::config::Config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::layout::AgentRoot;
+use crate::registry::RegistryCache;
 use crate::server::lifecycle::Supervisor;
 use crate::server::ProjectResourceMap;
 use crate::writer_lock::{WriterKind, WriterLock};
@@ -25,6 +26,7 @@ fn make_test_state(registry_path: PathBuf) -> AppState {
     let (supervisor, _rx) = Supervisor::for_backpressure_test();
     let config = Config::default();
     AppState {
+        registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(config),
@@ -49,21 +51,31 @@ fn writer_lock(agent_root: &AgentRoot) -> WriterLock {
 /// the index pinned as `primary`, and a coordinator wired to it. The lock lives
 /// on in the index and coordinator tasks.
 fn make_real_state(project_dir: &std::path::Path, registry_path: PathBuf) -> AppState {
+    make_real_state_with_cadence(
+        project_dir,
+        registry_path,
+        crate::server::DEFAULT_COMMIT_CADENCE,
+    )
+}
+
+/// [`make_real_state`] with the primary index committing every `cadence`.
+fn make_real_state_with_cadence(
+    project_dir: &std::path::Path,
+    registry_path: PathBuf,
+    cadence: std::time::Duration,
+) -> AppState {
     let canonical = std::fs::canonicalize(project_dir).expect("canonicalize project dir");
     let agent_root = AgentRoot::new(&canonical);
     std::fs::create_dir_all(agent_root.episodic_dir()).expect("episodic dir");
     let lock = writer_lock(&agent_root);
     let primary = Arc::new(
-        crate::server::TantivyIndexHandle::open(
-            &agent_root,
-            &lock,
-            crate::server::DEFAULT_COMMIT_CADENCE,
-        )
-        .expect("open primary index for test"),
+        crate::server::TantivyIndexHandle::open(&agent_root, &lock, cadence)
+            .expect("open primary index for test"),
     );
     let supervisor = Supervisor::start(&agent_root, &lock, 8, Some(primary.sender()))
         .expect("start supervisor for test");
     AppState {
+        registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
@@ -469,6 +481,7 @@ async fn learn_channel_full_returns_503() {
         .expect("pre-fill on empty channel");
 
     let state = AppState {
+        registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
@@ -850,6 +863,8 @@ async fn health_reports_fresh_empty_store() {
     let registry_path = dir.path().join("registry.toml");
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
+    // Health opens the project's runtime, which needs `.agent/` (BZR-1243).
+    std::fs::create_dir_all(AgentRoot::new(dir.path()).episodic_dir()).unwrap();
 
     let state = make_test_state(registry_path);
     let router = build_router(state);
@@ -927,6 +942,8 @@ async fn health_response_carries_generated_request_id() {
     let registry_path = dir.path().join("registry.toml");
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
+    // Health opens the project's runtime, which needs `.agent/` (BZR-1243).
+    std::fs::create_dir_all(AgentRoot::new(dir.path()).episodic_dir()).unwrap();
 
     let state = make_test_state(registry_path);
     let router = build_router(state);
@@ -1211,6 +1228,7 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
     // SO_PEERCRED; the middleware compares against this value and must return 403.
     let wrong_uid = nix::unistd::Uid::current().as_raw().wrapping_add(1);
     let state = AppState {
+        registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(Supervisor::for_backpressure_test().0),
         config: Arc::new(Config::default()),
@@ -2291,8 +2309,8 @@ async fn bearer_wrong_token_is_401() {
 /// AC (AILAB-192): the right token reaches the handler. This is the "200 on
 /// right token" row of the spec's §4 table — the auth layer letting a request
 /// through, deliberately on a bare `/ping` and not on `GET /api/v1/health`,
-/// which is behind `agent_root_middleware` and `assess_index_freshness` (spec
-/// §1.5).
+/// which is behind `agent_root_middleware` and opens the project (spec §1.5,
+/// BZR-1243).
 #[tokio::test]
 async fn bearer_right_token_is_200() {
     let dir = tempfile::tempdir().unwrap();
@@ -2586,5 +2604,244 @@ async fn migrate_registered_root_is_501() {
     assert_eq!(
         json["current_schema_version"],
         dreamd_protocol::RECORD_SCHEMA_VERSION
+    );
+}
+
+// ── BZR-1243: /health reads the live marks ──────────────────────────────────
+
+/// `POST /api/v1/learn` to `root`; returns the minted id.
+async fn post_learn(router: &axum::Router, root: &str, content: &str) -> String {
+    let body = sample_body("rust::health", content);
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/learn")
+                .header("x-agent-root", root)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    body_json(resp).await["id"].as_str().unwrap().to_owned()
+}
+
+/// `GET /api/v1/health` for `root`: the status and the body.
+async fn health_of(router: &axum::Router, root: &str) -> (StatusCode, serde_json::Value) {
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/health")
+                .header("x-agent-root", root)
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// The `index` object `/health` returns for these values.
+fn health_index(
+    stale: bool,
+    tail: Option<&str>,
+    last_indexed: Option<&str>,
+    unindexed: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stale": stale,
+        "jsonl_tail_id": tail,
+        "last_indexed_id": last_indexed,
+        "unindexed_count": unindexed,
+    })
+}
+
+fn primary_of(state: &AppState) -> Arc<crate::server::TantivyIndexHandle> {
+    Arc::clone(&state.primary.as_ref().expect("a primary handle").1)
+}
+
+#[tokio::test]
+async fn health_reads_live_marks_not_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state.clone());
+
+    post_learn(&router, &root, "first health learning").await;
+    let second = post_learn(&router, &root, "second health learning").await;
+    primary_of(&state).flush().await.expect("flush");
+
+    // A directory where the log goes: anything that reads the log fails.
+    let jsonl = AgentRoot::new(dir.path()).episodic_jsonl();
+    std::fs::rename(&jsonl, jsonl.with_extension("aside")).unwrap();
+    std::fs::create_dir(&jsonl).unwrap();
+
+    let (status, json) = health_of(&router, &root).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json["index"],
+        health_index(false, Some(&second), Some(&second), 0)
+    );
+}
+
+#[tokio::test]
+async fn health_counts_appends_the_indexer_has_not_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    // The cadence never fires during the test: `flush` is the only commit.
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state.clone());
+
+    post_learn(&router, &root, "one").await;
+    post_learn(&router, &root, "two").await;
+    let third = post_learn(&router, &root, "three").await;
+
+    let (status, json) = health_of(&router, &root).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["index"], health_index(true, Some(&third), None, 3));
+
+    primary_of(&state).flush().await.expect("flush");
+
+    let (status, json) = health_of(&router, &root).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json["index"],
+        health_index(false, Some(&third), Some(&third), 0)
+    );
+}
+
+#[tokio::test]
+async fn health_matches_the_disk_check_when_quiescent() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state.clone());
+
+    post_learn(&router, &root, "quiescent one").await;
+    post_learn(&router, &root, "quiescent two").await;
+    primary_of(&state).flush().await.expect("flush");
+
+    let (status, json) = health_of(&router, &root).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let disk =
+        crate::server::assess_index_freshness(&AgentRoot::new(dir.path())).expect("assess on disk");
+    assert_eq!(json["index"], serde_json::to_value(disk).unwrap());
+}
+
+#[tokio::test]
+async fn health_of_a_second_project_reads_its_own_runtime() {
+    let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let (root_a, root_b) = (
+        canonical_a.to_str().unwrap().to_owned(),
+        canonical_b.to_str().unwrap().to_owned(),
+    );
+
+    post_learn(&router, &root_b, "bee one").await;
+    let second_b = post_learn(&router, &root_b, "bee two").await;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    state
+        .with_index_handle(&canonical_b, |h| h.sender())
+        .expect("B's index")
+        .send(crate::server::IndexerMsg::Flush { ack: ack_tx })
+        .await
+        .expect("send flush to B");
+    ack_rx.await.expect("flush ack").expect("flush ok");
+
+    let (status, json) = health_of(&router, &root_b).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json["index"],
+        health_index(false, Some(&second_b), Some(&second_b), 0)
+    );
+
+    let (status, json) = health_of(&router, &root_a).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["index"], health_index(false, None, None, 0));
+}
+
+#[tokio::test]
+async fn health_opens_a_cold_project_like_recall() {
+    let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
+    // A third registered root with no `.agent/`.
+    let dir_c = tempfile::tempdir().unwrap();
+    let canonical_c = std::fs::canonicalize(dir_c.path()).unwrap();
+    std::fs::write(
+        &state.registry_path,
+        format!(
+            "[[projects]]\nroot = \"{}\"\n[[projects]]\nroot = \"{}\"\n[[projects]]\nroot = \"{}\"\n",
+            canonical_a.to_string_lossy(),
+            canonical_b.to_string_lossy(),
+            canonical_c.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    // B's store holds two records and has no live runtime.
+    let agent_root_b = AgentRoot::new(canonical_b.clone());
+    std::fs::create_dir_all(agent_root_b.episodic_dir()).unwrap();
+    let ids = [
+        "evt_01ARZ3NDEKTSV4RRFFQ69G5FA0",
+        "evt_01ARZ3NDEKTSV4RRFFQ69G5FA1",
+    ];
+    let mut log = String::new();
+    for id in ids {
+        let learning = AgentLearning {
+            id: EventId::parse(id).unwrap(),
+            ..placeholder_learning("rust::cold")
+        };
+        log.push_str(&serde_json::to_string(&learning).unwrap());
+        log.push('\n');
+    }
+    std::fs::write(agent_root_b.episodic_jsonl(), log).unwrap();
+    assert!(
+        state
+            .runtimes
+            .lock()
+            .unwrap()
+            .get_mut(&canonical_b)
+            .is_none(),
+        "precondition: B is not loaded"
+    );
+    let router = build_router(state.clone());
+
+    let (status, json) = health_of(&router, canonical_b.to_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        json["index"],
+        health_index(false, Some(ids[1]), Some(ids[1]), 0)
+    );
+    assert!(
+        state
+            .runtimes
+            .lock()
+            .unwrap()
+            .get_mut(&canonical_b)
+            .is_some(),
+        "health opened B's runtime"
+    );
+
+    let (status, json) = health_of(&router, canonical_c.to_str().unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a registered root without `.agent/`: {json}"
     );
 }

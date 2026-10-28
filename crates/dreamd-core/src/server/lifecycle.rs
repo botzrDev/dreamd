@@ -25,6 +25,7 @@
 //!    supervisor.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -32,6 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::{AgentRoot, DaemonHome};
+use crate::server::index_freshness::AppendMark;
 use crate::server::tantivy_handle::IndexerMsg;
 use crate::writer_lock::WriterLock;
 
@@ -134,6 +136,8 @@ pub struct Supervisor {
     /// per-connection senders; drop them all before [`Supervisor::shutdown`].
     tx: mpsc::Sender<MemoryCoordinatorMsg>,
     handle: tokio::task::JoinHandle<()>,
+    /// The coordinator's [`AppendMark`], shared with it (BZR-1243).
+    append_mark: Arc<Mutex<AppendMark>>,
 }
 
 impl Supervisor {
@@ -201,12 +205,26 @@ impl Supervisor {
             indexer_tx,
         )
         .map_err(ServerError::Coordinator)?;
+        let append_mark = coordinator.append_mark_handle();
         let lock = lock.clone();
         let handle = tokio::spawn(async move {
             let _lock = lock;
             coordinator.run().await
         });
-        Ok(Self { tx, handle })
+        Ok(Self {
+            tx,
+            handle,
+            append_mark,
+        })
+    }
+
+    /// What the coordinator has appended (BZR-1243). A supervisor with no
+    /// coordinator behind it returns `AppendMark::default()`.
+    pub fn append_mark(&self) -> AppendMark {
+        self.append_mark
+            .lock()
+            .expect("append mark poisoned")
+            .clone()
     }
 
     /// Clone a sender for a UDS client connection. The supervisor retains its
@@ -239,7 +257,14 @@ impl Supervisor {
     pub fn for_backpressure_test() -> (Self, mpsc::Receiver<MemoryCoordinatorMsg>) {
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(1);
         let handle = tokio::spawn(async {});
-        (Self { tx, handle }, rx)
+        (
+            Self {
+                tx,
+                handle,
+                append_mark: Arc::default(),
+            },
+            rx,
+        )
     }
 
     /// Drain and shut down the coordinator cleanly.

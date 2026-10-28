@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dreamd_protocol::{AgentLearning, EventId};
@@ -27,7 +28,9 @@ use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::provenance::{Kind, Ledger};
 use crate::server::index_coverage::{cover, CoverageReport};
-use crate::server::index_freshness::{read_jsonl_events, write_progress, IndexProgress};
+use crate::server::index_freshness::{
+    read_jsonl_events, write_progress, CommitMark, IndexProgress,
+};
 use crate::server::index_map::{tantivy_to_index, IndexError};
 
 /// Default mpsc capacity for the coordinator → indexer hand-off. Sized so a
@@ -161,6 +164,9 @@ impl IndexerHandle {
 /// `pending`, then writes the watermark. That order means a watermark never
 /// covers an id with no edge, and a crash between the commit and the edges
 /// costs nothing: the next coverage pass puts every log id back in `pending`.
+///
+/// A successful persist publishes the [`CommitMark`] that `/health` reads
+/// (BZR-1243); a failed one publishes nothing.
 pub(crate) struct IndexerPersist {
     progress_path: PathBuf,
     ledger: Ledger,
@@ -170,11 +176,26 @@ pub(crate) struct IndexerPersist {
     watermark: Option<EventId>,
     /// What `index_progress.json` holds, so an unchanged watermark is not rewritten.
     written: Option<EventId>,
+    /// Shared with the handle.
+    mark: Arc<Mutex<CommitMark>>,
+    /// Every `IndexerMsg::Append` taken off the channel, including one whose
+    /// `add_document` failed.
+    received: u64,
+    /// `Append`s added to the writer since the last successful persist.
+    pushed: u64,
+    /// A coverage pass ran since the last successful persist.
+    covered: bool,
 }
 
 impl IndexerPersist {
-    /// Seed from what `index_progress.json` holds now.
-    pub(crate) fn new(progress_path: PathBuf, ledger: Ledger, progress: &IndexProgress) -> Self {
+    /// Seed from what `index_progress.json` holds now. `mark` is published to
+    /// at every successful persist.
+    pub(crate) fn new(
+        progress_path: PathBuf,
+        ledger: Ledger,
+        progress: &IndexProgress,
+        mark: Arc<Mutex<CommitMark>>,
+    ) -> Self {
         let written = progress
             .last_indexed_id
             .as_deref()
@@ -185,12 +206,23 @@ impl IndexerPersist {
             pending: Vec::new(),
             watermark: written.clone(),
             written,
+            mark,
+            received: 0,
+            pushed: 0,
+            covered: false,
         }
+    }
+
+    /// One `IndexerMsg::Append` taken off the channel, before its
+    /// `add_document`.
+    pub(crate) fn receive(&mut self) {
+        self.received += 1;
     }
 
     /// One upserted id, recorded at the next commit.
     pub(crate) fn push(&mut self, id: EventId) {
         self.pending.push(id);
+        self.pushed += 1;
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -204,14 +236,21 @@ impl IndexerPersist {
     pub(crate) fn cover_all(&mut self, events: &[AgentLearning]) {
         self.pending = events.iter().map(|ev| ev.id.clone()).collect();
         self.watermark = None;
+        self.covered = true;
     }
 
     /// The one persist step: commit, then `index_doc` edges for `pending`, then
-    /// the watermark. Every Tantivy commit in production code is this call.
+    /// the watermark, then the [`CommitMark`]. Every Tantivy commit in
+    /// production code is this call.
     ///
-    /// On a ledger failure `pending` stays intact and the watermark does not
-    /// move, so the next commit retries the edges. The ledger skips an edge it
-    /// already holds.
+    /// On a ledger failure `pending` stays intact, the watermark does not move
+    /// and the mark is not published, so the next commit retries the edges. The
+    /// ledger skips an edge it already holds.
+    ///
+    /// The mark's `committed_appends` grows by the `Append`s pushed since the
+    /// last persist. After a coverage pass it becomes `received`: the pass
+    /// indexed every log id, and the coordinator writes each line before it
+    /// sends the `Append`, so every `Append` received so far is covered.
     pub(crate) fn commit(
         &mut self,
         writer: &mut IndexWriter<TantivyDocument>,
@@ -250,6 +289,17 @@ impl IndexerPersist {
             )?;
             self.written = self.watermark.clone();
         }
+        {
+            let mut mark = self.mark.lock().expect("commit mark poisoned");
+            mark.last_indexed_id = self.watermark.clone();
+            mark.committed_appends = if self.covered {
+                self.received
+            } else {
+                mark.committed_appends + self.pushed
+            };
+        }
+        self.pushed = 0;
+        self.covered = false;
         Ok(())
     }
 }
@@ -289,6 +339,7 @@ pub(crate) async fn run_indexer(
             msg = rx.recv() => {
                 match msg {
                     Some(IndexerMsg::Append { event_id, learning }) => {
+                        state.persist.receive();
                         if let Err(e) = add_document(&mut writer, &fields, &learning) {
                             tracing::warn!(error = ?e, "indexer add_document failed");
                             continue;

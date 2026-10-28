@@ -17,7 +17,8 @@
 //!
 //! The appender opens the file with `O_APPEND` on its first edge and
 //! serializes appends behind a mutex, so the coordinator and the indexer can
-//! append at the same time.
+//! append at the same time. It reads the file's triples once, at that first
+//! edge, and keeps them in memory (BZR-1243).
 //!
 //! The learn path never opens the ledger. The reserved vector kind in the
 //! format has no variant here: a writer MUST NOT emit it. This module has no
@@ -108,8 +109,29 @@ pub struct Ledger {
 #[derive(Debug)]
 struct LedgerInner {
     path: PathBuf,
-    /// Opened with `O_APPEND` on the first non-empty append.
-    file: Mutex<Option<File>>,
+    /// Opened on the first non-empty append.
+    open: Mutex<Option<Open>>,
+}
+
+/// The appender's fd and every triple the file holds.
+#[derive(Debug)]
+struct Open {
+    /// Opened with `O_APPEND`.
+    file: File,
+    /// [`edge_key`] of every line in the file: those read at the open and
+    /// those this appender wrote since.
+    seen: HashSet<[u8; 32]>,
+}
+
+/// SHA-256 of `kind ‖ 0x00 ‖ from ‖ 0x00 ‖ to`: one triple in 32 bytes.
+fn edge_key(kind: &str, from: &str, to: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(from.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(to.as_bytes());
+    hasher.finalize().into()
 }
 
 impl Ledger {
@@ -130,7 +152,7 @@ impl Ledger {
         Self {
             inner: Arc::new(LedgerInner {
                 path,
-                file: Mutex::new(None),
+                open: Mutex::new(None),
             }),
         }
     }
@@ -142,42 +164,28 @@ impl Ledger {
     /// Append `edges`, skipping any `(kind, from, to)` already in the file or
     /// earlier in `edges`. An empty slice writes nothing and creates nothing.
     ///
+    /// The file's triples are read once, when the first non-empty append opens
+    /// it, and kept: this appender is the only writer while its process holds
+    /// the project writer lock (BZR-1243). An edge counts as held only after
+    /// its line is written and synced, so a failed append leaves its edges for
+    /// the caller's retry.
+    ///
     /// Never truncates: complete lines are never rewritten or reordered.
     pub fn append(&self, edges: &[(Kind, String, String)]) -> Result<(), ProvenanceError> {
         if edges.is_empty() {
             return Ok(());
         }
-        let mut slot = self.inner.file.lock().expect("ledger mutex poisoned");
+        let mut slot = self.inner.open.lock().expect("ledger mutex poisoned");
         if slot.is_none() {
-            if let Some(parent) = self.inner.path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            *slot = Some(
-                OpenOptions::new()
-                    .read(true)
-                    .append(true)
-                    .create(true)
-                    .open(&self.inner.path)?,
-            );
+            *slot = Some(self.open_and_load()?);
         }
-        let file = slot.as_mut().expect("opened above");
+        let open = slot.as_mut().expect("opened above");
 
-        // The dedupe reads through the same fd; `O_APPEND` still sends every
-        // write to the end.
-        file.seek(SeekFrom::Start(0))?;
-        let mut existing = Vec::new();
-        file.read_to_end(&mut existing)?;
-
-        let mut seen: HashSet<(String, String, String)> = existing
-            .split(|b| *b == b'\n')
-            .filter(|line| !line.is_empty())
-            .filter_map(|line| serde_json::from_slice::<ExistingLine>(line).ok())
-            .map(|l| (l.kind, l.from, l.to))
-            .collect();
-
+        let mut chosen: HashSet<[u8; 32]> = HashSet::new();
         let mut out = Vec::new();
         for (kind, from, to) in edges {
-            if !seen.insert((kind.as_str().to_owned(), from.clone(), to.clone())) {
+            let key = edge_key(kind.as_str(), from, to);
+            if open.seen.contains(&key) || !chosen.insert(key) {
                 continue;
             }
             serde_json::to_writer(
@@ -192,11 +200,44 @@ impl Ledger {
             out.push(b'\n');
         }
 
-        if !out.is_empty() {
-            file.write_all(&out)?;
-            file.sync_data()?;
+        #[cfg(test)]
+        if self
+            .inner
+            .path
+            .with_file_name("failpoint-ledger-write")
+            .exists()
+        {
+            return Err(io::Error::other("failpoint-ledger-write").into());
         }
+        if !out.is_empty() {
+            open.file.write_all(&out)?;
+            open.file.sync_data()?;
+        }
+        open.seen.extend(chosen);
         Ok(())
+    }
+
+    /// Open the file for append and read every triple it holds, through the
+    /// same fd. `O_APPEND` still sends every write to the end.
+    fn open_and_load(&self) -> Result<Open, ProvenanceError> {
+        if let Some(parent) = self.inner.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&self.inner.path)?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)?;
+        let seen = existing
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_slice::<ExistingLine>(line).ok())
+            .map(|l| edge_key(&l.kind, &l.from, &l.to))
+            .collect();
+        Ok(Open { file, seen })
     }
 }
 
@@ -504,6 +545,55 @@ mod tests {
             .unwrap();
         Ledger::open(path.clone()).append(&[edge]).unwrap();
         assert_eq!(ledger_lines(&path).len(), 1);
+    }
+
+    /// BZR-1243: the appender reads the file once. A truncation behind its
+    /// back is not seen until a new appender opens the file.
+    #[test]
+    fn the_ledger_file_is_read_once_per_appender() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let edge = (Kind::IndexDoc, EVT_A.to_owned(), EVT_A.to_owned());
+        let ledger = Ledger::open(path.clone());
+        ledger.append(std::slice::from_ref(&edge)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        ledger.append(std::slice::from_ref(&edge)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "",
+            "the held set still has E"
+        );
+
+        Ledger::open(path.clone()).append(&[edge]).unwrap();
+        assert_eq!(ledger_lines(&path).len(), 1);
+    }
+
+    /// BZR-1243: an edge is held only once its line is written and synced.
+    #[test]
+    fn a_failed_write_does_not_mark_its_edges_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let failpoint = dir.path().join("failpoint-ledger-write");
+        let edge = (Kind::IndexDoc, EVT_A.to_owned(), EVT_A.to_owned());
+        let ledger = Ledger::open(path.clone());
+
+        fs::write(&failpoint, b"").unwrap();
+        assert!(ledger.append(std::slice::from_ref(&edge)).is_err());
+
+        fs::remove_file(&failpoint).unwrap();
+        ledger.append(std::slice::from_ref(&edge)).unwrap();
+        assert_eq!(
+            ledger_lines(&path),
+            vec![format!(
+                "{{\"schema_version\":\"provenance/1.0\",\"kind\":\"index_doc\",\"from\":\"{EVT_A}\",\"to\":\"{EVT_A}\"}}"
+            )]
+        );
     }
 
     #[test]

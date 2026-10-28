@@ -14,20 +14,19 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
-use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Term, Value};
-use tantivy::store::StoreReader;
+use tantivy::query::{
+    AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery, TermSetQuery,
+};
+use tantivy::schema::{IndexRecordOption, TantivyDocument, Term, Value};
 use tantivy::{DocAddress, DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
 
-use crate::index::{
-    Layer, SchemaFields, EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, SKILL_ACTION_FIELD,
-    TIMESTAMP_SEC_FIELD,
-};
+use crate::index::{Layer, SchemaFields, IMPORTANCE_FIELD, PAIN_FIELD, TIMESTAMP_SEC_FIELD};
 use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
 use crate::salience::{salience_with_context, RecurrenceContext};
 
@@ -103,13 +102,16 @@ impl Ord for ScoredDoc {
 /// Documents to drop before the top-k heap is filled (BZR-194).
 ///
 /// Counterfactual recall: "what would recall return if these memories were
-/// absent?" The index is never modified; matching documents are skipped inside
-/// [`SalienceSegmentCollector::collect`] so the remaining hits backfill `k`.
+/// absent?" The index is never modified. [`recall_excluding`] turns the
+/// exclusion into `MustNot` clauses of the query (BZR-1243), so matching
+/// documents are dropped before scoring and the remaining hits backfill `k`.
+/// Nothing reads the doc store for it.
 ///
-/// * `ids` match the stored `event_id` exactly. An `evt_…` id does not match
+/// * `ids` match the `event_id` term exactly. An `evt_…` id does not match
 ///   the `lsn_evt_…` lesson document derived from it.
 /// * `cluster_prefixes` match `skill_action` per [`cluster_prefix_matches`],
-///   on both layers.
+///   on both layers: the exact key's term, and every term in the half-open
+///   range `[prefix::, prefix:;)`.
 #[derive(Debug, Clone, Default)]
 pub struct RecallExclusion {
     pub ids: Vec<String>,
@@ -121,6 +123,8 @@ impl RecallExclusion {
         self.ids.is_empty() && self.cluster_prefixes.is_empty()
     }
 
+    /// The reference rule the query clauses implement.
+    #[cfg(test)]
     fn excludes(&self, event_id: &str, skill_action: &str) -> bool {
         self.ids.iter().any(|id| id == event_id)
             || self
@@ -134,7 +138,8 @@ impl RecallExclusion {
 ///
 /// `rust::error_handling` matches itself and `rust::error_handling::axum`, not
 /// `rust`, `rustacean`, or `rust::errors`. `skill_action` is one exact STRING
-/// token in the index, so this is a stored-field check, not a Tantivy term.
+/// token in the index; [`recall_excluding`] matches the same keys with one
+/// term and one term range.
 pub fn cluster_prefix_matches(skill_action: &str, prefix: &str) -> bool {
     skill_action == prefix
         || skill_action
@@ -153,50 +158,12 @@ pub struct SalienceSegmentCollector {
     importance_col: Column<f64>,
     recurrence: Arc<SegmentRecurrence>,
     now_sec: i64,
-    /// Present only when the exclusion is non-empty, so the default recall
-    /// path never touches the doc store.
-    exclusion: Option<SegmentExclusion>,
-}
-
-/// Per-segment exclusion state: the stored-field reader plus the two fields
-/// the match reads (`event_id`, `skill_action` are `STRING | STORED`, not
-/// fastfields).
-struct SegmentExclusion {
-    exclusion: RecallExclusion,
-    store: StoreReader,
-    event_id: Field,
-    skill_action: Field,
-}
-
-impl SegmentExclusion {
-    /// `true` when the stored doc matches the exclusion. A doc that fails to
-    /// load is kept: exclusion never turns a read error into a silent drop.
-    fn excludes(&self, doc: DocId) -> bool {
-        let Ok(stored) = self.store.get::<TantivyDocument>(doc) else {
-            return false;
-        };
-        let text = |field| {
-            stored
-                .get_first(field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        self.exclusion
-            .excludes(&text(self.event_id), &text(self.skill_action))
-    }
 }
 
 impl SegmentCollector for SalienceSegmentCollector {
     type Fruit = Vec<ScoredDoc>;
 
     fn collect(&mut self, doc: DocId, score: Score) {
-        if let Some(exclusion) = &self.exclusion {
-            if exclusion.excludes(doc) {
-                return;
-            }
-        }
-
         let ts = self.timestamp_col.first(doc).unwrap_or(0) as i64;
         let p = self.pain_col.first(doc).unwrap_or(0.0);
         let imp = self.importance_col.first(doc).unwrap_or(0.0);
@@ -240,7 +207,6 @@ impl SegmentCollector for SalienceSegmentCollector {
 pub struct SalienceCollector {
     k: usize,
     now_sec: i64,
-    exclusion: RecallExclusion,
     recurrence: Arc<RecurrenceTables>,
 }
 
@@ -251,15 +217,8 @@ impl SalienceCollector {
         Self {
             k,
             now_sec,
-            exclusion: RecallExclusion::default(),
             recurrence,
         }
-    }
-
-    /// Skip documents matching `exclusion` before the top-k heap (BZR-194).
-    pub fn with_exclusion(mut self, exclusion: RecallExclusion) -> Self {
-        self.exclusion = exclusion;
-        self
     }
 }
 
@@ -284,19 +243,6 @@ impl Collector for SalienceCollector {
                     segment.segment_id().uuid_string()
                 ))
             })?;
-        // Empty exclusion (every caller but counterfactual recall) never opens
-        // the doc store. SegmentReader has no `doc()` in Tantivy 0.26.
-        let exclusion = if self.exclusion.is_empty() {
-            None
-        } else {
-            let schema = segment.schema();
-            Some(SegmentExclusion {
-                exclusion: self.exclusion.clone(),
-                store: segment.get_store_reader(1)?, // for_segment, !is_empty()
-                event_id: schema.get_field(EVENT_ID_FIELD)?,
-                skill_action: schema.get_field(SKILL_ACTION_FIELD)?,
-            })
-        };
         Ok(SalienceSegmentCollector {
             heap: BinaryHeap::with_capacity(self.k + 1),
             k: self.k,
@@ -307,7 +253,6 @@ impl Collector for SalienceCollector {
             importance_col: ff.f64(IMPORTANCE_FIELD)?,
             recurrence,
             now_sec: self.now_sec,
-            exclusion,
         })
     }
 
@@ -426,9 +371,14 @@ pub fn recall(
 
 /// [`recall`] with counterfactual exclusion (BZR-194).
 ///
-/// Documents matching `exclusion` are dropped inside the collector, before the
-/// top-k heap, so up to `k` of the remaining hits come back. The index is not
-/// modified. An empty exclusion is exactly [`recall`].
+/// A non-empty `exclusion` wraps the query in a [`BooleanQuery`]: the query as
+/// one `Must` clause, then `MustNot` clauses for the excluded ids (one
+/// [`TermSetQuery`] on `event_id`) and for each cluster prefix (its exact
+/// `skill_action` term, and a [`RangeQuery`] over its `::` subtree). Matches
+/// are dropped before scoring, so up to `k` of the remaining hits come back,
+/// and `MustNot` clauses add no score, so every remaining hit scores as it
+/// does in [`recall`] (BZR-1243). The index is not modified. An empty
+/// exclusion searches the unchanged query, so it is exactly [`recall`].
 pub fn recall_excluding(
     reader: &RecallReader,
     fields: &SchemaFields,
@@ -454,11 +404,48 @@ pub fn recall_excluding(
     } else {
         bm25_query
     };
+    let final_query = exclude(final_query, fields, exclusion);
 
-    let collector =
-        SalienceCollector::new(k, now_sec, recurrence).with_exclusion(exclusion.clone());
+    let collector = SalienceCollector::new(k, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
     hydrate_scored(searcher, fields, top_docs)
+}
+
+/// `base` with `exclusion`'s `MustNot` clauses; `base` itself when the
+/// exclusion is empty.
+fn exclude(
+    base: Box<dyn Query>,
+    fields: &SchemaFields,
+    exclusion: &RecallExclusion,
+) -> Box<dyn Query> {
+    if exclusion.is_empty() {
+        return base;
+    }
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, base)];
+    if !exclusion.ids.is_empty() {
+        let ids = exclusion
+            .ids
+            .iter()
+            .map(|id| Term::from_field_text(fields.event_id, id));
+        clauses.push((Occur::MustNot, Box::new(TermSetQuery::new(ids))));
+    }
+    for prefix in &exclusion.cluster_prefixes {
+        let key = |text: &str| Term::from_field_text(fields.skill_action, text);
+        clauses.push((
+            Occur::MustNot,
+            Box::new(TermQuery::new(key(prefix), IndexRecordOption::Basic)),
+        ));
+        // `prefix::…`: `;` is the byte after `:`, the same half-open range as
+        // `ClusterCounts::subtree_bytes`.
+        clauses.push((
+            Occur::MustNot,
+            Box::new(RangeQuery::new(
+                Bound::Included(key(&format!("{prefix}::"))),
+                Bound::Excluded(key(&format!("{prefix}:;"))),
+            )),
+        ));
+    }
+    Box::new(BooleanQuery::new(clauses))
 }
 
 /// Top-`n` documents by query-time salience with no lexical filter (DR-704 / WEG-52).
@@ -894,7 +881,8 @@ mod tests {
     #[test]
     fn exclusion_by_id_backfills_top_k() {
         // The excluded doc outranks the other (newer, higher pain). With k = 1
-        // a post-filter would return nothing; the in-collector skip backfills.
+        // a post-filter would return nothing; dropping it before the heap
+        // backfills.
         let (_idx, fields, reader) = build_exclusion_index(&[
             (
                 "axum error handling",
@@ -1065,5 +1053,73 @@ mod tests {
         assert!(RecallExclusion::default().is_empty());
         assert_eq!(ids(&plain), ids(&excluding));
         assert_eq!(plain.len(), 2);
+    }
+
+    /// BZR-1243: the `MustNot` clauses drop exactly what the reference rule
+    /// drops, and every remaining hit keeps its score bit for bit.
+    #[test]
+    fn query_exclusion_matches_the_reference_filter() {
+        // Same content, timestamp and importance: the order is pain times the
+        // recurrence factor, and the pains make the docs each mutant would
+        // keep or drop wrongly rank near the top.
+        let docs: [(&str, &str, f64, Layer); 11] = [
+            ("evt_adotx", "a.x", 9.45, Layer::Episodic),
+            ("evt_acolonb", "a:b", 9.33, Layer::Episodic),
+            ("evt_a", "a", 5.98, Layer::Episodic),
+            ("evt_a_bc", "a::bc", 9.10, Layer::Episodic),
+            ("evt_a_b", "a::b", 7.24, Layer::Episodic),
+            ("lsn_evt_a_b", "a::b", 7.15, Layer::Semantic),
+            ("evt_a_b_c", "a::b::c", 8.74, Layer::Episodic),
+            ("evt_ab", "ab", 8.62, Layer::Episodic),
+            ("evt_go", "go", 6.86, Layer::Episodic),
+            ("evt_go_x", "go::x", 8.39, Layer::Episodic),
+            ("lsn_evt_go", "go", 6.67, Layer::Semantic),
+        ];
+        let entries: Vec<(&str, &str, &str, i64, f64, Layer)> = docs
+            .iter()
+            .map(|&(id, key, pain, layer)| ("quokka", id, key, NOW_SEC - DAY_SECS, pain, layer))
+            .collect();
+        let (_idx, fields, reader) = build_exclusion_index(&entries);
+        let all = recall(&reader, &fields, "quokka", docs.len(), None, NOW_SEC).unwrap();
+        assert_eq!(
+            ids(&all),
+            docs.iter().map(|d| d.0).collect::<Vec<_>>(),
+            "precondition: no two scores tie, in this order"
+        );
+
+        let exclusion = |prefixes: &[&str], excluded: &[&str]| RecallExclusion {
+            ids: excluded.iter().map(|id| id.to_string()).collect(),
+            cluster_prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+        };
+        let cases = [
+            (exclusion(&["a"], &[]), None),
+            (exclusion(&["a::b"], &[]), None),
+            (exclusion(&["go"], &["evt_a_bc"]), None),
+            (exclusion(&[], &["lsn_evt_a_b"]), None),
+            (exclusion(&["a:b"], &[]), None),
+            (exclusion(&["a"], &[]), Some(Layer::Episodic)),
+        ];
+        let hits = |results: &[RecallResult]| -> Vec<(String, u64)> {
+            results
+                .iter()
+                .map(|r| (r.event_id.clone(), r.score.to_bits()))
+                .collect()
+        };
+        for (exclusion, layer) in &cases {
+            let reference: Vec<RecallResult> =
+                recall(&reader, &fields, "quokka", docs.len(), *layer, NOW_SEC)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|r| !exclusion.excludes(&r.event_id, &r.skill_action))
+                    .take(4)
+                    .collect();
+            let got = recall_excluding(&reader, &fields, "quokka", 4, *layer, exclusion, NOW_SEC)
+                .unwrap();
+            assert_eq!(
+                hits(&got),
+                hits(&reference),
+                "exclusion {exclusion:?}, layer {layer:?}"
+            );
+        }
     }
 }

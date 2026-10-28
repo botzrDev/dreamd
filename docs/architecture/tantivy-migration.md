@@ -47,8 +47,8 @@ migration:
 | `layer` | text | `STRING \| STORED` | `"episodic"` or `"semantic"`; hydrated into the recall result (`source`); exact-match term for the whole-layer delete that replaces the semantic documents each cycle |
 | `last_updated_sec` | u64 | `FAST` | written (event timestamp for episodic docs, `LESSONS.md` `last_updated` for lessons); not read on the recall path |
 | `cited_event_count` | u64 | `FAST` | written as `0`; not read |
-| `event_id` | text | `STRING \| STORED` | exact-match term for the upsert every episodic add does (BZR-1236) and decay / forget pruning; lessons use the `lsn_<lesson id>` namespace; STORED for hydration and for recall exclusion (`exclude=` / `--without`) |
-| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; its terms build the recurrence table; hydrated into the recall result; read from the doc store for cluster exclusion (`--without-cluster`) |
+| `event_id` | text | `STRING \| STORED` | exact-match term for the upsert every episodic add does (BZR-1236) and decay / forget pruning; lessons use the `lsn_<lesson id>` namespace; its terms drive recall exclusion (`exclude=` / `--without`); STORED for hydration |
+| `skill_action` | text | `STRING \| STORED` | hierarchical clustering key; its terms build the recurrence table and drive cluster exclusion (`--without-cluster`), and nothing reads the doc store for it; hydrated into the recall result |
 | `source_harness` | text | `STRING \| STORED` | provenance harness id; hydrated into the recall result |
 
 The **three salience FastFields** the collector reads per matching document are
@@ -101,9 +101,11 @@ assumptions it depends on:
 - **Query construction and hydration types.** The recall path also uses
   `QueryParser`, `BooleanQuery` / `TermQuery` / `Occur`, `AllQuery` (for
   `dreamd score`), and `Term` / `IndexRecordOption` / `TantivyDocument` / `Value`
-  for stored-field hydration. Recall exclusion (BZR-194) additionally opens a
-  per-segment `tantivy::store::StoreReader` inside the collector. These are
-  lower-risk but should be smoke-checked on a major bump.
+  for stored-field hydration. Recall exclusion (BZR-194) adds `MustNot`
+  `TermSetQuery`, `TermQuery` and `RangeQuery` clauses (BZR-1243); the
+  `RangeQuery` over `skill_action`, which is not a fast field, walks the term
+  dictionary. These are lower-risk but should be smoke-checked on a major
+  bump.
 
 **On a major bump, re-verify (in order of risk):** (1) the `Collector` /
 `SegmentCollector` trait signatures still compile against `collector.rs`; (2) the

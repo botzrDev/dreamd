@@ -92,12 +92,14 @@ the markdown table. Each object carries `id`, `timestamp`, `skill_action`,
 ## Counterfactual recall: `--without` / `exclude=` (BZR-194)
 
 Counterfactual recall answers "what would recall return if these memories
-were absent?" Matching documents are dropped inside the salience collector,
-before the top-k heap is filled, so up to `k` of the remaining hits come
-back. The index is not written; nothing is deleted.
+were absent?" The exclusion becomes `MustNot` clauses of the recall query
+(the excluded `event_id` terms, and each cluster's `skill_action` term and
+`::` subtree range), so matching documents are dropped before scoring and up
+to `k` of the remaining hits come back. The index is not written; nothing is
+deleted.
 
 - `dreamd recall <query> --without <event_id>` is repeatable and matches the
-  stored `event_id` exactly.
+  `event_id` exactly.
 - `dreamd recall <query> --without-cluster <skill_action>` is repeatable. It
   drops every hit whose `skill_action` equals the prefix or extends it with
   `::`, on both the episodic and semantic layers. `rust::error_handling`

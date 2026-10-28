@@ -312,7 +312,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ### `GET /api/v1/health`
 
-Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught up to the JSONL tail for the resolved project. JSONL is the source of truth; this endpoint surfaces recall freshness without opening a search.
+Report whether the index has caught up to the log for the resolved project. The values come from the daemon's own coordinator and index, kept in memory, so the endpoint reads no file. The first call for a project the daemon has not loaded loads it, as recall does, so a registered root without `.agent/` gets `500` here too. JSONL is the source of truth; this endpoint surfaces recall freshness without opening a search.
 
 #### Request headers
 
@@ -335,12 +335,14 @@ Report whether the on-disk Tantivy watermark (`index_progress.json`) has caught 
 
 | Field | Meaning |
 |---|---|
-| `stale` | `true` when JSONL has events strictly after `last_indexed_id` |
-| `jsonl_tail_id` | `id` of the last well-formed JSONL record, or `null` on an empty log |
-| `last_indexed_id` | Largest event id the index has committed, from `index_progress.json`, or `null` if nothing has been indexed |
-| `unindexed_count` | JSONL events after the watermark |
+| `stale` | `true` when `unindexed_count` is above 0 |
+| `jsonl_tail_id` | The largest id in the log as the daemon last read or wrote it, or `null` on an empty log |
+| `last_indexed_id` | The largest event id the index has committed, or `null` if nothing has been indexed |
+| `unindexed_count` | Appends this daemon made that the index has not committed yet |
 
-`stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. Staleness that outlives the backlog indicates a crash gap between JSONL `sync_data` and the next commit; the next open's coverage pass, or a resync, heals it.
+`stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. A change to the log made outside the daemon (a `git checkout`, a hand edit) does not show here: `dreamd doctor`'s `index_freshness` line compares the log with the committed index, and the daemon's next coverage pass heals the difference.
+
+On Windows there is no index, so health compares the JSONL tail with `index_progress.json` on disk instead (see [Transport → Windows](#windows)).
 
 #### curl example
 

@@ -29,7 +29,8 @@
 //!     remains for eviction + shutdown-drain tests without a live index.
 //!   * [`tantivy_handle`] — Tantivy-backed `IndexHandle` (open/flush/close).
 //!   * [`indexer_actor`] — the writer-owning indexer task and `IndexerMsg`.
-//!   * [`index_freshness`] — the on-disk watermark and `assess_index_freshness`.
+//!   * [`index_freshness`] — the on-disk watermark, `assess_index_freshness`,
+//!     and the live marks `/health` reads (BZR-1243).
 //!   * [`index_coverage`] — the set difference between the log and the index
 //!     (`cover`, `assess_index_coverage`).
 //!   * `uds` — **`#[cfg(unix)]`** — bind/connect/cleanup for
@@ -73,6 +74,7 @@ pub mod watch;
 
 pub use http::{build_router, AppState};
 pub use index_coverage::{assess_index_coverage, CoverageReport, IndexCoverage};
+pub use index_freshness::{live_index_freshness, AppendMark, CommitMark};
 pub use index_map::{IndexError, IndexHandle, ProjectIndexMap, TestIndexHandle};
 pub use lifecycle::{
     CoordinatorSendError, ServerConfig, ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY,

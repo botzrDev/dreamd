@@ -214,7 +214,10 @@ fn http_on_response<B>(
 
 /// Validate `X-Agent-Root` and resolve the project via `registry.toml`.
 ///
-/// Inserts [`ProjectEntry`] into request extensions on success.
+/// The lookup goes through [`AppState::registry`], which parses the file once
+/// per file identity, and runs on `spawn_blocking`, because it stats the file
+/// and canonicalizes the path (BZR-1243). Inserts [`ProjectEntry`] into
+/// request extensions on success.
 ///
 /// # Errors
 /// * `400` — header missing or non-UTF-8
@@ -236,15 +239,19 @@ pub async fn agent_root_middleware(
         }
     };
 
-    let agent_root_path = std::path::Path::new(&agent_root_str);
+    let cache = std::sync::Arc::clone(&state.registry);
+    let resolved =
+        tokio::task::spawn_blocking(move || cache.resolve(std::path::Path::new(&agent_root_str)))
+            .await;
 
-    match crate::registry::resolve_project(&state.registry_path, agent_root_path) {
-        Ok(Some(entry)) => {
+    match resolved {
+        Ok(Ok(Some(entry))) => {
             req.extensions_mut().insert(entry);
             next.run(req).await
         }
-        Ok(None) => error_404("agent root not registered"),
-        Err(_) => error_500("registry read failed"),
+        Ok(Ok(None)) => error_404("agent root not registered"),
+        // A panicked or cancelled lookup is the same failure as a bad read.
+        Ok(Err(_)) | Err(_) => error_500("registry read failed"),
     }
 }
 

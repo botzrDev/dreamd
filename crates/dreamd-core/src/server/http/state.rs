@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::Config;
+use crate::registry::RegistryCache;
+#[cfg(unix)]
+use crate::server::{AppendMark, CommitMark};
 use crate::server::{
     IndexError, ProjectResourceMap, ProjectRuntime, Supervisor, TantivyIndexHandle,
 };
@@ -12,8 +15,11 @@ use crate::writer_lock::WriterKind;
 /// Shared application state cloned into every Axum request via
 /// `State<AppState>`. All fields behind `Arc` so cloning is cheap.
 ///
-/// `registry_path` — path to `~/.agent/registry.toml`. Per-request
-/// middleware calls `resolve_project(&state.registry_path, agent_root)`.
+/// `registry_path` — path to `~/.agent/registry.toml`.
+///
+/// `registry` — that file, parsed once per file identity (BZR-1243).
+/// `agent_root_middleware` resolves every request's `X-Agent-Root` through it,
+/// on a blocking thread.
 ///
 /// `supervisor` — the boot project's coordinator (the project `run_watch`
 /// started for `primary.0`). Handlers no longer dispatch to it directly; they
@@ -52,6 +58,8 @@ use crate::writer_lock::WriterKind;
 pub struct AppState {
     /// Path to `~/.agent/registry.toml` (see struct docs).
     pub registry_path: PathBuf,
+    /// `registry_path`, parsed once per file identity (BZR-1243).
+    pub registry: Arc<RegistryCache>,
     /// Boot-project coordinator; prefer [`Self::resolve_supervisor`].
     pub supervisor: Arc<Supervisor>,
     /// Layered runtime config loaded at daemon start.
@@ -75,6 +83,7 @@ impl AppState {
         daemon_uid: u32,
     ) -> Self {
         Self {
+            registry: Arc::new(RegistryCache::new(registry_path.clone())),
             registry_path,
             supervisor: Arc::new(supervisor),
             config: Arc::new(config),
@@ -203,6 +212,27 @@ impl AppState {
                 root.display()
             )))
         }
+    }
+
+    /// The marks of `root`'s coordinator and index, as one wired pair: `primary`
+    /// with the boot supervisor for the boot root, otherwise `root`'s runtime,
+    /// opened on a miss. Unlike `resolve_supervisor`, it never pairs the boot
+    /// supervisor with another root's index.
+    ///
+    /// The commit mark is read before the append mark, so `appended` is never
+    /// older than `committed_appends` (BZR-1243).
+    #[cfg(unix)]
+    pub(crate) fn live_marks(&self, root: &Path) -> Result<(CommitMark, AppendMark), IndexError> {
+        if let Some((primary_root, handle)) = self.primary.as_ref() {
+            if primary_root.as_path() == root {
+                let commit = handle.commit_mark();
+                return Ok((commit, self.supervisor.append_mark()));
+            }
+        }
+        self.with_runtime(root, |runtime| {
+            let commit = runtime.index().commit_mark();
+            (commit, runtime.supervisor().append_mark())
+        })
     }
 
     /// Resolve the coordinator that owns `root` (WEG-272).

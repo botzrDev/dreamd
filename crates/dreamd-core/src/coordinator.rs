@@ -17,12 +17,13 @@
 //! is acceptable until benchmarks demand otherwise. Do NOT swap in `tokio::fs`
 //! or `spawn_blocking` without re-reading `docs/architecture/durability.md`.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -37,6 +38,7 @@ use crate::episodic::{self, EpisodicError, RawLine};
 use crate::id_minter::IdMinter;
 use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
+use crate::server::index_freshness::AppendMark;
 
 /// Hard cap on a single serialized JSONL line — the on-disk line-format limit
 /// now lives in [`episodic`](crate::episodic). Re-exported so existing callers
@@ -226,6 +228,9 @@ pub struct MemoryCoordinator {
     /// lines were read under an older count re-reads the log at commit.
     #[cfg(unix)]
     outside_changes: u64,
+    /// The log's largest id and this coordinator's append count, shared with
+    /// its `Supervisor` for `/health` (BZR-1243).
+    append_mark: Arc<Mutex<AppendMark>>,
 }
 
 impl MemoryCoordinator {
@@ -280,6 +285,10 @@ impl MemoryCoordinator {
             episodic::recover(&mut file, jsonl_path)?
         };
         let minter = IdMinter::seeded(records.iter().map(|r| &r.id), SystemTime::now());
+        let append_mark = Arc::new(Mutex::new(AppendMark {
+            tail_id: records.iter().map(|r| &r.id).max().cloned(),
+            appended: 0,
+        }));
         let file = open_append(jsonl_path)?;
         #[cfg(unix)]
         let identity = LogIdentity::of(&file.metadata()?);
@@ -307,7 +316,14 @@ impl MemoryCoordinator {
             next_cycle_id: 0,
             #[cfg(unix)]
             outside_changes: 0,
+            append_mark,
         })
+    }
+
+    /// The mark this coordinator keeps, for its `Supervisor` to read
+    /// (BZR-1243). Taken before the coordinator is spawned.
+    pub fn append_mark_handle(&self) -> Arc<Mutex<AppendMark>> {
+        Arc::clone(&self.append_mark)
     }
 
     /// Run the coordinator loop until `Shutdown` is received (or the
@@ -399,6 +415,14 @@ impl MemoryCoordinator {
         let written = episodic::append(&mut self.file, &learning)?;
         #[cfg(unix)]
         self.confirm_landed(&learning, written)?;
+        // The line is durable. Ids are strictly increasing, so it is the
+        // largest. Counted before the indexer can see it, so `/health` never
+        // reads more committed appends than appends.
+        {
+            let mut mark = self.append_mark.lock().expect("append mark poisoned");
+            mark.appended += 1;
+            mark.tail_id = Some(event_id.clone());
+        }
 
         // Cache insert ONLY after durable write succeeds. Insert-before
         // would poison the cache on write failure.
@@ -570,7 +594,7 @@ impl MemoryCoordinator {
                 (episodic::raw_lines(&bytes), LessonBodySource::Deterministic)
             }
         };
-        dream_cycle::commit(
+        let decay = dream_cycle::commit(
             &self.agent_root,
             ledger,
             open.now_sec,
@@ -579,7 +603,22 @@ impl MemoryCoordinator {
             open.composed_for.as_deref(),
             body,
         )
-        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))
+        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
+        // The log the commit wrote is `raw` without the decayed records: the
+        // plan drops by id and keeps every other record's id (`patch_lines`).
+        let decayed: HashSet<&EventId> = decay.decayed_ids.iter().collect();
+        let tail_id = raw
+            .iter()
+            .filter_map(|line| line.parsed.as_ref())
+            .map(|record| &record.id)
+            .filter(|id| !decayed.contains(id))
+            .max()
+            .cloned();
+        self.append_mark
+            .lock()
+            .expect("append mark poisoned")
+            .tail_id = tail_id;
+        Ok(decay)
     }
 
     /// The whole log as of now, from `open`'s lines plus the bytes this
@@ -1269,6 +1308,89 @@ mod tests {
             ino(&c.file.metadata().unwrap()),
             at_path,
             "a failed cycle must still point the append fd at the file at the path"
+        );
+    }
+
+    /// BZR-1243: the mark follows the log the coordinator read and wrote.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_mark_tracks_open_appends_and_cycle_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let id =
+            |tail: &str| EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}")).unwrap();
+        let (a, b, c) = (id("FA0"), id("FA1"), id("FA2"));
+        // Out of id order; B is pinned and survives the cycle's decay.
+        let mut body = String::new();
+        for (record, pinned) in [(&a, false), (&c, false), (&b, true)] {
+            let learning = AgentLearning {
+                pinned,
+                ..learning_with(record, "rust::eh", "mark fixture", CYCLE_NOW_SEC)
+            };
+            body.push_str(&jsonl_line(&learning));
+        }
+        std::fs::write(root.episodic_jsonl(), body).unwrap();
+
+        let (mut coord, _tx, _lock) = open_coordinator(&root);
+        let mark = coord.append_mark_handle();
+        let read = || mark.lock().unwrap().clone();
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(c.clone()),
+                appended: 0
+            }
+        );
+
+        let first = coord
+            .handle_append(sample_learning(), Some("key".to_string()))
+            .await
+            .expect("append");
+        assert!(!first.deduplicated);
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(first.id.clone()),
+                appended: 1
+            }
+        );
+
+        let repeat = coord
+            .handle_append(sample_learning(), Some("key".to_string()))
+            .await
+            .expect("dedup append");
+        assert!(repeat.deduplicated, "precondition: a dedup-key hit");
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(first.id.clone()),
+                appended: 1
+            },
+            "a dedup-key hit is not an append"
+        );
+
+        // Ten years on: every unpinned record decays, and nothing promotes.
+        let later = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 10 * 365 * 86_400;
+        let prepared = coord.handle_prepare_cycle(later).expect("prepare");
+        assert!(
+            prepared.selected.is_none(),
+            "precondition: nothing promotes"
+        );
+        let decay = coord
+            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .expect("commit");
+        assert_eq!(decay.kept_count, 1, "precondition: only B is left");
+        assert_eq!(
+            read(),
+            AppendMark {
+                tail_id: Some(b.clone()),
+                appended: 1
+            }
         );
     }
 

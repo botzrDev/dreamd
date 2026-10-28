@@ -85,7 +85,7 @@ reference memory server intentionally. Do not rename them.
 
 **Salience is computed at query time.**
 `BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`
-This is computed from Tantivy fastfields on recall. It is not stored or indexed.
+This is computed on recall. Age, pain and importance come from Tantivy fastfields. `recurrence` is the all-time subtree count, which `recurrence::RecurrenceWarmer` derives per searcher generation (BZR-1242). The salience score itself is never stored.
 `salience()` clamps its inputs first (BZR-1237): `salience::age_secs` floors the age at 0,
 and `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
 
@@ -316,7 +316,37 @@ Locked 2026-10-24:
     - library: `MemoryCoordinatorMsg::{PrepareCycle, CommitCycle}` replace `RunDreamCycle`. New: `PreparedCycle`, `CycleTicket`, `CoordinatorError::CycleInProgress`, `dream_cycle::{Prepared, select, prepare, compose, commit}` and `plan::plan_cycle_with`.
 
     Left as is: `examples/crash-recovery/README.md:48` still says the daemon "serializes cycles", which stays true because the second trigger gets 409. Spec: `assignments/BZR-1241.v2.md`.
-12. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
+12. **BZR-1242** — on `main` (`3a610fd` + `8588449`). Recall's recurrence is one derived table:
+    - `recurrence.rs`:
+      - `ClusterCounts` holds exact counts keyed by `skill_action` bytes; `subtree(k)` adds `k`'s own count and the range `[k::, k:;)`;
+      - a per-segment scan, cached by `(SegmentId, delete_opstamp)`;
+      - `RecurrenceWarmer`, a Tantivy `Warmer` attached through `IndexReaderBuilder::warmers`. `garbage_collect` keeps the live generations and their segments;
+      - `RecallReader { reader, recurrence }`. The handle's reader and the four read-only CLI readers (`recall`, `score`, `blame`, `salience`) are all `RecallReader`s.
+    - The collector takes the table from the searcher it searches. A segment with no table is `InternalError`, never recurrence 0.
+    - Deleted: the live counter, `count_clusters`, `ApplyRecurrenceSidecar` / `apply_recurrence_sidecar` (including forget's call) and `cluster_member_count`. Both fastfields are written as 0. The schema stays `index/1.3`.
+    - `memory_diff` uses `ClusterCounts::from_events` over each object's events. `salience_report` uses the searcher's table.
+    - `check_store` reports `RecurrenceMismatch` only when the index covers the log exactly: no `DuplicateEventId`, `MissingFromIndex`, `NotInLog` or `DuplicateIndexDoc`.
+    - New bench `recall_subtree` (drift entry `subtree-bench-is-the-recurrence-gate`).
+
+    PM verification:
+    - Workspace 1236 / 0 / 0. R3 red-first on `5b4f1e3` gave `[3, 2, 1]`.
+    - A PM oracle matched a brute-force count over 24 stores: nested keys `a`, `a::b`, `a::b::c`, `ab`, `a::bc`, `a:b`, plus flushes, prunes and a reopen.
+    - M1–M18 fail as named. Round 1 added tests 10–13 and T8's `check_store` assertion, after five PM mutants of the checker survived round 0 (drift entry `mutate-each-check-of-a-compound-guard-alone`).
+    - `recall_subtree` 10k P50 282,317 ns (the gate is 1 ms). Quality suite 14 / 0. Stripped `dreamd` 20,921,888 bytes.
+    - The user committed `3a610fd` mid-ticket, with two failing tests. `8588449` adds Amendment 1's two test fixes and round 1.
+
+    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+    - Recall's `recurrence` is the all-time number of live episodic events whose `skill_action` equals the document's or extends it with `::`. An event counts itself, and a lesson gets its `cluster_key`'s count. Before 1.1.0 it depended on how the document was indexed: a live append got a running counter, a replay got the count at open, and a dream cycle's sidecar overwrote some clusters. Rankings change wherever keys nest or documents were indexed live (audit V3);
+    - `recall --explain`, `blame --explain`, and `citations[].recurrence` on `GET /api/v1/recall?explain=1` show the new value;
+    - `GET /api/v1/observability/salience` and `dreamd salience-drift` score with the new value. A drift against a snapshot written before 1.1.0 compares across the two definitions;
+    - `dreamd memory diff` scores each object's events with that object's log subtree counts. An event whose subtree grew between the objects now shows a salience row even when no sidecar exists. An invalid `recurrence_counts.json` is compared as bytes instead of failing the diff;
+    - a dream cycle and `dreamd forget` no longer re-index every event of a promoted cluster to apply the sidecar. `semantic/recurrence_counts.json` is now only the promotion report;
+    - the `recurrence` and `cited_event_count` fastfields are written as 0 and read by nothing. The index schema stays `index/1.3`, so no rebuild is needed;
+    - `invariants::check_store` reports `Violation::RecurrenceMismatch` when the index covers the log exactly;
+    - new bench: `cargo bench -p dreamd-core --bench recall_subtree`;
+    - library: new module `recurrence` (`ClusterCounts`, `RecallReader`, `RecurrenceWarmer`, `RecurrenceTables`, `SegmentRecurrence`; `ClusterCounts` and `RecallReader` are re-exported at the crate root). `recall`, `recall_excluding`, `score_by_salience`, `salience_report::build_report`, `invariants::check_store` and `recall_to_json` take `&RecallReader`, and `TantivyIndexHandle::reader()` returns one. `SalienceCollector::new(k, now_sec, tables)`. `RecurrenceContext::RecallIndexFastfield` is now `RecallSubtreeCount`. Removed: `IndexerMsg::ApplyRecurrenceSidecar`, `TantivyIndexHandle::apply_recurrence_sidecar` and `memory_diff::DiffError::Sidecar`.
+
+    Spec: `assignments/BZR-1242.v2.md`. Amendment 1 covers two existing assertions under the new definition, and moves the git greps onto `5b4f1e3`.
 13. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
 14. **BZR-1244** — delete library-only code: `GrantedStore`, `LettaStore`, `rrf`, `ServerConfig`, `detach_double_fork`, `SocketGuard`, recall's `layer` parameter. Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened.
 15. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
@@ -492,7 +522,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** Any document indexed into Tantivy MUST carry non-zero `pain` and `importance`, or it is unrankable. `collector.rs:114-115` reads both with `.unwrap_or(0.0)` and `salience()` multiplies by `(pain/10) × (importance/10)`, so a missing fastfield collapses the whole score to `0.0`.
 - **Why:** AILAB-205 — the AC asked for "dual-document scoring: episodic and semantic docs ranked together" without saying where a lesson's pain/importance comes from. A lesson has neither natively. The failure is silent: the document indexes fine, commits fine, matches the BM25 query fine, and then scores 0.0 and never appears in results. `test_zero_pain_produces_zero_score` (`collector.rs:400-413`) already pins the behavior.
 - **How to apply:**
-  - Lessons inherit **pain and importance** from the exemplar event named by `Lesson.id` (`lessons.rs:24`); `recurrence` = promoted-cluster size.
+  - Lessons inherit **pain and importance** from the exemplar event named by `Lesson.id` (`lessons.rs:24`). Since BZR-1242 a lesson's `recurrence` is the subtree count of its `cluster_key`, read from the recurrence table like any other document. It used to be the promoted-cluster size.
   - Exemplar lookup is the live JSONL only; missing → skip + WARN. Do **not** add a snapshot fallback — cited exemplars are pinned and never decay (see `pin-is-the-decay-exemption`), so the recovery path it would buy is unreachable on the normal route.
   - Never index with defaulted scores when the exemplar is unfindable — skip the document instead.
   - Do not "fix" this by changing the formula: ARCHITECTURE.md decision #2 and `salience.rs:9-11` lock the arithmetic shape verbatim.
@@ -521,11 +551,11 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### delete-term-must-target-a-unique-field
 
 - **Rule:** `writer.delete_term(...)` in the Tantivy path targets `fields.event_id` (unique per document) or `fields.layer` (whole-layer wholesale replace). **Never** `skill_action` / cluster key — episodic and semantic documents share it, so a cluster-keyed delete takes every event in the cluster with it.
-- **Why:** AILAB-205's Linear AC said `delete_term(cluster_key)` then `add_document`. Episodic docs carry `skill_action` (`index.rs:52`, written at `index.rs:149`), so that would silently delete the cluster's entire event history on every dream cycle. Both shipped delete sites use `event_id` deliberately — see the WEG-45 rationale at `index.rs:47-49` ("resolves to exactly one document"), the decay pruner at `tantivy_handle.rs:477`, and the recurrence sidecar at `tantivy_handle.rs:588`.
+- **Why:** AILAB-205's Linear AC said `delete_term(cluster_key)` then `add_document`. Episodic docs carry `skill_action` (`index.rs:52`, written at `index.rs:149`), so that would silently delete the cluster's entire event history on every dream cycle. Both shipped delete sites use `event_id` deliberately — see the WEG-45 rationale at `index.rs:47-49` ("resolves to exactly one document"), the decay pruner at `tantivy_handle.rs:477`, and the recurrence sidecar at `tantivy_handle.rs:588` (deleted in BZR-1242).
 - **How to apply:**
   - Per-document delete → `Term::from_field_text(fields.event_id, id)`.
   - Whole-layer replace (LESSONS.md is rewritten wholesale each cycle) → `Term::from_field_text(fields.layer, Layer::Semantic.as_str())`; `layer` is `STRING` so the match is exact and cannot touch episodic docs.
-  - Give non-event documents a distinct `event_id` namespace (e.g. `lsn_<lesson id>`), or the decay pruner and recurrence sidecar will delete them as collateral — the sidecar then re-adds only the episodic doc, dropping the other silently.
+  - Give non-event documents a distinct `event_id` namespace (e.g. `lsn_<lesson id>`), or the decay pruner will delete them as collateral. Before BZR-1242 the recurrence sidecar apply did the same, and re-added only the episodic doc.
   - Any ticket adding a delete path needs a regression test asserting the *other* layer survives.
 - **Cross-refs:** `semantic-docs-need-inherited-pain-importance`, `shared-helper-dual-consumer-blast-radius`
 
@@ -583,7 +613,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### replay-two-pass-already-filters
 
-- **Rule:** **Superseded by BZR-1236.** `replay_two_pass` is deleted. `TantivyIndexHandle::open` reads the log once (`read_jsonl_events`), counts clusters (`count_clusters`), and runs `index_coverage::cover`. Do not re-queue "remove the double-parse", and do not bring back a watermark filter.
+- **Rule:** **Superseded by BZR-1236.** `replay_two_pass` is deleted. `TantivyIndexHandle::open` reads the log once (`read_jsonl_events`) and runs `index_coverage::cover`. Since BZR-1242 it counts nothing: recurrence comes from the warmer. Do not re-queue "remove the double-parse", and do not bring back a watermark filter.
 - **Why:** AILAB-161 item 2 (June audit) shipped with the WEG-378 shared scan, so one read already fed both passes. The `id > watermark` filter it kept missed events merged in below the watermark (audit V9). BZR-1236 replaced it with the set difference.
 - **How to apply:** Read `index_coverage::cover` before queuing any open-time or index-error cleanup. The remaining 161 work is the enum + registry lockfile.
 - **Cross-refs:** `linear-todo-can-already-be-on-main`, `weg378-skip-midfile-halt-torn-tail`
@@ -646,7 +676,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### doctor-cluster-health-flag-already-exists
 
-- **Rule:** `dreamd doctor --cluster-health` already diffs `semantic/recurrence_counts.json` against `compute_promoted_clusters`. Tickets that "add cluster-health" must extend that flag's output, not invent a parallel flag.
+- **Rule:** `dreamd doctor --cluster-health` already diffs `semantic/recurrence_counts.json` against `compute_promoted_clusters`. Tickets that "add cluster-health" must extend that flag's output, not invent a parallel flag. Since BZR-1242 the sidecar is only the promotion report; recall does not read it.
 - **Why:** Linear AILAB-196 AC (May 2026) asked to show estimated next-cycle cost on `dreamd doctor --cluster-health` as if the flag were new. The flag and sidecar-drift checks shipped earlier; 196 is additive `next_cycle_est_usd=` output. A new flag would split the doctor surface and miss existing tests.
 - **How to apply:** Call a sibling reporter from the existing `if flags.cluster_health` arm. Do not fold cost into `check_cluster_health`'s `bool`. Do not call `run_cluster_engine` (it writes the sidecar) or stage a plan from doctor's production path (`select-lesson-or-retire-unlinks`).
 - **Cross-refs:** `select-lesson-or-retire-unlinks`, `linear-todo-can-already-be-on-main`
@@ -1053,14 +1083,14 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `forget::cascade` removes one event from the JSONL with the dream cycle's commit: it stages the log, the lesson change and the sidecar, then commits them with one redo WAL (BZR-1239). Its plan is `plan::plan_forget` (BZR-1240), which neither decays nor re-selects a lesson. It does not call `filesystem_phases` or `plan_cycle`.
 - **Why:** BZR-158's Linear AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: the in-crate crash sweep (`crash_sweep_forget_*`) crashes at every stage and rename point.
-- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. `plan_forget` recounts the sidecar from the remaining records. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
+- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. `plan_forget` recounts the sidecar from the remaining records. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`prune_decayed_events`, `index_semantic_lessons`; BZR-1242 removed `apply_recurrence_sidecar`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
 - **Cross-refs:** `coordinator-not-mutex-file`, `delete-term-must-target-a-unique-field`, `provenance-verify-does-not-rewrite-the-ledger`, `select-lesson-or-retire-unlinks`, `remaining-build-order-2026-09-24`, `forget-proof-is-a-receipt-not-a-signed-membership-proof`
 
 ### forget-proof-is-a-receipt-not-a-signed-membership-proof
 
 - **Rule:** `dreamd forget --proof` writes a `forget-receipt/1.0` file: event id, lesson effect, the root from `provenance::verify`, and the orphan edges whose `from` is that id. It does not write the signed membership proof in `docs/provenance.md`.
 - **Why:** BZR-151's Linear AC asks for a Merkle path proving derivatives were removed, plus ed25519, a verifier crate, embeddings, and a second dream cycle. The format's proof shows an id is a leaf under the root (`docs/provenance.md` Proof object). After `forget::cascade` the id is still a leaf, because ledger lines are append-only and `verify` reports the old edges as orphans. No crate depends on ed25519, and the format leaves key storage unspecified. A membership path would show the opposite of removal.
-- **How to apply:** Spec `assignments/BZR-151.v2.md`. Call `forget::cascade`. Refuse a live daemon the way `dreamd archive` does. `--dry-run` writes nothing and does not probe. Refresh an existing index with the coordinator's three messages; do not create `.agent/.dreamd/index` when it is absent. Do not add a `signature` or `path` key to the receipt. Do not add an HTTP route. An id that is already absent prints `removed=false` and exits 0.
+- **How to apply:** Spec `assignments/BZR-151.v2.md`. Call `forget::cascade`. Refuse a live daemon the way `dreamd archive` does. `--dry-run` writes nothing and does not probe. Refresh an existing index with `prune_decayed_events` and `index_semantic_lessons` (BZR-1242 removed the sidecar apply); do not create `.agent/.dreamd/index` when it is absent. Do not add a `signature` or `path` key to the receipt. Do not add an HTTP route. An id that is already absent prints `removed=false` and exits 0.
 - **Cross-refs:** `forget-cascade-does-not-run-the-dream-cycle`, `provenance-verify-does-not-rewrite-the-ledger`, `nfr-2-stripped-binary-is-20mb`, `remaining-build-order-2026-09-24`
 
 ### public-benchmark-is-the-in-ram-recall-bench
@@ -1068,7 +1098,18 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** BZR-177's public harness is the existing `cargo bench -p dreamd-core --bench recall` (`crates/dreamd-core/benches/recall.rs`, `Index::create_in_ram`). `scripts/benchmark/recall_summary.py` prints sample P50/P99 from `target/criterion/recall/n/{1000,10000,100000}/new/sample.json`. Divide `times[i]` by `iters[i]`. Do not read `estimates.json`. Do not add `benches/public`, a CI bench job, a LongMemEval score, a vectors install, or a dreamd.dev page. The no-argument printer always reads `<repo>/target/criterion`. Criterion 0.5.1 writes `$CRITERION_HOME` if set, otherwise `$CARGO_TARGET_DIR/criterion`, otherwise the target dir from `cargo metadata`, otherwise `./target/criterion`.
 - **Why:** Linear BZR-177 asks for `benches/public/`, LongMemEval mini scores (BZR-270), a vectors install, and CI publish to dreamd.dev. DR-208 already shipped the bench. The index is in RAM, so a disk-speed note is false. Criterion 0.5 stores iteration totals in `sample.json`, and its `median.point_estimate` is a bootstrap, not the sample percentile. Python `round` is banker's rounding; the index is `int((p / 100) * (n - 1) + 0.5)`. dreamd.dev is canceled. WasTrue (`scripts/benchmark/wastrue_bench.py`) is a different eval.
 - **How to apply:** Spec `assignments/BZR-177.v2.md`. Leave `benches/recall.rs` alone. Leave the PERF.md measured cells and the 2026-07-28 / `e8e27fd` stamp. Do not rewrite the µs table in `docs/architecture/tantivy-migration.md`. The full 100k bench is not a report-back gate; `cargo check -p dreamd-core --benches` is. A grep that bans the token `LongMemEval` also bans a sentence saying the page omits that eval. The shipped `docs/benchmarks.md` names vector recall and WasTrue and omits the token. The printer parses `sys.argv` (`json`, `pathlib`, `subprocess`, `sys`). Do not send either back.
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `vectors-feature-stays-out-of-the-default-binary`, `spec-page-is-in-repo-not-dreamd-dev`, `layer-semantic-is-not-embeddings`, `changelog-historical-entries-stay-put`
+- **Cross-refs:** `remaining-build-order-2026-09-24`, `vectors-feature-stays-out-of-the-default-binary`, `spec-page-is-in-repo-not-dreamd-dev`, `layer-semantic-is-not-embeddings`, `changelog-historical-entries-stay-put`, `subtree-bench-is-the-recurrence-gate`
+
+### subtree-bench-is-the-recurrence-gate
+
+- **Rule:** The recurrence gate is `cargo bench -p dreamd-core --bench recall_subtree`, not the public `recall` bench. `recall_subtree` indexes realistic nested `skill_action` keys and measures warm recall and `recurrence_cold`, a cold table build. BZR-1242's gate is a 10k P50 under 1 ms. The public `recall` bench writes no `skill_action`, so since 1.1.0 every doc in it has recurrence 0.
+- **Why:** BZR-1242 moved recurrence from a fastfield to a table that a `Warmer` builds per searcher. The public bench's corpus has no keys, so it cannot show what the table costs or how ranking changed. The PM's spec claimed its docs still carried `i % 5 + 1`. At `5b4f1e3` that value came from the fastfield, which is now written as 0; CLeetus caught it (verify r0, ruling 2). Measured on the BZR-1242 tree:
+  - `recall_subtree`: 1k 47,581, 10k 282,317, 100k 2,620,211 ns P50;
+  - `recurrence_cold`: 10k 215,636, 100k 750,621 ns.
+- **How to apply:**
+  - A ticket that touches the collector, the warmer, the reader or the query re-runs both benches with nothing else running and reports P50 per size against the numbers above.
+  - Leave the public bench's corpus alone (`public-benchmark-is-the-in-ram-recall-bench`). PERF.md and `docs/benchmarks.md` describe it.
+- **Cross-refs:** `public-benchmark-is-the-in-ram-recall-bench`, `nfr-2-stripped-binary-is-20mb`, `mutation-must-get-past-the-backstop`
 
 ### alpha-tag-is-the-version-bump-not-the-publish
 
@@ -1089,7 +1130,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** Until the named ticket lands, do not cite these ARCHITECTURE.md claims as facts:
   - "`add_document` is idempotent; replay re-does at most one commit window" (§4). Resolved by BZR-1236: §4 now describes the upsert, the coverage pass and the persist step. Cite those.
   - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). Resolved by BZR-1239: outputs are staged and committed with one redo WAL, recovery rolls it forward, and `crash_sweep.rs` pins the claim. Cite §3.
-  - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). False until BZR-1242.
+  - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). Resolved by BZR-1242: recurrence is the all-time subtree count, which `RecurrenceWarmer` derives per searcher, so there is no staleness to bound. `RecurrenceContext::RecallSubtreeCount` replaces the variant. Cite `docs/salience.md`.
   - The coordinator is the only writer (§1, "Architectural conventions"). Resolved by BZR-1232: §1 now says only a process holding the project writer lock starts a coordinator. Cite the new sentence.
 - **Why:** The 2026-10-24 audit reproduced four defects on `c241538`:
   - A `git merge` with the JSONL held open swaps the inode, and later appends land in the orphan.
@@ -1099,7 +1140,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
   Mapping the code for the response turned up more: per-request WAL recovery for non-boot projects, a stale fd after a failed cycle, the pin pass dropping `x_` fields, and unlocked concurrent ledger appenders.
 
-  BZR-1233 fixed the inode swap, the `Ulid::new()` inversions and the stale fd after a failed cycle. BZR-1236 fixed the replay duplicates and the unlocked ledger appenders.
+  BZR-1233 fixed the inode swap, the `Ulid::new()` inversions and the stale fd after a failed cycle. BZR-1236 fixed the replay duplicates and the unlocked ledger appenders. BZR-1242 fixed the sidecar prefix miss.
 - **How to apply:**
   - Each claim becomes true when its ticket lands, and that ticket rewrites the ARCHITECTURE sentence in the same commit.
   - Each defect has an ignored test (`#[ignore = "BZR-<n>: …"]`) from BZR-1230. Un-ignore it in the fixing ticket; it must fail before the fix and pass after.
@@ -1264,6 +1305,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - the commit splices the rewritten bytes onto the prepared lines, which brings back a record the rewrite removed and loses one it added.
 
   Round 1 added the test and M14. The gap was the spec's.
+
+  Recurred on BZR-1242. `check_store`'s recurrence check runs only when none of four coverage violations fired. The spec asked for one gate mutant (M13). Five PM mutants survived the whole suite: three each dropped one other gate term, one used the exact count instead of the subtree, and one skipped `lsn_` docs. Every test of those violations called `check_store(&root, None)`, which never reaches the gate. Round 1 added one test per term (M14–M18).
 - **How to apply:**
   - For each OR term, build the input where every other term passes.
   - For stat identity, three faults need three inputs: a rename (new inode), an in-place rewrite (same inode), and an append by another process (length).

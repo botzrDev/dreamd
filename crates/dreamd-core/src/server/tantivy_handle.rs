@@ -44,7 +44,7 @@
 //! are re-exported here so existing `tantivy_handle::…` imports still resolve.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dreamd_protocol::EventId;
@@ -62,7 +62,7 @@ use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::recurrence::RecallReader;
 use crate::server::index_coverage::cover;
-use crate::server::index_freshness::{read_jsonl_events, read_progress};
+use crate::server::index_freshness::{read_jsonl_events, read_progress, CommitMark};
 use crate::server::index_map::{
     io_to_index, tantivy_io_to_index, tantivy_to_index, IndexError, IndexHandle,
 };
@@ -103,6 +103,8 @@ pub struct TantivyIndexHandle {
     last_used: Mutex<Instant>,
     indexer: IndexerHandle,
     reader: RecallReader,
+    /// What the indexer's persist step last published (BZR-1243).
+    commit_mark: Arc<Mutex<CommitMark>>,
 }
 
 impl TantivyIndexHandle {
@@ -198,10 +200,12 @@ impl TantivyIndexHandle {
         // 4–5. Every log id is pending, so the commit backfills any `index_doc`
         //    edge a crash skipped, and the watermark becomes the log's largest
         //    id. Semantic lesson docs are not edges.
+        let commit_mark = Arc::new(Mutex::new(CommitMark::default()));
         let mut persist = IndexerPersist::new(
             progress_path.clone(),
             lock.ledger().clone(),
             &read_progress(&progress_path)?,
+            Arc::clone(&commit_mark),
         );
         persist.cover_all(&events);
         persist.commit(&mut writer)?;
@@ -234,7 +238,17 @@ impl TantivyIndexHandle {
             last_used: Mutex::new(Instant::now()),
             indexer: IndexerHandle { tx, join },
             reader,
+            commit_mark,
         })
+    }
+
+    /// What the indexer has committed, as of its last successful persist step
+    /// (BZR-1243). After `open` it holds open's watermark and 0.
+    pub fn commit_mark(&self) -> CommitMark {
+        self.commit_mark
+            .lock()
+            .expect("commit mark poisoned")
+            .clone()
     }
 
     /// Clone the sender for the indexer task. Pass into
@@ -1855,6 +1869,50 @@ mod tests {
 
         assert_eq!(index_doc_edges(&agent_root), vec![id.to_string()]);
         assert_eq!(progress_id(&agent_root).as_deref(), Some(id.as_str()));
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// BZR-1243: the mark moves only at the end of a successful persist step.
+    #[tokio::test]
+    async fn commit_mark_moves_only_after_a_successful_persist() {
+        let dir = unique_tmpdir("commit-mark");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600)).expect("open");
+        let opened = handle.commit_mark();
+        assert_eq!(opened, CommitMark::default(), "an empty store's open");
+
+        let learning = sample_learning(make_event_id('A'), "rust.test", "alpha");
+        prime_jsonl(&dir, std::slice::from_ref(&learning));
+        handle
+            .sender()
+            .send(IndexerMsg::Append {
+                event_id: learning.id.clone(),
+                learning: learning.clone(),
+            })
+            .await
+            .unwrap();
+        let failpoint = agent_root.dreamd_dir().join("failpoint-after-commit");
+        std::fs::write(&failpoint, b"").unwrap();
+        assert!(
+            flush(&handle).await.is_err(),
+            "precondition: the failpoint fails the persist step"
+        );
+        assert_eq!(handle.commit_mark(), opened);
+
+        std::fs::remove_file(&failpoint).unwrap();
+        flush(&handle).await.expect("flush");
+        assert_eq!(
+            handle.commit_mark(),
+            CommitMark {
+                last_indexed_id: Some(learning.id.clone()),
+                committed_appends: 1,
+            }
+        );
         handle.shutdown().await.expect("shutdown");
     }
 
