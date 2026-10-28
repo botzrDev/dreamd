@@ -451,7 +451,7 @@ mod tests {
         let report = build_report(&reader, NOW_SEC, dir.path()).unwrap();
         let drift = report.drift.expect("7-day file present");
         assert!((drift - (report.mean - 0.05)).abs() < 1e-12);
-        assert!((drift - 0.20).abs() < 1e-12);
+        assert!((drift - (0.25 * (1.0 + 2.0_f64.ln()) - 0.05)).abs() < 1e-12);
     }
 
     #[test]

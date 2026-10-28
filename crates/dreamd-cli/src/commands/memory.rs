@@ -708,13 +708,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_root, from, to, from_id, to_id, added) = two_objects(dir.path());
         let now = 1_790_700_000;
+        // `learning_line`'s 2026-09-28T00:00:00+00:00.
+        const TS: i64 = 1_790_553_600;
+        const OLD: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAA";
 
         let mut out = Vec::new();
         run_diff(dir.path(), &from, &to, false, false, now, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(
             text,
-            format!("added {added}\nlessons modified\npreferences same\nrecurrence same\n")
+            format!(
+                "added {added}\nsalience {OLD} {} {}\nlessons modified\npreferences same\nrecurrence same\n",
+                dreamd_core::salience::salience(now, TS, 6.0, 7.0, 1),
+                dreamd_core::salience::salience(now, TS, 6.0, 7.0, 2),
+            )
         );
 
         // Reverse direction, by bare id and by pinpoint form.

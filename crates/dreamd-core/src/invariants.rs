@@ -525,6 +525,36 @@ mod tests {
         h.shutdown().await.unwrap();
     }
 
+    /// A raw in-RAM index of `(event_id, skill_action, layer)` docs, committed
+    /// and read through a reloaded `RecallReader`.
+    fn raw_reader(docs: &[(&str, &str, Layer)]) -> RecallReader {
+        let (schema, fields) = build_schema();
+        let index = tantivy::Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        for &(doc_id, skill_action, layer) in docs {
+            writer
+                .add_document(doc!(
+                    fields.layer => layer.as_str(),
+                    fields.event_id => doc_id,
+                    fields.skill_action => skill_action,
+                ))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let reader = RecallReader::open(&index, tantivy::ReloadPolicy::Manual).unwrap();
+        reader.reload().unwrap();
+        reader
+    }
+
+    fn mismatch(doc_id: &str, skill_action: &str, index: u32, log: u32) -> Violation {
+        Violation::RecurrenceMismatch {
+            id: doc_id.to_owned(),
+            skill_action: skill_action.to_owned(),
+            index,
+            log,
+        }
+    }
+
     #[test]
     fn recurrence_mismatch_names_each_doc_whose_count_differs() {
         let (a, b, c) = (id('0'), id('1'), id('2'));
@@ -538,29 +568,12 @@ mod tests {
         );
         // The ids match the log, so no coverage violation fires. C's key does
         // not.
-        let (schema, fields) = build_schema();
-        let index = tantivy::Index::create_in_ram(schema);
-        let mut writer = index.writer(15_000_000).unwrap();
-        for (doc_id, skill_action) in [(&a, "rust::eh"), (&b, "rust::eh"), (&c, "go::x")] {
-            writer
-                .add_document(doc!(
-                    fields.layer => Layer::Episodic.as_str(),
-                    fields.event_id => doc_id.as_str(),
-                    fields.skill_action => skill_action,
-                ))
-                .unwrap();
-        }
-        writer.commit().unwrap();
-        let reader = RecallReader::open(&index, tantivy::ReloadPolicy::Manual).unwrap();
-        reader.reload().unwrap();
+        let reader = raw_reader(&[
+            (&a, "rust::eh", Layer::Episodic),
+            (&b, "rust::eh", Layer::Episodic),
+            (&c, "go::x", Layer::Episodic),
+        ]);
 
-        let mismatch =
-            |doc_id: &str, skill_action: &str, index, log| Violation::RecurrenceMismatch {
-                id: doc_id.to_owned(),
-                skill_action: skill_action.to_owned(),
-                index,
-                log,
-            };
         assert_eq!(
             check_store(&root, Some(&reader)).unwrap(),
             vec![
@@ -568,6 +581,93 @@ mod tests {
                 mismatch(&b, "rust::eh", 2, 3),
                 mismatch(&c, "go::x", 1, 0),
             ]
+        );
+    }
+
+    #[test]
+    fn a_lesson_doc_whose_count_differs_is_a_mismatch() {
+        let (a, b, c) = (id('0'), id('1'), id('2'));
+        let (root, _guard) = scaffold(
+            "inv-recurrence-lesson",
+            &[
+                learning(&a, "first", true),
+                learning(&b, "second", false),
+                learning(&c, "third", false),
+            ],
+        );
+        write_lessons(&root, &a, vec![]);
+        let lesson = semantic_event_id(&a);
+        let reader = raw_reader(&[
+            (&a, "rust::eh", Layer::Episodic),
+            (&b, "rust::eh", Layer::Episodic),
+            (&c, "go::x", Layer::Episodic),
+            (&lesson, "rust::eh", Layer::Semantic),
+        ]);
+
+        assert_eq!(
+            check_store(&root, Some(&reader)).unwrap(),
+            vec![
+                mismatch(&a, "rust::eh", 2, 3),
+                mismatch(&b, "rust::eh", 2, 3),
+                mismatch(&c, "go::x", 1, 0),
+                mismatch(&lesson, "rust::eh", 2, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_log_id_skips_the_recurrence_check() {
+        let (a, b) = (id('0'), id('1'));
+        let (root, _guard) = scaffold(
+            "inv-recurrence-dup-log",
+            &[
+                learning(&a, "first", false),
+                learning(&a, "again", false),
+                learning(&b, "second", false),
+            ],
+        );
+        let reader = raw_reader(&[
+            (&a, "rust::eh", Layer::Episodic),
+            (&b, "rust::eh", Layer::Episodic),
+        ]);
+
+        assert_eq!(
+            check_store(&root, Some(&reader)).unwrap(),
+            vec![Violation::DuplicateEventId { id: a, count: 2 }]
+        );
+    }
+
+    #[test]
+    fn a_doc_not_in_the_log_skips_the_recurrence_check() {
+        let (a, ghost) = (id('0'), id('9'));
+        let (root, _guard) = scaffold("inv-recurrence-ghost", &[learning(&a, "first", false)]);
+        let reader = raw_reader(&[
+            (&a, "rust::eh", Layer::Episodic),
+            (&ghost, "rust::eh", Layer::Episodic),
+        ]);
+
+        assert_eq!(
+            check_store(&root, Some(&reader)).unwrap(),
+            vec![Violation::NotInLog { id: ghost }]
+        );
+    }
+
+    #[test]
+    fn a_duplicated_index_doc_skips_the_recurrence_check() {
+        let (a, b) = (id('0'), id('1'));
+        let (root, _guard) = scaffold(
+            "inv-recurrence-dup-index",
+            &[learning(&a, "first", false), learning(&b, "second", false)],
+        );
+        let reader = raw_reader(&[
+            (&a, "rust::eh", Layer::Episodic),
+            (&a, "rust::eh", Layer::Episodic),
+            (&b, "rust::eh", Layer::Episodic),
+        ]);
+
+        assert_eq!(
+            check_store(&root, Some(&reader)).unwrap(),
+            vec![Violation::DuplicateIndexDoc { id: a, count: 2 }]
         );
     }
 }

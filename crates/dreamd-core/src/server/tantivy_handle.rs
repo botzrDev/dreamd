@@ -2200,6 +2200,16 @@ mod tests {
         want.extend(expect.iter().map(|id| (id.as_str().to_owned(), 2)));
         want.sort();
         assert_eq!(got, want);
+
+        // Over nested keys the subtree rule gives no mismatch. The fixture
+        // leaves the exemplar unpinned.
+        assert_eq!(
+            crate::invariants::check_store(&agent_root, Some(handle.reader()))
+                .expect("check_store"),
+            vec![crate::invariants::Violation::UnpinnedCitation {
+                id: unwrap[0].as_str().to_owned()
+            }]
+        );
         handle.shutdown().await.expect("shutdown");
     }
 
