@@ -193,7 +193,7 @@ insta = { workspace = true }
 [target.'cfg(unix)'.dev-dependencies]
 # WEG-268 regression test delivers SIGTERM to a running `dreamd watch` via
 # `nix::sys::signal::kill`. The `signal` feature is NOT enabled on the
-# production nix dep above (process/fs/user only), so it's a unix-only dev-dep:
+# production nix dep above (fs/user only), so it's a unix-only dev-dep:
 # Cargo unifies it into the test build without widening the shipped binary's
 # nix surface. Unix-only; Windows lifecycle is WEG-135.
 nix = { version = "0.29", default-features = false, features = ["signal"] }

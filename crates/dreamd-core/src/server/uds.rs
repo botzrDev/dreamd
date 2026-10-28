@@ -77,8 +77,8 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
     }
 }
 
-/// Open a client connection to the socket at `path`. [`bind_socket_raw`] uses
-/// it to tell a live writer from an orphaned socket file.
+/// Open a client connection to the socket at `path`. `bind_socket_raw` uses it
+/// to tell a live writer from an orphaned socket file.
 pub fn try_connect_existing(path: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
