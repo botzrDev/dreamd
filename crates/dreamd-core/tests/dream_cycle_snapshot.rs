@@ -45,8 +45,8 @@ fn run_cycle_on_fixture() -> (tempfile::TempDir, AgentRoot) {
     let lock = WriterLock::acquire(&root, WriterKind::Dream).expect("project writer lock");
 
     let cycle_date = cycle_date_from_now_sec(NOW_SEC);
-    // `run_filesystem_phases` is async since AILAB-204 (the LLM call is awaited
-    // while the cycle stages). `no_llm = true` keeps these snapshots pinned to
+    // `run_filesystem_phases` is async since AILAB-204: it awaits the model
+    // call before the stage opens. `no_llm = true` keeps these snapshots pinned to
     // the deterministic bytes and network-free, whatever the runner's env holds.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

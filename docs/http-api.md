@@ -375,7 +375,7 @@ No request body.
 | Status | Body | When |
 |---|---|---|
 | `200 OK` | `{"status":"ok"}` | Cycle completed |
-| `409 Conflict` | `{"error":"dream cycle in progress"}` | `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
+| `409 Conflict` | `{"error":"dream cycle in progress"}` | A cycle is open in the project's coordinator, or `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
 | `400 Bad Request` | `{"error":"…"}` | Missing `X-Agent-Root` |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |

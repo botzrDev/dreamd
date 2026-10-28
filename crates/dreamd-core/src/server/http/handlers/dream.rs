@@ -10,12 +10,20 @@ use axum::response::IntoResponse;
 #[cfg(unix)]
 use axum::http::{header, HeaderValue};
 #[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
 use tokio::sync::oneshot;
 
 #[cfg(unix)]
-use crate::coordinator::MemoryCoordinatorMsg;
+use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
 #[cfg(unix)]
-use crate::server::lifecycle::CoordinatorSendError;
+use crate::decay::DecayResult;
+#[cfg(unix)]
+use crate::dream_cycle::{self, DreamCycleError};
+#[cfg(unix)]
+use crate::layout::AgentRoot;
+#[cfg(unix)]
+use crate::server::lifecycle::{CoordinatorSendError, Supervisor};
 
 use super::super::router::error_500;
 use super::super::state::AppState;
@@ -33,7 +41,8 @@ use super::super::state::AppState;
 ///
 /// # Responses
 /// * `200` — `{"status":"ok"}` cycle completed
-/// * `409` — `{"error":"dream cycle in progress"}` WAL guard
+/// * `409` — `{"error":"dream cycle in progress"}`: a cycle is open in the
+///   project's coordinator, or `state.json` says `in_progress`
 /// * `403` — peer UID mismatch ([`peer_uid_middleware`](crate::server::http::peer_uid_middleware))
 /// * `404` — project not registered ([`agent_root_middleware`](crate::server::http::agent_root_middleware))
 /// * `503` — coordinator busy (`Retry-After: 1`)
@@ -50,11 +59,12 @@ pub(crate) async fn post_dream(
     Extension(entry): Extension<crate::registry::ProjectEntry>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    use crate::dream_cycle::{self, DreamCycleError, GuardedCycleOptions, IndexBackend};
+    use crate::dream_cycle::{GuardedCycleOptions, IndexBackend};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tracing::Instrument;
 
-    let project_root = std::path::Path::new(&entry.root);
-    let agent_root = crate::layout::AgentRoot::new(&entry.root);
+    let project_root = std::path::PathBuf::from(&entry.root);
+    let agent_root = AgentRoot::new(&entry.root);
 
     let no_llm = read_no_llm_header(&headers);
     let share_personal = read_share_personal_header(&headers);
@@ -68,12 +78,12 @@ pub(crate) async fn post_dream(
     // WEG-272: route the cycle to the coordinator that OWNS this project root,
     // not the boot coordinator — otherwise project B's dream cycle would run
     // against (and prune) the boot project's JSONL.
-    let supervisor = match state.resolve_supervisor(project_root) {
+    let supervisor = match state.resolve_supervisor(&project_root) {
         Ok(s) => s,
         Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
     };
 
-    let index_sender = match state.with_index_handle(project_root, |h| h.sender()) {
+    let index_sender = match state.with_index_handle(&project_root, |h| h.sender()) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -84,47 +94,49 @@ pub(crate) async fn post_dream(
         }
     };
 
-    // Guard, dirty capture, and post phases belong to the sequencer. This
-    // callback is only the dispatch: WEG-271 routes consolidation + decay
-    // through the coordinator so its long-lived append fd is reopened after the
-    // cycle's atomic rename(s). Running the rewrites inline here would orphan
-    // that fd and silently drop every subsequent POST /learn.
-    let result = dream_cycle::run_guarded_cycle(
-        GuardedCycleOptions {
-            agent_root: &agent_root,
-            project_root,
-            now_sec,
-            commit_autobiography: true,
-            index: IndexBackend::Sender(index_sender),
-        },
-        |now_sec, cycle_date| async move {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            let msg = MemoryCoordinatorMsg::RunDreamCycle {
-                now_sec,
-                cycle_date,
-                no_llm,
-                share_personal,
-                response_tx: resp_tx,
-            };
-            match supervisor.try_send(msg).await {
-                Ok(()) => {}
-                Err(CoordinatorSendError::Full) => return Err(DreamCycleError::CoordinatorBusy),
-                Err(CoordinatorSendError::Closed) => {
-                    return Err(DreamCycleError::Coordinator(
-                        "coordinator unavailable".to_string(),
-                    ))
-                }
-            }
-            match resp_rx.await {
-                Ok(Ok(decay)) => Ok(decay),
-                Ok(Err(e)) => Err(DreamCycleError::Coordinator(e.to_string())),
-                Err(_) => Err(DreamCycleError::Coordinator(
-                    "coordinator dropped dream-cycle response".to_string(),
-                )),
-            }
-        },
-    )
-    .await;
+    // Guard, dirty capture, and post phases belong to the sequencer. The
+    // dispatch prepares in the coordinator actor, composes in this task, and
+    // commits in the actor (`dispatch_cycle`): WEG-271 routes the commit
+    // through the coordinator so its long-lived append fd is reopened after
+    // the cycle's atomic rename(s). Running the rewrites inline here would
+    // orphan that fd and silently drop every subsequent POST /learn.
+    //
+    // The whole sequencer runs on a spawned task, and this handler awaits its
+    // handle: axum drops a handler future when its client disconnects, and a
+    // cycle the daemon accepted must still commit (or release its ticket) and
+    // run its post phases. The task keeps the request's span, so its logs
+    // still carry the request id.
+    let task = tokio::spawn(
+        async move {
+            dream_cycle::run_guarded_cycle(
+                GuardedCycleOptions {
+                    agent_root: &agent_root,
+                    project_root: &project_root,
+                    now_sec,
+                    commit_autobiography: true,
+                    index: IndexBackend::Sender(index_sender),
+                },
+                |now_sec, cycle_date| {
+                    dispatch_cycle(
+                        supervisor,
+                        agent_root.clone(),
+                        now_sec,
+                        cycle_date,
+                        no_llm,
+                        share_personal,
+                    )
+                },
+            )
+            .await
+        }
+        .in_current_span(),
+    );
+    let result = match task.await {
+        Ok(result) => result,
+        Err(e) => Err(DreamCycleError::Coordinator(format!(
+            "dream cycle task failed: {e}"
+        ))),
+    };
 
     match result {
         Ok(_) => {}
@@ -157,6 +169,77 @@ pub(crate) async fn post_dream(
         axum::Json(serde_json::json!({"status": "ok"})),
     )
         .into_response()
+}
+
+/// Prepare in the actor, compose here, commit in the actor (BZR-1241). The
+/// model call runs between the two messages, so appends keep landing.
+///
+/// Prepare goes through [`Supervisor::try_send`]: a full inbox is
+/// [`DreamCycleError::CoordinatorBusy`] (503), as for any request. Commit waits
+/// for inbox space instead: by then the model call is spent, and the commit is
+/// a bounded file operation.
+#[cfg(unix)]
+async fn dispatch_cycle(
+    supervisor: Arc<Supervisor>,
+    agent_root: AgentRoot,
+    now_sec: i64,
+    cycle_date: String,
+    no_llm: bool,
+    share_personal: bool,
+) -> Result<DecayResult, DreamCycleError> {
+    let (tx, rx) = oneshot::channel();
+    match supervisor
+        .try_send(MemoryCoordinatorMsg::PrepareCycle {
+            now_sec,
+            response_tx: tx,
+        })
+        .await
+    {
+        Ok(()) => {}
+        Err(CoordinatorSendError::Full) => return Err(DreamCycleError::CoordinatorBusy),
+        Err(CoordinatorSendError::Closed) => {
+            return Err(DreamCycleError::Coordinator(
+                "coordinator unavailable".to_string(),
+            ))
+        }
+    }
+    let prepared = match rx.await {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(CoordinatorError::CycleInProgress)) => return Err(DreamCycleError::InProgress),
+        Ok(Err(e)) => return Err(DreamCycleError::Coordinator(e.to_string())),
+        Err(_) => {
+            return Err(DreamCycleError::Coordinator(
+                "coordinator dropped the prepare response".to_string(),
+            ))
+        }
+    };
+    let body = dream_cycle::compose(
+        &agent_root,
+        prepared.selected.as_ref(),
+        no_llm,
+        share_personal,
+    )
+    .await;
+    let (tx, rx) = oneshot::channel();
+    let commit = MemoryCoordinatorMsg::CommitCycle {
+        ticket: prepared.ticket,
+        cycle_date,
+        body,
+        response_tx: tx,
+    };
+    // The model call is spent; wait for inbox space.
+    if supervisor.sender().send(commit).await.is_err() {
+        return Err(DreamCycleError::Coordinator(
+            "coordinator unavailable".to_string(),
+        ));
+    }
+    match rx.await {
+        Ok(Ok(decay)) => Ok(decay),
+        Ok(Err(e)) => Err(DreamCycleError::Coordinator(e.to_string())),
+        Err(_) => Err(DreamCycleError::Coordinator(
+            "coordinator dropped the commit response".to_string(),
+        )),
+    }
 }
 
 /// `POST /api/v1/dream` on a target without atomic file replacement — always

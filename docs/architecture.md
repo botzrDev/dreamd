@@ -115,7 +115,7 @@ bump, a Cargo path entry, and a CI matrix dimension. The default answer to
 State management is an actor model. A single `MemoryCoordinator` tokio task
 owns the mutable handle to `AGENT_LEARNINGS.jsonl`. API handlers, the
 in-process MCP store, and the dream-cycle path send messages
-(`AppendLearning`, `RunDreamCycle`, `Shutdown`) over a
+(`AppendLearning`, `PrepareCycle`, `CommitCycle`, `Shutdown`) over a
 `tokio::sync::mpsc` channel; only the coordinator writes. The one exception is
 a CLI command run with no daemon (`dreamd dream`, `dreamd forget`,
 `dreamd archive`, `dreamd memory checkout`): it rewrites the files in-process,
@@ -165,7 +165,7 @@ dominates the benefit at our target write rates.
 
 The message enum `MemoryCoordinatorMsg` is `#[non_exhaustive]` so additions
 stay non-breaking for downstream `match` consumers. Its variants today are
-`AppendLearning`, `RunDreamCycle`, and `Shutdown`.
+`AppendLearning`, `PrepareCycle`, `CommitCycle`, and `Shutdown`.
 
 ## Indexing and salience
 
@@ -289,8 +289,10 @@ maintainer must re-verify before bumping — see
 
 `dream_cycle::run_guarded_cycle` is the one sequencer (BZR-172); both triggers
 are thin adapters over it. It runs the 409 in-progress guard, captures the
-dirty-tree state, dispatches the filesystem phases (`run_filesystem_phases`),
-then runs the index and autobiography phases (`run_post_phases`). `now_sec` is
+dirty-tree state, dispatches the filesystem phases (prepare, compose and
+commit: `run_filesystem_phases` in-process, or `PrepareCycle` and `CommitCycle`
+through the daemon's coordinator), then runs the index and autobiography phases
+(`run_post_phases`). `now_sec` is
 caller-provided rather than read from the wall clock, so the deterministic path
 is reproducible from its inputs.
 
@@ -310,8 +312,12 @@ pins, and the staged write are the same either way; only the prose, the
   `dream_cycle::compose_lesson_body` builds a prompt from the promoted cluster,
   prices it against `cost_cap_usd`
   ([`llm-cost-accuracy.md`](llm-cost-accuracy.md)), and awaits the model
-  **inside the open cycle**, before its commit point. The completion must end in a `citations:`
-  trailer naming only events in the promoted cluster. `prompt_version` is then
+  **before the stage opens**, outside the coordinator (`dream_cycle::compose`).
+  The completion must end in a `citations:` trailer naming only events in the
+  promoted cluster, and the commit re-checks that against its own selection
+  (`dream_cycle::gate_at_commit`): records that landed during the model call
+  can move the top cluster or its members, and then the body is the
+  deterministic one. `prompt_version` is then
   `llm::VERSIONED_PROMPT_ID`. Composition is infallible by construction: a
   missing key, an over-cap estimate, an unpriced model, a transport failure,
   an empty answer, or an invalid citation trailer each fall back to the
@@ -501,12 +507,14 @@ Lifecycle:
 status change does not wipe `last_dream_cycle_at` or the autobiography skip
 marker.
 
-**One stage spans both filesystem phases (ARCH-2).**
-`dream_cycle::filesystem_phases` is `begin_cycle → autosnap ref → one read →
-plan (consolidation + decay) → apply_plan → commit_cycle` — one plan, one stage
-and one commit, not one per phase. A read, plan or stage error short-circuits
-through `?` *before* the commit point, leaving only the stage dir for the next
-writer to wipe.
+**One stage spans both filesystem phases (ARCH-2).** The filesystem phases are
+`dream_cycle::prepare` (the one read of the log, and the selection), then
+`dream_cycle::compose` (the model, awaited before the stage opens), then
+`dream_cycle::commit`: `begin_cycle → autosnap ref → read of LESSONS.md → plan
+(consolidation + decay, the citation gate re-run) → apply_plan → commit_cycle`
+— one plan, one stage and one commit, not one per phase. A read, plan or stage
+error short-circuits through `?` *before* the commit point, leaving only the
+stage dir for the next writer to wipe.
 
 **Recovery.** `wal::recover_if_needed(agent_root, ledger)` returns
 `RecoveryOutcome::{Clean, RolledForward { renamed, unlinked }, Recovered {
@@ -535,10 +543,14 @@ lazy per-project open, in-process `dreamd mcp`, and the CLI writers), before
 any store access, with the lock's provenance ledger already open. Just before
 it, `acquire` resets a `state.json` left at `in_progress` with no WAL to
 `failed`: the lock was free, so no cycle can be running. Inside the lock
-holder, a concurrent trigger is refused rather than queued:
-`dream_cycle::ensure_not_in_progress` yields `DreamCycleError::InProgress` when
-`state.json` says `in_progress`, and the HTTP layer maps that to 409. The lock
-refuses a second process before it gets that far.
+holder, a concurrent trigger is refused rather than queued. The daemon's guard
+is the coordinator's open cycle plus `state.json`, both checked inside
+`PrepareCycle`, so two triggers cannot both pass: the second gets
+`CoordinatorError::CycleInProgress` while the first one's ticket is alive or
+`state.json` says `in_progress`, and the HTTP layer maps that to 409.
+`dream_cycle::ensure_not_in_progress` (the `state.json` half) also runs first in
+`run_guarded_cycle`, as an early check. The lock refuses a second process
+before it gets that far.
 
 The crash sweep (`crash_sweep.rs`) pins all of this. It crashes a promoting
 cycle, a retiring cycle, and two forgets at every crash point in turn,
@@ -670,34 +682,45 @@ clone for callers that own their lifetime — the in-process MCP store
 (`memory_store::InProcessStore`) sends on one with a plain awaited `send` and no
 timeout, so in-process appends wait rather than shed.
 
-**Dream cycle routing:** the cycle's filesystem phases run **through** the coordinator,
-not beside it. `POST /api/v1/dream` sends `MemoryCoordinatorMsg::RunDreamCycle`
-over the same mpsc channel as appends; the actor loop dispatches it
-to `handle_run_dream_cycle`, which calls `run_filesystem_phases`
-(consolidation and decay as one plan, staged and committed by one redo WAL, including any LLM call).
+**Dream cycle routing:** the cycle's reads and writes of the log run **through** the
+coordinator, not beside it; its model call does not. `POST /api/v1/dream` sends
+`MemoryCoordinatorMsg::PrepareCycle` over the same mpsc channel as appends. The actor
+reads the log once, selects the lesson, keeps both as its open cycle, and returns the
+selection with a `CycleTicket`. The handler's task then composes the lesson body
+(`dream_cycle::compose`, including any LLM call) with no actor involved, and sends
+`MemoryCoordinatorMsg::CommitCycle` with the ticket and the body. The actor plans over
+the lines Prepare read plus every line appended since, then stages and commits
+(`dream_cycle::commit`: consolidation and decay as one plan, staged and committed by one
+redo WAL). If the log changed outside dreamd during the model call, the commit reads the
+whole log again and writes the deterministic body. The handler runs this sequence on a
+spawned task, so a client that disconnects does not cancel a cycle the daemon accepted.
 `dreamd forget` does not go through the coordinator: it runs `forget::cascade`
 in-process and refuses while a daemon is live.
 
 The reason is fd ownership (WEG-271). The cycle's commit can replace
 `AGENT_LEARNINGS.jsonl` by rename (a planned pin or prune), which orphans the coordinator's long-lived
-`File` — subsequent appends would land on an unlinked inode and be silently lost. Routing
-the cycle through the actor lets the handler reopen `self.file` (with `O_APPEND`) as
-part of the same message, on every exit path, error included, so there is no window
-in which the coordinator holds a stale fd. `now_sec` / `cycle_date` are supplied by the caller so the cycle stays
-wall-clock-free and deterministic in tests (see the `RunDreamCycle` variant doc).
+`File` — subsequent appends would land on an unlinked inode and be silently lost. Committing
+in the actor lets it reopen `self.file` (with `O_APPEND`) as part of the same
+message, on every exit path, error included, so there is no window in which the
+coordinator holds a stale fd. `now_sec` / `cycle_date` are supplied by the caller so the
+cycle stays wall-clock-free and deterministic in tests; Prepare fixes `now_sec`, and the
+commit plans with the same value (see the `PrepareCycle` variant doc).
 
-Two consequences follow, and both are load-bearing:
+Three consequences follow, and all are load-bearing:
 
-- Appends and a cycle's filesystem phases **serialise in the same FIFO actor loop** — a
-  running cycle occupies the coordinator for its duration, model call included.
-  Backpressure therefore applies
-  to `dream` exactly as it does to `learn`: the handler goes through `try_send`, and a
-  full channel returns 503 + `Retry-After: 1` (`handlers/dream.rs`).
+- Appends **interleave with the compose**. Only `PrepareCycle` and `CommitCycle` occupy
+  the actor, and both are file I/O with no model call, so a slow or retried model call
+  never holds the inbox. The in-progress guard lives in the actor: its open cycle, which
+  a dropped ticket releases, plus `state.json`, both checked inside `PrepareCycle`.
+- Backpressure applies to `dream` the way it does to `learn` at the start of a cycle:
+  `PrepareCycle` goes through `try_send`, and a full channel returns 503 +
+  `Retry-After: 1` (`handlers/dream.rs`). `CommitCycle` waits for inbox space instead,
+  because by then the model call is spent and the commit is a bounded file operation.
 - The cycle must be routed to the coordinator that **owns** the target project root, not
   the boot coordinator, or project B's cycle would prune project A's JSONL
   (`state.resolve_supervisor` in `handlers/dream.rs`; WEG-272).
 
-Only the post-filesystem phases leave the coordinator. Index work is handed to the
+The compose and the post-filesystem phases run outside the coordinator. Index work is handed to the
 indexer task over its own bounded channel (`DEFAULT_INDEXER_CHANNEL_CAPACITY = 1024`,
 `server/indexer_actor.rs`), and the autobiography commit runs after it in `run_post_phases`
 (`dream_cycle.rs`) — outside the coordinator and best-effort. It is not, however,

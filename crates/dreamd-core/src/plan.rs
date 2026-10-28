@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 use chrono::DateTime;
 use dreamd_protocol::{AgentLearning, EventId};
 
-use crate::consolidation::{self, ConsolidationError, LessonBodySource, PromotedCluster};
+use crate::consolidation::{
+    self, ConsolidationError, LessonBodySource, PromotedCluster, SelectedLesson,
+};
 use crate::decay::{self, DecayResult};
 use crate::episodic::{self, RawLine};
 use crate::forget::{ForgetError, LessonEffect};
@@ -65,25 +67,37 @@ pub(crate) fn records(raw: &[RawLine]) -> Vec<AgentLearning> {
     raw.iter().filter_map(|line| line.parsed.clone()).collect()
 }
 
-/// Plan one dream cycle over `raw` at `now_sec`.
-///
-/// - The recurrence sidecar is recounted, except for a log with no records,
-///   which leaves it alone.
-/// - The top promoted cluster gets `LESSONS.md` with `body`; `body` is trusted
-///   as given (the citation gate runs before it reaches here). With nothing
-///   promoted, a prior file is unlinked (AILAB-699) and an absent one stays
-///   absent. `prior_lessons` is only tested for presence, never parsed, so a
-///   corrupt prior file does not fail the cycle.
-/// - The ids to pin and the ledger edges come from the *rendered* file parsed
-///   back, which is what the pin pass and the commit's edge reader saw before
-///   BZR-1240. A rendered file that does not parse fails the plan.
-/// - Every unpinned cited record is pinned; no pin is ever cleared.
-/// - Decay drops old records that are neither pinned nor pinned by this plan.
+/// [`plan_cycle_with`] with `body` fixed in advance.
 pub fn plan_cycle(
     raw: &[RawLine],
     prior_lessons: Option<&[u8]>,
     now_sec: i64,
     body: LessonBodySource,
+) -> Result<CyclePlan, ConsolidationError> {
+    plan_cycle_with(raw, prior_lessons, now_sec, |_| body)
+}
+
+/// Plan one dream cycle over `raw` at `now_sec`.
+///
+/// - The recurrence sidecar is recounted, except for a log with no records,
+///   which leaves it alone.
+/// - The top promoted cluster gets `LESSONS.md` with the body `body` returns.
+///   `body` is called once, with the plan's own selection, and only when
+///   something promotes, so a caller can check a body composed earlier against
+///   what the plan selects (BZR-1241). Its result is trusted as given. With
+///   nothing promoted, a prior file is unlinked (AILAB-699) and an absent one
+///   stays absent. `prior_lessons` is only tested for presence, never parsed,
+///   so a corrupt prior file does not fail the cycle.
+/// - The ids to pin and the ledger edges come from the *rendered* file parsed
+///   back, which is what the pin pass and the commit's edge reader saw before
+///   BZR-1240. A rendered file that does not parse fails the plan.
+/// - Every unpinned cited record is pinned; no pin is ever cleared.
+/// - Decay drops old records that are neither pinned nor pinned by this plan.
+pub fn plan_cycle_with(
+    raw: &[RawLine],
+    prior_lessons: Option<&[u8]>,
+    now_sec: i64,
+    body: impl FnOnce(&SelectedLesson) -> LessonBodySource,
 ) -> Result<CyclePlan, ConsolidationError> {
     let records = records(raw);
     let promoted = consolidation::compute_promoted_clusters(&records, now_sec);
@@ -95,6 +109,7 @@ pub fn plan_cycle(
     };
     let (lessons, pins, edges) = match consolidation::select_lesson(&promoted, now_sec) {
         Some(selected) => {
+            let body = body(&selected);
             let file = consolidation::lessons_file_from_selected(now_sec, &selected, body);
             let cited = lessons::parse_lessons_file(&lessons::render_lessons_file(&file))?;
             let pins = consolidation::cited_pins(raw, &cited);
@@ -655,5 +670,56 @@ mod tests {
             ConsolidationError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
             other => panic!("expected Io(InvalidData), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plan_cycle_with_passes_the_plans_selection_to_the_body() {
+        let events = promoting();
+        let raw = episodic::raw_lines(&log(&events));
+        let expected = consolidation::select_lesson(
+            &consolidation::compute_promoted_clusters(&events, NOW),
+            NOW,
+        )
+        .expect("the log promotes");
+
+        let mut seen = None;
+        let plan = plan_cycle_with(&raw, None, NOW, |selected| {
+            seen = Some((
+                selected.cluster_key.clone(),
+                selected.exemplar_id.clone(),
+                selected.exemplar_content.clone(),
+                selected.events.clone(),
+            ));
+            llm("composed for the plan's selection", &['3', '1'])
+        })
+        .unwrap();
+
+        assert_eq!(
+            seen,
+            Some((
+                expected.cluster_key,
+                expected.exemplar_id,
+                expected.exemplar_content,
+                expected.events,
+            )),
+            "the body is asked for with the plan's own selection"
+        );
+        let LessonsChange::Write(file) = &plan.lessons else {
+            panic!("a promoting cycle writes LESSONS.md: {:?}", plan.lessons);
+        };
+        assert_eq!(file.prompt_version, "test/v1");
+        assert_eq!(file.lessons[0].content, "composed for the plan's selection");
+        assert_eq!(
+            file.citations,
+            vec![eid('3').to_string(), eid('1').to_string()]
+        );
+
+        // Nothing promotes: the body is never asked for.
+        let raw = episodic::raw_lines(&log(&[event('Z', "go::other", 1, 5.0, false)]));
+        let plan = plan_cycle_with(&raw, None, NOW, |_| {
+            panic!("the body is asked for only when something promotes")
+        })
+        .unwrap();
+        assert_eq!(plan.lessons, LessonsChange::Keep);
     }
 }

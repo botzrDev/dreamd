@@ -29,9 +29,10 @@ guarantee — there is no `Mutex<File>` wrapper because there is no second handl
 to compete with. Concurrent third-party writers are explicitly unsupported
 (`ARCHITECTURE.md` §1).
 
-The same actor also runs the dream cycle's filesystem phases (`RunDreamCycle`),
-which replace the file by atomic rename, and reopens its fd on every exit path,
-error included. On Unix it also compares the path with its own fd before and
+The same actor also runs a dream cycle's Prepare and Commit (`PrepareCycle`,
+`CommitCycle`); the model call runs outside it, between the two. The commit
+replaces the file by atomic rename, and the actor reopens its fd on every exit
+path, error included. On Unix it also compares the path with its own fd before and
 after each append (steps 2 and 9 below), so a file something else replaced is
 reopened instead of written as an orphaned inode. `dreamd forget` also replaces
 the file, but it runs in-process and refuses while a daemon is live, so no

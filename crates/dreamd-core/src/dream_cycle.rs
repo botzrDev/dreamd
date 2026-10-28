@@ -6,20 +6,26 @@
 //!   3. Index — recurrence sidecar apply → prune decayed docs
 //!   4. Autobiography — best-effort git commit
 //!
-//! [`run_filesystem_phases`] reads the log and `LESSONS.md` once, plans every
-//! output of consolidation + decay ([`crate::plan::plan_cycle`]), stages the
-//! plan, then commits it with one redo WAL (one cycle = one atomic region).
+//! A cycle's filesystem phases are three steps (BZR-1241):
+//!   1. [`prepare`] reads the log once and selects the lesson;
+//!   2. [`compose`] writes the lesson body, calling the model when one is
+//!      configured (AILAB-204);
+//!   3. [`commit`] opens the stage (status `in_progress`), takes the autosnap,
+//!      plans every output of consolidation + decay
+//!      ([`crate::plan::plan_cycle_with`]), stages the plan, and commits it with
+//!      one redo WAL (one cycle = one atomic region).
 //!
-//! AILAB-204 made phase 1 async: the LLM call that composes the lesson body is
-//! `await`ed **inside the open cycle**, between cluster selection and the
-//! plan. That is deliberate — it keeps the 409 in-progress guard
-//! honest and keeps the coordinator the single writer. It also means a manual
-//! cycle serializes `AppendLearning` for the duration of the model call; HTTP
-//! callers see 503 + `Retry-After` rather than a lost write.
+//! The model call runs **before** the stage opens, and outside the coordinator.
+//! The daemon prepares and commits through the coordinator actor
+//! (`PrepareCycle` / `CommitCycle`) and composes in the request's own task, so
+//! appends keep landing during the model call and the commit includes them.
+//! [`gate_at_commit`] re-checks the composed body against what the commit
+//! selects.
 //!
 //! Entry points (`dreamd dream`, `POST /api/v1/dream`) are thin adapters over
-//! [`run_guarded_cycle`], the one sequencer (BZR-172). The coordinator actor calls [`run_filesystem_phases`] only so it
-//! can reopen its long-lived append fd after atomic renames (WEG-271).
+//! [`run_guarded_cycle`], the one sequencer (BZR-172). The coordinator actor
+//! runs the commit itself so it can reopen its long-lived append fd after
+//! atomic renames (WEG-271).
 
 use std::path::{Path, PathBuf};
 
@@ -106,7 +112,11 @@ pub fn cycle_date_from_now_sec(now_sec: i64) -> String {
         .to_string()
 }
 
-/// Reject concurrent cycles (HTTP 409 guard).
+/// Reject a cycle while `state.json` says one is in progress (HTTP 409 guard).
+///
+/// In the daemon this is an early check: the coordinator's `PrepareCycle`
+/// runs it again inside the actor, together with the actor's own open cycle,
+/// and that is the authoritative one.
 pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleError> {
     match wal::read_last_cycle_status(agent_root)? {
         status if status == "in_progress" => Err(DreamCycleError::InProgress),
@@ -116,10 +126,13 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 
 /// Filesystem phases: consolidation then decay, as one plan.
 ///
-/// Reads the log and `LESSONS.md` once, plans every output, stages the plan in
-/// one stage and commits it with one redo WAL, so the full cycle is a single
-/// atomic region (ARCH-2). Called by the coordinator actor, which must reopen
-/// its append fd afterward.
+/// [`prepare`], then [`compose`], then [`commit`], in this task. The model call
+/// runs before the stage opens, so the stage and `in_progress` cover only the
+/// commit. The commit plans every output and stages it in one stage with one
+/// redo WAL, so the full cycle is a single atomic region (ARCH-2). The CLI's
+/// in-process path calls this under the project writer lock; the daemon runs
+/// the same three steps through its coordinator actor instead, which must
+/// reopen its append fd afterward.
 ///
 /// `no_llm` forces the deterministic body even when credentials exist. When it is
 /// `false`, the backend is resolved from the project's [`crate::config::Config`]
@@ -141,43 +154,24 @@ pub async fn run_filesystem_phases(
     no_llm: bool,
     share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
-    if no_llm {
-        // Turbofish only names the type the `None` needs; no client is built.
-        // `share_personal` is deliberately dropped on this arm rather than
-        // forwarded: with no backend there is no payload to consent to, and
-        // reading `personal/` here would be a disclosure with no recipient.
-        return filesystem_phases::<llm::GenaiBackend>(
-            agent_root, ledger, now_sec, cycle_date, None, false,
-        )
-        .await;
-    }
-
-    // A broken config.toml must not fail a cycle that would otherwise run
-    // deterministically — degrade to defaults and say so.
-    let config = crate::config::load_config(agent_root.project_root()).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "config load failed; using defaults for the LLM phase");
-        crate::config::Config::default()
-    });
-
-    match llm::resolve_backend(&config) {
-        Some(backend) => {
-            filesystem_phases(
-                agent_root,
-                ledger,
-                now_sec,
-                cycle_date,
-                Some((&backend, config.model.as_str())),
-                share_personal,
-            )
-            .await
-        }
-        None => {
-            filesystem_phases::<llm::GenaiBackend>(
-                agent_root, ledger, now_sec, cycle_date, None, false,
-            )
-            .await
-        }
-    }
+    let prepared = prepare(agent_root, now_sec)?;
+    let body = compose(
+        agent_root,
+        prepared.selected.as_ref(),
+        no_llm,
+        share_personal,
+    )
+    .await;
+    let composed_for = prepared.selected.as_ref().map(|s| s.cluster_key.as_str());
+    commit(
+        agent_root,
+        ledger,
+        now_sec,
+        cycle_date,
+        &prepared.raw,
+        composed_for,
+        body,
+    )
 }
 
 /// [`run_filesystem_phases`] with an explicit backend — the seam tests use to
@@ -195,26 +189,134 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     model: &str,
     share_personal: bool,
 ) -> Result<DecayResult, DreamCycleError> {
-    filesystem_phases(
+    let prepared = prepare(agent_root, now_sec)?;
+    let body = match prepared.selected.as_ref() {
+        Some(selected) => {
+            // The spend cap (AILAB-196) is read here rather than threaded
+            // through this function, because its signature is the FakeLlm seam
+            // and its callers hold a backend, not a project config. Reading it
+            // inside this arm also keeps a cycle that promotes nothing free of
+            // the extra file read. Same degrade-to-defaults rule as
+            // [`compose`]: a broken config.toml must never fail a cycle.
+            let cap_usd = crate::config::load_config(agent_root.project_root())
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "config load failed; using the default LLM cost cap");
+                    crate::config::Config::default()
+                })
+                .cost_cap_usd;
+            compose_lesson_body(
+                selected,
+                Some((backend, model)),
+                cap_usd,
+                agent_root,
+                share_personal,
+            )
+            .await
+        }
+        None => LessonBodySource::Deterministic,
+    };
+    let composed_for = prepared.selected.as_ref().map(|s| s.cluster_key.as_str());
+    commit(
         agent_root,
         ledger,
         now_sec,
         cycle_date,
-        Some((backend, model)),
-        share_personal,
+        &prepared.raw,
+        composed_for,
+        body,
     )
-    .await
 }
 
-/// The one stage and its commit. `llm` is `None` for every deterministic
-/// trigger (`--no-llm`, no credentials, or a test that wants today's bytes).
-async fn filesystem_phases<B: LlmBackend>(
+/// What a cycle composes for (BZR-1241): the log's lines, read once, and the
+/// lesson the model is asked to write.
+#[derive(Debug)]
+pub struct Prepared {
+    pub raw: Vec<episodic::RawLine>,
+    /// `None`: nothing promotes.
+    pub selected: Option<SelectedLesson>,
+}
+
+/// The lesson a cycle over `raw` composes for. Pure. The coordinator's
+/// `PrepareCycle` calls it on the lines it read itself.
+#[must_use]
+pub fn select(raw: &[episodic::RawLine], now_sec: i64) -> Option<SelectedLesson> {
+    consolidation::select_lesson(
+        &consolidation::compute_promoted_clusters(&plan::records(raw), now_sec),
+        now_sec,
+    )
+}
+
+/// Read the log once (an absent file is empty) and select. Reads no other file.
+pub fn prepare(agent_root: &AgentRoot, now_sec: i64) -> Result<Prepared, DreamCycleError> {
+    let bytes = match std::fs::read(agent_root.episodic_jsonl()) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(WalError::Io(e).into()),
+    };
+    let raw = episodic::raw_lines(&bytes);
+    let selected = select(&raw, now_sec);
+    Ok(Prepared { raw, selected })
+}
+
+/// The lesson body for `selected`, composed outside any actor. `None`, or
+/// `no_llm`, is the deterministic body. Otherwise `config.toml` is loaded once
+/// (degrading to defaults, as today), the backend is resolved, and
+/// `compose_lesson_body` runs with that config's `cost_cap_usd`. Infallible.
+pub async fn compose(
+    agent_root: &AgentRoot,
+    selected: Option<&SelectedLesson>,
+    no_llm: bool,
+    share_personal: bool,
+) -> LessonBodySource {
+    // `None` = nothing promoted: the plan retires any stale LESSONS.md
+    // (AILAB-699) and decay still runs, with no body to compose.
+    let Some(selected) = selected else {
+        return LessonBodySource::Deterministic;
+    };
+    if no_llm {
+        // `share_personal` is deliberately dropped on this arm rather than
+        // forwarded: with no backend there is no payload to consent to, and
+        // reading `personal/` here would be a disclosure with no recipient.
+        return LessonBodySource::Deterministic;
+    }
+
+    // A broken config.toml must not fail a cycle that would otherwise run
+    // deterministically — degrade to defaults and say so.
+    let config = crate::config::load_config(agent_root.project_root()).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "config load failed; using defaults for the LLM phase");
+        crate::config::Config::default()
+    });
+
+    match llm::resolve_backend(&config) {
+        Some(backend) => {
+            compose_lesson_body(
+                selected,
+                Some((&backend, config.model.as_str())),
+                config.cost_cap_usd,
+                agent_root,
+                share_personal,
+            )
+            .await
+        }
+        None => LessonBodySource::Deterministic,
+    }
+}
+
+/// Stage and commit one cycle over `raw` (the whole log as of now). Opens the
+/// stage (`begin_cycle`: status `in_progress`), stages the autosnap, reads the
+/// prior `LESSONS.md` through the stage, plans with `body` gated against the
+/// plan's selection, applies the plan, and commits it. Reads no log.
+///
+/// `composed_for` is the cluster key `body` was composed for (see
+/// [`gate_at_commit`]).
+pub fn commit(
     agent_root: &AgentRoot,
     ledger: &Ledger,
     now_sec: i64,
     cycle_date: &str,
-    llm_target: Option<(&B, &str)>,
-    share_personal: bool,
+    raw: &[episodic::RawLine],
+    composed_for: Option<&str>,
+    body: LessonBodySource,
 ) -> Result<DecayResult, DreamCycleError> {
     // ARCH-2: ONE plan holds BOTH filesystem phases' outputs, in ONE stage.
     // begin_cycle guards `.agent/` existence (WEG-281), refuses a pending WAL
@@ -225,51 +327,51 @@ async fn filesystem_phases<B: LlmBackend>(
     // half-finished cycle is ever recorded "complete", and none is ever
     // half-applied.
     let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
-    // BZR-160: one pre-mutation image of the four live files. Nothing is live
-    // yet, so the object is the pre-cycle store; its ref is staged.
+    // BZR-160 / BZR-1241: the pre-cycle image, taken at the commit, so it
+    // holds every record that landed while the model ran.
     snapshot::stage_autosnap(&mut stage, now_sec)?;
-
-    // The one read of the plan's inputs: the log and the prior LESSONS.md.
-    // Every later step works on these bytes; nothing reads back a staged file.
-    let log = stage
-        .read(&agent_root.episodic_jsonl())
-        .map_err(WalError::Io)?;
-    let raw = episodic::raw_lines(&log.unwrap_or_default());
     let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
-
-    // Select once here, for the model prompt; `plan_cycle` selects again from
-    // the same records and reaches the same exemplar. `None` = nothing
-    // promoted: the plan retires any stale LESSONS.md (AILAB-699) and decay
-    // still runs.
-    let promoted = consolidation::compute_promoted_clusters(&plan::records(&raw), now_sec);
-    let body = match consolidation::select_lesson(&promoted, now_sec) {
-        Some(selected) => {
-            // The spend cap (AILAB-196) is read here rather than threaded
-            // through `run_filesystem_phases_with_backend`, because that
-            // signature is the FakeLlm seam and its callers hold a backend,
-            // not a project config. Reading it inside this arm also keeps a
-            // cycle that promotes nothing free of the extra file read. Same
-            // degrade-to-defaults rule as the production entry point: a broken
-            // config.toml must never fail a cycle.
-            let cap_usd = crate::config::load_config(agent_root.project_root())
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "config load failed; using the default LLM cost cap");
-                    crate::config::Config::default()
-                })
-                .cost_cap_usd;
-            compose_lesson_body(&selected, llm_target, cap_usd, agent_root, share_personal).await
-        }
-        None => LessonBodySource::Deterministic,
-    };
-
-    let plan =
-        plan::plan_cycle(&raw, prior.as_deref(), now_sec, body).map_err(LessonPhaseError::from)?;
+    let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, |selected| {
+        gate_at_commit(body, composed_for, selected)
+    })
+    .map_err(LessonPhaseError::from)?;
     stage.apply_plan(&plan, cycle_date).map_err(WalError::Io)?;
     // BZR-1240: the redo WAL carries the plan's ledger edges, and the commit
     // appends them after the renames; a roll-forward appends them again, and
     // the ledger skips an edge it already holds.
     wal::commit_cycle(stage, ledger, now_sec)?;
     Ok(plan.decay_result())
+}
+
+/// BZR-1241: the citation gate, re-run against the commit plan's selection.
+/// Records that landed during the compose can move the top cluster or its
+/// members (deepest-wins), so a model body survives only when the plan selects
+/// the cluster it was composed for and every citation is still a member.
+pub(crate) fn gate_at_commit(
+    body: LessonBodySource,
+    composed_for: Option<&str>,
+    selected: &SelectedLesson,
+) -> LessonBodySource {
+    let LessonBodySource::Llm { citations, .. } = &body else {
+        return body;
+    };
+    let members: Vec<String> = selected
+        .events
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    if composed_for == Some(selected.cluster_key.as_str())
+        && llm::citations_are_valid(citations, &members)
+    {
+        return body;
+    }
+    tracing::warn!(
+        composed_for = ?composed_for,
+        cluster_key = %selected.cluster_key,
+        cited = ?citations,
+        "the commit plan no longer matches the composed lesson; writing the deterministic body"
+    );
+    LessonBodySource::Deterministic
 }
 
 /// Compose the lesson body. **Infallible by construction** — every LLM failure
@@ -487,17 +589,19 @@ pub struct GuardedCycleOptions<'a> {
 ///   4. `dispatch(now_sec, cycle_date)` — the filesystem phases;
 ///   5. [`run_post_phases`] with the decay result.
 ///
-/// `dispatch` is the adapter. The daemon's callback sends `RunDreamCycle` to the
-/// coordinator actor, which runs [`run_filesystem_phases`] and reopens its append
-/// fd (WEG-271); a full inbox maps to [`DreamCycleError::CoordinatorBusy`]. The
-/// CLI's callback calls [`run_filesystem_phases`] directly. This function never
-/// opens a stage itself — the one stage and its commit stay inside the
-/// filesystem phases.
+/// `dispatch` is the adapter. The daemon's callback is `dispatch_cycle` (the
+/// `POST /api/v1/dream` handler): it sends `PrepareCycle` to the coordinator
+/// actor, composes the body in its own task, then sends `CommitCycle`, and the
+/// actor commits and reopens its append fd (WEG-271). A full inbox at Prepare
+/// maps to [`DreamCycleError::CoordinatorBusy`], and a cycle the actor already
+/// holds open to [`DreamCycleError::InProgress`]. The CLI's callback calls
+/// [`run_filesystem_phases`] directly. This function never opens a stage
+/// itself — the one stage and its commit stay inside the filesystem phases.
 ///
-/// Queue property: appends wait only while the actor is inside
-/// `handle_run_dream_cycle` (consolidation, decay, and any model call). Index and
-/// autobiography run here, after the actor has replied, so they never hold the
-/// coordinator's inbox.
+/// Queue property: appends wait only while the actor handles `PrepareCycle` or
+/// `CommitCycle`, which are file I/O with no model call; the model call runs
+/// between the two. Index and autobiography run here, after the actor has
+/// replied, so they never hold the coordinator's inbox.
 pub async fn run_guarded_cycle<F, Fut>(
     opts: GuardedCycleOptions<'_>,
     dispatch: F,
@@ -545,9 +649,11 @@ where
 /// any staged one.
 ///
 /// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
-/// filesystem phases are async too (they `await` the model call), so they share
-/// the runtime that already existed for the index phases — building a second one
-/// inside the first would panic at the nested `block_on`.
+/// filesystem phases are async too: [`run_filesystem_phases`] runs prepare,
+/// compose and commit in this task, and the compose `await`s the model call
+/// before the stage opens. They share the runtime that already existed for the
+/// index phases — building a second one inside the first would panic at the
+/// nested `block_on`.
 pub fn run_in_process(
     project_root: &Path,
     now_sec: i64,
@@ -896,8 +1002,9 @@ mod tests {
         assert!(!result.decay.decayed_ids.is_empty() || result.decay.kept_count > 0);
     }
 
-    /// BZR-160: a real cycle leaves one object and one `snap-*` ref, taken
-    /// before consolidation, and never the branch pointer file.
+    /// BZR-160: a real cycle leaves one object and one `snap-*` ref, taken at
+    /// the commit before any output is staged, and never the branch pointer
+    /// file.
     #[test]
     fn in_process_cycle_writes_one_autosnap() {
         let (_dir, root) = scaffold_fixture();
@@ -1615,9 +1722,10 @@ mod tests {
         write_personal_canary(&root);
         let selected = deterministic_exemplar(&root);
 
-        // `--no-llm` becomes `llm_target = None` one frame up in
-        // `filesystem_phases`; a backend exists here only so "it was not called"
-        // is asserted against an object that records calls.
+        // `--no-llm` stops one frame up, in `compose`, which never hands this
+        // function a backend; `llm_target = None` is that path. A backend exists
+        // here only so "it was not called" is asserted against an object that
+        // records calls.
         let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
         let body =
             compose_lesson_body::<crate::llm::fake::FakeLlm>(&selected, None, 100.0, &root, true)
@@ -1749,6 +1857,83 @@ mod tests {
             "the cycle never reached its commit point"
         );
         assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), log_before);
+    }
+
+    // ── BZR-1241: the citation gate at commit ────────────────────────────────
+
+    fn gate_member(tail: &str) -> dreamd_protocol::AgentLearning {
+        dreamd_protocol::AgentLearning {
+            schema_version: "1.0.0".to_string(),
+            id: dreamd_protocol::EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}"))
+                .unwrap(),
+            timestamp: chrono::DateTime::from_timestamp(NOW_SEC, 0).unwrap(),
+            pain: 6.0,
+            importance: 7.0,
+            pinned: false,
+            skill_action: "rust::eh".to_string(),
+            source_harness: "test".to_string(),
+            content: format!("member {tail}"),
+        }
+    }
+
+    /// The commit plan's selection: `rust::eh` with members FA0, FA1, FA2.
+    fn commit_selection() -> SelectedLesson {
+        let events = vec![gate_member("FA0"), gate_member("FA1"), gate_member("FA2")];
+        SelectedLesson {
+            cluster_key: "rust::eh".to_string(),
+            exemplar_id: events[2].id.as_str().to_string(),
+            exemplar_content: events[2].content.clone(),
+            events,
+        }
+    }
+
+    fn composed(citations: &[&str]) -> LessonBodySource {
+        LessonBodySource::Llm {
+            content: "Return `?` instead of unwrapping.".to_string(),
+            prompt_version: llm::VERSIONED_PROMPT_ID.to_string(),
+            citations: citations
+                .iter()
+                .map(|tail| format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}"))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn gate_keeps_a_body_whose_cluster_and_citations_survive() {
+        let body = composed(&["FA0", "FA2"]);
+        assert_eq!(
+            gate_at_commit(body.clone(), Some("rust::eh"), &commit_selection()),
+            body
+        );
+        assert_eq!(
+            gate_at_commit(LessonBodySource::Deterministic, None, &commit_selection()),
+            LessonBodySource::Deterministic
+        );
+    }
+
+    #[test]
+    fn gate_drops_a_body_when_the_top_cluster_moves() {
+        // Every citation is still a member; only the cluster differs.
+        assert_eq!(
+            gate_at_commit(
+                composed(&["FA0"]),
+                Some("rust::eh::io"),
+                &commit_selection()
+            ),
+            LessonBodySource::Deterministic
+        );
+    }
+
+    #[test]
+    fn gate_drops_a_body_whose_citation_left_the_cluster() {
+        assert_eq!(
+            gate_at_commit(
+                composed(&["FA0", "FA9"]),
+                Some("rust::eh"),
+                &commit_selection()
+            ),
+            LessonBodySource::Deterministic
+        );
     }
 
     #[test]

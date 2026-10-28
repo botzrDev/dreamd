@@ -303,10 +303,12 @@ pub enum LessonBodySource {
 
 /// The cluster this cycle will write a lesson for, before a body is chosen.
 ///
-/// Produced by [`select_lesson`]. The dream cycle selects once to build the
-/// model prompt, then [`crate::plan::plan_cycle`] selects again from the same
-/// records, so an `await` on a network call can sit between selection and the
-/// plan while both still name one exemplar id.
+/// Produced by [`select_lesson`]. The dream cycle selects once for the compose
+/// (the model prompt), then [`crate::plan::plan_cycle_with`] selects again over
+/// the log as of the commit, and `dream_cycle::gate_at_commit` checks the
+/// composed body against that selection (BZR-1241). Records that landed during
+/// the model call can change the selection; the gate then writes the
+/// deterministic body for the commit's own selection.
 #[derive(Debug, Clone)]
 pub struct SelectedLesson {
     /// File-level cluster key of the winning (highest `salience_sum`) cluster.

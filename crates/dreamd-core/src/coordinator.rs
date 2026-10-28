@@ -22,6 +22,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -29,7 +30,10 @@ use dreamd_protocol::{AgentLearning, EventId, RECORD_SCHEMA_VERSION};
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::episodic::{self, EpisodicError};
+use crate::consolidation::{LessonBodySource, SelectedLesson};
+use crate::decay::DecayResult;
+use crate::dream_cycle::{self, DreamCycleError};
+use crate::episodic::{self, EpisodicError, RawLine};
 use crate::id_minter::IdMinter;
 use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
@@ -72,11 +76,16 @@ pub enum CoordinatorError {
     /// map to HTTP 413.
     #[error("payload too large: {size} bytes exceeds {max} byte limit")]
     PayloadTooLarge { size: usize, max: usize },
-    /// Consolidation or decay failed during a [`MemoryCoordinatorMsg::RunDreamCycle`]
-    /// (WEG-271). Carries the underlying error's display string — caller maps
-    /// to HTTP 500.
+    /// A dream cycle could not be prepared or committed
+    /// ([`MemoryCoordinatorMsg::PrepareCycle`] /
+    /// [`MemoryCoordinatorMsg::CommitCycle`], WEG-271). Carries the underlying
+    /// error's display string — caller maps to HTTP 500.
     #[error("dream cycle: {0}")]
     DreamCycle(String),
+    /// `PrepareCycle` refused: another cycle's ticket is alive, or `state.json`
+    /// says `in_progress`. Caller maps to HTTP 409.
+    #[error("dream cycle in progress")]
+    CycleInProgress,
 }
 
 impl From<EpisodicError> for CoordinatorError {
@@ -111,31 +120,66 @@ pub enum MemoryCoordinatorMsg {
         client_dedup_key: Option<String>,
         response_tx: oneshot::Sender<Result<AppendOutcome, CoordinatorError>>,
     },
-    /// Run a deterministic dream cycle (consolidation + decay) against the
-    /// coordinator's own project root, then reopen the append fd (WEG-271).
+    /// Start a dream cycle (BZR-1241): read the log once, select the lesson, and
+    /// keep both until `CommitCycle`. The caller composes the body with no actor
+    /// involved, so appends keep landing during the model call. Refused with
+    /// [`CoordinatorError::CycleInProgress`] while another cycle's ticket is alive
+    /// or `state.json` says `in_progress`.
     ///
-    /// The cycle's commit can replace `AGENT_LEARNINGS.jsonl` by rename (the
-    /// plan's pins or decay prune), which orphans the coordinator's
-    /// long-lived fd. Routing
-    /// the cycle through the actor lets the handler reopen `self.file` so
-    /// subsequent appends land on the live inode. `now_sec` / `cycle_date` are
-    /// supplied by the caller (the HTTP handler) so the cycle stays
-    /// wall-clock-free and deterministic in tests.
-    RunDreamCycle {
+    /// `now_sec` is supplied by the caller (the HTTP handler) so the cycle stays
+    /// wall-clock-free and deterministic in tests. The commit plans with the
+    /// same value, so one cycle has one clock.
+    PrepareCycle {
         now_sec: i64,
+        response_tx: oneshot::Sender<Result<PreparedCycle, CoordinatorError>>,
+    },
+    /// Finish the cycle `ticket` names: plan over the lines Prepare read plus
+    /// everything appended since, stage, commit, then reopen the append fd on
+    /// every exit path (WEG-271).
+    ///
+    /// The commit can replace `AGENT_LEARNINGS.jsonl` by rename (the plan's
+    /// pins or decay prune), which orphans the coordinator's long-lived fd.
+    /// Committing in the actor lets it reopen `self.file` so subsequent appends
+    /// land on the live inode.
+    CommitCycle {
+        ticket: CycleTicket,
         cycle_date: String,
-        /// Force the deterministic lesson body even when credentials exist
-        /// (AILAB-204). Set from the `x-dreamd-no-llm: 1` request header.
-        no_llm: bool,
-        /// Per-call consent to include `.agent/personal/` in the composition
-        /// prompt (AILAB-199). Set from the `x-dreamd-share-personal: 1` request
-        /// header. A required field rather than a defaulted one: a new message
-        /// site that forgets it must fail to compile, not quietly disclose.
-        share_personal: bool,
-        response_tx: oneshot::Sender<Result<crate::decay::DecayResult, CoordinatorError>>,
+        body: LessonBodySource,
+        response_tx: oneshot::Sender<Result<DecayResult, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
     Shutdown { response_tx: oneshot::Sender<()> },
+}
+
+/// What `PrepareCycle` returns.
+#[derive(Debug)]
+pub struct PreparedCycle {
+    /// The lesson to compose for. `None`: nothing promotes.
+    pub selected: Option<SelectedLesson>,
+    /// Hand it back in `CommitCycle`. Dropping it abandons the cycle.
+    pub ticket: CycleTicket,
+}
+
+/// A prepared cycle that is still wanted. The coordinator keeps a `Weak` of
+/// the lease: while a ticket is alive a second `PrepareCycle` is refused, and
+/// once it drops (a crashed or cancelled caller) the next one goes ahead.
+#[derive(Debug)]
+pub struct CycleTicket {
+    id: u64,
+    _lease: Arc<()>,
+}
+
+/// The cycle between `PrepareCycle` and `CommitCycle`.
+struct OpenCycle {
+    id: u64,
+    lease: Weak<()>,
+    now_sec: i64,
+    raw: Vec<RawLine>,
+    composed_for: Option<String>,
+    /// The identity and `outside_changes` the lines were read under. `None`
+    /// when the read did not match `identity` (BZR-1241).
+    #[cfg(unix)]
+    read_under: Option<(LogIdentity, u64)>,
 }
 
 /// Single mutable owner of `AGENT_LEARNINGS.jsonl`.
@@ -174,6 +218,14 @@ pub struct MemoryCoordinator {
     /// sends `IndexerMsg::Resync` after its own `Append` (BZR-1236).
     #[cfg(unix)]
     resync_pending: bool,
+    /// The dream cycle between `PrepareCycle` and `CommitCycle` (BZR-1241).
+    open_cycle: Option<OpenCycle>,
+    /// The id the next `PrepareCycle` gives its ticket.
+    next_cycle_id: u64,
+    /// How many times the log changed outside this coordinator. A cycle whose
+    /// lines were read under an older count re-reads the log at commit.
+    #[cfg(unix)]
+    outside_changes: u64,
 }
 
 impl MemoryCoordinator {
@@ -251,6 +303,10 @@ impl MemoryCoordinator {
             indexer_tx,
             #[cfg(unix)]
             resync_pending: false,
+            open_cycle: None,
+            next_cycle_id: 0,
+            #[cfg(unix)]
+            outside_changes: 0,
         })
     }
 
@@ -267,20 +323,21 @@ impl MemoryCoordinator {
                     let result = self.handle_append(learning, client_dedup_key).await;
                     let _ = response_tx.send(result);
                 }
-                MemoryCoordinatorMsg::RunDreamCycle {
+                MemoryCoordinatorMsg::PrepareCycle {
                     now_sec,
-                    cycle_date,
-                    no_llm,
-                    share_personal,
                     response_tx,
                 } => {
-                    // AILAB-204: awaited here, in the actor loop, so the cycle
-                    // (LLM call included) stays inside the coordinator's single
-                    // -writer window. Appends queue behind it; they are not
-                    // raced by a second writer.
-                    let result = self
-                        .handle_run_dream_cycle(now_sec, &cycle_date, no_llm, share_personal)
-                        .await;
+                    // A dropped receiver hands the ticket back here, and
+                    // dropping it frees the next PrepareCycle.
+                    let _ = response_tx.send(self.handle_prepare_cycle(now_sec));
+                }
+                MemoryCoordinatorMsg::CommitCycle {
+                    ticket,
+                    cycle_date,
+                    body,
+                    response_tx,
+                } => {
+                    let result = self.handle_commit_cycle(ticket, &cycle_date, body);
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -384,41 +441,95 @@ impl MemoryCoordinator {
         })
     }
 
-    /// WEG-271: run the deterministic dream cycle, then reopen the append fd.
+    /// BZR-1241: read the log once, select the lesson, and keep both as the
+    /// open cycle until `CommitCycle`. No model call: the caller composes.
     ///
-    /// The cycle's plan rewrites the log when it pins a cited record (on
-    /// cluster promotion) or prunes one, and its commit renames the staged log
-    /// over `AGENT_LEARNINGS.jsonl`, leaving `self.file` pointing at an
-    /// orphaned inode. It reopens on every exit path, error included, so the
-    /// next append lands on the live inode whether or not the commit replaced
-    /// the file and whether or not the cycle succeeded.
-    /// The staged log is a well-formed file, so no `episodic::recover` scan is
-    /// needed on reopen.
-    async fn handle_run_dream_cycle(
+    /// Refused while another cycle's ticket is alive, and while `state.json`
+    /// says `in_progress` (a failed cycle keeps that until the next lock
+    /// acquisition, and a pending WAL comes with it).
+    fn handle_prepare_cycle(&mut self, now_sec: i64) -> Result<PreparedCycle, CoordinatorError> {
+        if self.ledger.is_none() {
+            return Err(CoordinatorError::DreamCycle(
+                "this coordinator was opened without the project writer lock".to_string(),
+            ));
+        }
+        if self
+            .open_cycle
+            .as_ref()
+            .is_some_and(|open| open.lease.strong_count() > 0)
+        {
+            return Err(CoordinatorError::CycleInProgress);
+        }
+        match dream_cycle::ensure_not_in_progress(&self.agent_root) {
+            Ok(()) => {}
+            Err(DreamCycleError::InProgress) => return Err(CoordinatorError::CycleInProgress),
+            Err(e) => return Err(CoordinatorError::DreamCycle(e.to_string())),
+        }
+
+        #[cfg(unix)]
+        self.ensure_live_log()?;
+        let bytes = self.read_log()?;
+        // Commit reads only the bytes appended after these, so they must be
+        // exactly the file `file` writes, up to a line boundary.
+        #[cfg(unix)]
+        let read_under = (bytes.len() as u64 == self.identity.len
+            && bytes.last().is_none_or(|b| *b == b'\n'))
+        .then_some((self.identity, self.outside_changes));
+        let raw = episodic::raw_lines(&bytes);
+        let selected = dream_cycle::select(&raw, now_sec);
+
+        let id = self.next_cycle_id;
+        self.next_cycle_id += 1;
+        let lease = Arc::new(());
+        self.open_cycle = Some(OpenCycle {
+            id,
+            lease: Arc::downgrade(&lease),
+            now_sec,
+            raw,
+            composed_for: selected.as_ref().map(|s| s.cluster_key.clone()),
+            #[cfg(unix)]
+            read_under,
+        });
+        Ok(PreparedCycle {
+            selected,
+            ticket: CycleTicket { id, _lease: lease },
+        })
+    }
+
+    /// WEG-271 / BZR-1241: commit the cycle `ticket` names, then reopen the
+    /// append fd.
+    ///
+    /// The plan covers the lines Prepare read plus every line appended since.
+    /// If the log changed outside dreamd during the window, the whole log is
+    /// read again and the body is the deterministic one. The plan rewrites the
+    /// log when it pins a cited record (on cluster promotion) or prunes one,
+    /// and the commit renames the staged log over `AGENT_LEARNINGS.jsonl`,
+    /// leaving `self.file` pointing at an orphaned inode. It reopens on every
+    /// exit path past the ticket check, error included, so the next append
+    /// lands on the live inode whether or not the commit replaced the file and
+    /// whether or not the cycle succeeded. The staged log is a well-formed
+    /// file, so no `episodic::recover` scan is needed on reopen.
+    fn handle_commit_cycle(
         &mut self,
-        now_sec: i64,
+        ticket: CycleTicket,
         cycle_date: &str,
-        no_llm: bool,
-        share_personal: bool,
-    ) -> Result<crate::decay::DecayResult, CoordinatorError> {
+        body: LessonBodySource,
+    ) -> Result<DecayResult, CoordinatorError> {
         let Some(ledger) = self.ledger.clone() else {
             return Err(CoordinatorError::DreamCycle(
                 "this coordinator was opened without the project writer lock".to_string(),
             ));
         };
-        let result = crate::dream_cycle::run_filesystem_phases(
-            &self.agent_root,
-            &ledger,
-            now_sec,
-            cycle_date,
-            no_llm,
-            share_personal,
-        )
-        .await
-        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()));
+        let Some(open) = self.open_cycle.take_if(|open| open.id == ticket.id) else {
+            return Err(CoordinatorError::DreamCycle(
+                "no prepared dream cycle for this ticket".to_string(),
+            ));
+        };
+        let result = self.commit_open_cycle(open, &ledger, cycle_date, body);
         // Every exit path reopens: the commit can fail after its rename has
         // already replaced the log.
         let reopened = self.reopen();
+        drop(ticket);
         match (result, reopened) {
             (Ok(decay), Ok(())) => Ok(decay),
             (Ok(_), Err(e)) => Err(e.into()),
@@ -431,6 +542,87 @@ impl MemoryCoordinator {
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// The commit itself, without the reopen.
+    fn commit_open_cycle(
+        &mut self,
+        mut open: OpenCycle,
+        ledger: &Ledger,
+        cycle_date: &str,
+        body: LessonBodySource,
+    ) -> Result<DecayResult, CoordinatorError> {
+        let (raw, body) = match self.log_since(&mut open)? {
+            Some(raw) => (raw, body),
+            None => {
+                tracing::warn!(
+                    path = %self.jsonl_path.display(),
+                    "the episodic log changed outside dreamd during the model call; \
+                     writing the deterministic body"
+                );
+                // Handle the change the way an append would before reading:
+                // end a foreign final line, raise the minter's floor, and
+                // flag the resync.
+                #[cfg(unix)]
+                self.ensure_live_log()?;
+                let bytes = self.read_log()?;
+                (episodic::raw_lines(&bytes), LessonBodySource::Deterministic)
+            }
+        };
+        dream_cycle::commit(
+            &self.agent_root,
+            ledger,
+            open.now_sec,
+            cycle_date,
+            &raw,
+            open.composed_for.as_deref(),
+            body,
+        )
+        .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))
+    }
+
+    /// The whole log as of now, from `open`'s lines plus the bytes this
+    /// coordinator appended since Prepare read them. `None` when the log
+    /// changed any other way in between: an outside change was handled, the
+    /// path holds another file or another length, the file is not the one
+    /// Prepare read, or Prepare's read did not match what `file` wrote.
+    #[cfg(unix)]
+    fn log_since(&self, open: &mut OpenCycle) -> std::io::Result<Option<Vec<RawLine>>> {
+        use std::os::unix::fs::FileExt;
+
+        let Some((at, changes)) = open.read_under else {
+            return Ok(None);
+        };
+        if changes != self.outside_changes
+            || LogIdentity::at(&self.jsonl_path)? != Some(self.identity)
+            || (self.identity.dev, self.identity.ino) != (at.dev, at.ino)
+            || self.identity.len < at.len
+        {
+            return Ok(None);
+        }
+        let mut tail = vec![0u8; (self.identity.len - at.len) as usize];
+        self.file.read_exact_at(&mut tail, at.len)?;
+        // Prepare's bytes end at a line boundary, so the two line lists
+        // concatenate to the lines of the whole file.
+        let mut raw = std::mem::take(&mut open.raw);
+        raw.extend(episodic::raw_lines(&tail));
+        Ok(Some(raw))
+    }
+
+    /// Off Unix there is no log identity, so a commit always reads the whole
+    /// log again.
+    #[cfg(not(unix))]
+    fn log_since(&self, _open: &mut OpenCycle) -> std::io::Result<Option<Vec<RawLine>>> {
+        Ok(None)
+    }
+
+    /// The bytes at `jsonl_path`; an absent file is empty.
+    fn read_log(&self) -> std::io::Result<Vec<u8>> {
+        match std::fs::read(&self.jsonl_path) {
+            Ok(bytes) => Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
         }
     }
 
@@ -504,6 +696,7 @@ impl MemoryCoordinator {
         );
         // This function is sync; `handle_append` sends the resync.
         self.resync_pending = true;
+        self.outside_changes += 1;
         Ok(records)
     }
 
@@ -1030,8 +1223,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn failed_cycle_reopens_the_append_fd() {
+    #[test]
+    fn failed_cycle_reopens_the_append_fd() {
         let dir = tempfile::tempdir().unwrap();
         let root = AgentRoot::new(dir.path());
         std::fs::create_dir_all(root.episodic_dir()).unwrap();
@@ -1059,9 +1252,12 @@ mod tests {
         let (mut c, _tx, _lock) = open_coordinator(&root);
         let before = ino(&c.file.metadata().unwrap());
 
-        let result = c
-            .handle_run_dream_cycle(CYCLE_NOW_SEC, "2026-05-28", true, false)
-            .await;
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        let result = c.handle_commit_cycle(
+            prepared.ticket,
+            "2026-05-28",
+            LessonBodySource::Deterministic,
+        );
         assert!(
             result.is_err(),
             "precondition: the cycle fails; got {result:?}"
@@ -1074,6 +1270,593 @@ mod tests {
             at_path,
             "a failed cycle must still point the append fd at the file at the path"
         );
+    }
+
+    // ── BZR-1241: PrepareCycle / CommitCycle ─────────────────────────────────
+
+    #[cfg(unix)]
+    const CYCLE_DATE: &str = "2026-05-28";
+
+    #[cfg(unix)]
+    fn eh_id(tail: &str) -> EventId {
+        EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5{tail}")).unwrap()
+    }
+
+    /// Three `rust::eh` records from the hour before [`CYCLE_NOW_SEC`]: the
+    /// cluster promotes and FA2, the newest, is its exemplar. Returns the ids
+    /// in log order.
+    #[cfg(unix)]
+    fn seed_eh_store(root: &AgentRoot) -> Vec<EventId> {
+        std::fs::create_dir_all(root.episodic_dir()).unwrap();
+        let mut body = String::new();
+        let mut ids = Vec::new();
+        for (tail, hours, content) in [
+            ("FA0", 3, "unwrap panicked in the handler"),
+            ("FA1", 2, "unwrap panicked in the parser"),
+            ("FA2", 1, "unwrap panicked in the loader"),
+        ] {
+            let id = eh_id(tail);
+            body.push_str(&jsonl_line(&learning_with(
+                &id,
+                "rust::eh",
+                content,
+                CYCLE_NOW_SEC - hours * 3600,
+            )));
+            ids.push(id);
+        }
+        std::fs::write(root.episodic_jsonl(), body).unwrap();
+        ids
+    }
+
+    #[cfg(unix)]
+    fn llm_body(content: &str, citations: &[&EventId]) -> LessonBodySource {
+        LessonBodySource::Llm {
+            content: content.to_string(),
+            prompt_version: crate::llm::VERSIONED_PROMPT_ID.to_string(),
+            citations: citations.iter().map(|id| id.as_str().to_string()).collect(),
+        }
+    }
+
+    /// A record `handle_append` will stamp with the wall clock, which is after
+    /// [`CYCLE_NOW_SEC`], so it counts in the cycle's windows at age 0.
+    #[cfg(unix)]
+    fn appended(skill: &str, content: &str, pain: f32, importance: f32) -> AgentLearning {
+        AgentLearning {
+            pain,
+            importance,
+            ..learning_with(&placeholder_id(), skill, content, CYCLE_NOW_SEC)
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_lessons(root: &AgentRoot) -> crate::lessons::LessonsFile {
+        crate::lessons::read_lessons_file(&root.lessons_md()).expect("LESSONS.md reads")
+    }
+
+    #[cfg(unix)]
+    fn is_pinned(root: &AgentRoot, id: &EventId) -> bool {
+        episodic::read_all(&root.episodic_jsonl())
+            .unwrap()
+            .iter()
+            .find(|r| r.id == *id)
+            .unwrap_or_else(|| panic!("{id} is in the log"))
+            .pinned
+    }
+
+    /// Every path under `.agent/`, relative to it, with its bytes (`None` for a
+    /// directory). The writer lock's stamp names its holder, so it is left out.
+    #[cfg(unix)]
+    fn agent_tree(root: &AgentRoot) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(
+            base: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(base).unwrap().to_path_buf();
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(base, &path, out);
+                } else {
+                    out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let base = root.agent_dir();
+        let mut out = std::collections::BTreeMap::new();
+        walk(&base, &base, &mut out);
+        out.remove(Path::new(".dreamd/writer.lock"));
+        out
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_then_commit_matches_the_in_process_cycle() {
+        let actor_dir = tempfile::tempdir().unwrap();
+        let actor_root = AgentRoot::new(actor_dir.path());
+        seed_eh_store(&actor_root);
+        let in_process_dir = tempfile::tempdir().unwrap();
+        let in_process_root = AgentRoot::new(in_process_dir.path());
+        seed_eh_store(&in_process_root);
+
+        let (mut c, _tx, _lock) = open_coordinator(&actor_root);
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        assert!(
+            prepared.selected.is_some(),
+            "precondition: the store promotes"
+        );
+        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .expect("commit");
+
+        let lock = WriterLock::acquire(&in_process_root, WriterKind::Dream).unwrap();
+        crate::dream_cycle::run_filesystem_phases(
+            &in_process_root,
+            lock.ledger(),
+            CYCLE_NOW_SEC,
+            CYCLE_DATE,
+            true,
+            false,
+        )
+        .await
+        .expect("in-process cycle");
+
+        let actor = agent_tree(&actor_root);
+        assert!(
+            actor.contains_key(Path::new("semantic/LESSONS.md")),
+            "precondition: the cycle wrote a lesson; tree: {:?}",
+            actor.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(actor, agent_tree(&in_process_root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn appends_land_between_prepare_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let ids = seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        assert_eq!(
+            prepared.selected.as_ref().map(|s| s.cluster_key.as_str()),
+            Some("rust::eh"),
+            "precondition: the store promotes rust::eh"
+        );
+        // While the model "runs": one record in the selected cluster (pain 1,
+        // so FA2 stays the exemplar) and one elsewhere.
+        c.handle_append(appended("rust::eh", "unwrap in the cache", 1.0, 7.0), None)
+            .await
+            .expect("append in the cluster");
+        c.handle_append(appended("go::fmt", "gofmt on save", 6.0, 7.0), None)
+            .await
+            .expect("append elsewhere");
+        let log = std::fs::read(root.episodic_jsonl()).unwrap();
+        let appended_lines: Vec<u8> = episodic::raw_lines(&log)[3..]
+            .iter()
+            .flat_map(|line| line.bytes.clone())
+            .collect();
+
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            llm_body("Return `?` instead of unwrapping.", &[&ids[0], &ids[1]]),
+        )
+        .expect("commit");
+
+        let lessons = read_lessons(&root);
+        assert_eq!(lessons.prompt_version, crate::llm::VERSIONED_PROMPT_ID);
+        assert_eq!(
+            lessons.lessons[0].content,
+            "Return `?` instead of unwrapping."
+        );
+        let after = std::fs::read(root.episodic_jsonl()).unwrap();
+        assert!(
+            after.ends_with(&appended_lines),
+            "the new log must end with the two appended lines; log:\n{}",
+            String::from_utf8_lossy(&after)
+        );
+        assert!(is_pinned(&root, &ids[0]), "cited record FA0 is pinned");
+        assert!(is_pinned(&root, &ids[1]), "cited record FA1 is pinned");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_prepare_while_a_ticket_is_live_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (c, tx, _lock) = open_coordinator(&root);
+
+        // Both are queued before the actor reads its inbox.
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        for response_tx in [first_tx, second_tx] {
+            tx.send(MemoryCoordinatorMsg::PrepareCycle {
+                now_sec: CYCLE_NOW_SEC,
+                response_tx,
+            })
+            .await
+            .unwrap();
+        }
+        let handle = tokio::spawn(c.run());
+
+        let first = first_rx.await.unwrap();
+        let second = second_rx.await.unwrap();
+        assert!(first.is_ok(), "the first prepare gets a ticket: {first:?}");
+        assert!(
+            matches!(second, Err(CoordinatorError::CycleInProgress)),
+            "the second prepare is refused while the first ticket is alive: {second:?}"
+        );
+        drop(first);
+        shutdown(tx, handle).await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_ticket_frees_the_next_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let first = c
+            .handle_prepare_cycle(CYCLE_NOW_SEC)
+            .expect("first prepare");
+        drop(first);
+        let second = c.handle_prepare_cycle(CYCLE_NOW_SEC);
+        assert!(
+            second.is_ok(),
+            "a dropped ticket frees the next prepare: {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_refuses_while_state_json_says_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+        // Written while the lock is held, so nothing resets it.
+        std::fs::write(
+            root.state_json(),
+            b"{\"schema_version\":\"1.0\",\"last_dream_cycle_status\":\"in_progress\"}\n",
+        )
+        .unwrap();
+
+        let result = c.handle_prepare_cycle(CYCLE_NOW_SEC);
+        assert!(
+            matches!(result, Err(CoordinatorError::CycleInProgress)),
+            "got {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_after_an_outside_replace_writes_the_deterministic_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let ids = seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        // A `git checkout` while the model runs: the same records plus one
+        // more in the selected cluster.
+        let extra = eh_id("FA3");
+        let mut replacement = std::fs::read(root.episodic_jsonl()).unwrap();
+        replacement.extend_from_slice(
+            jsonl_line(&learning_with(
+                &extra,
+                "rust::eh",
+                "unwrap panicked in the merge",
+                CYCLE_NOW_SEC - 4 * 3600,
+            ))
+            .as_bytes(),
+        );
+        replace_by_rename(&root.episodic_jsonl(), &replacement);
+
+        // The body would pass the gate: same cluster, cited ids still members.
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            llm_body("Composed before the checkout.", &[&ids[0], &ids[1]]),
+        )
+        .expect("commit");
+
+        assert_eq!(
+            read_lessons(&root).prompt_version,
+            crate::consolidation::DETERMINISTIC_PROMPT_ID
+        );
+        let after: Vec<EventId> = episodic::read_all(&root.episodic_jsonl())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            after.contains(&extra),
+            "the new log holds the replacement's extra record: {after:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commit_after_an_in_place_rewrite_and_an_append_writes_the_deterministic_body() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let ids = seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+        let path = root.episodic_jsonl();
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        let before = std::fs::metadata(&path).unwrap();
+        // While the model runs, an outside writer rewrites the log in place:
+        // FA0 is gone and FX1 and FX2 are new, so the file is longer than
+        // what Prepare read.
+        let x1 = eh_id("FX1");
+        let x2 = eh_id("FX2");
+        let mut rewrite = String::new();
+        for (id, content, hours) in [
+            (&ids[1], "unwrap panicked in the parser", 2),
+            (&ids[2], "unwrap panicked in the loader", 1),
+            (&x1, "outside one, a longer line than the others", 1),
+            (&x2, "outside two", 1),
+        ] {
+            rewrite.push_str(&jsonl_line(&learning_with(
+                id,
+                "rust::eh",
+                content,
+                CYCLE_NOW_SEC - hours * 3600,
+            )));
+        }
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(rewrite.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        let rewritten = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (rewritten.dev(), rewritten.ino()),
+            (before.dev(), before.ino()),
+            "precondition: the rewrite keeps the inode"
+        );
+        assert!(
+            rewritten.len() > before.len(),
+            "precondition: the rewrite is longer than what Prepare read"
+        );
+
+        // An append handles the outside change before the commit, so the
+        // path, the inode and the length all match the actor's fd again. Only
+        // the outside-change count tells Commit the prepared lines are stale.
+        let added = c
+            .handle_append(appended("go::fmt", "gofmt on save", 6.0, 7.0), None)
+            .await
+            .expect("append")
+            .id;
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            llm_body("Composed before the rewrite.", &[&ids[1], &ids[2]]),
+        )
+        .expect("commit");
+
+        let after: Vec<EventId> = episodic::read_all(&path)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            after,
+            vec![ids[1].clone(), ids[2].clone(), x1, x2, added],
+            "the commit plans over the log as it is now"
+        );
+        assert_eq!(
+            read_lessons(&root).prompt_version,
+            crate::consolidation::DETERMINISTIC_PROMPT_ID
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_with_another_ticket_is_refused_and_keeps_the_open_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        let other = CycleTicket {
+            id: prepared.ticket.id + 1,
+            _lease: Arc::new(()),
+        };
+        let refused = c.handle_commit_cycle(other, CYCLE_DATE, LessonBodySource::Deterministic);
+        assert!(
+            refused.is_err(),
+            "another ticket must not commit this cycle: {refused:?}"
+        );
+
+        let committed =
+            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+        assert!(
+            committed.is_ok(),
+            "the real ticket still commits: {committed:?}"
+        );
+        assert!(root.lessons_md().exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_autosnap_holds_records_appended_during_the_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        let x = c
+            .handle_append(appended("go::fmt", "landed mid-compose", 6.0, 7.0), None)
+            .await
+            .expect("append")
+            .id;
+        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .expect("commit");
+
+        let objects: Vec<PathBuf> = std::fs::read_dir(root.branches_objects_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(objects.len(), 1, "one autosnap object: {objects:?}");
+        let snap_log =
+            std::fs::read_to_string(objects[0].join("episodic/AGENT_LEARNINGS.jsonl")).unwrap();
+        assert!(
+            snap_log.contains(x.as_str()),
+            "the autosnap's log holds {x}; it holds:\n{snap_log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_does_not_wait_behind_a_prepared_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (c, tx, _lock) = open_coordinator(&root);
+        let handle = tokio::spawn(c.run());
+
+        let (prepare_tx, prepare_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::PrepareCycle {
+            now_sec: CYCLE_NOW_SEC,
+            response_tx: prepare_tx,
+        })
+        .await
+        .unwrap();
+        let prepared = prepare_rx.await.unwrap().expect("prepare");
+
+        let (sh_tx, sh_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::Shutdown { response_tx: sh_tx })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), sh_rx)
+            .await
+            .expect("Shutdown acks within 1 s while a cycle is prepared")
+            .expect("shutdown ack");
+
+        let (commit_tx, _commit_rx) = oneshot::channel();
+        let sent = tx
+            .send(MemoryCoordinatorMsg::CommitCycle {
+                ticket: prepared.ticket,
+                cycle_date: CYCLE_DATE.to_string(),
+                body: LessonBodySource::Deterministic,
+                response_tx: commit_tx,
+            })
+            .await;
+        assert!(sent.is_err(), "a commit after shutdown cannot be sent");
+        handle.await.expect("coordinator joined");
+
+        assert_ne!(
+            crate::wal::read_last_cycle_status(&root).unwrap(),
+            "in_progress"
+        );
+        let stage_root = root.dreamd_dir().join("stage");
+        assert!(
+            !stage_root.exists() || std::fs::read_dir(&stage_root).unwrap().next().is_none(),
+            "no stage was opened"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_without_the_writer_lock_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (_tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
+        let mut c = MemoryCoordinator::open_at(
+            &root.episodic_jsonl(),
+            root.project_root(),
+            rx,
+            #[cfg(unix)]
+            None,
+        )
+        .expect("open coord");
+
+        let result = c.handle_prepare_cycle(CYCLE_NOW_SEC);
+        assert!(result.is_err(), "got {result:?}");
+        assert!(c.open_cycle.is_none(), "a refused prepare keeps no cycle");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commit_gates_the_body_against_the_commit_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let a_ids = seed_eh_store(&root);
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        assert_eq!(
+            prepared.selected.as_ref().map(|s| s.cluster_key.as_str()),
+            Some("rust::eh"),
+            "precondition: A is the top cluster at prepare"
+        );
+        // While the model runs, cluster B lands with a larger salience sum.
+        let mut b_ids = Vec::new();
+        for content in ["open failed", "read failed", "write failed", "seek failed"] {
+            let id = c
+                .handle_append(appended("py::io", content, 9.0, 9.0), None)
+                .await
+                .expect("append")
+                .id;
+            b_ids.push(id);
+        }
+        let log = std::fs::read(root.episodic_jsonl()).unwrap();
+        let commit_selection = crate::consolidation::select_lesson(
+            &crate::consolidation::compute_promoted_clusters(
+                &crate::plan::records(&episodic::raw_lines(&log)),
+                CYCLE_NOW_SEC,
+            ),
+            CYCLE_NOW_SEC,
+        )
+        .expect("the log promotes");
+        assert_eq!(
+            commit_selection.cluster_key, "py::io",
+            "precondition: B is the top cluster at commit"
+        );
+
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            llm_body("A lesson about rust::eh.", &[&a_ids[0], &a_ids[1]]),
+        )
+        .expect("commit");
+
+        let lessons = read_lessons(&root);
+        assert_eq!(lessons.cluster_key, "py::io");
+        assert_eq!(
+            lessons.prompt_version,
+            crate::consolidation::DETERMINISTIC_PROMPT_ID
+        );
+        assert_eq!(
+            lessons.citations,
+            vec![commit_selection.exemplar_id.clone()]
+        );
+        assert!(
+            b_ids
+                .iter()
+                .any(|id| id.as_str() == commit_selection.exemplar_id),
+            "B's exemplar is one of B's records"
+        );
+        for id in &a_ids {
+            assert!(!is_pinned(&root, id), "{id} (A) must not be pinned");
+        }
     }
 
     #[cfg(unix)]

@@ -95,7 +95,10 @@ change nothing live until one redo WAL (`dream_in_progress.wal`, `format: "redo/
 commits them. When a process takes the project writer lock, recovery rolls a redo WAL
 forward and wipes any stage directory (`wal::recover_on_startup`; its one caller is
 `WriterLock::acquire`). `.agent/` is either pre- or post-cycle, never mid-cycle; the crash
-sweep (`crash_sweep.rs`) pins that.
+sweep (`crash_sweep.rs`) pins that. Each operation reads the log and `LESSONS.md` once and
+plans every output, ledger edges included, with a pure function (`plan::plan_cycle` /
+`plan_forget`, BZR-1240). The redo WAL carries those edges, and the commit appends exactly
+them.
 
 **`unsafe` policy.**
 `unsafe_code = "forbid"` at workspace level. `dreamd-core` has a scoped `deny` override
@@ -268,7 +271,25 @@ Locked 2026-10-24:
    - BZR-1244: on Windows, `io::write_atomic_with_hook` may have no non-test caller left.
 
    Spec: `assignments/BZR-1239.v2.md`. Amendment 1 moved the stage removal into `commit_cycle` and fixed the crash-sweep oracle.
-10. **BZR-1240** — pure single-parse `plan_cycle` / `plan_forget`.
+10. **BZR-1240** — on `main` (`1953ef5`). A dream cycle, the deterministic cycle and `forget::cascade` each read the log and `LESSONS.md` once, plan every output with a pure function, stage the plan, and commit it:
+    - `plan::plan_cycle(raw, prior, now, body)` and `plan_forget(raw, prior, id, now)` return a `CyclePlan`: the new log (or `None`), the archived lines, the lessons change (`Keep` / `Write` / `Unlink`), the sidecar, and the ledger edges. They read no file and no clock.
+    - `plan_cycle` takes its pins and edges from the rendered `LESSONS.md` parsed back, which is what the pin pass saw before (Amendment 1). It tests the prior file only for presence.
+    - `Stage::apply_plan` stages the log, lessons, sidecar, archive and edges. The redo WAL has a required `edges` key, and `roll_forward` appends those edges where `record_cycle` used to derive them from disk.
+    - `provenance::lesson_edges` is the one edge rule, and `verify` uses it too.
+
+    PM verification: an independent harness ran 26 stores through `22da460` and through the new tree, and every `.agent/` file came out byte-identical (drift entry `refactor-oracle-is-byte-equivalence-with-the-base`). Workspace 1207 passed / 0 failed / 1 ignored. Crash sweep final k / first landed k: Promoting 17/6, Retiring 16/5, ForgetCitation 13/4, ForgetExemplar 12/3. Mutations M1–M16 and a PM-only P1 fail as named. Stripped `dreamd` is 20,859,104 bytes.
+
+    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
+    - for the same store and clock, a dream cycle's and `dreamd forget`'s outputs are byte-identical to before; they now come from one read of the log and of `LESSONS.md`;
+    - the redo WAL carries the cycle's ledger edges (a required `edges` key), and the commit and any roll-forward append exactly those. Edges are no longer re-derived from `LESSONS.md` and the sidecar after the renames. The format token stays `redo/1`, because no release wrote the edge-less form;
+    - a `LESSONS.md` that exists but cannot be read (a directory at that path, or a file without read permission) now fails a dream cycle before its commit point, and nothing changes. Before, a directory there failed the rename after the commit point and wedged every writer's recovery, and an unreadable file was replaced;
+    - library: new `plan` module (`plan_cycle`, `plan_forget`, `CyclePlan`, `LessonsChange`), `consolidation::{select_lesson, cited_pins}`, `decay::{plan_decay, DecayPlan, merge_archive}`, `provenance::lesson_edges`, `wal::RedoEdge`, `RedoWal.edges` and `stage::Stage::{record_edges, apply_plan}`. `provenance::Kind` derives `Deserialize`, and `run_deterministic_dream_cycle` now decays. Removed: `consolidation::{stage_cluster_engine, apply_pin_unpin, select_lesson_or_retire, write_selected_lesson}`, `decay::{run_decay_pruner, DecayError}`, `provenance::record_cycle` and `DreamCycleError::Decay`.
+
+    Found during the ticket and reported to the user; neither has a ticket:
+    - a lesson body (exemplar content or LLM prose) containing `<!-- /dreamd:lesson -->` either fails every promoting cycle for that cluster with `InvalidData` or forges a second lesson whose id gets pinned. Behaviour is unchanged from `22da460`;
+    - on a store where none of the four autosnap inputs exists, every dream cycle fails writing `<id>.partial/manifest.json`, because the `.partial` dir is only created as a side effect of writing an entry. It has been there since BZR-160 (`806b764`).
+
+    Left for BZR-1241: clustering runs twice per cycle, in `filesystem_phases` for the model prompt and again in `plan_cycle`. Spec: `assignments/BZR-1240.v2.md` (Amendment 1 added the round trip and the unreadable-file test).
 11. **BZR-1241** — LLM compose outside the coordinator critical section (`PrepareCycle` / `CommitCycle`). Also blocked by 1233.
 12. **BZR-1242** — recurrence as one derived table via a `Warmer`. Deletes the live counter, `ApplyRecurrenceSidecar` and `cluster_member_count`. Also blocked by 1236.
 13. **BZR-1243** — remove O(N) work from `/health`, ledger appends, registry lookup and `exclude=`.
@@ -454,7 +475,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### pin-is-the-decay-exemption
 
-- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `apply_pin_unpin` pins every cited record that is not already pinned, and never clears a pin (`consolidation.rs`, BZR-1234), `should_decay` returns `false` immediately for pinned records (`decay.rs:33-35`), and the pruner reads the log the pin pass staged in the same cycle (BZR-1239, `decay_reads_the_staged_log`) — so the pin always lands first. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
+- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `consolidation::cited_pins` pins every cited record that is not already pinned, and never clears a pin (BZR-1234, BZR-1240), `should_decay` returns `false` immediately for pinned records (`decay.rs:33`), and `decay::plan_decay` skips every id the same plan pins (BZR-1240) — so a record this cycle cites is never archived by it. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
 - **Why:** AILAB-205 rev 2 specced a snapshot-fallback lookup on the premise that every exemplar decays at ~90 days, giving lessons a hard lifetime. The premise was false and the step was cut in rev 3. Cost: a scope expansion approved on bad evidence, plus in-flight dev work. The reasoning error was reading `should_decay`'s age and salience gates while skipping the `pinned` short-circuit three lines above them.
 - **How to apply:**
   - Before claiming a record decays, check `pinned` first — it is the outermost gate in `should_decay`, ahead of both age and salience.
@@ -602,7 +623,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 - **Rule:** `dreamd doctor --cluster-health` already diffs `semantic/recurrence_counts.json` against `compute_promoted_clusters`. Tickets that "add cluster-health" must extend that flag's output, not invent a parallel flag.
 - **Why:** Linear AILAB-196 AC (May 2026) asked to show estimated next-cycle cost on `dreamd doctor --cluster-health` as if the flag were new. The flag and sidecar-drift checks shipped earlier; 196 is additive `next_cycle_est_usd=` output. A new flag would split the doctor surface and miss existing tests.
-- **How to apply:** Call a sibling reporter from the existing `if flags.cluster_health` arm. Do not fold cost into `check_cluster_health`'s `bool`. Do not call `select_lesson_or_retire` / `run_cluster_engine` from doctor (`select-lesson-or-retire-unlinks`).
+- **How to apply:** Call a sibling reporter from the existing `if flags.cluster_health` arm. Do not fold cost into `check_cluster_health`'s `bool`. Do not call `run_cluster_engine` (it writes the sidecar) or stage a plan from doctor's production path (`select-lesson-or-retire-unlinks`).
 - **Cross-refs:** `select-lesson-or-retire-unlinks`, `linear-todo-can-already-be-on-main`
 
 ### no-llm-must-not-skip-daemon-proxy
@@ -712,9 +733,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### select-lesson-or-retire-unlinks
 
-- **Rule:** `select_lesson_or_retire` is not a read. On empty promotion it stages an unlink of `LESSONS.md` that the cycle's commit applies (AILAB-699; staged since BZR-1239). `run_cluster_engine` always writes `recurrence_counts.json`.
-- **Why:** A preview that reused the write-path select/cluster functions would mutate the store — the opposite of `--dry`.
-- **How to apply:** Dry uses `compute_promoted_clusters` (already pub, no disk) plus a new `preview_select_lesson` that does not unlink and does not call `run_cluster_engine`. Do not call `wal::begin_cycle`, `write_selected_lesson`, decay, index, or autobiography on the dry path.
+- **Rule:** Planning is pure and staging writes. Since BZR-1240, `select_lesson_or_retire` is gone: `consolidation::select_lesson` and `plan::plan_cycle` read nothing and write nothing, and the retire (AILAB-699) is `LessonsChange::Unlink` in the plan, which `Stage::apply_plan` stages and the commit applies. `run_cluster_engine` still writes `recurrence_counts.json` directly; only tests and doctor's fixtures call it.
+- **Why:** A preview that reused a writing select/cluster path would mutate the store — the opposite of `--dry`.
+- **How to apply:** Dry uses `compute_promoted_clusters` (no disk) plus `preview_select_lesson`, which does not unlink. A preview may call `plan_cycle`. Do not call `wal::begin_cycle`, `Stage::apply_plan`, `run_cluster_engine`, the index, or autobiography on the dry path.
 - **Cross-refs:** `dry-skips-proxy-unlike-no-llm`
 
 ### fixture-now-sec-is-not-the-corpus-clock
@@ -1005,9 +1026,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### forget-cascade-does-not-run-the-dream-cycle
 
-- **Rule:** `forget::cascade` removes one event from the JSONL with the dream cycle's commit: it stages the log, the lesson change and the sidecar, then commits them with one redo WAL (BZR-1239). It does not call `filesystem_phases`, `select_lesson_or_retire`, or `run_decay_pruner`.
+- **Rule:** `forget::cascade` removes one event from the JSONL with the dream cycle's commit: it stages the log, the lesson change and the sidecar, then commits them with one redo WAL (BZR-1239). Its plan is `plan::plan_forget` (BZR-1240), which neither decays nor re-selects a lesson. It does not call `filesystem_phases` or `plan_cycle`.
 - **Why:** BZR-158's Linear AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: the in-crate crash sweep (`crash_sweep_forget_*`) crashes at every stage and rename point.
-- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. Recount with `stage_cluster_engine` (a staged sidecar). Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
+- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. `plan_forget` recounts the sidecar from the remaining records. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`apply_recurrence_sidecar`, `prune_decayed_events`, `index_semantic_lessons`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
 - **Cross-refs:** `coordinator-not-mutex-file`, `delete-term-must-target-a-unique-field`, `provenance-verify-does-not-rewrite-the-ledger`, `select-lesson-or-retire-unlinks`, `remaining-build-order-2026-09-24`, `forget-proof-is-a-receipt-not-a-signed-membership-proof`
 
 ### forget-proof-is-a-receipt-not-a-signed-membership-proof
@@ -1187,3 +1208,24 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Report the final `k` and the first landed `k` rather than fixing them in the spec. A ticket that changes how many files a cycle stages (BZR-1240) moves them.
   - When a spec counts a function's definitions, count its `cfg` twins.
 - **Cross-refs:** `mutation-must-get-past-the-backstop`, `guards-vs-mandates-same-line`, `architecture-claims-false-until-dreamd-hardening`
+
+### refactor-oracle-is-byte-equivalence-with-the-base
+
+- **Rule:** When a ticket restructures code and promises no behaviour change, the PM's oracle is byte equivalence. Run the same stores, with the same clock, through the base commit and through the new tree, dump every `.agent/` file, and `diff -r` the dumps. Passing unit tests and unchanged snapshots are not enough.
+- **Why:** BZR-1240 rewrote every dream-cycle and forget phase into one pure plan. The insta snapshots cover three fixtures. The PM's harness covered 26 stores: promote and decay with `x_` members, `6.50` number text, skipped lines and torn tails; retire; no-ops; empty and skipped-only logs; duplicate ids; five model bodies; non-UTF-8 prior files; and forget of an exemplar, a citation and an absent id. It came out byte-identical, apart from a random tempdir name inside one error message.
+- **How to apply:**
+  - Write the harness yourself, not from the dev's equivalence test.
+  - Run each tree in its own copy (`git archive <base>` for the old one) with its own `CARGO_TARGET_DIR`.
+  - Leave out `writer.lock` and the stage dir, mask random tempdir names, and keep the result line of each operation in the dump.
+  - Include hostile inputs: unknown members, number text that does not round-trip, torn tails, duplicate ids, a forged lesson marker.
+  - Mark the model path with a marker string, so a dump proves the path ran.
+- **Cross-refs:** `in-memory-value-is-not-the-round-tripped-file`, `mutation-must-get-past-the-backstop`, `jsonl-rewrites-go-through-patch-lines`
+
+### in-memory-value-is-not-the-round-tripped-file
+
+- **Rule:** When a refactor replaces "write the file, then read it back" with "use the value in memory", check whether render-then-parse is the identity for every input. Where it is not, the refactor changes behaviour. Either round-trip on purpose, or treat the change as a behaviour change and gate it with the user.
+- **Why:** BZR-1240's first spec took the pins and edges from the `LessonsFile` in memory. Before that, the pin pass and the commit's edge reader parsed the rendered `LESSONS.md`. CLeetus's pre-flight found that a lesson body containing `<!-- /dreamd:lesson -->` parses back differently. That would have changed which id gets pinned, and whether the cycle fails. Amendment 1 made `plan_cycle` parse the rendered bytes back (tests 15 and 16, mutation M16). The marker injection itself is a latent defect with no ticket.
+- **How to apply:**
+  - List every value that used to come back from disk, and find the inputs where render and parse disagree. Free text that can hold the format's delimiters is the usual case.
+  - Pin the round trip with a test that feeds such an input and asserts the exact log bytes and edge list.
+- **Cross-refs:** `refactor-oracle-is-byte-equivalence-with-the-base`, `behaviour-change-needs-a-grep-for-the-old-behaviour`

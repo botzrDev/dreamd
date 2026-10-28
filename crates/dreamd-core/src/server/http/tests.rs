@@ -1670,6 +1670,64 @@ async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
     );
 }
 
+/// BZR-1241 (V4): the coordinator's open cycle is the daemon's in-progress
+/// guard. While a prepared cycle's ticket is alive, `POST /dream` is 409; once
+/// the ticket drops, the next one runs.
+#[tokio::test]
+async fn dream_while_a_prepared_cycle_is_live_returns_409() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root_str);
+    let agent_root = AgentRoot::new(dir.path());
+    std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+    std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+    std::fs::write(agent_root.episodic_jsonl(), b"").unwrap();
+
+    let state = make_real_state(dir.path(), registry_path);
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    let supervisor = state
+        .resolve_supervisor(&canonical)
+        .expect("the project's supervisor");
+    let (prepare_tx, prepare_rx) = oneshot::channel();
+    supervisor
+        .sender()
+        .send(MemoryCoordinatorMsg::PrepareCycle {
+            now_sec: 1_780_000_000,
+            response_tx: prepare_tx,
+        })
+        .await
+        .unwrap();
+    let prepared = prepare_rx.await.unwrap().expect("prepare");
+
+    let router = build_router(state);
+    let dream = || {
+        with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dream")
+                .header("x-agent-root", &root_str)
+                .header(crate::client::NO_LLM_HEADER, "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(dream())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], serde_json::json!("dream cycle in progress"));
+
+    drop(prepared);
+    let resp = router.into_service().oneshot(dream()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 // -----------------------------------------------------------------------
 // WEG-264 Defect 2 — daemon shares one index handle between append + recall
 // -----------------------------------------------------------------------

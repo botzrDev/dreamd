@@ -274,13 +274,16 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // SIGTERM must not leave ~/.agent/dreamd.sock behind (WEG-268).
     //
     // Ordering against the drain is deliberate. The drain below is bounded by
-    // DRAIN_TIMEOUT (AILAB-748), but a `Shutdown` queued behind an in-progress
-    // dream cycle can still hold it for the full bound — so putting the unlink
-    // after it would put a shipped guarantee behind that wait, and systemd's
-    // `TimeoutStopSec` SIGKILL could land first and strand the socket. AILAB-162
-    // requires only that the drain happen before process exit, not before the
-    // unlink. A client that connects in the window between the two gets
-    // ECONNREFUSED instead of a 503, which is the better failure anyway.
+    // DRAIN_TIMEOUT (AILAB-748). A `Shutdown` no longer waits behind a dream
+    // cycle's model call: it waits at most behind one cycle Prepare or Commit,
+    // which is file I/O, and a cycle mid-compose at shutdown commits nothing.
+    // The drain can still park behind a full indexer channel for the full
+    // bound, though — so putting the unlink after it would put a shipped
+    // guarantee behind that wait, and systemd's `TimeoutStopSec` SIGKILL could
+    // land first and strand the socket. AILAB-162 requires only that the drain
+    // happen before process exit, not before the unlink. A client that
+    // connects in the window between the two gets ECONNREFUSED instead of a
+    // 503, which is the better failure anyway.
     let _ = std::fs::remove_file(&sock_path);
 
     // Drain the boot coordinator and the primary index (AILAB-162). Appends
@@ -458,9 +461,12 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    serve return, or a serve error. This is the sibling of the socket
     //    unlink in `run_watch_uds` and the ordering argument there transfers
     //    unchanged: the drain below is bounded by DRAIN_TIMEOUT (AILAB-748), a
-    //    `Shutdown` queued behind an in-progress cycle can consume that whole
-    //    budget, and a supervisor that kills the process on its own stop timeout
-    //    would then strand a file advertising the port of a daemon that is gone.
+    //    `Shutdown` queued behind other work can still consume that whole
+    //    budget (not a dream cycle's model call: at most one cycle Prepare or
+    //    Commit, which is file I/O, and a cycle mid-compose at shutdown commits
+    //    nothing), and a supervisor that kills the process on its own stop
+    //    timeout would then strand a file advertising the port of a daemon
+    //    that is gone.
     //    A client that reads it in the window between the two gets a refused
     //    connect instead of a 503, the better of the two failures.
     remove_server_json(&server_json);
