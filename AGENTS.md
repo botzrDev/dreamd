@@ -129,7 +129,7 @@ Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `L
 
 On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. The workspace version is now `1.2.0` (unreleased; tag and publish stay human). The npm dist-tags after 1.0.1 have not been re-checked here.
 
-Still out of scope: vector/embedding recall, hybrid retrieval, Windows `write_atomic` (dream cycle and index), Homebrew install, animated GIF, auto dream cycle.
+Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, animated GIF, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
 
 The optional `vectors` feature downloads a model and does not rank. BZR-1244 deleted `rrf`, so there is no fusion code. Forget, memory branches, and the in-RAM latency page are shipped. Do not describe vector recall or hybrid retrieval as shipped. `v1.0.0` is a published tag; `v0.2.0-alpha.1` was never tagged.
 

@@ -50,7 +50,7 @@ A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these
 3. Daemon expected but not running (Remote / daemon proxy)
 4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1
 5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
-6. Native Windows — the npx shim has no Windows binary and exits 1 (see [windows.md](./windows.md))
+6. Native Windows — the npx shim has no Windows binary and exits 1. Build `dreamd` and start `dreamd watch` first (see [windows.md](./windows.md))
 
 **Fix:**
 

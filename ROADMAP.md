@@ -29,8 +29,7 @@ hit first. The day-to-day view lives in the issue tracker; this is the shape.
 - **Semantic indexing** of `LESSONS.md` as a Tantivy document layer — still
   BM25 × salience, not embeddings.
 - **Windows watch + learn** — loopback TCP + bearer token from `auth.json`.
-  Dream cycle and index stay Unix-only until atomic writes land (see
-  [`docs/windows.md`](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+  The dream cycle and the index were still Unix-only in that release.
 - **`dreamd service`** on Linux (systemd `--user`), macOS (LaunchAgent), and
   Windows (logon scheduled task): install / start / status / restart / uninstall.
 
@@ -64,9 +63,19 @@ BM25 × salience.
   and a rank-fusion helper nothing calls yet. `POST /api/v1/migrate` exists as a
   501 stub.
 
+## In the working tree (1.2.0, not tagged)
+
+- **Windows dream cycle and Tantivy index.** Replaces follow the Unix call
+  order. The parent flush is not a power-loss proof. Learn still runs when
+  that flush fails. A model lesson is kept when the log's file identity did
+  not change during the call. `dreamd watch` indexes live appends. A segment
+  file that is still mapped stays in the index directory until the mapping is
+  gone; `dreamd doctor --repair` rebuilds that directory after the daemon
+  stops. See [`docs/windows.md`](docs/windows.md). Tag and publish stay human
+  steps.
+
 ## Next
 
-- **Windows atomic writes** — dream cycle and Tantivy index on native Windows.
 - **More harness adapters**, including OpenCode.
 - Hardening and hot-fixes from launch feedback.
 

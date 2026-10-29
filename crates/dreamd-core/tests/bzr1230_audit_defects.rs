@@ -7,8 +7,8 @@
 //! fail under `--ignored` before that fix. The fixing ticket un-ignores its
 //! test; it does not weaken the assertion.
 //!
-//! `#![cfg(unix)]` because opening an index handle writes its manifest with
-//! `io::write_atomic`, which is `Unsupported` off Unix.
+//! `#![cfg(unix)]` because these tests use the Unix writer lock and the UDS
+//! daemon. The index opens on Windows too.
 
 use std::fs;
 use std::path::Path;

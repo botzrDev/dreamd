@@ -2213,8 +2213,8 @@ const BEARER_TOKEN_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef01
 const BEARER_TOKEN_B: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
 /// Write the AILAB-203 `~/.agent/auth.json` wire shape: `{"token":"<64 hex>"}`.
-/// `std::fs::write`, not `io::write_atomic` — that is `Unsupported` on the very
-/// target this layer exists for, and these fixtures live in a tempdir.
+/// `std::fs::write`. These fixtures live in a tempdir and are not the daemon's
+/// durable replace.
 fn write_auth_json(path: &std::path::Path, token_hex: &str) {
     std::fs::write(path, format!("{{\"token\":\"{token_hex}\"}}\n")).unwrap();
 }

@@ -178,8 +178,8 @@ impl RegistryCache {
 /// absent file reads as empty), canonicalizes `project_root` (falling back to
 /// the path as given when that fails), and hands both to `mutate`. When
 /// `mutate` returns `true` the registry is replaced and chmodded `0600` on
-/// Unix (`write_atomic`); on Windows the same bytes go through
-/// `io::replace_renaming` because `write_atomic` stays unsupported. When it
+/// Unix (`write_atomic`). Windows uses `io::replace_renaming`: a temp file and
+/// a rename, with no parent flush and no chmod. When it
 /// returns `false` nothing is written. Returns what
 /// `mutate` returned.
 ///
@@ -216,8 +216,7 @@ pub fn update_registry(
 
     let serialized = toml::to_string(&registry).map_err(io::Error::other)?;
     // Unix keeps the parent-directory fsync in `write_atomic` and chmod 0600.
-    // Windows cannot call `write_atomic` (that would also unlock the dream
-    // cycle). `replace_renaming` is the registry-only temp-file rename.
+    // Windows registry writes stay on `replace_renaming`: no parent flush.
     #[cfg(unix)]
     {
         write_atomic(&registry_path, serialized.as_bytes())?;

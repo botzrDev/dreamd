@@ -23,6 +23,7 @@ Every Rust job in all four workflows installs the same pinned toolchain, `dtolna
 | [Security audit](#security-audit) | **Yes** | `cargo audit` against RustSec advisory DB |
 | [License & dependency policy](#license--dependency-policy) | **Yes** | `cargo deny check` (licenses + advisories) |
 | [Test](#test) | **Yes** (Linux + macOS) | `cargo test --all-features --workspace` on three OSes |
+| [Windows replace probe](#test) | **Yes** | One Windows test: the production parent-directory open returns `Ok` |
 | [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be ≤ 20 MB (20,971,520 bytes) |
 | [Idle-RSS gate](#idle-rss-gate) | **Yes** | Daemon idle memory < 30 MB (Linux) |
 | [Tarball build sentinel](#tarball-build-sentinel) | **Yes** | `cargo build` without `.git/` must not leak vergen sentinels |

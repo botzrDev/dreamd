@@ -379,11 +379,9 @@ impl DaemonHome {
     /// `daemon_home_is_never_inside_a_project_store`), so neither the token nor
     /// the port can leak into a project's git history.
     ///
-    /// Written with `std::fs::write`, **not**
-    /// [`io::write_atomic`](crate::io::write_atomic) — that is still
-    /// `ErrorKind::Unsupported` off Unix, and this file is a discardable address
-    /// hint the daemon rewrites on every bind, not memory state whose torn write
-    /// would lose data.
+    /// Written with `std::fs::write`, not
+    /// [`io::write_atomic`](crate::io::write_atomic). This file is a discardable
+    /// address hint the daemon rewrites on every bind, not memory state.
     pub fn server_json(&self) -> PathBuf {
         self.home.join("server.json")
     }

@@ -1,24 +1,34 @@
 # Windows support
 
-dreamd's durability guarantees lean on POSIX file semantics. Episodic appends
-are `OpenOptions` + `write_all` + `sync_data` on the JSONL, which works
-anywhere. Everything that *replaces* a file is written in full first and then
-renamed over the target (`rename(2)`), so a crash mid-write can never leave a
-half-written file in the store. The dream cycle stages its outputs — the
-`LESSONS.md` rewrite, the pruned JSONL, the recurrence sidecar, the decay
-archive — under `.agent/.dreamd/stage/` and renames them in once its redo WAL
-commits; the Tantivy index manifest and the other sidecars go through
-`io::write_atomic`. That is what those writers provide on Linux and macOS.
+Learn, the dream cycle, recall, and `dreamd watch` run on native Windows.
+The daemon is loopback TCP with a bearer token, not a Unix socket. There is
+no prebuilt `dreamd-mcp` binary, so you build `dreamd` yourself or take a
+release asset. The directory flush is the Unix call order and is not a
+power-loss proof.
 
-**Windows replaces follow the Unix call order.** [`io::write_atomic`] writes a
-temp file, flushes those bytes, renames, then flushes the parent directory.
-On Windows that parent open is write access plus `FILE_FLAG_BACKUP_SEMANTICS`,
-then `FlushFileBuffers`. A failure before the rename leaves the destination
-untouched. The directory flush is the same call Unix makes. It is not a
-power-loss proof: Tantivy documents a directory-handle flush as a no-op on
-local disks and an error on virtual drives. A flush error fails that replace.
-Learn does not use this path, so it still runs on every volume, including a
-ReFS Dev Drive.
+Episodic appends are `OpenOptions` + `write_all` + `sync_data` on the JSONL.
+A replace writes the new bytes in full, then renames them over the target, so
+a crash mid-write does not leave a half-written file in the store. The dream
+cycle stages `LESSONS.md`, the pruned JSONL, the recurrence sidecar, and the
+decay archive under `.agent/.dreamd/stage/` and renames them in once its redo
+WAL commits. The index manifest and the other sidecars go through
+`io::write_atomic`.
+
+**The replace sequence is the Unix one.** [`io::write_atomic`] writes a temp
+file, flushes those bytes, renames, then flushes the parent directory. On
+Windows that parent is opened for write with `FILE_FLAG_BACKUP_SEMANTICS`,
+then `FlushFileBuffers` (`File::sync_all`). A failure before the rename leaves
+the destination untouched. A parent-flush error after the rename is still
+returned, so that replace fails. Tantivy documents a directory-handle flush
+as a no-op on local disks and an error on virtual drives. Learn does not use
+this path, so it still runs when the flush fails, including on a ReFS Dev
+Drive. An SMB share is judged by the flush result.
+
+The log's identity on Windows is a volume serial and a file index (`file-id`;
+`GetFileInformationByHandle` stays in that crate). Unix uses device and inode.
+A dream cycle compares that identity before and after the model call. When it
+matches, the model lesson is kept. When the log was replaced during the call,
+the cycle re-reads it and writes the deterministic lesson.
 
 `registry.toml` is the exception. `dreamd init` registers a project on Windows
 by locking `registry.toml.lock` with `std::fs::File::lock` and replacing
@@ -50,10 +60,11 @@ that builds that asset is allowed to fail, so a given release may not carry it;
 v1.0.0 does.
 
 The Unix transport stays Unix-only: `~/.agent/dreamd.sock`, the `SO_PEERCRED`
-peer-UID check, and the `dreamd dream` UDS proxy are all `#[cfg(unix)]`. Windows
-serves the *same* axum router over a different transport rather than borrowing
-that one. The Windows CI jobs remain informational (`continue-on-error`) — they
-are not a merge gate.
+peer-UID check, and the `dreamd dream` UDS proxy. Windows serves the same
+axum router over loopback TCP. `dreamd dream` on Windows runs in-process; it
+does not proxy over a socket. The Windows test matrix stays
+`continue-on-error`. A separate job, `windows-replace-probe`, is a merge gate
+and runs only the production parent-open test.
 
 ## `dreamd watch` on Windows: loopback TCP + bearer
 
@@ -93,13 +104,10 @@ AILAB-192 gives `dreamd watch` a Windows topology. It:
 when the log's file identity did not change during the model call. `dreamd
 archive`, `dreamd forget`, and `dreamd reset` replace files through
 `write_atomic`. `registry.toml` stays on the temp-file rename with no parent
-flush. `GET /api/v1/recall` reads the index `watch` opened.
-`GET /api/v1/health` does not read the in-memory marks the Unix route uses. It
-compares the JSONL tail to `index_progress.json` and returns **200** when that
-read succeeds. `stale` is true when the log has events past the watermark,
-including when the watermark file is absent and the log is not empty. A valid
-token gets you past the auth layer. A `200` from health is the watermark
-comparison, not the Unix mark pair.
+flush. `GET /api/v1/recall` reads the index `watch` opened. `GET /api/v1/health` is
+the on-disk watermark comparison described under
+[Index files that stay mapped](#index-files-that-stay-mapped). A valid token
+gets you past the auth layer. A `200` from health is that comparison.
 
 See [http-api.md](./http-api.md) for the transport tables, the exact middleware
 verdicts, and a PowerShell smoke test that reads the port and the token back out
@@ -109,10 +117,10 @@ of the two files.
 
 `dreamd mcp` serves the **Remote** backend over that same loopback TCP plus
 bearer when `server.json` is live — it parses, and `127.0.0.1:<port>` accepts a
-connection — and exits **2** otherwise. There is deliberately no in-process
-fallback: a coordinator booted inside `mcp` would accept `append_node` writes it
-cannot durably persist, which is why AILAB-174 deleted that branch. When
-there is no daemon, the error says to start `dreamd watch` before `dreamd mcp`.
+connection — and exits **2** otherwise. There is no in-process server.
+`dreamd watch` holds the project writer lock and the index; a second writer
+inside `mcp` is not started. When there is no daemon, the error says to start
+`dreamd watch` before `dreamd mcp`.
 Start `dreamd watch` first (or let the logon task start it), then point your harness
 at that binary — `"command": "dreamd", "args": ["mcp"]` — rather than
 at `npx -y dreamd-mcp`, which has no Windows binary to run. (The shim's
@@ -167,7 +175,26 @@ a missing token can still read as `stopped`, and a task Task Scheduler calls
 `Running` is not proof the API is answering. `dreamd status` is the
 daemon-liveness question; `dreamd service status` is the supervisor one.
 
+## Index files that stay mapped
+
+Tantivy deletes a segment file after it is no longer part of a commit. On
+Windows that delete fails while the file is still mapped. The failure is
+expected: Tantivy retries later, and the index directory holds the file until
+the mapping is gone. The directory can grow across commits for that reason.
+
+`dreamd doctor --repair` removes `.agent/.dreamd/index` and rebuilds it from
+the episodic log. It refuses while `dreamd watch` is live (a loopback connect
+to `server.json`), because the daemon is the process holding those mappings.
+Stop the daemon, then run the repair. The log is not a repair target.
+
+`GET /api/v1/health` on Windows does not read the in-memory marks the Unix
+route uses. It compares the JSONL tail with `index_progress.json`. `stale` is
+true when the log has events past that watermark. `dreamd doctor`'s
+`index_freshness` line is the set difference between the log and the committed
+index.
+
 ## Still open
 
-There is no prebuilt `dreamd-mcp` Windows binary. `/health` on Windows still
-reads the on-disk watermark. The directory flush is not a power-loss proof.
+There is no prebuilt `dreamd-mcp` Windows binary. The directory flush is not
+a power-loss proof. `/health` stays on the on-disk watermark. `registry.toml`
+stays on the temp-file rename with no parent flush.

@@ -2,7 +2,7 @@
 
 Quickstart for wiring `dreamd-mcp` into [Cline](https://github.com/cline/cline) (VS Code extension).
 
-> **Status:** Round-trip works both in-process and via the daemon proxy on Linux and macOS. Native Windows is watch + learn only; the dream cycle and Tantivy index stay Unix-only, and `npx -y dreamd-mcp` has no Windows binary to download — on native Windows use the local-binary config below with a `dreamd` you built, and start `dreamd watch` first (there is no in-process mode there). For consolidate-and-search, use WSL2 or a Linux/macOS host. The Windows settings path below is for Cline-on-Windows; see [docs/windows.md](../../docs/windows.md).
+> **Status:** Round-trip works both in-process and via the daemon proxy on Linux and macOS. On native Windows, `npx -y dreamd-mcp` has no binary to download — use the local-binary config below with a `dreamd` you built, and start `dreamd watch` first (there is no in-process mode). Learn, the dream cycle, and recall run on that daemon. See [docs/windows.md](../../docs/windows.md).
 
 ## 1. Init the project store
 

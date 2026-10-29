@@ -16,7 +16,7 @@ For the product story, see [marketing.md](./marketing.md). For install and usage
 | File-system source of truth | ✓ JSONL + Markdown in-repo ([SPEC.md](../SPEC.md)) | often DB / service-backed; local options vary | ✓ git-backed MemFS / context repositories | local JSON knowledge graph file | ✓ markdown files in the project |
 | LLM consolidation | ✓ opt-in LLM dream cycle with deterministic fallback when no key / over cap / `--no-llm` | extraction / update pipelines (typically LLM-assisted) | ✓ sleep-time / dreaming subagents | — no dream-cycle contract | manual / prompt-driven “update memory bank” |
 | Maturity / stars | small OSS — **4★** on `botzrDev/dreamd` (2026-07-14) | ~60.8k★ `mem0ai/mem0` (2026-07-14) | ~2.8k★ `letta-ai/letta-code` (2026-07-14) | ref lives in `modelcontextprotocol/servers` (~88.5k★ monorepo, 2026-07-14; not memory-only) | pattern inside Cline (~64.7k★ `cline/cline`, 2026-07-14); not a separate star counter |
-| OS support | Linux + macOS (full); Windows watch+learn (no dream cycle / index) | cross-platform / cloud clients | verify current CLI/platform matrix | Node/`npx` (broad host support) | wherever Cline runs |
+| OS support | Linux, macOS, and Windows (learn, dream cycle, Tantivy index). Windows is loopback TCP; no prebuilt `dreamd-mcp` binary. Directory flush is not a power-loss proof | cross-platform / cloud clients | verify current CLI/platform matrix | Node/`npx` (broad host support) | wherever Cline runs |
 
 Cell legend: ✓ = strength for that dimension; — = not offered (or not yet for dreamd); short prose = partial / different shape. Competitor cells lean cautious when unverified from this repo.
 

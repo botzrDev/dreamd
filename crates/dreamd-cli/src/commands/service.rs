@@ -664,15 +664,10 @@ fn write_service_file(path: &Path, body: &str) -> Result<(), ServiceError> {
 /// Every failure is [`ServiceError::Io`] naming the path that could not be
 /// created or written — the same contract as [`write_service_file`].
 ///
-/// It is deliberately not [`write_service_file`]: that goes through
-/// `dreamd_core::io::write_atomic`, which is `ErrorKind::Unsupported` on
-/// Windows (AILAB-203 does not implement it; that is still v0.1.1), so
-/// routing the task XML or `auth.json` through it would fail `service
-/// install` on the one OS that needs those two files. Nothing is being given
-/// up that matters here: neither file has a concurrent writer — `install` is
-/// a one-shot, and the token turns over only under another
-/// `install --force` — so the crash-atomicity the durable helper buys has no
-/// reader to protect.
+/// It is deliberately not [`write_service_file`]. Neither the task XML nor
+/// `auth.json` has a concurrent writer: `install` is a one-shot, and the token
+/// turns over only under another `install --force`. A torn write of either
+/// file is an install that did not finish, not a lost learning.
 fn write_plain_file(path: &Path, body: &[u8]) -> Result<(), ServiceError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ServiceError::Io {

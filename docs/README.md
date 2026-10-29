@@ -30,7 +30,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 | [operator-handbook.md](./operator-handbook.md) | Operators | Manual store-maintenance runbook (e.g. `archive --force-unpin`) |
 | [migrate.md](./migrate.md) | Operators | `dreamd migrate` — episodic schema migration (identity `1.0.0 → 1.0.0` no-op is the only registered path), `--from`/`--to` tokens, `.bak` behavior |
 | [install.md](./install.md) | Operators | Optional per-user daemon service — `dreamd service install` / `start` / `restart` / `status` / `uninstall` on Linux (systemd `--user` unit), macOS (LaunchAgent) and Windows (Task Scheduler logon task) |
-| [windows.md](./windows.md) | Operators | Native Windows status — what `service install` registers (logon task + `auth.json`), how `watch` serves the API over loopback TCP + bearer, and what is still blocked by `write_atomic` |
+| [windows.md](./windows.md) | Operators | Native Windows — loopback TCP + bearer, the replace sequence and its limits, the dream cycle, the Tantivy index, mapped segment files, and `doctor --repair` |
 
 ## Memory branches, provenance, and forgetting
 

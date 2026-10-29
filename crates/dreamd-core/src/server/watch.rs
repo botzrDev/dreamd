@@ -69,9 +69,7 @@ use crate::layout::{AgentRoot, DaemonHome};
 use crate::server::build_router;
 use crate::server::http::AppState;
 use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
-// `TantivyIndexHandle` is cfg-free here because it is still the `drain_daemon`
-// type parameter on every target; only `DEFAULT_COMMIT_CADENCE` and the `open`
-// call that consumes it are Unix-only.
+// Both transports open a `TantivyIndexHandle` and drain it.
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 // `uds_server` itself is `#[cfg(unix)]`; both items name a `UnixListener`.
 #[cfg(unix)]
@@ -351,10 +349,9 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     // 2.5. Take the project writer lock, which resets a stale `in_progress`
     //      and recovers any stale dream-cycle WAL before coordinators open. The
     //      error is propagated rather than logged and swallowed: recovery
-    //      restores a store whose consolidation was interrupted mid-cycle, and
-    //      on this target it can legitimately fail (`write_atomic` is
-    //      `Unsupported`), so continuing past it would serve a half-applied
-    //      store as if it were intact. Held to the end of this function.
+    //      restores a store whose consolidation was interrupted mid-cycle, so
+    //      continuing past a failed recovery would serve a half-applied store
+    //      as if it were intact. Held to the end of this function.
     let writer_lock = WriterLock::acquire(&agent_root, WriterKind::Watch)?;
 
     // 3. Resolve the daemon home through `layout::home_dir()`, exactly as the
@@ -603,14 +600,11 @@ pub(crate) fn published_host(bound: IpAddr) -> IpAddr {
 /// — a loopback host plus the kernel-assigned port, see [`server_json_body`] —
 /// creating `~/.agent/` if this is the first start.
 ///
-/// `std::fs::create_dir_all` + `std::fs::write`, deliberately **not**
-/// [`io::write_atomic`](crate::io::write_atomic): that helper is
-/// `ErrorKind::Unsupported` off Unix (AILAB-192 does not implement it), so a
-/// watch that used it could never publish its address at all. The trade is
-/// acceptable here and only here — this file is a discardable address hint the
-/// daemon rewrites on every bind and unlinks on every stop, not memory state, so
-/// the worst a torn write costs is one `read_server_json` failure (reported as
-/// `Unreachable`) and a restart, never a lost learning. `create_dir_all` sets no
+/// `std::fs::create_dir_all` + `std::fs::write`, not
+/// [`io::write_atomic`](crate::io::write_atomic). This file is a discardable
+/// address hint the daemon rewrites on every bind and unlinks on every stop,
+/// so the worst a torn write costs is one `read_server_json` failure (reported
+/// as `Unreachable`) and a restart, never a lost learning. `create_dir_all` sets no
 /// mode bits: `0700` on `~/.agent/` is the UDS path's business (`bind_api_socket`)
 /// and `PermissionsExt` does not exist off Unix. The port is not a secret; the
 /// token beside it is, and this function never touches `auth.json`.
