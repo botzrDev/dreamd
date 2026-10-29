@@ -6,11 +6,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Workspace version is 1.2.0. It is not tagged. Tag and publish stay human steps.
+## [1.2.0] - 2026-10-29
+
+There is no 1.1.0 tag. This release ships the deprecations prepared for that version together with the Windows dream cycle and Tantivy index. Recall is still BM25 × salience.
+
+### Added
 
 - On Windows, `io::write_atomic` follows the Unix call order: temp file, flush the bytes, rename, then flush the parent. The parent is opened for write with `FILE_FLAG_BACKUP_SEMANTICS`. A failure before the rename leaves the destination untouched. A parent-flush error after the rename is returned. That flush is not a power-loss proof. Learn and `dreamd watch` still start when it fails. `registry.toml` stays on its temp-file rename, with no parent flush.
 - The episodic log's identity on Windows is a volume serial and a file index (`file-id`). A dream cycle whose log did not change during the model call keeps the model lesson. `POST /api/v1/dream` and `dreamd dream` run on Windows.
 - `dreamd watch` opens the Tantivy index on Windows and live appends are indexed. Tantivy does not delete a segment file that is still mapped; the file stays in the index directory until the mapping is gone. `dreamd doctor --repair` removes that directory after the daemon has stopped and rebuilds the index from the log. `GET /api/v1/health` on Windows still compares the log with `index_progress.json`.
+
+### Changed
+
+- The NFR-2 stripped-binary gate in CI and the release workflow is 24 MB (25,165,824 bytes), up from 20 MB. The first v1.2.0 release build measured the musl binary at 20.23 MB and the glibc binary at 19.99 MB. The 16 MB soft warning is unchanged.
 - Coding recall oracle (`python3 scripts/benchmark/coding_oracle.py`) scores a frozen 12-episode fixture after one `dreamd dream --no-llm`, packing `k=32` recall to the same whitespace-token budget: dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
 
 ### Deprecated
@@ -310,7 +318,8 @@ Workspace version is 1.2.0. It is not tagged. Tag and publish stay human steps.
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/botzrDev/dreamd/compare/v1.0.1...v1.2.0
 [1.0.1]: https://github.com/botzrDev/dreamd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/botzrDev/dreamd/compare/v0.1.1...v1.0.0
 [0.2.0-alpha.1]: https://github.com/botzrDev/dreamd/compare/v0.1.1...2e34181

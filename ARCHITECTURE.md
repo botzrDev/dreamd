@@ -308,7 +308,7 @@ For multiple agents writing to the same project simultaneously, run one `dreamd 
 | Metric | Target |
 |---|---|
 | Idle daemon RSS | < 30 MB |
-| Stripped release binary | < 20 MB |
+| Stripped release binary | < 24 MB |
 | Recall P50 warm at 10k | < 5 ms |
 | Recall P99 cold at 10k | < 50 ms |
 

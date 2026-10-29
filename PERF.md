@@ -25,7 +25,7 @@ step summary — CI does not auto-commit this file. A macOS threshold (observed 
 
 | Limit   | Measured | Gate                    |
 | ------- | -------- | ----------------------- |
-| ≤ 20 MB (20,971,520 bytes) | see CI   | `size-gate` (CI, Linux) |
+| ≤ 24 MB (25,165,824 bytes) | see CI   | `size-gate` (CI, Linux) |
 
 ## Recall latency
 

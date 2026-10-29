@@ -1,7 +1,7 @@
 {
   "name": "dreamd-mcp",
   "mcpName": "io.github.botzrDev/dreamd",
-  "version": "1.0.1",
+  "version": "1.2.0",
   "description": "Local-first memory for AI coding agents. One .agent/ folder shared by Claude Code, Cursor and Cline over MCP. Plain files, no vector DB.",
   "keywords": [
     "mcp",
