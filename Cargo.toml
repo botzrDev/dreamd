@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-# Unreleased. Windows durable replace: dream cycle and Tantivy index. Tag and publish stay human steps. Recall is still BM25 × salience.
+# 1.2.0. Windows dream cycle and Tantivy index. Recall is still BM25 × salience. There is no 1.1.0 tag.
 version = "1.2.0"
 edition = "2021"
 license = "Apache-2.0"
