@@ -70,6 +70,13 @@ BM25 × salience.
 - **More harness adapters**, including OpenCode.
 - Hardening and hot-fixes from launch feedback.
 
+## Planned for 2.0
+
+- **Remove the deprecated surfaces** — the six `dreamd memory` subcommands
+  (`branch`, `checkout`, `branches`, `delete`, `diff`, `bisect`),
+  `dreamd vectors enable` and the `vectors` feature, and `dream --auto`. Each
+  was deprecated in 1.1.0 and is removed in 2.0 (BZR-1246).
+
 ## On the roadmap — not shipped
 
 - **Vector backend and hybrid retrieval** — lexical × vector scoring, built as

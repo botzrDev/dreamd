@@ -8,7 +8,8 @@
 //! `memory bisect start|good|bad|run --help`, and
 //! `service install|start|restart|status|uninstall --help`,
 //! plus the WEG-18 version output contract
-//! (`VERSION_SHORT` and `render_long()`).
+//! (`VERSION_SHORT` and `render_long()`) and the BZR-1245 deprecation notices
+//! (`deprecation::ALL`).
 //!
 //! Help snapshots are deterministic clap output and use no filters. Version
 //! output snapshots carry vergen-baked SHA/date/triple that drift per-build; they go
@@ -22,6 +23,7 @@
 
 use clap::{ColorChoice, CommandFactory};
 use dreamd::cli::Cli;
+use dreamd::commands::deprecation;
 use dreamd::commands::version::{render_long, VERSION_SHORT};
 use insta::{assert_snapshot, with_settings};
 
@@ -293,6 +295,13 @@ fn snapshot_service_uninstall_help() {
 #[test]
 fn snapshot_vectors_help() {
     assert_snapshot!("vectors_help", subcommand_help("vectors"));
+}
+
+/// BZR-1245: the eight deprecation notices are a stable interface; scripts
+/// may match them on stderr.
+#[test]
+fn snapshot_deprecation_notices() {
+    assert_snapshot!("deprecation_notices", deprecation::ALL.join("\n"));
 }
 
 #[test]

@@ -29,6 +29,7 @@ mcp-http = ["dreamd-core/mcp-http"]
 # BZR-188 — optional embedder seam. Off by default for NFR-2; see
 # `dreamd-core`'s `vectors`. `dreamd vectors enable` calls it, and only a
 # build with this feature does.
+# Deprecated in 1.1.0, removed in 2.0 (BZR-1245).
 vectors = ["dreamd-core/vectors"]
 
 [dependencies]

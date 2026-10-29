@@ -22,6 +22,7 @@ default = []
 mcp-http = ["rmcp/transport-streamable-http-server"]
 # BZR-188 — fastembed is compiled only with this feature. The default
 # release binary is the NFR-2 artifact and must not link it.
+# Deprecated in 1.1.0, removed in 2.0 (BZR-1245).
 vectors = ["dep:fastembed"]
 
 [dependencies]

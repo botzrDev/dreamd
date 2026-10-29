@@ -1,0 +1,12 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "deprecation::ALL.join(\"\\n\")"
+---
+dreamd: warning — `dreamd memory branch` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd memory checkout` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd memory branches` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd memory delete` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd memory diff` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd memory bisect` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it
+dreamd: warning — `dreamd vectors enable` and the `vectors` cargo feature are deprecated and will be removed in dreamd 2.0; recall never used the model
+dreamd: warning — `dreamd dream --auto` is deprecated and will be removed in dreamd 2.0; run `dreamd dream` when you want a cycle

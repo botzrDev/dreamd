@@ -112,7 +112,7 @@ The MCP surface is two tools. Everything else is CLI, run against the same files
 | `dreamd score` | Top memories by salience alone, no query. |
 | `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from exactly seven days earlier. New in 1.0.0; forwarded by the npm shim. See [docs/observability.md](./docs/observability.md). |
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing. |
-| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Name snapshots of the memory files, switch between them, diff two, and binary-search the automatic `snap-*` snapshots. New in 1.0.0; forwarded by the npm shim. `checkout` and `bisect` refuse while `dreamd watch` holds the live log: on Linux and macOS while the socket file exists (including a stale socket), on Windows while a loopback connect to `server.json` succeeds. See [docs/branching-guide.md](./docs/branching-guide.md). |
+| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Name snapshots of the memory files, switch between them, diff two, and binary-search the automatic `snap-*` snapshots. New in 1.0.0; forwarded by the npm shim. Deprecated in 1.1.0 and removed in 2.0: `.agent/` is plain files, so use git. `checkout` and `bisect` refuse while `dreamd watch` holds the live log: on Linux and macOS while the socket file exists (including a stale socket), on Windows while a loopback connect to `server.json` succeeds. See [docs/branching-guide.md](./docs/branching-guide.md). |
 | `dreamd forget <event-id>` | Remove one episodic event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` JSON file (a receipt, not a signed proof). Refuses while the daemon is running. New in 1.0.0; forwarded by the npm shim. |
 | `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges, and corrupt lines. Read-only. New in 1.0.0. See [docs/provenance.md](./docs/provenance.md). |
 
@@ -170,7 +170,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | [docs/glossary.md](./docs/glossary.md) | Domain terms |
 | [SPEC.md](./SPEC.md) | On-disk contract |
 | [docs/salience.md](./docs/salience.md) | Salience formula deep-dive |
-| [docs/branching-guide.md](./docs/branching-guide.md) | Memory branches: branch, checkout, diff, bisect |
+| [docs/branching-guide.md](./docs/branching-guide.md) | Memory branches: branch, checkout, diff, bisect (deprecated; removed in 2.0) |
 | [docs/provenance.md](./docs/provenance.md) | Provenance ledger format and what `doctor --provenance` checks |
 | [docs/observability.md](./docs/observability.md) | Recall citations (`explain=1`) and salience drift |
 | [docs/spec/](./docs/spec/README.md) | Two-page `.agent/` digest of that contract |

@@ -6,6 +6,8 @@
 
 use std::process::Command;
 
+use dreamd::commands::deprecation;
+
 fn dreamd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_dreamd")
 }
@@ -84,6 +86,175 @@ fn dream_auto_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--auto is not supported"), "got: {stderr}");
+}
+
+/// stderr split into lines, for the BZR-1245 first-line checks.
+fn stderr_lines(out: &std::process::Output) -> Vec<String> {
+    String::from_utf8(out.stderr.clone())
+        .expect("stderr is utf-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+const NO_AGENT_DIR: &str = "dreamd: error — no .agent/ directory found. Run `dreamd init` first.";
+
+#[test]
+fn memory_subcommands_print_the_deprecation_notice_first() {
+    let cases: [(&[&str], &str); 9] = [
+        (&["branch", "x"], deprecation::MEMORY_BRANCH),
+        (&["checkout", "x"], deprecation::MEMORY_CHECKOUT),
+        (&["branches"], deprecation::MEMORY_BRANCHES),
+        (&["delete", "x"], deprecation::MEMORY_DELETE),
+        (&["diff", "a", "b"], deprecation::MEMORY_DIFF),
+        (
+            &["bisect", "start", "--good", "a", "--bad", "b"],
+            deprecation::MEMORY_BISECT,
+        ),
+        (&["bisect", "good"], deprecation::MEMORY_BISECT),
+        (&["bisect", "bad"], deprecation::MEMORY_BISECT),
+        (&["bisect", "run", "true"], deprecation::MEMORY_BISECT),
+    ];
+    for (args, notice) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let out = Command::new(dreamd_bin())
+            .arg("memory")
+            .args(args)
+            .current_dir(tmp.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("run dreamd memory");
+
+        let lines = stderr_lines(&out);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some(notice),
+            "{args:?}: {lines:?}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            lines.get(1).map(String::as_str),
+            Some(NO_AGENT_DIR),
+            "{args:?}"
+        );
+        assert_eq!(lines.len(), 2, "{args:?}: {lines:?}");
+    }
+}
+
+#[test]
+fn memory_branch_output_is_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    // One live file: a snapshot of a store with none fails on its own
+    // (`<id>.partial/` is only created by writing an entry).
+    let episodic = tmp.path().join(".agent/episodic");
+    std::fs::create_dir_all(&episodic).unwrap();
+    std::fs::write(episodic.join("AGENT_LEARNINGS.jsonl"), b"").unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let out = Command::new(dreamd_bin())
+        .args(["memory", "branch", "exp"])
+        .current_dir(tmp.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("run dreamd memory branch");
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("{}\n", deprecation::MEMORY_BRANCH)
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let id = stdout.strip_suffix('\n').expect("one line");
+    assert!(
+        id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "stdout must be one 64-hex line; got {stdout:?}"
+    );
+}
+
+#[test]
+fn vectors_enable_prints_the_deprecation_notice_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No HOME, so neither build can download a model.
+    let out = Command::new(dreamd_bin())
+        .args(["vectors", "enable"])
+        .current_dir(tmp.path())
+        .env_remove("HOME")
+        .output()
+        .expect("run dreamd vectors enable");
+
+    let lines = stderr_lines(&out);
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some(deprecation::VECTORS_ENABLE),
+        "{lines:?}"
+    );
+    assert_eq!(out.status.code(), Some(2));
+    #[cfg(not(feature = "vectors"))]
+    let own = "dreamd vectors enable: this binary was built without the vectors feature; rebuild with --features vectors";
+    #[cfg(feature = "vectors")]
+    let own = "dreamd vectors enable: HOME is unset";
+    assert_eq!(lines.get(1).map(String::as_str), Some(own), "{lines:?}");
+}
+
+#[test]
+fn dream_auto_prints_the_deprecation_notice_first() {
+    let cases: [(&[&str], &str); 2] = [
+        (
+            &["dream", "--auto"],
+            "dreamd: --auto is not supported. Set dream_cycle_mode = \"manual\" in config.toml. Cycles run only when you invoke them.",
+        ),
+        (
+            &["dream", "--dry", "--auto"],
+            "dreamd: --dry and --auto are mutually exclusive: auto mode performs real writes on a schedule",
+        ),
+    ];
+    for (args, old) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".agent")).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let out = Command::new(dreamd_bin())
+            .args(args)
+            .current_dir(tmp.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("run dreamd dream --auto");
+
+        let lines = stderr_lines(&out);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some(deprecation::DREAM_AUTO),
+            "{args:?}: {lines:?}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(lines.get(1).map(String::as_str), Some(old), "{args:?}");
+        assert_eq!(lines.len(), 2, "{args:?}: {lines:?}");
+    }
+}
+
+#[test]
+fn other_commands_print_no_deprecation_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".agent")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["dream", "--dry"][..], &["memory", "--help"][..]] {
+        let out = Command::new(dreamd_bin())
+            .args(args)
+            .current_dir(tmp.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("run dreamd");
+
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let lines = stderr_lines(&out);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.to_lowercase().contains("deprecated")),
+            "{args:?}: {lines:?}"
+        );
+    }
 }
 
 #[test]

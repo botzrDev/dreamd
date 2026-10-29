@@ -228,7 +228,7 @@ CLI surfaces that are, or were, reserved. BZR-1244 deleted the items with no pro
 | Item | What it is | Status (v0.1) | Decision | Revisit when |
 |---|---|---|---|---|
 | `--dry` on `dreamd dream` | Clap flag on the dream subcommand | **Implemented** (AILAB-341) — previews the would-be `LESSONS.md` on stdout, writes nothing, skips the daemon proxy | **Shipped** — no longer a reserved surface | n/a |
-| `--auto` on `dreamd dream` | Hidden clap flag on the dream subcommand | **Parseable; always exit 2** with a deferred message | **Keep** — CLI surface reserved for a future auto mode (not shipped as of 1.0.0; the dream cycle is manual-only); documented here, not only in `cli.rs` | An auto dream cycle is scheduled |
+| `--auto` on `dreamd dream` | Hidden clap flag on the dream subcommand | **Parseable; always exit 2** with a deprecation notice and a deferred message | **Deprecated (BZR-1245); removed in 2.0** | n/a |
 
 ### 9. SkillAction validation seam
 
@@ -335,11 +335,11 @@ All `dreamd-core` paths are under `crates/dreamd-core/src/`.
 | WAL + `state.json` | `wal.rs`, `daemon_state.rs` |
 | Salience | `salience.rs`, `collector.rs`, `salience_report.rs` |
 | Forget | `forget.rs` |
-| Memory branches (snapshot, diff, bisect) | `snapshot.rs`, `memory_diff.rs`, `bisect.rs` |
+| Memory branches (snapshot, diff, bisect; deprecated), autosnap retention | `snapshot.rs`, `memory_diff.rs`, `bisect.rs`, `retention.rs` |
 | Provenance ledger | `provenance.rs` |
 | Registry (`~/.agent/registry.toml`) | `registry.rs` |
 | Config, redaction, first-run disclosure | `config.rs`, `redaction.rs`, `privacy.rs` |
-| Model download, unused by recall (`vectors` feature) | `vectors.rs` |
+| Model download, unused by recall (`vectors` feature; deprecated) | `vectors.rs` |
 | Schema migration stub | `migrate.rs` |
 | Wire types | `crates/dreamd-protocol/src/lib.rs` |
 | CLI | `crates/dreamd-cli/src/cli.rs`, `crates/dreamd-cli/src/commands/` |

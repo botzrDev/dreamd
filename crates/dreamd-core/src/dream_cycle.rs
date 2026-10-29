@@ -28,6 +28,7 @@
 //! atomic renames (WEG-271).
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::autobiography::{self, AutobiographyOutcome};
 use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLesson};
@@ -37,6 +38,7 @@ use crate::layout::AgentRoot;
 use crate::llm::{self, LlmBackend};
 use crate::plan;
 use crate::provenance::{Ledger, ProvenanceError};
+use crate::retention;
 use crate::snapshot::{self, SnapshotError};
 use crate::wal::{self, CycleKind, WalError};
 
@@ -303,9 +305,12 @@ pub async fn compose(
 }
 
 /// Stage and commit one cycle over `raw` (the whole log as of now). Opens the
-/// stage (`begin_cycle`: status `in_progress`), stages the autosnap, reads the
-/// prior `LESSONS.md` through the stage, plans with `body` gated against the
-/// plan's selection, applies the plan, and commits it. Reads no log.
+/// stage (`begin_cycle`: status `in_progress`), stages the autosnap and the
+/// unlinks of the `snap-*` refs past the retention cap
+/// ([`retention::plan_ref_prune`]), reads the prior `LESSONS.md` through the
+/// stage, plans with `body` gated against the plan's selection, applies the
+/// plan, and commits it. Then it removes the objects no ref names
+/// ([`retention::collect_objects`]). Reads no log.
 ///
 /// `composed_for` is the cluster key `body` was composed for (see
 /// [`gate_at_commit`]).
@@ -330,6 +335,19 @@ pub fn commit(
     // BZR-160 / BZR-1241: the pre-cycle image, taken at the commit, so it
     // holds every record that landed while the model ran.
     snapshot::stage_autosnap(&mut stage, now_sec)?;
+    // BZR-1245: the `snap-*` refs past the newest AUTOSNAP_KEEP are unlinked
+    // through the stage, so they go with this cycle's commit or not at all.
+    let staged = snapshot::autosnap_ref_name(now_sec)?;
+    match retention::plan_ref_prune(agent_root, &staged) {
+        Ok(names) => {
+            for name in names {
+                stage
+                    .unlink(&agent_root.branches_refs_dir().join(name))
+                    .map_err(WalError::Io)?;
+            }
+        }
+        Err(e) => retention::warn_skipped(&e, "autosnap retention skipped; no ref pruned"),
+    }
     let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
     let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, |selected| {
         gate_at_commit(body, composed_for, selected)
@@ -340,6 +358,15 @@ pub fn commit(
     // appends them after the renames; a roll-forward appends them again, and
     // the ledger skips an edge it already holds.
     wal::commit_cycle(stage, ledger, now_sec)?;
+    // BZR-1245: objects are not part of the commit. Collection is idempotent,
+    // so whatever a crash or an error leaves, the next cycle collects. The
+    // wall clock is read only for the grace cutoff.
+    let cutoff = SystemTime::now()
+        .checked_sub(retention::OBJECT_GC_GRACE)
+        .unwrap_or(UNIX_EPOCH);
+    if let Err(e) = retention::collect_objects(agent_root, cutoff) {
+        retention::warn_skipped(&e, "autosnap object collection skipped");
+    }
     Ok(plan.decay_result())
 }
 
@@ -998,6 +1025,159 @@ mod tests {
             jsonl_before
         );
         assert!(!root.branches_dir().join("HEAD").exists());
+    }
+
+    /// BZR-1245: with 20 older `snap-*` refs, a cycle unlinks the oldest one
+    /// and collects its object, which is past the grace and named by no ref.
+    #[tokio::test]
+    async fn cycle_prunes_snap_refs_and_collects_their_objects() {
+        let (_dir, root) = scaffold_fixture();
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        let mut seeded = Vec::new();
+        for i in 0..20 {
+            // A distinct LESSONS.md per autosnap, so each names its own object.
+            fs::write(root.lessons_md(), format!("seed {i}\n")).unwrap();
+            let t = NOW_SEC - 86_400 + i * 60;
+            let id = snapshot::create_autosnap(&root, t).unwrap();
+            seeded.push((snapshot::autosnap_ref_name(t).unwrap(), id));
+        }
+        fs::remove_file(root.lessons_md()).unwrap();
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        for (_, id) in &seeded {
+            fs::File::open(root.branches_objects_dir().join(id))
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
+        }
+
+        run_deterministic(&root).await;
+
+        let refs: Vec<String> = fs::read_dir(root.branches_refs_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(refs.len(), 20, "{refs:?}");
+        assert!(refs.iter().all(|r| r.starts_with("snap-")), "{refs:?}");
+        assert!(!refs.contains(&seeded[0].0), "the oldest ref is pruned");
+        let staged = snapshot::autosnap_ref_name(NOW_SEC).unwrap();
+        assert!(refs.contains(&staged), "the cycle's own ref lands");
+
+        let objects = root.branches_objects_dir();
+        assert!(
+            !objects.join(&seeded[0].1).exists(),
+            "the pruned ref's object is collected"
+        );
+        for (_, id) in &seeded[1..] {
+            assert!(objects.join(id).is_dir(), "{id} is still named");
+        }
+        let body = fs::read_to_string(root.branches_refs_dir().join(&staged)).unwrap();
+        let new_id = body.lines().next().unwrap();
+        assert!(seeded.iter().all(|(_, id)| id != new_id));
+        assert!(objects.join(new_id).is_dir());
+        assert_eq!(fs::read_dir(&objects).unwrap().count(), 20);
+    }
+
+    /// Test 13's store: 20 `snap-*` refs a day old, each naming its own object,
+    /// every object two hours old. Returns `(ref name, object id)` oldest first.
+    fn seed_old_autosnaps(root: &AgentRoot) -> Vec<(String, String)> {
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        let mut seeded = Vec::new();
+        for i in 0..20 {
+            fs::write(root.lessons_md(), format!("seed {i}\n")).unwrap();
+            let t = NOW_SEC - 86_400 + i * 60;
+            let id = snapshot::create_autosnap(root, t).unwrap();
+            seeded.push((snapshot::autosnap_ref_name(t).unwrap(), id));
+        }
+        fs::remove_file(root.lessons_md()).unwrap();
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        for (_, id) in &seeded {
+            fs::File::open(root.branches_objects_dir().join(id))
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
+        }
+        seeded
+    }
+
+    /// An object dir no ref names, holding one manifest, with mtime `mtime`.
+    fn unnamed_object(root: &AgentRoot, fill: u64, mtime: SystemTime) -> PathBuf {
+        let dir = root.branches_objects_dir().join(format!("{fill:064x}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(snapshot::MANIFEST_FILE), b"{}\n").unwrap();
+        fs::File::open(&dir).unwrap().set_modified(mtime).unwrap();
+        dir
+    }
+
+    fn snap_refs(root: &AgentRoot) -> Vec<String> {
+        let mut refs: Vec<String> = fs::read_dir(root.branches_refs_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("snap-"))
+            .collect();
+        refs.sort();
+        refs
+    }
+
+    /// BZR-1245 Amendment 3, test 22: a retention plan that fails only warns.
+    /// The cycle commits and prunes nothing.
+    #[tokio::test]
+    async fn cycle_commits_when_retention_planning_fails() {
+        let (_dir, root) = scaffold_fixture();
+        let seeded = seed_old_autosnaps(&root);
+        fs::write(crate::bisect::state_path(&root), "{not json").unwrap();
+
+        run_deterministic(&root).await;
+
+        assert!(root.lessons_md().exists(), "the cycle committed");
+        let refs = snap_refs(&root);
+        assert_eq!(refs.len(), 21, "nothing pruned: {refs:?}");
+        assert!(refs.contains(&snapshot::autosnap_ref_name(NOW_SEC).unwrap()));
+        for (name, id) in &seeded {
+            assert!(refs.contains(name), "{name} is kept");
+            assert!(
+                root.branches_objects_dir().join(id).is_dir(),
+                "{id} is kept"
+            );
+        }
+    }
+
+    /// BZR-1245 Amendment 3, test 23: object collection that fails after the
+    /// commit only warns. The prune still lands, and nothing is removed.
+    #[tokio::test]
+    async fn cycle_commits_when_object_collection_fails() {
+        let (_dir, root) = scaffold_fixture();
+        let seeded = seed_old_autosnaps(&root);
+        fs::write(root.branches_refs_dir().join("broken"), "junk\n").unwrap();
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        let x = unnamed_object(&root, 0xa, two_hours_ago);
+
+        run_deterministic(&root).await;
+
+        assert!(root.lessons_md().exists(), "the cycle committed");
+        let refs = snap_refs(&root);
+        assert_eq!(refs.len(), 20, "{refs:?}");
+        assert!(!refs.contains(&seeded[0].0), "the oldest ref is pruned");
+        assert!(
+            root.branches_objects_dir().join(&seeded[0].1).is_dir(),
+            "collection failed closed: the pruned ref's object stays"
+        );
+        assert!(x.is_dir(), "collection failed closed: X stays");
+    }
+
+    /// BZR-1245 Amendment 3, test 24: the cycle collects with the grace, so a
+    /// fresh unnamed object survives and an old one goes.
+    #[tokio::test]
+    async fn cycle_keeps_a_fresh_unnamed_object() {
+        let (_dir, root) = scaffold_fixture();
+        seed_old_autosnaps(&root);
+        let f = unnamed_object(&root, 0xf, SystemTime::now());
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        let o = unnamed_object(&root, 0x0, two_hours_ago);
+
+        run_deterministic(&root).await;
+
+        assert!(f.is_dir(), "F is inside the grace");
+        assert!(!o.exists(), "O is unnamed and past the grace");
     }
 
     #[test]

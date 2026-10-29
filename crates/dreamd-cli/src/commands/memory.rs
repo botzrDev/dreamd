@@ -184,7 +184,8 @@ pub fn run_branches(cwd: &Path, out: &mut dyn Write) -> Result<(), MemoryError> 
     Ok(())
 }
 
-/// `dreamd memory delete <name>`: remove the ref. The object stays on disk.
+/// `dreamd memory delete <name>`: remove the ref. A later dream cycle removes
+/// the object if no ref names it.
 pub fn run_delete(cwd: &Path, name: &str) -> Result<(), MemoryError> {
     let root = discover(cwd)?;
     snapshot::delete_branch(&root, name)?;

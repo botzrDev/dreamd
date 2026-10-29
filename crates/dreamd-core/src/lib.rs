@@ -52,6 +52,7 @@ pub mod provenance;
 pub mod recurrence;
 pub mod redaction;
 pub mod registry;
+pub mod retention;
 pub mod salience;
 pub use salience::{salience_with_context, RecurrenceContext};
 #[cfg(test)]

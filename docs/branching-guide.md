@@ -1,5 +1,7 @@
 # Using memory branches
 
+> **Deprecated.** The `dreamd memory` commands are deprecated in 1.1.0 and will be removed in 2.0 (BZR-1245). Each one prints a one-line warning on stderr before it runs; nothing else about it changes. `.agent/` is plain files, so git can branch, diff and bisect it.
+
 This page covers how to use memory branches. The on-disk byte format (objects, refs, `HEAD`) is in [`branching.md`](branching.md).
 
 A branch is a named snapshot of a project's four live memory files: the episodic log, `LESSONS.md`, the recurrence sidecar, and `PREFERENCES.md`. There is one live store. A branch is a saved copy of it that you can return to.
@@ -31,7 +33,7 @@ One line per ref. `*` marks the current branch:
   snap-20260929t140300z
 ```
 
-`snap-*` names are automatic refs. Each dream cycle writes one before it changes lessons or prunes the log, and each `memory branch` writes one. You can check out a `snap-*` ref like any other.
+`snap-*` names are automatic refs. Each dream cycle writes one before it changes lessons or prunes the log, and each `memory branch` writes one. You can check out a `snap-*` ref like any other. Each dream cycle keeps the newest 20 `snap-*` refs, plus the current branch and any ref an unfinished bisect needs, and removes the older ones; named branches are never removed ([`branching.md`](branching.md), Removing objects).
 
 ## Check out a branch
 
@@ -77,7 +79,7 @@ Durable appends go through the daemon: start `dreamd watch`, then `POST /api/v1/
 dreamd memory delete before-refactor
 ```
 
-This removes the ref. It refuses to delete the current branch; check out another one first. The snapshot object stays on disk under `.agent/.dreamd/branches/objects/`.
+This removes the ref. It refuses to delete the current branch; check out another one first. The snapshot object stays on disk under `.agent/.dreamd/branches/objects/` until a dream cycle finds no ref naming it, at least an hour later, and removes it.
 
 ## Compare two snapshots
 

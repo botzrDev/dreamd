@@ -22,17 +22,17 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 | `blame` | Same ranking, smaller table, default `-k` 5 | [observability.md](./observability.md) |
 | `score` | Top memories by salience, no query | [below](#score) |
 | `salience-drift` | Salience histogram and 7-day drift | [observability.md](./observability.md) |
-| `memory` | Branch, checkout, diff, bisect | [branching-guide.md](./branching-guide.md) |
+| `memory` | Branch, checkout, diff, bisect. Deprecated; removed in 2.0 | [branching-guide.md](./branching-guide.md) |
 | `forget` | Remove one event | [provenance.md](./provenance.md), [GUIDE.md](../GUIDE.md) §8 |
 | `archive` | `--force-unpin` so decay can prune | [operator-handbook.md](./operator-handbook.md) |
 | `migrate` | Episodic schema migrate; the only path is `1.0.0` to `1.0.0` | [migrate.md](./migrate.md) |
 | `reset workspace` | Restore `working/WORKSPACE.md` | [below](#reset-workspace) |
-| `vectors enable` | Download the optional model; exit 2 on the default binary | [vectors.md](./vectors.md) |
+| `vectors enable` | Download the optional model; exit 2 on the default binary. Deprecated, with the `vectors` feature; removed in 2.0 | [vectors.md](./vectors.md) |
 | `uninstall` | Stop processes, unregister, clear caches | [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) |
 | `update` | Clear the native binary cache | same README |
 | `version` | Version, commit, build date, target, schema, vectors | [below](#version) |
 
-`dream --dry` prints the `LESSONS.md` it would write and writes nothing. `dream --no-llm` forces the deterministic lesson and still goes through a live daemon. `dream --no-commit` skips the git commit and also skips the daemon, so do not run it while `dreamd watch` is serving that project ([troubleshooting.md](./troubleshooting.md)). `dream --auto` exits 2.
+`dream --dry` prints the `LESSONS.md` it would write and writes nothing. `dream --no-llm` forces the deterministic lesson and still goes through a live daemon. `dream --no-commit` skips the git commit and also skips the daemon, so do not run it while `dreamd watch` is serving that project ([troubleshooting.md](./troubleshooting.md)). `dream --auto` prints a deprecation notice (it is removed in 2.0) and still exits 2.
 
 ## status
 

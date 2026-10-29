@@ -40,7 +40,7 @@ pub struct DreamArgs {
     /// anything. Skips the daemon proxy; --no-commit is ignored.
     #[arg(long)]
     pub dry: bool,
-    /// Not supported. Cycles run only when invoked.
+    /// Deprecated, removed in 2.0. Not supported. Cycles run only when invoked.
     #[arg(long, hide = true)]
     pub auto: bool,
     /// Skip the git commit and the daemon. The cycle runs in this process and
@@ -146,7 +146,7 @@ pub enum Command {
     Init(InitArgs),
     /// Start the MCP server (bridges to daemon if running, otherwise in-process).
     Mcp(McpArgs),
-    /// Name memory snapshots as branches and check them out.
+    /// Deprecated, removed in 2.0. Name memory snapshots as branches and check them out.
     ///
     /// Refs live under .agent/.dreamd/branches/. Checkout replaces the live
     /// memory files and refuses while `dreamd watch` is running.
@@ -181,7 +181,7 @@ pub enum Command {
     Update(UpdateArgs),
     /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
     Watch(WatchArgs),
-    /// Download the optional embedding model. Recall is unchanged.
+    /// Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged.
     ///
     /// The default binary is built without the `vectors` feature: `enable`
     /// says so and exits 2. A build with `--features vectors` downloads
@@ -335,14 +335,14 @@ pub struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub enum MemoryCommand {
-    /// Snapshot the live memory files, name the snapshot <NAME>, and make it current.
+    /// Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot <NAME>, and make it current.
     ///
     /// Fails if the branch already exists. Prints the object id.
     Branch {
         /// Branch name: [a-z0-9][a-z0-9._-]{0,63}, no `..`.
         name: String,
     },
-    /// Replace the live memory files with branch <NAME> and make it current.
+    /// Deprecated, removed in 2.0. Replace the live memory files with branch <NAME> and make it current.
     ///
     /// Refuses while the daemon socket exists; stop `dreamd watch` first.
     /// Prints the object id.
@@ -350,22 +350,22 @@ pub enum MemoryCommand {
         /// Branch name to check out.
         name: String,
     },
-    /// List branches; `*` marks the current one.
+    /// Deprecated, removed in 2.0. List branches; `*` marks the current one.
     Branches,
-    /// Delete branch <NAME>. The snapshot object stays on disk.
+    /// Deprecated, removed in 2.0. Delete branch <NAME>. A later dream cycle removes the object if no ref names it.
     ///
     /// Refuses to delete the current branch.
     Delete {
         /// Branch name to delete.
         name: String,
     },
-    /// Binary-search the snap-* timeline for the first bad snapshot (BZR-153).
+    /// Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot (BZR-153).
     ///
     /// Searches refs by the timestamp on their second line; there is no parent
     /// pointer. Each step checks out a snapshot, so it refuses while `dreamd
     /// watch` is running. Prints `<name> <id>`.
     Bisect(BisectArgs),
-    /// Compare two snapshots: added/removed events, salience changes, file verdicts.
+    /// Deprecated, removed in 2.0. Compare two snapshots: added/removed events, salience changes, file verdicts.
     ///
     /// Reads objects only; never checks out. Each side is a ref name,
     /// `<name>:<id>` (the ref must name that id), or a 64-hex object id.
@@ -506,7 +506,7 @@ pub struct VectorsArgs {
 
 #[derive(Subcommand)]
 pub enum VectorsCommand {
-    /// Download BAAI/bge-small-en-v1.5 into ~/.agent/models.
+    /// Deprecated, removed in 2.0. Download BAAI/bge-small-en-v1.5 into ~/.agent/models.
     ///
     /// Works only in a binary built with `--features vectors`. The default
     /// binary was built without it: this prints that and exits 2, and creates
@@ -886,6 +886,9 @@ fn run_forget(args: ForgetArgs) -> ExitCode {
 }
 
 fn run_dream(args: DreamArgs) -> ExitCode {
+    if args.auto {
+        eprintln!("{}", commands::deprecation::DREAM_AUTO);
+    }
     if let Err(msg) = args.validate() {
         eprintln!("dreamd: {msg}");
         return ExitCode::from(2);
@@ -1183,7 +1186,19 @@ fn daemon_socket() -> Option<PathBuf> {
 /// on any snapshot or bisect error (including the daemon-socket refusal on
 /// checkout and a bisect script `sh` cannot spawn).
 fn run_memory(command: MemoryCommand) -> ExitCode {
+    use commands::deprecation;
     use commands::memory::{self, MemoryError};
+    eprintln!(
+        "{}",
+        match &command {
+            MemoryCommand::Branch { .. } => deprecation::MEMORY_BRANCH,
+            MemoryCommand::Checkout { .. } => deprecation::MEMORY_CHECKOUT,
+            MemoryCommand::Branches => deprecation::MEMORY_BRANCHES,
+            MemoryCommand::Delete { .. } => deprecation::MEMORY_DELETE,
+            MemoryCommand::Bisect(_) => deprecation::MEMORY_BISECT,
+            MemoryCommand::Diff { .. } => deprecation::MEMORY_DIFF,
+        }
+    );
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
         Err(code) => return code,
@@ -1655,6 +1670,7 @@ fn run_vectors_enable() -> ExitCode {
     // Stdout stays UNLOCKED: loading the model starts ONNX Runtime, which may
     // log through tracing to stderr. See AGENTS.md
     // no-hoisted-stdio-lock-across-tantivy.
+    eprintln!("{}", commands::deprecation::VECTORS_ENABLE);
     commands::vectors::run(&mut std::io::stdout(), &mut std::io::stderr())
 }
 

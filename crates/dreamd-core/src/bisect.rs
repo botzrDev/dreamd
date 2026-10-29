@@ -214,6 +214,17 @@ pub fn ensure_in_progress(agent_root: &AgentRoot) -> Result<(), BisectError> {
     read_state(agent_root).map(|_| ())
 }
 
+/// The ref names an in-progress bisect still needs (BZR-1245 retention).
+/// Empty when no bisect is in progress; an error when the state file is
+/// unreadable or malformed.
+pub(crate) fn pinned_ref_names(agent_root: &AgentRoot) -> Result<Vec<String>, BisectError> {
+    match read_state(agent_root) {
+        Ok(state) => Ok(state.steps),
+        Err(BisectError::NotInProgress) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Start a bisect between `good` and `bad` (ref names, or object ids some ref
 /// names). Adjacent endpoints return [`BisectOutcome::Found`] with no checkout
 /// and no state file. Otherwise the midpoint is checked out and, only after

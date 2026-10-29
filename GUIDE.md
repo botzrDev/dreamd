@@ -247,7 +247,7 @@ dreamd blame "axum error"              # id, timestamp, skill_action, content, b
 
 After section 4 the lesson shows up as its own row with an `lsn_evt_…` id and layer `semantic`, next to the episodic events it was promoted from.
 
-Branch the memory files before an experiment, then compare:
+Branch the memory files before an experiment, then compare. The `dreamd memory` commands are deprecated in 1.1.0 and will be removed in 2.0; `.agent/` is plain files, so git can do the same job:
 
 ```bash
 dreamd memory branch before-experiment   # snapshots the live files, prints the object id
@@ -275,7 +275,7 @@ dreamd doctor --provenance
 |---|---|
 | HTTP API details | [docs/http-api.md](./docs/http-api.md) |
 | Configuration | [docs/configuration.md](./docs/configuration.md) |
-| Memory branches | [docs/branching-guide.md](./docs/branching-guide.md) |
+| Memory branches (deprecated; removed in 2.0) | [docs/branching-guide.md](./docs/branching-guide.md) |
 | Recall citations and salience drift | [docs/observability.md](./docs/observability.md) |
 | Architecture | [ARCHITECTURE.md](./ARCHITECTURE.md) |
 | CLI reference | [docs/cli.md](./docs/cli.md) |

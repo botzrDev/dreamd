@@ -20,6 +20,8 @@ use crate::index::RecurrenceSidecar;
 use crate::invariants::check_store;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
+use crate::retention::AUTOSNAP_KEEP;
+use crate::snapshot::autosnap_ref_name;
 use crate::stage::{arm_crash, crash_fired};
 use crate::test_support::{unique_tmpdir, DirGuard};
 use crate::wal;
@@ -29,12 +31,16 @@ const NOW: i64 = 1_780_000_000;
 const DAY: i64 = 86_400;
 /// Far past the number of crash points any one run has.
 const MAX_POINTS: u32 = 64;
+/// `snap-*` refs `Scenario::Pruning` seeds before the cycle's own.
+const SEEDED_SNAPS: i64 = 20;
 
 type Image = BTreeMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Promoting,
+    /// `Promoting` plus [`SEEDED_SNAPS`] older `snap-*` refs (BZR-1245).
+    Pruning,
     Retiring,
     ForgetCitation,
     ForgetExemplar,
@@ -91,7 +97,7 @@ fn seed(scenario: Scenario) -> (AgentRoot, DirGuard) {
     fs::create_dir_all(root.semantic_dir()).unwrap();
     fs::create_dir_all(root.dreamd_dir()).unwrap();
     let log = match scenario {
-        Scenario::Promoting => {
+        Scenario::Promoting | Scenario::Pruning => {
             fs::create_dir_all(root.snapshots_dir()).unwrap();
             let prior = event('P', "go::older", 200, 5.0, false);
             fs::write(root.snapshot_file(&date()), lines(&[prior])).unwrap();
@@ -121,7 +127,22 @@ fn seed(scenario: Scenario) -> (AgentRoot, DirGuard) {
         }
     };
     fs::write(root.episodic_jsonl(), lines(&log)).unwrap();
+    if scenario == Scenario::Pruning {
+        fs::create_dir_all(root.branches_refs_dir()).unwrap();
+        for i in 0..SEEDED_SNAPS {
+            fs::write(
+                root.branches_refs_dir().join(seeded_snap(i)),
+                format!("{i:064x}\n2026-05-28T00:00:00Z\n"),
+            )
+            .unwrap();
+        }
+    }
     (root, DirGuard(dir))
+}
+
+/// The `i`th seeded `snap-*` ref name, oldest first; all are older than `NOW`.
+fn seeded_snap(i: i64) -> String {
+    autosnap_ref_name(NOW - (SEEDED_SNAPS - i) * 60).unwrap()
 }
 
 fn date() -> String {
@@ -168,19 +189,21 @@ fn image(root: &AgentRoot) -> Image {
 
 fn run(scenario: Scenario, root: &AgentRoot, lock: &WriterLock) -> Result<(), String> {
     match scenario {
-        Scenario::Promoting | Scenario::Retiring => tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(run_filesystem_phases(
-                root,
-                lock.ledger(),
-                NOW,
-                &date(),
-                true,
-                false,
-            ))
-            .map(drop)
-            .map_err(|e| e.to_string()),
+        Scenario::Promoting | Scenario::Pruning | Scenario::Retiring => {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(run_filesystem_phases(
+                    root,
+                    lock.ledger(),
+                    NOW,
+                    &date(),
+                    true,
+                    false,
+                ))
+                .map(drop)
+                .map_err(|e| e.to_string())
+        }
         Scenario::ForgetCitation => forget::cascade(root, lock.ledger(), &eid('Y'), NOW)
             .map(drop)
             .map_err(|e| e.to_string()),
@@ -237,7 +260,7 @@ fn clean_post(scenario: Scenario) -> Image {
 
     let lessons = || lessons::read_lessons_file(&root.lessons_md()).unwrap();
     match scenario {
-        Scenario::Promoting => {
+        Scenario::Promoting | Scenario::Pruning => {
             let file = lessons();
             assert_eq!(file.cluster_key, "rust::eh");
             assert_eq!(file.lessons[0].id, eid('3').to_string(), "the exemplar");
@@ -258,8 +281,21 @@ fn clean_post(scenario: Scenario) -> Image {
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(refs.len(), 1, "{refs:?}");
-            assert!(refs[0].starts_with("snap-"), "{refs:?}");
+            if scenario == Scenario::Promoting {
+                assert_eq!(refs.len(), 1, "{refs:?}");
+                assert!(refs[0].starts_with("snap-"), "{refs:?}");
+            } else {
+                assert_eq!(refs.len(), AUTOSNAP_KEEP, "{refs:?}");
+                assert!(
+                    !refs.contains(&seeded_snap(0)),
+                    "the oldest seeded ref is pruned"
+                );
+                assert!(refs.contains(&seeded_snap(1)), "{refs:?}");
+                assert!(
+                    refs.contains(&autosnap_ref_name(NOW).unwrap()),
+                    "the new ref lands"
+                );
+            }
             let ledger = fs::read_to_string(root.provenance_ledger()).unwrap();
             assert!(ledger.contains("\"lesson_citation\""), "{ledger}");
             assert!(ledger.contains("\"recurrence\""), "{ledger}");
@@ -369,6 +405,13 @@ fn sweep(scenario: Scenario) -> (Vec<Point>, Image) {
 #[test]
 fn crash_sweep_promoting_cycle() {
     sweep(Scenario::Promoting);
+}
+
+/// BZR-1245: the ref unlink is staged, so a crash leaves all 20 seeded refs
+/// or the pruned set, never a store without the cycle's own ref.
+#[test]
+fn crash_sweep_promoting_cycle_prunes_a_snap_ref() {
+    sweep(Scenario::Pruning);
 }
 
 #[test]

@@ -8,6 +8,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Coding recall oracle (`python3 scripts/benchmark/coding_oracle.py`) scores a frozen 12-episode fixture after one `dreamd dream --no-llm`, packing `k=32` recall to the same whitespace-token budget: dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
 
+### Deprecated
+
+- `dreamd memory branch|checkout|branches|delete|diff|bisect` print a one-line warning on stderr and will be removed in 2.0. `.agent/` is plain files, so use git to branch, diff and bisect it.
+- `dreamd vectors enable` prints a one-line warning on stderr. It and the `vectors` cargo feature will be removed in 2.0. Recall never used the model.
+- `dreamd dream --auto` prints a one-line warning before its existing refusal (still exit 2) and will be removed in 2.0.
+
 ## [1.0.1] - 2026-10-21
 
 ### Security
