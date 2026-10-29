@@ -81,8 +81,8 @@ and creates a **draft** GitHub Release with the tarballs, `checksums.txt`, and
 
 - The workflow does **not** run the test suite. The tag is only as tested as the
   commit it points at (step 1's local run, and CI on that commit if it was pushed).
-- The Linux and macOS builds fail if the stripped binary is over 20 MB
-  (20,971,520 bytes, NFR-2). The Windows build is `continue-on-error`, unstripped and
+- The Linux and macOS builds fail if the stripped binary is over 24 MB
+  (25,165,824 bytes, NFR-2). The Windows build is `continue-on-error`, unstripped and
   unchecked.
 - A tag name containing a hyphen (`v0.2.0-alpha.1`, `v0.1.0-rc.5`) is created as a
   **prerelease**. A hyphen-free tag (`v1.0.0`) is a **stable** release: once it leaves

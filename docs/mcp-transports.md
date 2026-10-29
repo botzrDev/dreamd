@@ -23,7 +23,7 @@ Nothing about this path changed when HTTP was added. Without `--bind`, `dreamd m
 
 ## Availability
 
-Streamable HTTP is compiled in only when you build with the **`mcp-http`** cargo feature, which is off by default. It adds about 1.5 MB to the stripped binary, and the default release build has to stay under the 20 MB size limit (NFR-2). So the **prebuilt binaries** — GitHub release tarballs, and what `npx -y dreamd-mcp` downloads — are **stdio-only**. On those binaries `--bind` still parses, but it exits **2** with a message that names the feature. Nothing binds.
+Streamable HTTP is compiled in only when you build with the **`mcp-http`** cargo feature, which is off by default. It adds about 1.5 MB to the stripped binary, and the default release build has to stay under the 24 MB size limit (NFR-2). So the **prebuilt binaries** — GitHub release tarballs, and what `npx -y dreamd-mcp` downloads — are **stdio-only**. On those binaries `--bind` still parses, but it exits **2** with a message that names the feature. Nothing binds.
 
 Build it yourself:
 

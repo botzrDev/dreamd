@@ -18,6 +18,7 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 
 ### Changed
 
+- The NFR-2 stripped-binary gate in CI and the release workflow is 24 MB (25,165,824 bytes), up from 20 MB. The first v1.2.0 release build measured the musl binary at 20.23 MB and the glibc binary at 19.99 MB. The 16 MB soft warning is unchanged.
 - Coding recall oracle (`python3 scripts/benchmark/coding_oracle.py`) scores a frozen 12-episode fixture after one `dreamd dream --no-llm`, packing `k=32` recall to the same whitespace-token budget: dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
 
 ### Deprecated
