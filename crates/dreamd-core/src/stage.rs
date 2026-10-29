@@ -102,39 +102,28 @@ impl Stage {
     /// stays until the stage is wiped.
     ///
     /// `live` must be under `.agent/`, or this is
-    /// [`io::ErrorKind::InvalidInput`]. Returns [`io::ErrorKind::Unsupported`]
-    /// on Windows, like [`crate::io::write_atomic`].
+    /// [`io::ErrorKind::InvalidInput`]. The staged file is fsynced here. The
+    /// directory entry becomes durable at the commit flush ([`crate::io::sync_dir`]).
     pub fn put(&mut self, live: &Path, bytes: &[u8]) -> io::Result<()> {
-        let rel = self.checked_relative(live)?;
-        #[cfg(windows)]
-        {
-            let _ = (rel, bytes);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                crate::io::WRITE_ATOMIC_UNSUPPORTED,
-            ))
-        }
-        #[cfg(not(windows))]
-        {
-            use std::io::Write;
+        use std::io::Write;
 
-            let file_name = rel
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let name = format!("{}-{file_name}", self.seq);
-            self.seq += 1;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.dir.join(&name))?;
-            file.write_all(bytes)?;
-            file.sync_data()?;
-            drop(file);
-            crash_point()?;
-            self.entries.insert(rel, Entry::Put(name));
-            Ok(())
-        }
+        let rel = self.checked_relative(live)?;
+        let file_name = rel
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = format!("{}-{file_name}", self.seq);
+        self.seq += 1;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.dir.join(&name))?;
+        file.write_all(bytes)?;
+        file.sync_data()?;
+        drop(file);
+        crash_point()?;
+        self.entries.insert(rel, Entry::Put(name));
+        Ok(())
     }
 
     /// Stage the removal of `live`. Records nothing when `live` would not

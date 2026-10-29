@@ -691,10 +691,12 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
 
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
-/// (which repair only ever reads). Fails closed when a live daemon is
-/// detected — wiping the cache underneath its writer would race it — and when
-/// the project writer lock is held by any other writer.
-#[cfg(unix)]
+/// (which repair only ever reads). On Windows the wipe is also how a segment
+/// file that Tantivy could not delete while it was still mapped leaves the
+/// index directory: stop the daemon first, then this removes the directory
+/// and rebuilds it. Fails closed when a live daemon is detected — wiping the
+/// cache underneath its writer would race it — and when the project writer
+/// lock is held by any other writer.
 fn run_repair(
     agent_root: &AgentRoot,
     socket: Option<&Path>,
@@ -702,13 +704,13 @@ fn run_repair(
     err: &mut impl Write,
 ) -> io::Result<bool> {
     use dreamd_core::server::{
-        is_daemon_socket_live, TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME,
-        INDEX_PROGRESS_FILENAME,
+        TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME, INDEX_PROGRESS_FILENAME,
     };
     use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 
+    #[cfg(unix)]
     if let Some(sock) = socket {
-        if is_daemon_socket_live(sock) {
+        if dreamd_core::server::is_daemon_socket_live(sock) {
             writeln!(
                 err,
                 "dreamd: error — doctor --repair refused: a daemon is live on {}. \
@@ -738,32 +740,53 @@ fn run_repair(
 
     let mut actions: Vec<String> = Vec::new();
 
-    // The liveness probe above came back dead, so a still-present socket file
-    // is an orphan and safe to unlink. Confirm it really is a socket first:
-    // `is_daemon_socket_live` also answers "dead" for a regular file (connect
-    // fails with ENOTSOCK), so an operator pointing $DREAMD_SOCK at the wrong
-    // path must not have that file deleted out from under them.
-    if let Some(sock) = socket {
-        if !is_unix_socket(sock) {
-            if sock.exists() {
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        if let Some(home) = dreamd_core::layout::home_dir() {
+            let server_json =
+                dreamd_core::layout::DaemonHome::new(home.join(".agent")).server_json();
+            if dreamd_core::daemon_client::tcp_daemon_is_live(&server_json) {
                 writeln!(
                     err,
-                    "dreamd: error — {} is not a unix socket; refusing to unlink it.",
-                    sock.display()
+                    "dreamd: error — doctor --repair refused: a daemon is live. \
+                     Stop `dreamd watch` first, then re-run."
                 )?;
                 return Ok(false);
             }
-        } else {
-            match std::fs::remove_file(sock) {
-                Ok(()) => actions.push(format!("unlinked orphaned socket {}", sock.display())),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => {
+        }
+    }
+
+    // The liveness probe above came back dead, so a still-present socket file
+    // is an orphan and safe to unlink. Unix only: Windows has no socket file.
+    #[cfg(unix)]
+    {
+        // Confirm it really is a socket first:
+        // `is_daemon_socket_live` also answers "dead" for a regular file (connect
+        // fails with ENOTSOCK), so an operator pointing $DREAMD_SOCK at the wrong
+        // path must not have that file deleted out from under them.
+        if let Some(sock) = socket {
+            if !is_unix_socket(sock) {
+                if sock.exists() {
                     writeln!(
                         err,
-                        "dreamd: error — could not unlink {}: {e}",
+                        "dreamd: error — {} is not a unix socket; refusing to unlink it.",
                         sock.display()
                     )?;
                     return Ok(false);
+                }
+            } else {
+                match std::fs::remove_file(sock) {
+                    Ok(()) => actions.push(format!("unlinked orphaned socket {}", sock.display())),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        writeln!(
+                            err,
+                            "dreamd: error — could not unlink {}: {e}",
+                            sock.display()
+                        )?;
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -842,20 +865,6 @@ fn run_repair(
     // is never empty here.
     writeln!(out, "repair: {}", actions.join("; "))?;
     Ok(true)
-}
-
-#[cfg(not(unix))]
-fn run_repair(
-    _agent_root: &AgentRoot,
-    _socket: Option<&Path>,
-    _out: &mut impl Write,
-    err: &mut impl Write,
-) -> io::Result<bool> {
-    writeln!(
-        err,
-        "dreamd: error — doctor --repair requires the unix daemon runtime"
-    )?;
-    Ok(false)
 }
 
 fn format_elapsed(secs: i64) -> String {

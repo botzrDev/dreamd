@@ -12,8 +12,7 @@
 //! Each call writes `salience-<UTC date>.json` under the observability
 //! directory, overwriting that day's file. `drift` compares today's mean with
 //! the file dated exactly seven UTC days earlier; any other day leaves it null.
-//! The file is a gitignored cache written with [`std::fs::write`] —
-//! the atomic-write helper in `io.rs` is `Unsupported` on Windows.
+//! The file is a gitignored cache written with [`std::fs::write`].
 
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -185,6 +185,8 @@ hammer cannot assert an exact line count without retries.
 - Durable replay protection across restart.
 - Sidecar storage for oversized payloads (not shipped; an over-4 KiB line is
   rejected).
-- Windows-specific durability semantics (`FlushFileBuffers`, ReFS). Windows
-  runs `watch` + learn only; `io::write_atomic` is unsupported there, so the
-  dream cycle and the index do not run. See [`../windows.md`](../windows.md).
+- A power-loss proof of the Windows directory flush. `io::write_atomic` runs
+  the Unix call order there (`FlushFileBuffers` on a directory handle opened
+  for write with `FILE_FLAG_BACKUP_SEMANTICS`). That call is not evidence the
+  directory entry survived power loss. The dream cycle and the Tantivy index
+  run on Windows. See [`../windows.md`](../windows.md).

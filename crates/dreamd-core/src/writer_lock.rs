@@ -273,9 +273,14 @@ fn still_names(path: &Path, file: &File) -> io::Result<bool> {
     }
 }
 
-#[cfg(not(unix))]
-fn still_names(_path: &Path, _file: &File) -> io::Result<bool> {
-    Ok(true)
+#[cfg(windows)]
+fn still_names(path: &Path, file: &File) -> io::Result<bool> {
+    let held = same_file::Handle::from_file(file.try_clone()?)?;
+    match same_file::Handle::from_path(path) {
+        Ok(on_disk) => Ok(held == on_disk),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// The holder's stamp, or `None` if it cannot be read or parsed.

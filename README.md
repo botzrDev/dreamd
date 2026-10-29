@@ -138,7 +138,7 @@ Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/h
 
 **What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. To uninstall dreamd itself, run `dreamd uninstall` — details: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset). That stops running processes and clears caches; removing the per-user *service* entry (the systemd unit, the LaunchAgent, or the Windows Task Scheduler logon task) is the separate `dreamd service uninstall`, whose optional `--purge` deletes the daemon home `~/.agent/` and never a per-project `.agent/` store ([docs/install.md](./docs/install.md)).
 
-**Windows?** Partial. `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`; `POST /api/v1/learn` works. The dream cycle and Tantivy index do not — `io::write_atomic` is still `Unsupported` there. For consolidate-and-search, use WSL2 or a Linux/macOS host. The npm shim downloads prebuilt binaries for Linux x86_64 and macOS (x86_64 / arm64) only, so native Windows means a `cargo` build. Details: [docs/windows.md](./docs/windows.md).
+**Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle, and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. The npm shim downloads prebuilt binaries for Linux x86_64 and macOS (x86_64 / arm64) only, so native Windows means a `cargo` build or a release asset. Details: [docs/windows.md](./docs/windows.md).
 
 **Is everything free forever?** Apache-2.0 core is open. Premium may come later. Self-hosted only (no hosted SaaS).
 
@@ -154,7 +154,7 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 | **v0.1.1** (2026-09-14) | LLM dream cycle, `LESSONS.md` semantic layer (still BM25 × salience, not embeddings), Windows watch+learn, `dreamd service` on Linux / macOS / Windows |
 | **v1.0.0** (2026-10-02) | Stable release of the tree since v0.1.1: `dreamd memory` branches / diff / bisect, provenance ledger + `doctor --provenance`, `dreamd forget`, `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations on HTTP recall. Recall is still BM25 × salience |
 | **v1.0.1** (2026-10-21) | Patch: dependency security fixes (`rustls`, `rustls-webpki`, `webpki-roots`, `quinn-proto`) and printed strings that match the 1.0.0 tree. No recall change |
-| **Next** | Windows atomic writes (dream cycle + index), vector recall, WasTrue benchmark publish |
+| **Next** | vector recall, WasTrue benchmark publish |
 
 ---
 
@@ -185,7 +185,7 @@ Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.m
 
 ## Status
 
-**v1.0.1 is released** (GitHub tag `v1.0.1`, 2026-10-21; npm `dreamd-mcp` 1.0.1 on `latest` and `next`). It is a patch release: dependency security fixes and corrected printed strings, no new commands ([CHANGELOG.md](./CHANGELOG.md)). The MCP Registry entry `io.github.botzrDev/dreamd` is a separate human publish ([RELEASING.md](./RELEASING.md)). Commands marked "new in 1.0.0" above need 1.0.0 or later. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `blame`, `score`, `salience-drift`, `memory`, `forget`, `archive`, `migrate`, `reset workspace`, `vectors`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). `vectors enable` exits 2 on the default build and does not change recall. Linux, macOS, and partial Windows (watch + learn; no dream cycle or index). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
+**v1.0.1 is released** (GitHub tag `v1.0.1`, 2026-10-21; npm `dreamd-mcp` 1.0.1 on `latest` and `next`). It is a patch release: dependency security fixes and corrected printed strings, no new commands ([CHANGELOG.md](./CHANGELOG.md)). The MCP Registry entry `io.github.botzrDev/dreamd` is a separate human publish ([RELEASING.md](./RELEASING.md)). Commands marked "new in 1.0.0" above need 1.0.0 or later. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `blame`, `score`, `salience-drift`, `memory`, `forget`, `archive`, `migrate`, `reset workspace`, `vectors`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). `vectors enable` exits 2 on the default build and does not change recall. Linux, macOS, and Windows (watch, learn, dream cycle, and the Tantivy index over loopback TCP). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
@@ -211,7 +211,7 @@ Tokens are whitespace-separated words. Each chunk is packed whole, stopping befo
 
 ## Platforms
 
-Linux and macOS (full). Windows is watch + learn over loopback TCP; the dream cycle and Tantivy index stay Unix-only until atomic writes land. See [docs/windows.md](./docs/windows.md).
+Linux, macOS, and Windows. Windows serves over loopback TCP. See [docs/windows.md](./docs/windows.md).
 
 ---
 

@@ -19,7 +19,6 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-#[cfg(unix)]
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -180,7 +179,6 @@ struct OpenCycle {
     composed_for: Option<String>,
     /// The identity and `outside_changes` the lines were read under. `None`
     /// when the read did not match `identity` (BZR-1241).
-    #[cfg(unix)]
     read_under: Option<(LogIdentity, u64)>,
 }
 
@@ -192,9 +190,9 @@ pub struct MemoryCoordinator {
     jsonl_path: PathBuf,
     /// Issues this coordinator's event ids; seeded from the log at open.
     minter: IdMinter,
-    /// Device, inode and length of the file `file` writes, as of its last
-    /// write. Compared with the path around every append.
-    #[cfg(unix)]
+    /// Device and inode on Unix, volume serial and file index on Windows, plus
+    /// the length of the file `file` writes, as of its last write. Compared
+    /// with the path around every append.
     identity: LogIdentity,
     /// The project root this coordinator owns. The dream cycle (consolidation +
     /// decay) runs against this root. Distinct from `agent_root_key`, which is
@@ -214,11 +212,10 @@ pub struct MemoryCoordinator {
     /// hand-off awaits `send`, so a full channel backpressures this actor
     /// rather than shedding an update; when the channel is closed we log
     /// `warn!` once and drop the sender.
-    #[cfg(unix)]
     indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     /// Set when the log changed outside this coordinator; the next append
-    /// sends `IndexerMsg::Resync` after its own `Append` (BZR-1236).
-    #[cfg(unix)]
+    /// sends `IndexerMsg::Resync` after its own `Append` (BZR-1236). The send
+    /// itself runs only when an indexer is wired.
     resync_pending: bool,
     /// The dream cycle between `PrepareCycle` and `CommitCycle` (BZR-1241).
     open_cycle: Option<OpenCycle>,
@@ -226,7 +223,6 @@ pub struct MemoryCoordinator {
     next_cycle_id: u64,
     /// How many times the log changed outside this coordinator. A cycle whose
     /// lines were read under an older count re-reads the log at commit.
-    #[cfg(unix)]
     outside_changes: u64,
     /// The log's largest id and this coordinator's append count, shared with
     /// its `Supervisor` for `/health` (BZR-1243).
@@ -247,16 +243,10 @@ impl MemoryCoordinator {
         agent_root: &AgentRoot,
         ledger: Ledger,
         rx: mpsc::Receiver<MemoryCoordinatorMsg>,
-        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
+        indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     ) -> std::io::Result<Self> {
         let path = agent_root.episodic_jsonl();
-        let mut coordinator = Self::open_at(
-            &path,
-            agent_root.project_root(),
-            rx,
-            #[cfg(unix)]
-            indexer_tx,
-        )?;
+        let mut coordinator = Self::open_at(&path, agent_root.project_root(), rx, indexer_tx)?;
         coordinator.ledger = Some(ledger);
         Ok(coordinator)
     }
@@ -267,7 +257,7 @@ impl MemoryCoordinator {
         jsonl_path: &Path,
         agent_root: &Path,
         rx: mpsc::Receiver<MemoryCoordinatorMsg>,
-        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
+        indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     ) -> std::io::Result<Self> {
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -290,8 +280,7 @@ impl MemoryCoordinator {
             appended: 0,
         }));
         let file = open_append(jsonl_path)?;
-        #[cfg(unix)]
-        let identity = LogIdentity::of(&file.metadata()?);
+        let identity = LogIdentity::of(jsonl_path)?;
 
         let agent_root_key =
             std::fs::canonicalize(agent_root).unwrap_or_else(|_| agent_root.to_path_buf());
@@ -301,20 +290,16 @@ impl MemoryCoordinator {
             file,
             jsonl_path: jsonl_path.to_path_buf(),
             minter,
-            #[cfg(unix)]
             identity,
             agent_root: AgentRoot::new(agent_root),
             ledger: None,
             rx,
             agent_root_key,
             idempotency: LruCache::new(cap),
-            #[cfg(unix)]
             indexer_tx,
-            #[cfg(unix)]
             resync_pending: false,
             open_cycle: None,
             next_cycle_id: 0,
-            #[cfg(unix)]
             outside_changes: 0,
             append_mark,
         })
@@ -413,7 +398,6 @@ impl MemoryCoordinator {
         // via `From<EpisodicError>`. LRU insert stays below — only after a
         // durable write succeeds.
         let written = episodic::append(&mut self.file, &learning)?;
-        #[cfg(unix)]
         self.confirm_landed(&learning, written)?;
         // The line is durable. Ids are strictly increasing, so it is the
         // largest. Counted before the indexer can see it, so `/health` never
@@ -449,11 +433,9 @@ impl MemoryCoordinator {
         // open, or a resync), so backpressure is still what keeps live recall
         // whole. A `Closed` channel is still logged once and the sender
         // dropped so we stop retrying.
-        #[cfg(unix)]
         self.route_to_indexer(&event_id, &learning).await;
         // The log changed outside this coordinator: it may hold ids the index
         // has never seen. Queued behind this append's `Append`.
-        #[cfg(unix)]
         if std::mem::take(&mut self.resync_pending) {
             self.send_resync().await;
         }
@@ -490,12 +472,10 @@ impl MemoryCoordinator {
             Err(e) => return Err(CoordinatorError::DreamCycle(e.to_string())),
         }
 
-        #[cfg(unix)]
         self.ensure_live_log()?;
         let bytes = self.read_log()?;
         // Commit reads only the bytes appended after these, so they must be
         // exactly the file `file` writes, up to a line boundary.
-        #[cfg(unix)]
         let read_under = (bytes.len() as u64 == self.identity.len
             && bytes.last().is_none_or(|b| *b == b'\n'))
         .then_some((self.identity, self.outside_changes));
@@ -511,7 +491,6 @@ impl MemoryCoordinator {
             now_sec,
             raw,
             composed_for: selected.as_ref().map(|s| s.cluster_key.clone()),
-            #[cfg(unix)]
             read_under,
         });
         Ok(PreparedCycle {
@@ -588,7 +567,6 @@ impl MemoryCoordinator {
                 // Handle the change the way an append would before reading:
                 // end a foreign final line, raise the minter's floor, and
                 // flag the resync.
-                #[cfg(unix)]
                 self.ensure_live_log()?;
                 let bytes = self.read_log()?;
                 (episodic::raw_lines(&bytes), LessonBodySource::Deterministic)
@@ -626,34 +604,24 @@ impl MemoryCoordinator {
     /// changed any other way in between: an outside change was handled, the
     /// path holds another file or another length, the file is not the one
     /// Prepare read, or Prepare's read did not match what `file` wrote.
-    #[cfg(unix)]
     fn log_since(&self, open: &mut OpenCycle) -> std::io::Result<Option<Vec<RawLine>>> {
-        use std::os::unix::fs::FileExt;
-
         let Some((at, changes)) = open.read_under else {
             return Ok(None);
         };
         if changes != self.outside_changes
             || LogIdentity::at(&self.jsonl_path)? != Some(self.identity)
-            || (self.identity.dev, self.identity.ino) != (at.dev, at.ino)
+            || !self.identity.same_file(&at)
             || self.identity.len < at.len
         {
             return Ok(None);
         }
         let mut tail = vec![0u8; (self.identity.len - at.len) as usize];
-        self.file.read_exact_at(&mut tail, at.len)?;
+        read_exact_at(&self.file, &mut tail, at.len)?;
         // Prepare's bytes end at a line boundary, so the two line lists
         // concatenate to the lines of the whole file.
         let mut raw = std::mem::take(&mut open.raw);
         raw.extend(episodic::raw_lines(&tail));
         Ok(Some(raw))
-    }
-
-    /// Off Unix there is no log identity, so a commit always reads the whole
-    /// log again.
-    #[cfg(not(unix))]
-    fn log_since(&self, _open: &mut OpenCycle) -> std::io::Result<Option<Vec<RawLine>>> {
-        Ok(None)
     }
 
     /// The bytes at `jsonl_path`; an absent file is empty.
@@ -668,16 +636,12 @@ impl MemoryCoordinator {
     /// Point `file` at whatever is at `jsonl_path` now.
     fn reopen(&mut self) -> std::io::Result<()> {
         self.file = open_append(&self.jsonl_path)?;
-        #[cfg(unix)]
-        {
-            self.identity = LogIdentity::of(&self.file.metadata()?);
-        }
+        self.identity = LogIdentity::of(&self.jsonl_path)?;
         Ok(())
     }
 
     /// Before a write: if the file at the path is not the one `file` last
     /// wrote, reopen it.
-    #[cfg(unix)]
     fn ensure_live_log(&mut self) -> Result<(), CoordinatorError> {
         if LogIdentity::at(&self.jsonl_path)? != Some(self.identity) {
             self.reopen_after_external_change()?;
@@ -688,7 +652,6 @@ impl MemoryCoordinator {
     /// After a write of `written` bytes: if the path no longer shows that
     /// write, reopen it, and append `learning` again unless the file now at the
     /// path already holds its id.
-    #[cfg(unix)]
     fn confirm_landed(
         &mut self,
         learning: &AgentLearning,
@@ -709,15 +672,12 @@ impl MemoryCoordinator {
     /// Something other than this coordinator replaced or edited the log.
     /// Reopen it, end a foreign final line that lacks `\n`, and raise the
     /// minter's floor to the file's largest id. Returns the file's records.
-    #[cfg(unix)]
     fn reopen_after_external_change(&mut self) -> Result<Vec<AgentLearning>, CoordinatorError> {
-        use std::os::unix::fs::FileExt;
-
         self.reopen()?;
         let len = self.file.metadata()?.len();
         if len > 0 {
             let mut last = [0u8; 1];
-            self.file.read_exact_at(&mut last, len - 1)?;
+            read_exact_at(&self.file, &mut last, len - 1)?;
             if last[0] != b'\n' {
                 // End the foreign line, so the next append starts its own line
                 // instead of extending that one.
@@ -734,7 +694,7 @@ impl MemoryCoordinator {
             .lock()
             .expect("append mark poisoned")
             .tail_id = records.iter().map(|r| &r.id).max().cloned();
-        self.identity = LogIdentity::of(&self.file.metadata()?);
+        self.identity = LogIdentity::of(&self.jsonl_path)?;
         tracing::warn!(
             path = %self.jsonl_path.display(),
             "episodic log changed outside the coordinator; reopened it"
@@ -764,7 +724,6 @@ impl MemoryCoordinator {
     /// commit still lands on the usual 5 s cadence. A closed channel is terminal
     /// for live routing: warn once, drop the sender, and let the next open's
     /// coverage pass pick the append up.
-    #[cfg(unix)]
     async fn route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
         let Some(tx) = self.indexer_tx.as_ref() else {
             return;
@@ -784,7 +743,6 @@ impl MemoryCoordinator {
     /// Ask the indexer to run its coverage pass, **awaiting** the send for the
     /// same reason [`Self::route_to_indexer`] does. A closed channel follows
     /// that function's rule.
-    #[cfg(unix)]
     async fn send_resync(&mut self) {
         let Some(tx) = self.indexer_tx.as_ref() else {
             return;
@@ -810,32 +768,98 @@ fn open_append(path: &Path) -> std::io::Result<File> {
 }
 
 /// What the coordinator expects at `jsonl_path`. The indexer's tick compares
-/// the same three fields.
-#[cfg(unix)]
+/// the same file and its length.
+///
+/// Unix stores the device and inode. Windows stores the volume serial and file
+/// index from the `file-id` crate (`GetFileInformationByHandle` stays in that
+/// crate). `extra` is the high 64 bits of a 128-bit Windows file id, and 0
+/// everywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LogIdentity {
     pub(crate) dev: u64,
     pub(crate) ino: u64,
+    extra: u64,
     pub(crate) len: u64,
 }
 
-#[cfg(unix)]
 impl LogIdentity {
-    fn of(meta: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            len: meta.len(),
-        }
+    /// The file at `path`, including its length.
+    fn of(path: &Path) -> std::io::Result<Self> {
+        let meta = std::fs::metadata(path)?;
+        Self::from_meta(path, &meta)
     }
 
     /// `None` when nothing is at `path`.
     pub(crate) fn at(path: &Path) -> std::io::Result<Option<Self>> {
         match std::fs::metadata(path) {
-            Ok(meta) => Ok(Some(Self::of(&meta))),
+            Ok(meta) => Ok(Some(Self::from_meta(path, &meta)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
+        }
+    }
+
+    /// Same file, ignoring length.
+    pub(crate) fn same_file(&self, other: &Self) -> bool {
+        self.dev == other.dev && self.ino == other.ino && self.extra == other.extra
+    }
+
+    #[cfg(unix)]
+    fn from_meta(_path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            extra: 0,
+            len: meta.len(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn from_meta(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<Self> {
+        let id = file_id::get_file_id(path).map_err(std::io::Error::other)?;
+        let (dev, ino, extra) = match id {
+            file_id::FileId::LowRes {
+                volume_serial_number,
+                file_index,
+            } => (u64::from(volume_serial_number), file_index, 0),
+            file_id::FileId::HighRes {
+                volume_serial_number,
+                file_id,
+            } => (volume_serial_number, file_id as u64, (file_id >> 64) as u64),
+            file_id::FileId::Inode { .. } => {
+                return Err(std::io::Error::other(
+                    "file-id returned an inode id on Windows",
+                ));
+            }
+        };
+        Ok(Self {
+            dev,
+            ino,
+            extra,
+            len: meta.len(),
+        })
+    }
+}
+
+/// Read `buf.len()` bytes at `offset`. Unix uses `read_exact_at`. Windows uses
+/// `seek_read`, which does not promise a full buffer.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let n = file.seek_read(buf, offset)?;
+        if n == buf.len() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short read of the episodic log",
+            ))
         }
     }
 }
@@ -888,14 +912,7 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let coordinator = MemoryCoordinator::open_at(
-            jsonl,
-            root,
-            rx,
-            #[cfg(unix)]
-            None,
-        )
-        .expect("open coord");
+        let coordinator = MemoryCoordinator::open_at(jsonl, root, rx, None).expect("open coord");
         let handle = tokio::spawn(coordinator.run());
         (tx, handle)
     }
@@ -1127,14 +1144,9 @@ mod tests {
         std::fs::create_dir_all(root.episodic_dir()).expect("create .agent/");
         let lock = WriterLock::acquire(root, WriterKind::Watch).expect("project writer lock");
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let mut c = MemoryCoordinator::open_at(
-            &root.episodic_jsonl(),
-            root.project_root(),
-            rx,
-            #[cfg(unix)]
-            None,
-        )
-        .expect("open coord");
+        let mut c =
+            MemoryCoordinator::open_at(&root.episodic_jsonl(), root.project_root(), rx, None)
+                .expect("open coord");
         c.ledger = Some(lock.ledger().clone());
         (c, tx, lock)
     }
@@ -1962,14 +1974,9 @@ mod tests {
         let root = AgentRoot::new(dir.path());
         seed_eh_store(&root);
         let (_tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(8);
-        let mut c = MemoryCoordinator::open_at(
-            &root.episodic_jsonl(),
-            root.project_root(),
-            rx,
-            #[cfg(unix)]
-            None,
-        )
-        .expect("open coord");
+        let mut c =
+            MemoryCoordinator::open_at(&root.episodic_jsonl(), root.project_root(), rx, None)
+                .expect("open coord");
 
         let result = c.handle_prepare_cycle(CYCLE_NOW_SEC);
         assert!(result.is_err(), "got {result:?}");

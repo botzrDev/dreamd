@@ -186,9 +186,8 @@ impl AppState {
     /// recall reads it). Otherwise `f` runs against the index of `root`'s
     /// [`ProjectRuntime`], opened on a miss by [`Self::with_runtime`].
     ///
-    /// Off Unix a runtime has no index (`TantivyIndexHandle::open` writes
-    /// through `io::write_atomic`, which is `Unsupported` there), so a
-    /// non-primary root is an error.
+    /// A root that is not the pinned boot project opens a [`ProjectRuntime`],
+    /// which holds that project's index.
     pub(crate) fn with_index_handle<T>(
         &self,
         root: &Path,
@@ -200,18 +199,7 @@ impl AppState {
             }
         }
 
-        #[cfg(unix)]
-        {
-            self.with_runtime(root, |runtime| f(runtime.index()))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = f;
-            Err(IndexError::Io(format!(
-                "no index for {} on this target",
-                root.display()
-            )))
-        }
+        self.with_runtime(root, |runtime| f(runtime.index()))
     }
 
     /// The marks of `root`'s coordinator and index, as one wired pair: `primary`

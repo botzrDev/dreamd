@@ -1,14 +1,19 @@
 //! Atomic file writes (DR-104 / WEG-8).
 //!
-//! [`write_atomic`] is the durable replace for the registry, the index
-//! sidecars, `state.json`, the dream cycle's redo WAL, and the one-shot CLI
-//! rewrites. It writes to `<path>.tmp`, `sync_data`s the bytes, renames into
-//! place, then `sync_all`s the parent directory so the rename itself survives
-//! crash. A dream cycle's own outputs are staged and committed by the redo WAL
-//! instead (`crate::stage`, `crate::wal`). On Windows [`write_atomic`] stays
-//! [`io::ErrorKind::Unsupported`] — see `docs/windows.md`. `registry.toml` is
-//! the exception: a temp-file rename used only for that file, and it does not
-//! make the dream cycle durable.
+//! [`write_atomic`] is the durable replace for the index sidecars, `state.json`,
+//! the dream cycle's redo WAL, and the one-shot CLI rewrites. It writes to
+//! `<path>.tmp`, `sync_data`s the bytes, renames into place, then flushes the
+//! parent directory ([`sync_dir`]). A dream cycle's own outputs are staged and
+//! committed by the redo WAL instead (`crate::stage`, `crate::wal`).
+//! `registry.toml` is the exception: [`replace_renaming`] is a temp-file rename
+//! with no parent flush, on every target.
+//!
+//! The parent flush is the Unix call order. It is not a power-loss proof of
+//! the directory entry: on Windows `sync_all` is `FlushFileBuffers`, and a
+//! directory handle is opened for write with `FILE_FLAG_BACKUP_SEMANTICS`.
+//! Tantivy documents that flush as a no-op on local disks. A failure before
+//! the rename leaves `path` untouched. A parent-flush error after the rename
+//! is still returned.
 //!
 //! Single-writer assumption holds: every mutation in v0.1 funnels through the
 //! `MemoryCoordinator` (ARCHITECTURE.md "Load-bearing engineering decisions" §1), so
@@ -23,33 +28,41 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
-/// User-visible reason [`write_atomic`] returns [`io::ErrorKind::Unsupported`]
-/// on Windows. The dream cycle and the Tantivy index both go through that
-/// function, so this sentence is what a Windows caller sees.
-pub const WRITE_ATOMIC_UNSUPPORTED: &str = "\
-atomic file replacement is unavailable on Windows; the dream cycle and the \
-Tantivy index cannot run (see docs/windows.md)";
+/// `FILE_FLAG_BACKUP_SEMANTICS`. Opening a directory on Windows needs it, and
+/// [`File::sync_all`](File::sync_all) is `FlushFileBuffers`, which needs write
+/// access on that handle.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// Flush the directory entry at `dir`.
+///
+/// Unix opens the directory and `sync_all`s it. Windows opens it for read and
+/// write with [`FILE_FLAG_BACKUP_SEMANTICS`] and `sync_all`s that handle. The
+/// Windows probe test calls this function, not a lookalike.
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?;
+        return file.sync_all();
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(dir)?.sync_all()
+    }
+}
 
 /// Replace `path` with `contents` atomically.
 ///
 /// On any failure between `.tmp` creation and `rename` into place, the `.tmp`
 /// file is left on disk and `path` is untouched. The `.tmp` is not what
 /// recovery reads: dream-cycle recovery keys off the WAL and the stage dir.
-///
-/// Returns [`io::ErrorKind::Unsupported`] on Windows; see `docs/windows.md`.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        let _ = (path, contents);
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            WRITE_ATOMIC_UNSUPPORTED,
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        write_atomic_with_hook(path, contents, |_| Ok(()))
-    }
+    write_atomic_with_hook(path, contents, |_| Ok(()))
 }
 
 /// The implementation behind [`write_atomic`].
@@ -59,48 +72,34 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// handed **the `.tmp` path this call actually created**. [`write_atomic`]
 /// passes a no-op; tests inject a failing hook to assert the destination file is
 /// untouched on error and the `.tmp` is left behind.
-///
-/// Returns [`io::ErrorKind::Unsupported`] on Windows (hook ignored), mirroring
-/// [`write_atomic`]. See `docs/windows.md`.
 pub(crate) fn write_atomic_with_hook(
     path: &Path,
     contents: &[u8],
     hook: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        let _ = (path, contents, hook);
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            WRITE_ATOMIC_UNSUPPORTED,
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        let tmp = path.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(contents)?;
-        f.sync_data()?;
-        drop(f);
-        hook(&tmp)?;
-        fs::rename(&tmp, path)?;
-        if let Some(parent) = path.parent() {
-            // `std::fs::rename` does not expose the parent-dir fd, and `PathBuf`
-            // has no `sync_data` — we must re-open the parent and fsync it so
-            // the rename itself is durable across crash. No-op-but-not-error
-            // on macOS; correct on Linux.
-            File::open(parent)?.sync_all()?;
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp)?;
+    f.write_all(contents)?;
+    f.sync_data()?;
+    drop(f);
+    hook(&tmp)?;
+    fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            // `std::fs::rename` does not expose the parent-dir fd. Re-open it
+            // and flush so the call order matches Unix. On Windows this is
+            // [`sync_dir`]: write access plus backup semantics.
+            sync_dir(parent)?;
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// Replace `path` by writing a sibling temp file and renaming it over `path`.
 ///
-/// This is the Windows writer for `registry.toml` only. [`write_atomic`] stays
-/// unsupported there so a dream-cycle replace cannot succeed by accident.
-/// `rename` on Windows replaces an existing file; it is not the POSIX
-/// parent-directory `fsync` that [`write_atomic`] does on Unix.
+/// This is the writer for `registry.toml` only. It does not flush the parent
+/// directory. [`write_atomic`] does. Production registry writes on Unix still
+/// use [`write_atomic`]; Windows registry writes use this function.
 ///
 /// Compiled into Unix test builds so the rename can be checked without a
 /// Windows host. Production Unix registry writes still use [`write_atomic`].
@@ -177,7 +176,6 @@ mod tests {
     use super::*;
     use crate::test_support::{unique_tmpdir, DirGuard};
 
-    #[cfg(not(windows))]
     #[test]
     fn happy_path_replaces_target_and_removes_tmp() {
         let dir = unique_tmpdir("happy");
@@ -193,7 +191,6 @@ mod tests {
         assert!(!tmp.exists(), "stray .tmp left behind after happy path");
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn injected_failure_preserves_original_and_keeps_tmp() {
         let dir = unique_tmpdir("fail");
@@ -275,15 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_unsupported_message_names_the_real_limit() {
-        assert!(
-            !WRITE_ATOMIC_UNSUPPORTED.contains("v0.1"),
-            "{WRITE_ATOMIC_UNSUPPORTED}"
-        );
-        assert!(WRITE_ATOMIC_UNSUPPORTED.contains("docs/windows.md"));
-    }
-
-    #[test]
     fn replace_renaming_replaces_the_target_and_removes_the_temp() {
         let dir = unique_tmpdir("replace-renaming");
         let _g = DirGuard(dir.clone());
@@ -296,12 +284,17 @@ mod tests {
         assert!(!dir.join("registry.tmp").exists());
     }
 
+    /// The production parent open: write access and backup semantics, then
+    /// `sync_all`. A lookalike open would not prove the replace path.
     #[cfg(windows)]
     #[test]
-    fn windows_stub_returns_unsupported() {
-        let err = write_atomic(Path::new("ignored"), b"data")
-            .expect_err("write_atomic must error on Windows");
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(err.to_string(), WRITE_ATOMIC_UNSUPPORTED);
+    fn windows_parent_flush_uses_production_open() {
+        let dir = unique_tmpdir("win-flush");
+        let _g = DirGuard(dir.clone());
+        sync_dir(&dir).expect("production parent flush");
+        let target = dir.join("LESSONS.md");
+        fs::write(&target, b"old\n").unwrap();
+        write_atomic(&target, b"new\n").expect("write_atomic");
+        assert_eq!(fs::read(&target).unwrap(), b"new\n");
     }
 }

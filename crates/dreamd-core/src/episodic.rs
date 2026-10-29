@@ -441,8 +441,7 @@ pub fn append(file: &mut File, learning: &AgentLearning) -> Result<usize, Episod
 /// [`crate::stage::Stage::apply_plan`] stages it, and the cycle's redo WAL
 /// renames it in.
 ///
-/// Returns [`std::io::ErrorKind::Unsupported`] on Windows (v0.1 defers Windows
-/// durable writes; see `docs/windows.md`), matching `io::write_atomic`.
+/// Uses [`crate::io::write_atomic`], including on Windows.
 pub fn rewrite_atomic(path: &Path, contents: &[u8]) -> Result<(), EpisodicError> {
     crate::io::write_atomic(path, contents)?;
     Ok(())

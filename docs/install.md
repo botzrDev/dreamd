@@ -227,10 +227,10 @@ serves its Remote backend over that same loopback TCP when the daemon is up, and
 still exits 2 when it is not. The verbs above still report what Task Scheduler
 thinks, not what the daemon did: a `start` whose `watch` exited can leave
 `status` at `stopped`, and a task Task Scheduler calls `Running` is not proof
-the API is answering — `dreamd status` is the daemon-liveness question. The
-dream cycle and the Tantivy index remain unavailable on Windows because
-`io::write_atomic` is still unsupported there, so for a store you can
-consolidate and search, use WSL2 — see [windows.md](./windows.md). `dreamd init`
+the API is answering — `dreamd status` is the daemon-liveness question. Learn,
+the dream cycle, and the Tantivy index run on that daemon. The directory flush
+is not a power-loss proof. There is no prebuilt `dreamd-mcp` Windows binary —
+see [windows.md](./windows.md). `dreamd init`
 does register the project on Windows, which is what `POST /api/v1/learn` needs;
 a second init, when `.agent/` already exists, still does not register.
 

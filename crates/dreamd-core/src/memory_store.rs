@@ -144,8 +144,8 @@ pub(crate) fn new_index_map() -> SharedIndexMap {
 /// | `Some`       | `None`           | index read        | "no agent root" error  |
 /// | `Some`       | `Some`           | index read        | `send().await`         |
 ///
-/// Off Unix recall is always `{"results":[]}`: `TantivyIndexHandle::open`
-/// writes through [`crate::io::write_atomic`], which is `Unsupported` there.
+/// The pinned index and the index map are Unix fields. Windows `dreamd mcp`
+/// does not construct this store; it proxies to `dreamd watch`.
 pub struct InProcessStore {
     agent_root: Option<AgentRoot>,
     coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,

@@ -1,5 +1,5 @@
-//! One project's writer runtime: the project writer lock, the Tantivy index
-//! (Unix), and the coordinator wired to that index.
+//! One project's writer runtime: the project writer lock, the Tantivy index,
+//! and the coordinator wired to that index.
 //!
 //! The daemon keeps one [`ProjectResourceMap`](crate::server::ProjectResourceMap)
 //! of these for every project other than its boot project, so a project's
@@ -16,19 +16,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::layout::AgentRoot;
-use crate::server::index_map::IndexError;
-#[cfg(unix)]
-use crate::server::index_map::IndexHandle;
+use crate::server::index_map::{IndexError, IndexHandle};
 use crate::server::lifecycle::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::server::project_resource_map::ProjectMapResource;
-#[cfg(unix)]
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 use crate::writer_lock::{WriterKind, WriterLock, WriterLockError};
 
 /// A project's coordinator and index, opened under one writer lock.
 pub struct ProjectRuntime {
     supervisor: Arc<Supervisor>,
-    #[cfg(unix)]
     index: Arc<TantivyIndexHandle>,
     last_used: Instant,
     /// Declared last, dropped last.
@@ -36,7 +32,7 @@ pub struct ProjectRuntime {
 }
 
 impl ProjectRuntime {
-    /// acquire → (unix) open index → start coordinator wired to that index.
+    /// acquire → open index → start coordinator wired to that index.
     ///
     /// A refused lock is [`IndexError::WriterLock`] carrying the
     /// [`WriterLockError`] `Display`. A failed recovery keeps its
@@ -46,7 +42,6 @@ impl ProjectRuntime {
             WriterLockError::Recover(e) => IndexError::Wal(e.to_string()),
             other => IndexError::WriterLock(other.to_string()),
         })?;
-        #[cfg(unix)]
         let index = Arc::new(TantivyIndexHandle::open(
             agent_root,
             &lock,
@@ -56,14 +51,11 @@ impl ProjectRuntime {
             agent_root,
             &lock,
             COORDINATOR_CHANNEL_CAPACITY,
-            // `Supervisor::start`'s indexer parameter is `#[cfg(unix)]`.
-            #[cfg(unix)]
             Some(index.sender()),
         )
         .map_err(|e| IndexError::Supervisor(e.to_string()))?;
         Ok(Self {
             supervisor: Arc::new(supervisor),
-            #[cfg(unix)]
             index,
             last_used: Instant::now(),
             lock,
@@ -76,7 +68,6 @@ impl ProjectRuntime {
     }
 
     /// The project's index; the coordinator's appends go to its indexer.
-    #[cfg(unix)]
     pub fn index(&self) -> &Arc<TantivyIndexHandle> {
         &self.index
     }
@@ -90,11 +81,7 @@ impl ProjectRuntime {
     /// The order is `run_watch`'s drain: the coordinator's queued appends reach
     /// the indexer before the final commit.
     pub async fn shutdown(self) {
-        #[cfg(unix)]
-        let index = Some(self.index);
-        #[cfg(not(unix))]
-        let index = None;
-        crate::server::watch::drain_daemon(self.supervisor, index).await;
+        crate::server::watch::drain_daemon(self.supervisor, Some(self.index)).await;
         drop(self.lock);
     }
 }
@@ -111,13 +98,11 @@ impl ProjectMapResource for ProjectRuntime {
     fn release(self) -> Result<(), IndexError> {
         let Self {
             supervisor,
-            #[cfg(unix)]
             index,
             lock,
             ..
         } = self;
         drop(supervisor);
-        #[cfg(unix)]
         if let Ok(index) = Arc::try_unwrap(index) {
             index.close()?;
         }

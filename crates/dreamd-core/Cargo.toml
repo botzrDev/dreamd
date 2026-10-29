@@ -34,7 +34,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # (`tokio::time::interval` + `MissedTickBehavior::Skip`). Multi-threaded
 # runtime still lives in the consuming CLI crate.
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros", "time", "net", "io-util", "signal"] }
-dreamd-protocol = { path = "../dreamd-protocol", version = "1.0.1" }
+dreamd-protocol = { path = "../dreamd-protocol", version = "1.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "1"
@@ -198,6 +198,10 @@ insta = { workspace = true }
 # Cargo unifies it into the test build without widening the shipped binary's
 # nix surface. Unix-only; Windows lifecycle is WEG-135.
 nix = { version = "0.29", default-features = false, features = ["signal"] }
+
+[target."cfg(windows)".dependencies]
+file-id = "0.2.3"
+same-file = "1.0.6"
 
 # WEG-21 integration test spawns two helper processes and asserts the first
 # binds the socket as writer-process while the second connects as client. The

@@ -18,7 +18,6 @@ use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
 use crate::index::{check_manifest_version, ManifestCheckOutcome, INDEX_MANIFEST_FILENAME};
 use crate::layout::AgentRoot;
 use crate::server::index_freshness::AppendMark;
-#[cfg(unix)]
 use crate::server::tantivy_handle::IndexerMsg;
 use crate::writer_lock::WriterLock;
 
@@ -93,15 +92,9 @@ impl Supervisor {
     /// binary aborts startup via [`ServerError::ManifestCheck`]; older or
     /// absent manifests log a `tracing::warn!` and proceed.
     ///
-    /// `indexer_tx` is a `#[cfg(unix)]` **parameter**, not an `Option` that is
-    /// always `None` off Unix (AILAB-192). It has to be: the value is threaded
-    /// straight into `MemoryCoordinator::open`, whose own `indexer_tx` parameter
-    /// has been `#[cfg(unix)]` since AILAB-174 because `TantivyIndexHandle` has
-    /// no bootable Windows path (`open` → `write_manifest_if_absent` →
-    /// `io::write_atomic` → `Unsupported`). A portable two-argument shape here
-    /// would either force the coordinator's field open on every target or make
-    /// this signature accept a channel it cannot forward. Same pattern, same
-    /// reason, as
+    /// `indexer_tx` is `Some` when this process opened a Tantivy handle for the
+    /// project. `None` is append-only (tests, and a caller that has not opened
+    /// an index). The channel is forwarded into
     /// [`MemoryCoordinator::open`](crate::coordinator::MemoryCoordinator::open).
     ///
     /// `lock` must cover `agent_root`. The coordinator task keeps a clone of it,
@@ -111,7 +104,7 @@ impl Supervisor {
         agent_root: &AgentRoot,
         lock: &WriterLock,
         channel_capacity: usize,
-        #[cfg(unix)] indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
+        indexer_tx: Option<mpsc::Sender<IndexerMsg>>,
     ) -> Result<Self, ServerError> {
         if !lock.covers(agent_root) {
             return Err(ServerError::WriterLock(format!(
@@ -138,16 +131,9 @@ impl Supervisor {
         }
 
         let (tx, rx) = mpsc::channel::<MemoryCoordinatorMsg>(channel_capacity);
-        let coordinator = MemoryCoordinator::open(
-            agent_root,
-            lock.ledger().clone(),
-            rx,
-            // Forwarded under the same gate the parameter carries, so the arity
-            // matches `MemoryCoordinator::open` on both targets (AILAB-192).
-            #[cfg(unix)]
-            indexer_tx,
-        )
-        .map_err(ServerError::Coordinator)?;
+        let coordinator =
+            MemoryCoordinator::open(agent_root, lock.ledger().clone(), rx, indexer_tx)
+                .map_err(ServerError::Coordinator)?;
         let append_mark = coordinator.append_mark_handle();
         let lock = lock.clone();
         let handle = tokio::spawn(async move {

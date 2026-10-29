@@ -27,7 +27,7 @@ Cell legend: ✓ = strength for that dimension; — = not offered (or not yet fo
 Pulled from [AGENTS.md](../AGENTS.md) scope — not a marketing softener:
 
 - **No vector embeddings.** Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer. Embedding / hybrid recall is not shipped; the optional `vectors` build feature only downloads a model and does not rank ([vectors.md](./vectors.md)).
-- **Windows is watch + learn only.** `io::write_atomic` is still `Unsupported`, so the dream cycle and Tantivy index do not run there. Full consolidate-and-search is Linux / macOS / WSL2. See [windows.md](./windows.md).
+- **Windows runs learn, the dream cycle, and the Tantivy index** over loopback TCP. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt `dreamd-mcp` Windows binary. See [windows.md](./windows.md).
 - **No auto dream cycle.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
 - **Provenance is unsigned.** The ledger records which event fed which index document and lesson, and `dreamd doctor --provenance` re-checks it, but nothing is signed, `source_harness` is caller-asserted, and `dreamd forget --proof` writes a receipt, not a cryptographic proof. See [provenance.md](./provenance.md).
 

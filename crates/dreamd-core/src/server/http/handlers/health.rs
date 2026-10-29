@@ -21,7 +21,7 @@ use super::super::state::AppState;
 /// normal for up to one commit cadence. A change to the log made outside the
 /// daemon shows in `dreamd doctor`, not here.
 ///
-/// Off Unix there is no index, so health compares the JSONL tail with
+/// Off Unix, health compares the JSONL tail with
 /// `index_progress.json` on disk through
 /// [`assess_index_freshness`](crate::server::assess_index_freshness).
 ///

@@ -21,7 +21,6 @@ use tantivy::{doc, IndexReader, IndexWriter, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-#[cfg(unix)]
 use crate::coordinator::LogIdentity;
 use crate::index::{Layer, SchemaFields};
 use crate::io::write_atomic;
@@ -312,8 +311,7 @@ pub(crate) struct IndexerState {
     /// Manual-reload reader over the writer's index, for the coverage pass.
     pub(crate) coverage: IndexReader,
     pub(crate) agent_root: AgentRoot,
-    /// The log's device, inode and length as of the last tick or coverage pass.
-    #[cfg(unix)]
+    /// The log's identity and length as of the last tick or coverage pass.
     pub(crate) log: Option<LogIdentity>,
 }
 
@@ -401,25 +399,20 @@ pub(crate) async fn run_indexer(
             _ = interval.tick() => {
                 // A log replaced by rename, or one that shrank, can hold ids
                 // the index has never seen and lack ids it has.
-                #[cfg(unix)]
-                {
-                    let now = LogIdentity::at(&state.agent_root.episodic_jsonl()).ok().flatten();
-                    let changed = match (state.log, now) {
-                        (Some(was), Some(now)) => {
-                            (was.dev, was.ino) != (now.dev, now.ino) || now.len < was.len
-                        }
-                        (None, None) => false,
-                        _ => true,
-                    };
-                    if changed {
-                        // On success the pass records the identity it read;
-                        // on failure the old one stays, so the next tick retries.
-                        if let Err(e) = resync(&mut writer, &fields, &mut state) {
-                            tracing::warn!(error = ?e, "indexer resync after a log change failed");
-                        }
-                    } else {
-                        state.log = now;
+                let now = LogIdentity::at(&state.agent_root.episodic_jsonl()).ok().flatten();
+                let changed = match (state.log, now) {
+                    (Some(was), Some(now)) => !was.same_file(&now) || now.len < was.len,
+                    (None, None) => false,
+                    _ => true,
+                };
+                if changed {
+                    // On success the pass records the identity it read;
+                    // on failure the old one stays, so the next tick retries.
+                    if let Err(e) = resync(&mut writer, &fields, &mut state) {
+                        tracing::warn!(error = ?e, "indexer resync after a log change failed");
                     }
+                } else {
+                    state.log = now;
                 }
                 if state.persist.has_pending() {
                     if let Err(e) = state.persist.commit(&mut writer) {
@@ -445,16 +438,12 @@ fn resync(
     let jsonl = state.agent_root.episodic_jsonl();
     // Stat before the read: a change after this point is either in the read or
     // seen by the next tick.
-    #[cfg(unix)]
     let seen = LogIdentity::at(&jsonl).map_err(|e| IndexError::Io(e.to_string()))?;
     let events = read_jsonl_events(&jsonl)?;
     let report = cover(writer, fields, &state.coverage, &events)?;
     state.persist.cover_all(&events);
     state.persist.commit(writer)?;
-    #[cfg(unix)]
-    {
-        state.log = seen;
-    }
+    state.log = seen;
     Ok(report)
 }
 

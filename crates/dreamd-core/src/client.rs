@@ -7,35 +7,9 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use http_body_util::Full;
 
-/// Request header that forces the daemon's cycle into deterministic mode
-/// (AILAB-204). Sent as the literal `"1"` and only when `--no-llm` is set —
-/// omitted otherwise, so a daemon built before this ticket sees no new header
-/// at all rather than one it must know to ignore.
-pub const NO_LLM_HEADER: &str = "x-dreamd-no-llm";
-
-/// The only value [`NO_LLM_HEADER`] is honored at. Case-sensitive: anything
-/// else (`"true"`, `"yes"`, `"0"`) is treated as absent, so a client that
-/// guesses the wire format gets the safe default rather than a silent behavior
-/// change.
-pub const NO_LLM_HEADER_VALUE: &str = "1";
-
-/// Request header carrying per-call consent to include `.agent/personal/` in the
-/// dream-cycle composition prompt (AILAB-199).
-///
-/// Same wire shape as [`NO_LLM_HEADER`] for the same reason: `dreamd dream
-/// --share-personal` **proxies** to the daemon rather than skipping it — the
-/// daemon is the single writer of this project's JSONL — so the consent has to
-/// travel as a header. Omitted entirely when the flag is off, so a daemon built
-/// before this ticket sees an unchanged request rather than one it must know to
-/// ignore, and so the absence of consent is the absence of a header rather than
-/// a value that could be misread.
-pub const SHARE_PERSONAL_HEADER: &str = "x-dreamd-share-personal";
-
-/// The only value [`SHARE_PERSONAL_HEADER`] is honored at. Case-sensitive, and
-/// deliberately the same literal as [`NO_LLM_HEADER_VALUE`]: anything else
-/// (`"true"`, `"yes"`, `"0"`) is treated as absent, so a client that guesses the
-/// wire format gets *no disclosure* rather than an accidental one.
-pub const SHARE_PERSONAL_HEADER_VALUE: &str = "1";
+pub use crate::dream_cycle::{
+    NO_LLM_HEADER, NO_LLM_HEADER_VALUE, SHARE_PERSONAL_HEADER, SHARE_PERSONAL_HEADER_VALUE,
+};
 
 /// Outcome of attempting to proxy a dream cycle to a daemon. All four are
 /// "the proxy made a decision"; only `Ran` and `InProgress` mean the daemon

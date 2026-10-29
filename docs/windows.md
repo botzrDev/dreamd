@@ -10,27 +10,34 @@ archive — under `.agent/.dreamd/stage/` and renames them in once its redo WAL
 commits; the Tantivy index manifest and the other sidecars go through
 `io::write_atomic`. That is what those writers provide on Linux and macOS.
 
-**Windows durable writes are not in 1.0.0.** The atomic-write path and the
-dream cycle's stage writer both return
-[`std::io::ErrorKind::Unsupported`] on Windows rather than silently
-falling back to a non-atomic write that could corrupt the store on a crash.
-The error says atomic file replacement is unavailable, and names the dream
-cycle and the Tantivy index.
+**Windows replaces follow the Unix call order.** [`io::write_atomic`] writes a
+temp file, flushes those bytes, renames, then flushes the parent directory.
+On Windows that parent open is write access plus `FILE_FLAG_BACKUP_SEMANTICS`,
+then `FlushFileBuffers`. A failure before the rename leaves the destination
+untouched. The directory flush is the same call Unix makes. It is not a
+power-loss proof: Tantivy documents a directory-handle flush as a no-op on
+local disks and an error on virtual drives. A flush error fails that replace.
+Learn does not use this path, so it still runs on every volume, including a
+ReFS Dev Drive.
 
 `registry.toml` is the exception. `dreamd init` registers a project on Windows
 by locking `registry.toml.lock` with `std::fs::File::lock` and replacing
 `registry.toml` through a temporary file and `rename`. That writer is not
 `io::write_atomic`, the file is not chmod `0600`, and a successful registration
-does not make the dream cycle or the index available. A second `dreamd init`,
+does not flush the parent directory. A second `dreamd init`,
 when `.agent/` already exists, still leaves the store as-is and does not
 register the project. Learn answers `404` (`agent root not registered`) until
 the root is in the registry.
 
 Native Windows was out of scope for v0.1. v0.1.1 added compile, `dreamd service
 install` (logon task + `auth.json`), and `dreamd watch` over loopback TCP with
-a bearer token. `io::write_atomic` is still `ErrorKind::Unsupported`, so the
-dream cycle and the Tantivy index do not work there. For a store you can
-consolidate and search, use WSL2 or a Linux/macOS host.
+a bearer token. `io::write_atomic` runs there. The dream cycle runs there: the
+log's identity is a volume serial and a file index, so a model lesson is kept
+when the log did not change during the call. `dreamd watch` opens the Tantivy
+index and live appends are indexed. Tantivy does not delete a segment file
+that is still mapped; the file stays in the index directory until that mapping
+is gone. `dreamd doctor --repair` removes the directory and rebuilds it from
+the log, and it refuses while `dreamd watch` is live.
 
 **There is no prebuilt Windows binary on the npm path.** The `dreamd-mcp` shim
 ships Linux x86_64 and macOS binaries only; on native Windows
@@ -75,23 +82,24 @@ AILAB-192 gives `dreamd watch` a Windows topology. It:
    Unix peer-UID verdict and that layer is not mounted here.
 5. **Shuts down on Ctrl-C.** There is no `SIGTERM` on Windows, so Ctrl-C is the
    whole signal story; the drain then runs exactly as it does on Unix.
-6. **Never opens the Tantivy index.** `TantivyIndexHandle::open` writes its
-   first `index_manifest.json` through `io::write_atomic`, so a Windows watch
-   that opened the index could not boot at all.
+6. **Opens the Tantivy index** and wires it to the coordinator, the same
+   hand-off as the Unix daemon. A segment file that is still mapped is left
+   in the index directory until the mapping goes. `dreamd doctor --repair`
+   deletes that directory after the daemon has stopped and rebuilds the index
+   from the log.
 
-That last point is what you feel in practice. `POST /api/v1/learn` works — the
-JSONL append never touches `write_atomic` — so learnings do land durably in
-`.agent/episodic/AGENT_LEARNINGS.jsonl`. `POST /api/v1/dream` stays mounted and
-returns **500** naming the reason (`dream cycle is unavailable on this platform:
-atomic file replacement is unsupported`), because consolidation, decay, the
-`LESSONS.md` rewrite and the recurrence sidecar are all staged and renamed into
-place, and the stage writer is `Unsupported` there like `write_atomic`.
-`GET /api/v1/recall` opens the index and returns **500** when that open fails.
-`GET /api/v1/health` does not open Tantivy. It compares the JSONL tail to
-`index_progress.json` and returns **200** when that read succeeds. `stale` is
-true when the log has events past the watermark, including when the watermark
-file is absent and the log is not empty. A valid token gets you past the auth
-layer. A `200` from health is not a promise that recall works.
+`POST /api/v1/learn` appends to `.agent/episodic/AGENT_LEARNINGS.jsonl`.
+`POST /api/v1/dream` and `dreamd dream` run the cycle. A model lesson is kept
+when the log's file identity did not change during the model call. `dreamd
+archive`, `dreamd forget`, and `dreamd reset` replace files through
+`write_atomic`. `registry.toml` stays on the temp-file rename with no parent
+flush. `GET /api/v1/recall` reads the index `watch` opened.
+`GET /api/v1/health` does not read the in-memory marks the Unix route uses. It
+compares the JSONL tail to `index_progress.json` and returns **200** when that
+read succeeds. `stale` is true when the log has events past the watermark,
+including when the watermark file is absent and the log is not empty. A valid
+token gets you past the auth layer. A `200` from health is the watermark
+comparison, not the Unix mark pair.
 
 See [http-api.md](./http-api.md) for the transport tables, the exact middleware
 verdicts, and a PowerShell smoke test that reads the port and the token back out
@@ -161,7 +169,5 @@ daemon-liveness question; `dreamd service status` is the supervisor one.
 
 ## Still open
 
-`io::write_atomic` is still `ErrorKind::Unsupported` on Windows, and that is the
-one blocker left for parity: it is why the dream cycle, `LESSONS.md`, the
-recurrence sidecar and the Tantivy index are unavailable there. It is not in
-1.0.0; it is listed as *Windows atomic writes* in [ROADMAP.md](../ROADMAP.md).
+There is no prebuilt `dreamd-mcp` Windows binary. `/health` on Windows still
+reads the on-disk watermark. The directory flush is not a power-loss proof.

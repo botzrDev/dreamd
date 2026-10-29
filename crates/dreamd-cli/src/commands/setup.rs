@@ -1041,7 +1041,6 @@ fn append_in_process(project_root: &Path, stored: &str) -> Result<String, String
             &root,
             &lock,
             dreamd_core::server::COORDINATOR_CHANNEL_CAPACITY,
-            #[cfg(unix)]
             None,
         )
         .map_err(|e| e.to_string())?;

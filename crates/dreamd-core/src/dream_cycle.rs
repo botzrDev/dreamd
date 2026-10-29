@@ -28,6 +28,20 @@
 //! atomic renames (WEG-271).
 
 use std::path::{Path, PathBuf};
+
+/// Request header that forces the daemon's cycle into deterministic mode
+/// (AILAB-204). Sent as the literal `"1"` and only when `--no-llm` is set.
+pub const NO_LLM_HEADER: &str = "x-dreamd-no-llm";
+
+/// The only value [`NO_LLM_HEADER`] is honored at. Case-sensitive.
+pub const NO_LLM_HEADER_VALUE: &str = "1";
+
+/// Request header carrying per-call consent to include `.agent/personal/` in
+/// the dream-cycle composition prompt (AILAB-199).
+pub const SHARE_PERSONAL_HEADER: &str = "x-dreamd-share-personal";
+
+/// The only value [`SHARE_PERSONAL_HEADER`] is honored at. Case-sensitive.
+pub const SHARE_PERSONAL_HEADER_VALUE: &str = "1";
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::autobiography::{self, AutobiographyOutcome};
@@ -53,7 +67,6 @@ pub enum DreamCycleError {
     Provenance(#[from] ProvenanceError),
     #[error("snapshot: {0}")]
     Snapshot(#[from] SnapshotError),
-    #[cfg(unix)]
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
     #[error("dream cycle already in progress")]
@@ -75,14 +88,10 @@ pub enum DreamCycleError {
 #[derive(Debug)]
 pub struct DreamCycleResult {
     pub decay: DecayResult,
-    #[cfg(unix)]
     pub autobiography: Option<AutobiographyOutcome>,
-    #[cfg(not(unix))]
-    pub autobiography: Option<()>,
 }
 
 /// How post-filesystem index updates reach the Tantivy indexer task.
-#[cfg(unix)]
 pub enum IndexBackend {
     /// Reuse the daemon's live indexer channel (HTTP path).
     Sender(tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>),
@@ -101,7 +110,6 @@ pub struct PostPhaseOptions<'a> {
     pub decay_result: &'a DecayResult,
     pub dirty_at_cycle_start: &'a [PathBuf],
     pub commit_autobiography: bool,
-    #[cfg(unix)]
     pub index: IndexBackend,
 }
 
@@ -566,7 +574,6 @@ fn compose_from_completion(selected: &SelectedLesson, text: &str) -> LessonBodyS
 }
 
 /// Index + autobiography phases. Async because Tantivy ops run on the indexer task.
-#[cfg(unix)]
 pub async fn run_post_phases(
     opts: PostPhaseOptions<'_>,
 ) -> Result<Option<AutobiographyOutcome>, DreamCycleError> {
@@ -588,12 +595,6 @@ pub async fn run_post_phases(
     }
 }
 
-#[cfg(not(unix))]
-pub async fn run_post_phases(opts: PostPhaseOptions<'_>) -> Result<Option<()>, DreamCycleError> {
-    let _ = opts;
-    Ok(None)
-}
-
 /// Inputs to [`run_guarded_cycle`] that do not vary by entry point.
 pub struct GuardedCycleOptions<'a> {
     pub agent_root: &'a AgentRoot,
@@ -603,7 +604,6 @@ pub struct GuardedCycleOptions<'a> {
     /// `false` on `--no-commit`: skips the dirty-tree walk and the autobiography
     /// commit.
     pub commit_autobiography: bool,
-    #[cfg(unix)]
     pub index: IndexBackend,
 }
 
@@ -656,7 +656,6 @@ where
         decay_result: &decay,
         dirty_at_cycle_start: &dirty_at_cycle_start,
         commit_autobiography: opts.commit_autobiography,
-        #[cfg(unix)]
         index: opts.index,
     })
     .await?;
@@ -707,7 +706,6 @@ pub fn run_in_process(
             project_root,
             now_sec,
             commit_autobiography: !no_commit,
-            #[cfg(unix)]
             index: IndexBackend::FreshHandle(lock.clone()),
         },
         |now_sec, cycle_date| async move {
@@ -842,7 +840,6 @@ async fn preview_phases(
     })
 }
 
-#[cfg(unix)]
 async fn run_index_phases(
     agent_root: &AgentRoot,
     decay_result: &DecayResult,
@@ -886,7 +883,6 @@ async fn run_index_phases(
 /// LESSONS.md.
 ///
 /// [`TantivyIndexHandle::index_semantic_lessons`]: crate::server::TantivyIndexHandle::index_semantic_lessons
-#[cfg(unix)]
 async fn index_semantic_lessons(
     agent_root: &AgentRoot,
     sender: &tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>,
@@ -907,7 +903,6 @@ async fn index_semantic_lessons(
     Ok(())
 }
 
-#[cfg(unix)]
 async fn prune_decayed_events(
     sender: &tokio::sync::mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>,
     event_ids: Vec<dreamd_protocol::EventId>,
@@ -1212,7 +1207,6 @@ mod tests {
                 project_root: dir.path(),
                 now_sec: NOW_SEC,
                 commit_autobiography: false,
-                #[cfg(unix)]
                 index: IndexBackend::Skip,
             },
             |now_sec, cycle_date| {
@@ -1245,7 +1239,6 @@ mod tests {
                     project_root: root.project_root(),
                     now_sec: NOW_SEC,
                     commit_autobiography: false,
-                    #[cfg(unix)]
                     index: IndexBackend::Skip,
                 },
                 |_, _| async { panic!("dispatch must not run while a cycle is in progress") },

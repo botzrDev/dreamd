@@ -44,8 +44,10 @@
 //!     the `--bind` address; non-loopback only with `--insecure`, AILAB-197),
 //!     the port is published in `~/.agent/server.json`, [`serve_tcp`] serves the
 //!     same router behind the AILAB-203 bearer token, and the wait is `ctrl_c`
-//!     alone. That arm opens no Tantivy index — `io::write_atomic` is
-//!     `Unsupported` off Unix, so `TantivyIndexHandle::open` cannot run there.
+//!     alone. That arm opens the Tantivy index and pins it, the same hand-off
+//!     as the Unix arm. `io::write_atomic` runs on Windows; the directory flush
+//!     is not a power-loss proof. A mapped segment file stays in the index
+//!     directory until the mapping is dropped.
 //!
 //! (`uds` / `uds_server` are deliberately named without intra-doc links: the
 //! modules do not exist on Windows, and a link to a `cfg`-absent item resolves

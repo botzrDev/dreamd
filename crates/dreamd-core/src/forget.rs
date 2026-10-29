@@ -108,9 +108,6 @@ impl From<DreamCycleError> for ForgetError {
 /// replaces the file by rename.
 ///
 /// `ledger` is the project writer lock's appender (`WriterLock::ledger`).
-///
-/// Returns [`io::ErrorKind::Unsupported`] (wrapped) on Windows, inherited from
-/// the stage writer.
 pub fn cascade(
     agent_root: &AgentRoot,
     ledger: &Ledger,

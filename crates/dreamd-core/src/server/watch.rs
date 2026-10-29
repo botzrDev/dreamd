@@ -21,8 +21,9 @@
 //!  │   └─ serve_uds ──► HTTP router (peer UID + X-Agent-Root middleware)
 //!  └─ #[cfg(not(unix))] run_watch_loopback
 //!      ├─ WriterLock (boot project, held until exit)
-//!      ├─ Supervisor (boot project) ──► MemoryCoordinator actor (no indexer_tx)
-//!      ├─ AppState.runtimes ──► lazy per-project lock + Supervisor (no index)
+//!      ├─ Supervisor (boot project) ──► MemoryCoordinator actor
+//!      │     └─ indexer_tx ──► TantivyIndexHandle (pinned "primary")
+//!      ├─ AppState.runtimes ──► lazy per-project lock + index + Supervisor
 //!      └─ serve_tcp ──► HTTP router (bearer + X-Agent-Root middleware)
 //! ```
 //!
@@ -38,14 +39,9 @@
 //! anything else. Unix has no TCP listener, so either option there is a usage
 //! error ([`WatchError::TcpFlagsOnUnix`]), not a silent no-op.
 //!
-//! The **primary handle** is handed off at boot so the coordinator's live appends
-//! and recall/dream read the same Tantivy index (one `IndexWriter` per dir). The
-//! loopback arm has no primary and no index at all: [`TantivyIndexHandle::open`] is never
-//! called there, because it writes the index manifest through
-//! [`io::write_atomic`](crate::io::write_atomic), which is
-//! `ErrorKind::Unsupported` off Unix — a watch that opened the index could not boot.
-//! JSONL appends are still durable there; index-backed recall and the dream cycle
-//! are not available (see `docs/windows.md`).
+//! The **primary handle** is handed off at boot on both transports so the
+//! coordinator's live appends and recall/dream read the same Tantivy index
+//! (one `IndexWriter` per dir).
 //!
 //! ## Signal handling
 //!
@@ -53,8 +49,8 @@
 //! `~/.agent/dreamd.sock`. The loopback arm blocks on `ctrl_c` alone —
 //! `tokio::signal::unix` and its `SignalKind` do not exist off Unix, so there is
 //! no SIGTERM to wait for — and unlinks `~/.agent/server.json` instead of the
-//! socket. Both then drain the boot coordinator (and, on Unix, the primary
-//! index), bounded by [`DRAIN_TIMEOUT`] — see [`drain_daemon`]. Lazily-opened
+//! socket. Both then drain the boot coordinator and the primary index, bounded
+//! by [`DRAIN_TIMEOUT`] — see [`drain_daemon`]. Lazily-opened
 //! per-project coordinators and index handles are not touched on either path;
 //! eviction reaps them on drop (AILAB-306).
 
@@ -76,9 +72,7 @@ use crate::server::lifecycle::{ServerError, Supervisor, COORDINATOR_CHANNEL_CAPA
 // `TantivyIndexHandle` is cfg-free here because it is still the `drain_daemon`
 // type parameter on every target; only `DEFAULT_COMMIT_CADENCE` and the `open`
 // call that consumes it are Unix-only.
-use crate::server::tantivy_handle::TantivyIndexHandle;
-#[cfg(unix)]
-use crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE;
+use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 // `uds_server` itself is `#[cfg(unix)]`; both items name a `UnixListener`.
 #[cfg(unix)]
 use crate::server::uds_server::{bind_api_socket, serve_uds};
@@ -305,20 +299,15 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 ///
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard → project
 /// writer lock (which runs WAL recovery) → resolve the daemon home → require
-/// `~/.agent/auth.json` → boot Supervisor (no indexer) → compose AppState → [`bind_listen`] (`127.0.0.1:0`
+/// `~/.agent/auth.json` → open the index → boot Supervisor wired to it →
+/// compose AppState → [`bind_listen`] (`127.0.0.1:0`
 /// unless `listen` says otherwise, AILAB-197) → publish `server.json` → serve
 /// until Ctrl-C → unlink `server.json` → drain.
 ///
-/// Two departures from [`run_watch_uds`] are load-bearing, not incidental:
+/// The index is the same hand-off as [`run_watch_uds`]. A mapped segment file
+/// stays in the index directory until the mapping is dropped. `AppState` gets
+/// that handle as its pinned primary, and the shutdown drain commits it.
 ///
-/// * **No Tantivy.** [`TantivyIndexHandle::open`] is never called here. It writes
-///   the index manifest through [`io::write_atomic`](crate::io::write_atomic), which is
-///   `ErrorKind::Unsupported` off Unix, so opening the index would fail the boot
-///   outright rather than degrade it. `AppState` therefore gets no pinned
-///   primary, the coordinator is started with no `indexer_tx`, and the
-///   shutdown drain gets `None` for the index. JSONL
-///   appends are durable; index-backed recall and the dream cycle are not
-///   available on this target (`docs/windows.md`).
 /// * **`auth.json` is read, never written.** The bearer token is minted by
 ///   `dreamd service install` and rotated by that command's `--force`; a watch
 ///   that minted one would silently invalidate every client holding the old
@@ -391,32 +380,35 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    caches, logs, mints or rewrites it.
     read_auth_token(&daemon_home.auth_json()).map_err(|e| WatchError::AuthToken(e.to_string()))?;
 
-    // 5. Boot the project coordinator with no indexer. `Supervisor::start`'s
-    //    third parameter is `#[cfg(unix)]`, so off Unix the call takes two
-    //    arguments; under `cfg(test)` on Unix it takes three and is handed
-    //    `None`, which is the same "no indexer" wiring this target ships. Either
-    //    way no Tantivy handle is opened anywhere on this path.
+    // 5. Open the project index and wire it as the coordinator's live indexer,
+    //    the same hand-off as the Unix arm. Recall reads this handle.
+    let primary_handle = Arc::new(TantivyIndexHandle::open(
+        &agent_root,
+        &writer_lock,
+        DEFAULT_COMMIT_CADENCE,
+    )?);
     let supervisor = Supervisor::start(
         &agent_root,
         &writer_lock,
         COORDINATOR_CHANNEL_CAPACITY,
-        #[cfg(unix)]
-        None,
+        Some(primary_handle.sender()),
     )?;
 
     // 6. Compose AppState. `daemon_uid` is 0 and never read: `peer_uid_middleware`
     //    is not mounted on this router (TCP carries no peer credential), and
     //    `nix` is a `cfg(unix)` dependency, so `Uid::current()` does not even
-    //    exist here to ask. A lazily opened project runtime has no index on
-    //    this target, and there is no `with_primary`.
-    //    `with_auth_json` is mandatory rather than optional: `auth_json: None`
-    //    is fail-closed, and a router built without it 401s every request.
+    //    exist here to ask. `with_auth_json` is mandatory: `auth_json: None` is
+    //    fail-closed, and a router built without it 401s every request.
     let state = AppState::new(daemon_home.registry_toml(), supervisor, config, 0)
-        .with_auth_json(daemon_home.auth_json());
+        .with_auth_json(daemon_home.auth_json())
+        .with_primary(
+            agent_root.project_root().to_path_buf(),
+            Arc::clone(&primary_handle),
+        );
     // Retain the shutdown handle BEFORE `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
-    // connection tasks, so there would be nothing left here to drain. There is
-    // no index handle to retain on this arm — see this function's docs.
+    // connection tasks, so there would be nothing left here to drain.
+    // `primary_handle` stays here for the drain below.
     let drain_supervisor = Arc::clone(&state.supervisor);
     let router = build_router(state);
 
@@ -471,11 +463,14 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    connect instead of a 503, the better of the two failures.
     remove_server_json(&server_json);
 
-    // 10. Drain the boot coordinator (AILAB-162), `None` for the index because
-    //     nothing on this path ever opened one. Appends already accepted are
-    //     durable only once the coordinator has processed them, so returning
-    //     without draining would drop whatever it still had queued.
-    let _ = with_drain_timeout(DRAIN_TIMEOUT, drain_daemon(drain_supervisor, None)).await;
+    // 10. Drain the boot coordinator, then the index (AILAB-162). Appends
+    //     already accepted are durable only once the coordinator has processed
+    //     them and the indexer has committed.
+    let _ = with_drain_timeout(
+        DRAIN_TIMEOUT,
+        drain_daemon(drain_supervisor, Some(primary_handle)),
+    )
+    .await;
     drop(writer_lock);
 
     outcome.map_err(WatchError::from)

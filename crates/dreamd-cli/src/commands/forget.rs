@@ -13,9 +13,7 @@
 //!
 //! **Index:** after a removal, when `.agent/.dreamd/index` already exists, the
 //! command opens it, prunes this one event id and re-indexes the lesson layer.
-//! An absent index directory is left absent. Off Unix there
-//! is no index step (the cascade itself returns `Unsupported` there, inherited
-//! from `write_atomic`).
+//! An absent index directory is left absent. The refresh runs on Windows too.
 //!
 //! **Receipt:** `--proof <path>` writes a `forget-receipt/1.0` file
 //! ([`dreamd_core::forget::render_receipt`]). It is not the signed membership
@@ -202,7 +200,6 @@ fn write_receipt(
 
 /// Send the coordinator's post-forget index messages to an existing index.
 /// An absent index directory is left absent.
-#[cfg(unix)]
 fn refresh_index(
     root: &AgentRoot,
     lock: &WriterLock,
@@ -230,15 +227,6 @@ fn refresh_index(
         phases.map_err(index_err)?;
         drained.map_err(index_err)
     })
-}
-
-#[cfg(not(unix))]
-fn refresh_index(
-    _root: &AgentRoot,
-    _lock: &WriterLock,
-    _event_id: &EventId,
-) -> Result<(), ForgetCliError> {
-    Ok(())
 }
 
 #[cfg(test)]

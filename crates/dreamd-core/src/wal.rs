@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -212,7 +212,7 @@ pub fn begin_cycle(
 /// are appended after the renames. `now_sec` stamps `last_dream_cycle_at`.
 pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), WalError> {
     let agent_root = stage.agent_root().clone();
-    File::open(stage.dir())?.sync_all()?;
+    sync_dir_if_present(stage.dir())?;
     crash_point()?;
 
     let redo = stage.redo();
@@ -362,8 +362,8 @@ fn is_staged(path: &str) -> bool {
 }
 
 fn sync_dir_if_present(dir: &Path) -> io::Result<()> {
-    match File::open(dir) {
-        Ok(f) => f.sync_all(),
+    match crate::io::sync_dir(dir) {
+        Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

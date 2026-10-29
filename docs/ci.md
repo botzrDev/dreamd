@@ -102,7 +102,7 @@ Enforces license allowlist and advisory policy defined in `deny.toml`. CI pins `
 cargo test --all-features --workspace
 ```
 
-Windows is in the matrix for visibility but is non-gating (`continue-on-error`). The crate **compiles** on Windows (AILAB-174). `dreamd watch` boots there over loopback TCP with a bearer token (AILAB-192) and `POST /api/v1/learn` works; the dream cycle and Tantivy index do not, because `io::write_atomic` is still `ErrorKind::Unsupported`. `uds` / `uds_server` / `client` stay Unix-only. Windows CI jobs remain informational and gate nothing.
+Windows is in the matrix for visibility but is non-gating (`continue-on-error`). The crate **compiles** on Windows (AILAB-174). `dreamd watch` boots there over loopback TCP with a bearer token (AILAB-192). Learn, the dream cycle, and the Tantivy index run there. `uds` / `uds_server` / `client` stay Unix-only. The matrix job stays informational. `windows-replace-probe` is a required job: it runs only `io::tests::windows_parent_flush_uses_production_open`.
 
 ### Reproduce a specific OS locally
 

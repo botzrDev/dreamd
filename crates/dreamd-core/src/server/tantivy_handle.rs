@@ -52,7 +52,6 @@ use tantivy::directory::MmapDirectory;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(unix)]
 use crate::coordinator::LogIdentity;
 use crate::index::{
     build_schema, check_manifest_version, IndexManifest, ManifestCheckOutcome,
@@ -187,7 +186,6 @@ impl TantivyIndexHandle {
 
         // 1. The log's identity, before the read: a change after this point is
         //    either in the read or seen by the indexer's first tick.
-        #[cfg(unix)]
         let log = LogIdentity::at(&jsonl_path).map_err(io_to_index)?;
         // 2. The set difference between the log and the index.
         let events = read_jsonl_events(&jsonl_path)?;
@@ -225,7 +223,6 @@ impl TantivyIndexHandle {
             persist,
             coverage,
             agent_root: agent_root.clone(),
-            #[cfg(unix)]
             log,
         };
         let lock = lock.clone();
@@ -2669,4 +2666,40 @@ mod tests {
              claim a clean pass that never happened"
         );
     }
+}
+
+/// Tantivy 0.26 keeps a segment file that is still mapped. On Windows
+/// `delete` of that file fails, garbage collection retries later, and the
+/// index directory holds the file until the mapping is dropped.
+/// `dreamd doctor --repair` removes the directory only after the daemon
+/// (the process that holds the mappings) has stopped.
+#[cfg(windows)]
+#[test]
+fn windows_mmapped_segment_file_survives_gc_until_unmap() {
+    use std::collections::HashSet;
+    use std::io::Write;
+
+    use tantivy::directory::{ManagedDirectory, MmapDirectory};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::path::Path::new("segment_file");
+    let mmap = MmapDirectory::open(dir.path()).unwrap();
+    let mut managed = ManagedDirectory::wrap(Box::new(mmap)).unwrap();
+    let mut write = managed.open_write(path).unwrap();
+    write.write_all(&[1, 2, 3]).unwrap();
+    write.terminate().unwrap();
+
+    let mapped = managed.open_read(path).unwrap();
+    let living = HashSet::new();
+    managed.garbage_collect(|| living.clone()).unwrap();
+    assert!(
+        managed.exists(path).unwrap(),
+        "a mapped file stays in the index directory"
+    );
+    drop(mapped);
+    managed.garbage_collect(|| living).unwrap();
+    assert!(
+        !managed.exists(path).unwrap(),
+        "the file goes once the mapping is dropped"
+    );
 }

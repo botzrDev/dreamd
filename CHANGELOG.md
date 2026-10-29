@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+Workspace version is 1.2.0. It is not tagged. Tag and publish stay human steps.
+
+- On Windows, `io::write_atomic` follows the Unix call order: temp file, flush the bytes, rename, then flush the parent. The parent is opened for write with `FILE_FLAG_BACKUP_SEMANTICS`. A failure before the rename leaves the destination untouched. A parent-flush error after the rename is returned. That flush is not a power-loss proof. Learn and `dreamd watch` still start when it fails. `registry.toml` stays on its temp-file rename, with no parent flush.
+- The episodic log's identity on Windows is a volume serial and a file index (`file-id`). A dream cycle whose log did not change during the model call keeps the model lesson. `POST /api/v1/dream` and `dreamd dream` run on Windows.
+- `dreamd watch` opens the Tantivy index on Windows and live appends are indexed. Tantivy does not delete a segment file that is still mapped; the file stays in the index directory until the mapping is gone. `dreamd doctor --repair` removes that directory after the daemon has stopped and rebuilds the index from the log. `GET /api/v1/health` on Windows still compares the log with `index_progress.json`.
 - Coding recall oracle (`python3 scripts/benchmark/coding_oracle.py`) scores a frozen 12-episode fixture after one `dreamd dream --no-llm`, packing `k=32` recall to the same whitespace-token budget: dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
 
 ### Deprecated

@@ -20,9 +20,8 @@
 //! published a live loopback address to `~/.agent/server.json` and
 //! `~/.agent/auth.json` holds a readable bearer token, tool calls are proxied
 //! over loopback TCP (`Backend::RemoteTcp`); otherwise `run_mcp_server` returns
-//! [`McpRunError::Unsupported`]. There is no in-process fallback, because
-//! [`crate::io::write_atomic`] is `ErrorKind::Unsupported` there and an
-//! in-process `append_node` would accept writes it could not persist.
+//! [`McpRunError::Unsupported`]. There is no in-process fallback: tool calls
+//! go to `dreamd watch`, which holds the project writer lock and the index.
 //!
 //! **Transport** (AILAB-206): stdio by default. `dreamd mcp --bind <ADDR>`
 //! serves the same server, chosen by the same steps above, over Streamable HTTP
@@ -100,8 +99,8 @@ pub enum McpRunError {
     /// Non-Unix host with no daemon to proxy to (AILAB-174, narrowed by
     /// AILAB-192). Off Unix `dreamd mcp` is proxy-or-refuse: with a live
     /// loopback daemon it serves `Backend::RemoteTcp`, and without one it
-    /// returns this rather than booting an in-process store, because
-    /// [`crate::io::write_atomic`] is still `ErrorKind::Unsupported` there.
+    /// returns this rather than booting an in-process store. `dreamd watch`
+    /// is the writer.
     /// Declared unconditionally so this copy is testable on Linux.
     #[error(
         "start `dreamd watch` before `dreamd mcp`; there is no in-process server on Windows (see docs/windows.md)"
@@ -321,9 +320,8 @@ impl MemoryMcpServer {
     /// `agent_root_header` must be the canonicalized project-root string (see
     /// `run_mcp_server`).
     ///
-    /// A non-Unix `MemoryMcpServer` never reads a local Tantivy index, because
-    /// `TantivyIndexHandle::open` would go through
-    /// [`crate::io::write_atomic`], which is `ErrorKind::Unsupported` there.
+    /// A non-Unix `MemoryMcpServer` proxies to `dreamd watch`. It does not open
+    /// its own index.
     #[cfg(not(unix))]
     pub fn with_remote_tcp(
         endpoint: DaemonEndpoint,
@@ -374,11 +372,8 @@ impl MemoryMcpServer {
     /// the `source` field and the `{"results":[...]}` envelope all come from the
     /// one server-side implementation and are forwarded verbatim.
     ///
-    /// The in-process store returns empty results. There is deliberately no
-    /// local read path here: `TantivyIndexHandle::open` writes its first
-    /// manifest through [`crate::io::write_atomic`], which is
-    /// `ErrorKind::Unsupported` on Windows, so an in-process index cannot even
-    /// be opened.
+    /// There is no local read path here. Recall is the daemon's. `dreamd mcp`
+    /// on Windows does not open an in-process index.
     ///
     /// The description literal below must stay byte-identical to the unix copy
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
@@ -632,9 +627,9 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
 ///
 /// There is deliberately **no in-process fallback**: this path never calls
 /// `Supervisor::start` and never constructs [`Backend::Local`]. AILAB-174
-/// deleted that branch because
-/// [`crate::io::write_atomic`] is `ErrorKind::Unsupported` off Unix, so an
-/// in-process server would accept `append_node` calls it could never durably
+/// deleted that branch. `dreamd watch` is the writer. An in-process server
+/// would be a second writer of the log. The deleted branch would have accepted
+/// `append_node` calls it could never durably
 /// persist: the dream cycle, the index sidecar and `LESSONS.md` all go through
 /// that one seam. Refusing is the honest answer; a silent lossy accept is not.
 /// The daemon is the only writer that can persist, hence "proxy or refuse".

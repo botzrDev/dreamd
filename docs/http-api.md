@@ -31,11 +31,11 @@ All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header
 | Authentication | `Authorization: Bearer <64 lowercase hex>` matching `~/.agent/auth.json`; missing or wrong is `401` |
 | Scope | Loopback unless `--insecure`. Without it a non-loopback `--bind` is refused before binding, and the daemon re-checks the address it bound. With it the daemon logs a warning on every start; the bearer token is still required. |
 
-`~/.agent/server.json` is a discardable address hint, not memory state, so it is written with a plain `std::fs::write` rather than the atomic-replace path (which is still `ErrorKind::Unsupported` on Windows). A hard-killed daemon can therefore leave a stale file behind: liveness is "the file parses **and** `127.0.0.1:<port>` accepts a connection", never "the file exists". A `server.json` naming a non-loopback host is refused rather than connected to.
+`~/.agent/server.json` is a discardable address hint, not memory state, so it is written with a plain `std::fs::write` rather than `io::write_atomic`. A hard-killed daemon can therefore leave a stale file behind: liveness is "the file parses **and** `127.0.0.1:<port>` accepts a connection", never "the file exists". A `server.json` naming a non-loopback host is refused rather than connected to.
 
 `~/.agent/auth.json` is minted by `dreamd service install` and rotated by `dreamd service install --force` (AILAB-203). `dreamd watch` only ever reads it: a missing or malformed file makes the daemon exit 1 pointing at `dreamd service install`, and `watch` never writes or rotates the token itself.
 
-**What answers on Windows.** `dreamd watch` deliberately never opens the Tantivy index there — `TantivyIndexHandle::open` writes its first `index_manifest.json` through `io::write_atomic` — so the daemon boots with no index at all. `POST /api/v1/learn` works: the JSONL append is `OpenOptions` + `write_all` + `sync_data`, not an atomic replace. `POST /api/v1/dream` stays mounted and returns `500` (see [below](#post-apiv1dream)). `GET /api/v1/recall` opens the index and returns `500` when that open fails. `GET /api/v1/health` does not open Tantivy. It compares the JSONL tail to `index_progress.json` and returns `200` when that read succeeds. `stale` is true when the log has events past the watermark, including when the watermark file is absent and the log is not empty. A valid bearer token buys you past the auth layer. A `200` from health is not a promise that recall works.
+**What answers on Windows.** `dreamd watch` opens the Tantivy index. `POST /api/v1/learn` appends with `OpenOptions` + `write_all` + `sync_data`. `POST /api/v1/dream` runs the cycle. `GET /api/v1/recall` reads the index. `GET /api/v1/health` compares the JSONL tail to `index_progress.json` and returns `200` when that read succeeds. `stale` is true when the log has events past the watermark, including when the watermark file is absent and the log is not empty. A valid bearer token buys you past the auth layer. A `200` from health is that watermark comparison.
 
 ### curl example (Unix socket smoke test)
 
@@ -342,7 +342,7 @@ Report whether the index has caught up to the log for the resolved project. The 
 
 `stale: true` is normal for up to one commit cadence (5 s) after a live append. Channel saturation stretches it further — a queued append is in the JSONL and not yet committed, so it reads as `stale` until the indexer drains the backlog. A change to the log made outside the daemon (a `git checkout`, a hand edit) does not show here: `dreamd doctor`'s `index_freshness` line compares the log with the committed index, and the daemon's next coverage pass heals the difference.
 
-On Windows there is no index, so health compares the JSONL tail with `index_progress.json` on disk instead (see [Transport → Windows](#windows)).
+On Windows health compares the JSONL tail with `index_progress.json` on disk (see [Transport → Windows](#windows)). The index is open; this route does not read the Unix in-memory marks.
 
 #### curl example
 
@@ -358,7 +358,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 Run a full dream cycle for the resolved project: consolidate episodic learnings into `LESSONS.md`, apply decay/pruning, update recurrence sidecar.
 
-**Not available on Windows.** The route stays mounted rather than vanishing from the route table, and returns `500` with `{"error":"dream cycle is unavailable on this platform: atomic file replacement is unsupported (see docs/windows.md)"}`. Consolidation, decay, the `LESSONS.md` rewrite and the recurrence sidecar are all staged and *renamed* into place, and the stage writer is `ErrorKind::Unsupported` there, like `io::write_atomic`.
+On Windows the route runs the same cycle. The daemon is loopback TCP with a bearer token, and there is no Unix-socket proxy. A cycle whose log did not change during the model call keeps that body.
 
 #### Request headers
 
