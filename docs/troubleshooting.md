@@ -86,6 +86,20 @@ Recovery depends on how far the cycle got. A `dream_in_progress.wal` means the c
 
 A WAL whose `format` this version does not know, or one that names a path outside `.agent/`, makes every writer refuse to start (`wal recovery: …`). This is deliberate: dreamd will not guess at a store it cannot recover.
 
+A WAL that is not JSON, whose `format` this version does not know, or that names a path outside the store, is not recovered by restarting. `dreamd doctor` prints `dream_cycle_wal:` with the file, the reason, and the command. With the daemon stopped:
+
+```bash
+dreamd doctor --repair
+```
+
+That moves `.agent/.dreamd/dream_in_progress.wal` to `dream_in_progress.wal.corrupt-YYYY-MM-DD` (a later one the same day gets `-2`, `-3`, …), deletes nothing, wipes `.agent/.dreamd/stage/`, and sets `state.json` to `failed`. It does not read the WAL for meaning. A `redo/1` WAL this version can apply is still rolled forward; `--repair` does not quarantine that one. After a quarantine, the repair output includes `store invariants:` — `ok`, or the violations and the quarantined file, because a WAL corrupted after its commit point can leave a half-applied cycle. The Linux user unit (`~/.config/systemd/user/dreamd.service`, `Restart=on-failure`, `RestartSec=5`) starts `dreamd watch` again after every exit 1, and `watch` exits 1 again until this repair has run, so the journal repeats the two-line message. Stop the unit, run the repair, then start it:
+
+```bash
+systemctl --user stop dreamd.service
+dreamd doctor --repair
+systemctl --user start dreamd.service
+```
+
 Recovery keys off the WAL file (`.agent/.dreamd/dream_in_progress.wal`). It runs whenever a process takes the project writer lock: `dreamd watch` at start, an in-process `dreamd mcp`, and the CLI writers (`dreamd dream` without a daemon or with `--no-commit`, `forget`, `archive --force-unpin`, `memory checkout`, `bisect`, `doctor --repair`). Taking the lock also resets a `state.json` left at `in_progress` with no WAL to `failed`. An interrupted cycle therefore needs no hand edit: the next writer recovers it and then runs. While a cycle is live, a second one is refused: HTTP 409 through the daemon, or the writer-lock refusal (`project writer lock is held by pid N (kind)`, exit 1) from the CLI.
 
 **Prevention:** Don't run overlapping dream cycles (HTTP 409 guards concurrent cycles). Use one daemon writer per machine.

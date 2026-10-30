@@ -53,8 +53,29 @@ pub fn run(cwd: &Path, args: &WatchArgs) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("dreamd watch: {e}");
+            if let Some(hint) = recovery_hint(&e) {
+                eprintln!("{hint}");
+            }
             ExitCode::from(exit_code_for(&e))
         }
+    }
+}
+
+/// The second line `dreamd watch` prints when the project WAL is unreadable.
+///
+/// The first line is still `dreamd watch: {err}`. Other start failures,
+/// including a lock held by another writer, stay one line.
+fn recovery_hint(err: &WatchError) -> Option<&'static str> {
+    use dreamd_core::wal::WalError;
+    use dreamd_core::writer_lock::WriterLockError;
+
+    match err {
+        WatchError::WriterLock(WriterLockError::Recover(
+            WalError::UnknownFormat(_) | WalError::BadRedoPath(_) | WalError::Json(_),
+        )) => {
+            Some("dreamd watch: run `dreamd doctor --repair` to move the WAL aside and start again")
+        }
+        _ => None,
     }
 }
 
@@ -153,6 +174,28 @@ mod tests {
             line.contains("dreamd service install"),
             "watch's auth-token failure must name the minting command; got: {line}"
         );
+    }
+
+    #[test]
+    fn watch_names_doctor_repair_for_an_unreadable_wal() {
+        use dreamd_core::wal::WalError;
+        use dreamd_core::writer_lock::WriterLockError;
+
+        let cases = [
+            WalError::UnknownFormat("none".to_string()),
+            WalError::BadRedoPath("/tmp/outside".to_string()),
+            WalError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+        ];
+        for err in cases {
+            let watch = WatchError::WriterLock(WriterLockError::Recover(err));
+            let hint = recovery_hint(&watch).expect("unreadable WAL names the repair");
+            assert_eq!(
+                hint,
+                "dreamd watch: run `dreamd doctor --repair` to move the WAL aside and start again"
+            );
+        }
+        let busy = WatchError::WriterLock(WriterLockError::Busy { holder: None });
+        assert!(recovery_hint(&busy).is_none());
     }
 
     /// A non-loopback bind is refused at start unless `--insecure` (AILAB-197);
