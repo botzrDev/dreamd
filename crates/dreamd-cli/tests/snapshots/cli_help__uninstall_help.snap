@@ -11,7 +11,7 @@ Options:
           Keep the native binary cache (~/.cache/dreamd-mcp) and npx cache entries
 
       --all-npx
-          Wipe the ENTIRE npx cache (every cached package, not just dreamd-mcp). Prints a warning before deleting
+          Wipe the whole npx cache (every cached package, not just dreamd-mcp). Prints a warning before deleting
 
   -q, --quiet
           Suppress non-essential output (errors still print to stderr)

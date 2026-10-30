@@ -62,9 +62,9 @@ impl DreamArgs {
     /// the combination is invalid.
     pub fn validate(&self) -> Result<(), String> {
         if self.dry && self.auto {
-            return Err("--dry and --auto are mutually exclusive: \
-                 auto mode performs real writes on a schedule"
-                .to_string());
+            return Err(
+                "--dry and --auto are mutually exclusive; --auto is not supported".to_string(),
+            );
         }
         Ok(())
     }
@@ -93,9 +93,9 @@ pub struct ForgetArgs {
 /// `commands::watch`, so a hostname is refused there rather than resolved.
 #[derive(Args, Debug, Default)]
 pub struct WatchArgs {
-    /// TCP listen address (not Unix): an IP or IP:port, e.g. 127.0.0.1:8080 or
-    /// [::1]:0. Port defaults to 0 (OS-chosen). Hostnames are not resolved.
-    /// Default: 127.0.0.1:0.
+    /// TCP listen address (not Unix): an IP or IP:port, e.g. `127.0.0.1:8080` or
+    /// `[::1]:0`. Port defaults to 0 (OS-chosen). Hostnames are not resolved.
+    /// Default: `127.0.0.1:0`.
     #[arg(long, value_name = "ADDR")]
     pub bind: Option<String>,
     /// Allow a non-loopback --bind (not Unix). Logs a warning on every start.
@@ -108,9 +108,12 @@ pub struct WatchArgs {
 /// Arguments for the `dreamd doctor` subcommand.
 #[derive(Args, Debug, Default)]
 pub struct DoctorArgs {
-    /// Rebuild Tantivy from JSONL; unlink orphaned UDS. Wipes the whole derived
-    /// index cache dir, including any .tantivy-*.lock inside it, and never targets
-    /// lock files on their own. Does not modify AGENT_LEARNINGS.jsonl.
+    /// Rebuild the search index from the episodic log, unlink an orphaned
+    /// daemon socket, and move aside a dream-cycle WAL that cannot be parsed.
+    /// Wipes the whole derived index directory, including any .tantivy-*.lock
+    /// inside it, and never targets lock files on their own. Does not modify
+    /// AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the
+    /// project.
     #[arg(long)]
     pub repair: bool,
     /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
@@ -126,7 +129,7 @@ pub struct DoctorArgs {
 /// Top-level subcommands exposed by the `dreamd` binary.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Maintain the on-disk memory log. Today: unpin entries with --force-unpin.
+    /// Maintain the on-disk memory log; its one operation is unpinning entries (--force-unpin).
     Archive(ArchiveArgs),
     /// Show which stored memories drove a query's recall ranking.
     Blame(BlameArgs),
@@ -140,11 +143,13 @@ pub enum Command {
     /// Stop a live `dreamd watch` first; the command refuses while the daemon
     /// is running.
     Forget(ForgetArgs),
-    /// Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged. If it is missing from the registry, init registers it.
+    /// Scaffold a new per-project .agent/ store and register it.
     ///
-    /// Requires a project-root sentinel in cwd or an ancestor.
+    /// An existing .agent/ is left unchanged, and is registered if the
+    /// registry lacks it. Requires a project-root sentinel in cwd or an
+    /// ancestor.
     Init(InitArgs),
-    /// Start the MCP server (bridges to daemon if running, otherwise in-process).
+    /// Start the MCP server, bridged to the running daemon or, on Unix, in-process when none is running.
     Mcp(McpArgs),
     /// Deprecated, removed in 2.0. Name memory snapshots as branches and check them out.
     ///
@@ -153,33 +158,31 @@ pub enum Command {
     Memory(MemoryArgs),
     /// Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no-op.
     Migrate(MigrateArgs),
-    /// Search stored memories by query, ranked by relevance and importance (markdown table).
+    /// Search stored memories by query, ranked by BM25 × salience (markdown table).
     Recall(RecallArgs),
-    /// List the top-N stored memories by importance, without a search query.
+    /// List the top-N stored memories by salience, without a search query.
     ///
-    /// Uses Tantivy AllQuery (score 1.0 per doc), so printed rows show
-    /// `bm25 ≈ 1` and `score ≈ salience` — expected SalienceCollector behavior.
+    /// With no query every document gets a BM25 score of 1, so each row shows
+    /// `bm25 ≈ 1` and `score ≈ salience`.
     Score(ScoreArgs),
     /// Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago.
     ///
     /// Scores every episodic doc with salience alone (no BM25) and writes
     /// today's snapshot under `.agent/.dreamd/observability/`.
     SalienceDrift(SalienceDriftArgs),
-    /// Reset scratch state. Today only `workspace` is supported.
+    /// Reset scratch state; `workspace` is the only target.
     Reset(ResetArgs),
     /// Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task).
-    // Nested so uninstall can land later without reshuffling
-    // top-level parsing (same shape as `reset`).
     Service(ServiceArgs),
-    /// Front door: scaffold .agent/ (via init) and print the harness wiring next steps.
+    /// Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps.
     Setup(SetupArgs),
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
     /// Stop local dreamd servers, unregister this project, and clear caches.
     Uninstall(UninstallArgs),
-    /// Clear the native binary cache so `npx -y dreamd-mcp` fetches latest.
+    /// Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release.
     Update(UpdateArgs),
-    /// Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM.
+    /// Run the daemon in the foreground until it gets SIGINT or SIGTERM.
     Watch(WatchArgs),
     /// Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged.
     ///
@@ -191,9 +194,8 @@ pub enum Command {
     Version,
 }
 
-/// Args for `dreamd archive`. Force-unpin is the only operation today; the
-/// struct is shaped to grow (future maintenance ops) without reshuffling
-/// top-level parsing. Target-mode invariants (`--force-unpin` required; exactly
+/// Args for `dreamd archive`. Force-unpin is its only operation. Target-mode
+/// invariants (`--force-unpin` required; exactly
 /// one of `<EVENT_ID>` / `--all`) are enforced at runtime in
 /// [`commands::archive::run`] so they surface a clear message and non-zero exit.
 #[derive(Args)]
@@ -204,7 +206,7 @@ pub struct ArchiveArgs {
     /// The event id to unpin. Mutually exclusive with --all.
     #[arg(value_name = "EVENT_ID")]
     pub id: Option<String>,
-    /// Unpin every entry. Refused unless explicitly set.
+    /// Unpin every entry. Mutually exclusive with EVENT_ID.
     #[arg(long)]
     pub all: bool,
 }
@@ -216,12 +218,12 @@ pub struct ArchiveArgs {
 /// (5, vs recall's 10). `--json` prints one compact JSON array instead.
 #[derive(Args)]
 pub struct BlameArgs {
-    /// Free-text query (BM25 over episodic content).
+    /// Free-text query, matched with BM25 against stored events and lessons.
     pub query: String,
-    /// Max results (default 5 — recall stays at 10).
+    /// Max results.
     #[arg(short = 'k', long, default_value_t = 5)]
     pub k: usize,
-    /// Print per-hit salience factor breakdown (DR-204).
+    /// Print each hit's salience factor breakdown.
     #[arg(long)]
     pub explain: bool,
     /// Print one compact JSON array instead of the markdown table.
@@ -254,7 +256,7 @@ pub struct McpArgs {
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
     /// Serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio: an IP
-    /// or IP:port, e.g. 127.0.0.1:8080 or [::1]:0. Port defaults to 0
+    /// or IP:port, e.g. `127.0.0.1:8080` or `[::1]:0`. Port defaults to 0
     /// (OS-chosen). Hostnames are not resolved. No auth: any local process can
     /// reach a loopback bind. Needs a build with the `mcp-http` cargo feature
     /// (prebuilt release binaries are stdio-only).
@@ -266,12 +268,12 @@ pub struct McpArgs {
     pub insecure: bool,
 }
 
-/// Arguments for the `dreamd migrate` subcommand (WEG-133 / DR-108).
+/// Arguments for the `dreamd migrate` subcommand (WEG-133).
 ///
 /// `--from` / `--to` are **episodic record** schema strings
 /// (`dreamd_protocol::RECORD_SCHEMA_VERSION`), e.g. `1.0.0` — not the daemon
 /// `state.json` schema the `dreamd version` display line prints, and not the
-/// Tantivy index schema. At v0.1 the only registered path is the identity
+/// Tantivy index schema. The only registered path is the identity
 /// `1.0.0 → 1.0.0` (a no-op).
 #[derive(Args)]
 pub struct MigrateArgs {
@@ -283,15 +285,15 @@ pub struct MigrateArgs {
     pub to: String,
 }
 
-/// Arguments for the `dreamd recall` subcommand (WEG-51 / DR-703).
+/// Arguments for the `dreamd recall` subcommand (WEG-51).
 #[derive(Args)]
 pub struct RecallArgs {
-    /// Free-text query (BM25 over episodic content).
+    /// Free-text query, matched with BM25 against stored events and lessons.
     pub query: String,
-    /// Max results (default 10 — CLI demo default; HTTP/MCP stay at 5).
+    /// Max results. HTTP and MCP recall default to 5.
     #[arg(short = 'k', long, default_value_t = 10)]
     pub k: usize,
-    /// Print per-hit salience factor breakdown (DR-204).
+    /// Print each hit's salience factor breakdown.
     #[arg(long)]
     pub explain: bool,
     /// Drop these event ids before top-k. Repeatable. Does not modify the index.
@@ -302,14 +304,13 @@ pub struct RecallArgs {
     pub without_cluster: Vec<String>,
 }
 
-/// Arguments for the `dreamd score` subcommand (WEG-52 / DR-704).
+/// Arguments for the `dreamd score` subcommand (WEG-52).
 ///
-/// Ranks the index by query-time salience with no lexical BM25 filter
-/// (`AllQuery`). Under that path every hit has `bm25 ≈ 1` and
-/// `score ≈ salience` — expected Tantivy/`SalienceCollector` behavior.
+/// Ranks every document by query-time salience. There is no query (the
+/// search is an `AllQuery`), so BM25 contributes a constant 1.
 #[derive(Args)]
 pub struct ScoreArgs {
-    /// Max results (default 100).
+    /// Max results.
     #[arg(short = 'n', long, default_value_t = 100)]
     pub n: usize,
     /// Print per-hit salience factor breakdown (same blocks as `dreamd recall --explain`).
@@ -333,16 +334,17 @@ pub struct MemoryArgs {
     pub command: MemoryCommand,
 }
 
+/// `dreamd memory` verbs, all deprecated and removed in 2.0.
 #[derive(Subcommand)]
 pub enum MemoryCommand {
-    /// Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot <NAME>, and make it current.
+    /// Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot `<NAME>`, and make it current.
     ///
     /// Fails if the branch already exists. Prints the object id.
     Branch {
-        /// Branch name: [a-z0-9][a-z0-9._-]{0,63}, no `..`.
+        /// Branch name: `[a-z0-9][a-z0-9._-]{0,63}`, no `..`.
         name: String,
     },
-    /// Deprecated, removed in 2.0. Replace the live memory files with branch <NAME> and make it current.
+    /// Deprecated, removed in 2.0. Replace the live memory files with branch `<NAME>` and make it current.
     ///
     /// Refuses while the daemon socket exists; stop `dreamd watch` first.
     /// Prints the object id.
@@ -352,14 +354,14 @@ pub enum MemoryCommand {
     },
     /// Deprecated, removed in 2.0. List branches; `*` marks the current one.
     Branches,
-    /// Deprecated, removed in 2.0. Delete branch <NAME>. A later dream cycle removes the object if no ref names it.
+    /// Deprecated, removed in 2.0. Delete branch `<NAME>`. A later dream cycle removes the object if no ref names it.
     ///
     /// Refuses to delete the current branch.
     Delete {
         /// Branch name to delete.
         name: String,
     },
-    /// Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot (BZR-153).
+    /// Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot.
     ///
     /// Searches refs by the timestamp on their second line; there is no parent
     /// pointer. Each step checks out a snapshot, so it refuses while `dreamd
@@ -391,6 +393,7 @@ pub struct BisectArgs {
     pub command: BisectCommand,
 }
 
+/// `dreamd memory bisect` steps.
 #[derive(Subcommand)]
 pub enum BisectCommand {
     /// Start a bisect between a good and a bad ref, and check out the midpoint.
@@ -423,15 +426,14 @@ pub enum BisectCommand {
     },
 }
 
-/// Args for `dreamd reset`. Wraps the nested target subcommand so the shape
-/// scales when more reset targets land (e.g., personal, episodic) without
-/// reshuffling top-level command parsing.
+/// Args for `dreamd reset`, which takes its target as a nested subcommand.
 #[derive(Args)]
 pub struct ResetArgs {
     #[command(subcommand)]
     pub command: ResetCommand,
 }
 
+/// `dreamd reset` targets.
 #[derive(Subcommand)]
 pub enum ResetCommand {
     /// Clear working/WORKSPACE.md back to its initial scaffold contents.
@@ -442,10 +444,9 @@ pub enum ResetCommand {
     },
 }
 
-/// Args for `dreamd service`. Wraps the nested verb so the lifecycle set
-/// (install / start / restart / status / uninstall — the last landed with
-/// AILAB-202) grew without reshuffling top-level command parsing. Same shape
-/// as [`ResetArgs`]. The nested `uninstall` is not the top-level
+/// Args for `dreamd service`, which takes its verb (install / start / restart
+/// / status / uninstall) as a nested subcommand, like [`ResetArgs`]. The
+/// nested `uninstall` is not the top-level
 /// [`Command::Uninstall`] (AILAB-226), which stops processes and clears
 /// caches rather than removing the OS service entry.
 #[derive(Args)]
@@ -454,44 +455,52 @@ pub struct ServiceArgs {
     pub command: ServiceCommand,
 }
 
+/// `dreamd service` verbs.
 #[derive(Subcommand)]
 pub enum ServiceCommand {
-    /// Write a user-scope service for `dreamd watch` and enable it now
-    /// (Linux systemd --user / macOS LaunchAgent / Windows scheduled task).
+    /// Write a user-scope service for `dreamd watch` (Linux systemd --user unit, macOS LaunchAgent, Windows logon task).
+    ///
+    /// Linux and macOS also start it now. The Windows task first runs at the
+    /// next logon or on `dreamd service start`, and install also writes the
+    /// bearer token `dreamd watch` checks, ~/.agent/auth.json.
     Install {
-        /// Overwrite an existing LaunchAgent plist (macOS) or scheduled-task XML (Windows). No effect on Linux.
+        /// Overwrite an existing LaunchAgent plist (macOS) or scheduled task (Windows); on Windows this also rotates the bearer token. No effect on Linux.
         #[arg(long)]
         force: bool,
     },
-    /// Start the user-scope service (systemctl --user start / launchctl kickstart).
+    /// Start the user-scope service (systemctl --user start, launchctl kickstart -k, or schtasks /Run).
     Start,
-    /// Bounce the user-scope service (systemctl --user restart / launchctl kickstart -k).
+    /// Restart the user-scope service (systemctl --user restart, launchctl kickstart -k, or schtasks /End then /Run).
     Restart,
-    /// Report whether the user-scope service is running (systemd / launchd).
-    /// Daemon-level liveness (UDS) is `dreamd status`.
+    /// Report whether the user-scope service is running (systemd, launchd, or Task Scheduler).
+    ///
+    /// Whether the daemon itself answers is `dreamd status`.
     Status,
     /// Remove the user-scope service. Never deletes per-project .agent/ stores.
     ///
     /// Tears down the OS service entry only: the systemd --user unit
-    /// (`disable --now`, remove the unit file, `daemon-reload`) or the macOS
-    /// LaunchAgent (`launchctl bootout`, remove the plist). It is idempotent —
-    /// a unit or plist that is already gone is not an error. By default no
-    /// data is deleted at all: the daemon home `~/.agent/` and every
+    /// (`disable --now`, remove the unit file, `daemon-reload`), the macOS
+    /// LaunchAgent (`launchctl bootout`, remove the plist), or the Windows
+    /// scheduled task (`schtasks /Delete`, remove the task XML). It is
+    /// idempotent — an entry that is already gone is not an error. By default
+    /// no data is deleted at all: the daemon home `~/.agent/` and every
     /// per-project `.agent/` store are left exactly as they are, and both are
     /// reported on the `preserved:` lines.
     ///
-    /// `--purge` additionally deletes the daemon home `~/.agent/` — the
-    /// registry, the socket and `dreamd.log`, and nothing else. It never walks
+    /// `--purge` also deletes the daemon home `~/.agent/` and everything in
+    /// it: the project registry, the socket or `server.json`, `dreamd.log`,
+    /// the Windows `auth.json`, and any model under `models/`. It never walks
     /// or removes a per-project `<repo>/.agent/` store. It needs `--yes` or a
     /// typed `y` on a tty, like `dreamd reset workspace`.
     ///
     /// This is not `dreamd uninstall`, which stops running processes, drops
-    /// the socket and clears caches without touching the OS service entry.
+    /// the socket, unregisters the project and clears caches without touching
+    /// the OS service entry.
     Uninstall {
-        /// Also remove ~/.agent/ (registry, socket, log). Not per-project stores.
+        /// Also delete the daemon home ~/.agent/ and everything in it. Never per-project stores.
         #[arg(long)]
         purge: bool,
-        /// Confirm --purge without a prompt (`reset workspace --yes`).
+        /// Confirm --purge without a prompt, like `reset workspace --yes`.
         #[arg(long)]
         yes: bool,
     },
@@ -504,6 +513,7 @@ pub struct VectorsArgs {
     pub command: VectorsCommand,
 }
 
+/// `dreamd vectors` verbs, deprecated and removed in 2.0.
 #[derive(Subcommand)]
 pub enum VectorsCommand {
     /// Deprecated, removed in 2.0. Download BAAI/bge-small-en-v1.5 into ~/.agent/models.
@@ -518,8 +528,8 @@ pub enum VectorsCommand {
 ///
 /// `setup` is the install front door: it scaffolds `.agent/`, merges the
 /// `mcpServers.dreamd` block into the harness config, and prints the verify
-/// step. On a TTY without `--yes` the AILAB-551 wizard fills in the answers the
-/// user did not already type as flags; the clap surface itself is unchanged.
+/// step. On a TTY without `--yes` the wizard (AILAB-551) asks for the answers
+/// the user did not already type as flags.
 #[derive(Args, Debug)]
 pub struct SetupArgs {
     /// Accept defaults without prompting. Required when stdin is not a tty.
@@ -562,7 +572,7 @@ pub struct UninstallArgs {
     /// Keep the native binary cache (~/.cache/dreamd-mcp) and npx cache entries.
     #[arg(long)]
     pub keep_caches: bool,
-    /// Wipe the ENTIRE npx cache (every cached package, not just dreamd-mcp).
+    /// Wipe the whole npx cache (every cached package, not just dreamd-mcp).
     /// Prints a warning before deleting.
     #[arg(long)]
     pub all_npx: bool,
@@ -580,7 +590,7 @@ pub struct UpdateArgs {
     /// Suppress non-essential output (errors still print to stderr).
     #[arg(short = 'q', long)]
     pub quiet: bool,
-    /// Explicitly stop local `dreamd mcp` / `dreamd watch` (already the default; nothing is relaunched for you).
+    /// Say that local `dreamd mcp` / `dreamd watch` are stopped; update stops them either way and relaunches nothing. `dreamd service restart` brings a supervised daemon back.
     #[arg(long)]
     pub restart: bool,
 }
@@ -650,13 +660,12 @@ fn home_dir() -> Option<PathBuf> {
 
 /// The `dreamd service` refusal copy for a host with no usable home
 /// directory. Windows names both variables because
-/// [`dreamd_core::layout::resolve_home_from_vars`] consults both there; Unix keeps the wording it
-/// has always had, since `USERPROFILE` is never read on that side and naming
-/// it would only send the reader after a variable that could not have helped.
+/// [`dreamd_core::layout::resolve_home_from_vars`] consults both there; Unix
+/// names only `HOME`, because `USERPROFILE` is never read there.
 /// The three `service` verbs use this, and so do `init`, `setup`, and
 /// `uninstall`, which exit 2 without a daemon home rather than fall back to a
 /// relative `.agent` (BZR-168). Every other `home_dir` caller has its own
-/// "skip with a note" behaviour and its own wording.
+/// "skip with a note" behavior and its own wording.
 fn no_home_message() -> &'static str {
     if cfg!(windows) {
         "neither HOME nor USERPROFILE is set; cannot locate the per-user service path"
@@ -669,8 +678,7 @@ fn no_home_message() -> &'static str {
 ///
 /// Only the daemon does. `init_tracing` opens the path with `truncate(true)`,
 /// so any short-lived invocation that got a path would wipe a running daemon's
-/// accumulated log — and, `archive` aside, no CLI one-shot emits a single
-/// `tracing` event into it anyway. `mcp` is long-running but is deliberately
+/// accumulated log. `mcp` is long-running but is deliberately
 /// excluded: IDEs spawn several concurrently, so a file layer there would have
 /// two MCP servers truncating each other's log; its stderr already lands in the
 /// IDE's own MCP log. Everything else runs console-only on stderr. AILAB-184.
@@ -706,7 +714,7 @@ fn run_archive(args: ArchiveArgs) -> ExitCode {
     // and rewrites the episodic JSONL. The liveness probe below does spawn a
     // thread and block on it, but that closure only connects to the socket —
     // it emits no tracing, and the wait is bounded by LIVENESS_PROBE_TIMEOUT —
-    // so it cannot wait on a thread that wants the stderr lock we hold.
+    // so it cannot wait on a thread that wants the stderr lock held here.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -803,7 +811,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let socket = dreamd_core::client::resolve_daemon_socket();
     #[cfg(not(unix))]
     let socket: Option<PathBuf> = None;
-    // Unlocked handles, deliberately — do NOT hoist a `.lock()` out here.
+    // Unlocked handles, deliberately — do not hoist a `.lock()` out here.
     // `--repair` reopens the index, and Tantivy's `segment_updater` thread logs
     // through the tracing console layer, which writes to `std::io::stderr`.
     // `StdoutLock`/`StderrLock` are process-wide and reentrant only for the
@@ -847,7 +855,7 @@ fn run_forget(args: ForgetArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    // Same daemon address as `run_archive`: the UDS socket on Unix,
+    // Same daemon address as `run_archive`: the socket on Unix,
     // `~/.agent/server.json` off it.
     #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
@@ -922,11 +930,11 @@ fn run_dream(args: DreamArgs) -> ExitCode {
     };
     // AILAB-341: `--dry` writes nothing, so it forks off here — after config and
     // store resolution (a preview still needs to know which store it is
-    // previewing), before the write path. It deliberately does NOT proxy to the
+    // previewing), before the write path. It deliberately does not proxy to the
     // daemon: `POST /api/v1/dream` performs the mutation the flag exists to
     // avoid. `--no-commit` is a no-op alongside it, not an error.
     if args.dry {
-        // lock-ok (AILAB-583 / AILAB-204): stdout stays UNLOCKED — the preview
+        // lock-ok (AILAB-583 / AILAB-204): stdout stays unlocked — the preview
         // may sit on the model call for up to 90s.
         // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
         let outcome = commands::dream::run_dry(
@@ -954,9 +962,9 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         };
     }
 
-    // lock-ok (AILAB-583 / AILAB-204): `&mut std::io::stdout()` stays UNLOCKED.
-    // The cycle opens a Tantivy index and — since AILAB-204 — may sit on a
-    // network call for up to 90s; holding a std stream lock across either is the
+    // lock-ok (AILAB-583 / AILAB-204): `&mut std::io::stdout()` stays unlocked.
+    // The cycle opens a Tantivy index and may sit on a model call for up to
+    // 90s; holding a std stream lock across either is the
     // documented deadlock. See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     match commands::dream::run(
         agent_root.project_root(),
@@ -1075,7 +1083,7 @@ fn run_recall(args: RecallArgs) -> ExitCode {
     let now_sec = chrono::Utc::now().timestamp();
     // Unlocked handles (AILAB-583): recall opens the Tantivy index (read-only
     // `Index::open_in_dir` + `reader()`, whose reload policy owns a background
-    // watcher thread). No writer today, but per AGENTS.md
+    // watcher thread). It opens no writer, but per AGENTS.md
     // `no-hoisted-stdio-lock-across-tantivy` an index-opening arm never holds a
     // hoisted lock that a logging index thread could deadlock on (AILAB-575).
     let mut out = std::io::stdout();
@@ -1166,7 +1174,7 @@ fn run_salience_drift(args: SalienceDriftArgs) -> ExitCode {
 }
 
 /// The daemon address checkout refuses on, when a home directory resolves.
-/// Unix is the UDS path (an exists-check, including a stale socket). Windows
+/// Unix is the socket path (an exists-check, including a stale socket). Windows
 /// is `server.json`, which the memory command probes with a loopback connect.
 fn daemon_socket() -> Option<PathBuf> {
     let home = home_dir()?;
@@ -1295,7 +1303,7 @@ fn run_reset_workspace(yes: bool) -> ExitCode {
 
 /// Was this arg typed on the command line, as opposed to filled in by clap's
 /// default? The wizard skips a prompt only for a flag the user actually typed
-/// (AILAB-551 §1.7) — comparing against the default would wrongly treat
+/// (AILAB-551) — comparing against the default would wrongly treat
 /// `--harness both` as "unanswered".
 fn from_command_line(m: &clap::ArgMatches, id: &str) -> bool {
     matches!(
@@ -1307,9 +1315,9 @@ fn from_command_line(m: &clap::ArgMatches, id: &str) -> bool {
 /// Which `setup` prompts survive the flags the user already typed.
 ///
 /// `--no-write-mcp` has no prompt of its own — the harness prompt's option 4
-/// covers "skip" — so it only needs to be honoured, which `write_mcp` already
-/// does. Without matches (unreachable from the `Setup` arm) we prompt for
-/// nothing, since we cannot tell an explicit flag from a default.
+/// covers "skip" — so it only needs to be honored, which `write_mcp` already
+/// does. Without matches (unreachable from the `Setup` arm) nothing is
+/// prompted, since an explicit flag cannot be told from a default.
 fn setup_interactive(m: Option<&clap::ArgMatches>) -> commands::setup::Interactive {
     let Some(m) = m else {
         return commands::setup::Interactive::default();
@@ -1370,9 +1378,8 @@ fn run_status() -> ExitCode {
     };
     // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
     // registry and the daemon log both resolve off $HOME via the one `home_dir()`
-    // helper. AILAB-184: `status` no longer installs a file layer, so nothing in
-    // this process truncates the log — the tail is read here, in-command, rather
-    // than pre-read in `run()` before `init_tracing` (the retired WEG-103 dance).
+    // helper. `status` installs no file layer (AILAB-184), so nothing in this
+    // process truncates the log, and the tail is read here, in-command.
     #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
     // Off Unix there is no socket to resolve: the daemon publishes a loopback
@@ -1389,7 +1396,7 @@ fn run_status() -> ExitCode {
         .map(|p| commands::status::read_log_tail(&p))
         .unwrap_or_default();
     // lock-ok (AILAB-583): status never opens a Tantivy index — it probes the
-    // daemon socket and reads registry.toml, the WAL, and the daemon log tail.
+    // daemon socket and reads registry.toml, state.json, and the daemon log tail.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -1421,7 +1428,7 @@ fn resolve_shim_cache_dir() -> Option<PathBuf> {
 /// `uninstall` / `update` (AILAB-584): a running `dreamd mcp` / `dreamd watch`
 /// is only ours to signal if its own `HOME=` resolves here. `None` — no home
 /// directory; the stop pass then has nothing to attribute against and skips
-/// with a warning rather than signalling machine-wide, which is what the bare
+/// with a warning rather than signaling machine-wide, which is what the bare
 /// `pkill -f` it replaced used to do. See [`home_dir`] for why an *empty*
 /// `HOME` counts as no home directory here.
 fn resolve_home() -> Option<PathBuf> {
@@ -1551,14 +1558,17 @@ fn run_watch(args: WatchArgs) -> ExitCode {
     commands::watch::run(&cwd, &args)
 }
 
-/// `dreamd service install` (AILAB-190 / AILAB-169). Writes the per-user
-/// service for this binary's `watch` against the project discovered from cwd:
-/// a systemd --user unit on Linux (then `daemon-reload` + `enable --now`) or a
-/// LaunchAgent plist on macOS (then `launchctl bootstrap gui/<uid>`; `--force`
-/// overwrites an existing plist and is ignored on Linux). Console-only
-/// one-shot: it only writes a service file and execs `systemctl` /
-/// `launchctl`, never opens a Tantivy index, and uses unlocked
-/// `println!`/`eprintln!` so no stdio lock is hoisted.
+/// `dreamd service install` (AILAB-190 / AILAB-169 / AILAB-203). Writes the
+/// per-user service for this binary's `watch` against the project discovered
+/// from cwd: a systemd --user unit on Linux (then `daemon-reload` +
+/// `enable --now`), a LaunchAgent plist on macOS (then
+/// `launchctl bootstrap gui/<uid>`), or a Task Scheduler logon task on Windows
+/// (`schtasks /Create`, plus the bearer token in `~/.agent/auth.json`; the
+/// task is not started). `--force` overwrites an existing plist or task and is
+/// ignored on Linux. Console-only one-shot: it only writes service files and
+/// execs `systemctl` / `launchctl` / `schtasks` / `icacls`, never opens a
+/// Tantivy index, and uses unlocked `println!`/`eprintln!` so no stdio lock is
+/// hoisted.
 fn run_service_install(force: bool) -> ExitCode {
     let cwd = match current_dir_or_exit() {
         Ok(p) => p,
@@ -1572,15 +1582,17 @@ fn run_service_install(force: bool) -> ExitCode {
 }
 
 /// `dreamd service start` (AILAB-190 / AILAB-169): `systemctl --user start
-/// dreamd.service` on Linux, `launchctl kickstart -k` on macOS. Same
-/// console-only, index-free contract as `run_service_install`.
+/// dreamd.service` on Linux, `launchctl kickstart -k` on macOS, `schtasks
+/// /Run` on Windows. Same console-only, index-free contract as
+/// `run_service_install`.
 fn run_service_start() -> ExitCode {
     service_exit(commands::service::run_start())
 }
 
 /// `dreamd service restart` (AILAB-185): `systemctl --user restart
 /// dreamd.service` on Linux, the same `launchctl kickstart -k` argv `start`
-/// uses on macOS. Bounce-only — it never rewrites the unit / plist, so an
+/// uses on macOS, a best-effort `schtasks /End` then `/Run` on Windows.
+/// Bounce-only — it never rewrites the unit / plist / task, so an
 /// npx cache-path change still needs `dreamd service install` first. Not
 /// `dreamd update --restart`, which stops local `mcp` / `watch` processes —
 /// the supervised one included, since it runs under the same `HOME` — and
@@ -1591,10 +1603,11 @@ fn run_service_restart() -> ExitCode {
 }
 
 /// `dreamd service status` (AILAB-178): the OS supervisor's view of the unit /
-/// LaunchAgent (running / stopped / failed / not-installed, PID, active-since)
-/// plus the last `STATUS_LOG_TAIL_LINES` lines of `~/.agent/dreamd.log`, read
-/// in-command like `run_status` does. Daemon-level UDS liveness is `dreamd
-/// status` (WEG-103); the two are deliberately separate. Console-only,
+/// LaunchAgent / scheduled task (running / stopped / failed / not-installed,
+/// PID, active-since) plus the last `STATUS_LOG_TAIL_LINES` lines of
+/// `~/.agent/dreamd.log`, read in-command like `run_status` does. Whether the
+/// daemon itself answers is `dreamd status` (WEG-103); the two are
+/// deliberately separate. Console-only,
 /// index-free, unlocked `print!` — same contract as `run_service_install`.
 fn run_service_status() -> ExitCode {
     let Some(home) = home_dir() else {
@@ -1609,7 +1622,8 @@ fn run_service_status() -> ExitCode {
 }
 
 /// `dreamd service uninstall` (AILAB-202): tear down the user-scope service
-/// entry — the systemd --user unit or the macOS LaunchAgent — and print the
+/// entry — the systemd --user unit, the macOS LaunchAgent, or the Windows
+/// scheduled task — and print the
 /// removed / preserved paths. Idempotent: a unit or plist that is already
 /// gone is not an error. `--purge` additionally deletes the daemon home
 /// `~/.agent/` after `--yes` or a typed `y` on a tty, and never a per-project
@@ -1618,8 +1632,8 @@ fn run_service_status() -> ExitCode {
 /// Not the top-level `dreamd uninstall` (AILAB-226), which stops local
 /// processes and clears caches: this verb never touches a process table.
 /// No project root is needed, so `current_dir_or_exit` is deliberately not
-/// called — one `HOME` read drives the unit path, the plist path and the
-/// daemon home alike. Same console-only, index-free contract as
+/// called — one `HOME` read drives the service file path and the daemon home
+/// alike. Same console-only, index-free contract as
 /// `run_service_install`: unlocked `println!`, no hoisted stdio lock.
 fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
     let Some(home) = home_dir() else {
@@ -1667,7 +1681,7 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
 }
 
 fn run_vectors_enable() -> ExitCode {
-    // Stdout stays UNLOCKED: loading the model starts ONNX Runtime, which may
+    // Stdout stays unlocked: loading the model starts ONNX Runtime, which may
     // log through tracing to stderr. See AGENTS.md
     // no-hoisted-stdio-lock-across-tantivy.
     eprintln!("{}", commands::deprecation::VECTORS_ENABLE);
@@ -1696,9 +1710,9 @@ fn run_version() -> ExitCode {
 pub fn run() -> ExitCode {
     // Same parse as `Cli::parse()`, split in two so the `ArgMatches` survives:
     // `setup`'s wizard needs `value_source` to tell a typed flag from a default
-    // (AILAB-551 §1.7), which the derived struct alone cannot express.
+    // (AILAB-551), which the derived struct alone cannot express.
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
-    // `from_arg_matches` (NOT `from_arg_matches_mut`) is load-bearing, not
+    // `from_arg_matches` (not `from_arg_matches_mut`) is load-bearing, not
     // stylistic: the `_mut` derive calls `matches.remove_subcommand()`, after
     // which `matches.subcommand_matches("setup")` below returns `None`, the
     // wizard silently degrades to `Interactive::default()` (ask nothing), and
@@ -1709,13 +1723,13 @@ pub fn run() -> ExitCode {
         Err(e) => e.exit(),
     };
 
-    // WEG-32 / DR-004 — install the tracing subscriber once, before dispatch,
+    // Install the tracing subscriber once (WEG-32), before dispatch,
     // so every subcommand's `tracing` callsites land on stderr. AILAB-184: only
     // the daemon (`dreamd watch`) additionally gets the file layer at
     // ~/.agent/dreamd.log; see `wants_daemon_log` for why every other
     // invocation passes None and stays console-only. The log path is resolved
     // via the one `home_dir()` helper (empty HOME counts as none).
-    // `_log_guard` MUST live until run() returns — `let _ =` would drop it
+    // `_log_guard` must live until run() returns — `let _ =` would drop it
     // immediately and discard buffered file logs — and it is still
     // load-bearing whenever a file layer is installed.
     let log_file = if wants_daemon_log(cli.command.as_ref()) {
@@ -1899,7 +1913,7 @@ mod tests {
 
     #[test]
     fn parses_dream_no_llm_with_no_commit() {
-        // AILAB-204 §3.4 — the two flags are compatible and independent.
+        // AILAB-204: the two flags are compatible and independent.
         let cli = Cli::try_parse_from(["dreamd", "dream", "--no-llm", "--no-commit"]).unwrap();
         match cli.command {
             Some(Command::Dream(args)) => {
@@ -1911,7 +1925,7 @@ mod tests {
         }
     }
 
-    /// AILAB-199 §3.3 — the consent flag parses, is not hidden, and does not
+    /// AILAB-199: the consent flag parses, is not hidden, and does not
     /// drag any other flag on with it.
     #[test]
     fn parses_dream_share_personal() {
@@ -1929,7 +1943,7 @@ mod tests {
         }
     }
 
-    /// AILAB-199 §3.3 — compatible with both `--dry` and `--no-llm`. The
+    /// AILAB-199: compatible with both `--dry` and `--no-llm`. The
     /// combination is legal and discloses nothing: `--no-llm` never opens a
     /// request for the consent to apply to.
     #[test]
@@ -2319,7 +2333,7 @@ mod tests {
     }
 
     /// Neither variable set is the genuine "no home directory" case, which
-    /// every caller already has a defined behaviour for (skip with a note, or
+    /// every caller already has a defined behavior for (skip with a note, or
     /// refuse to attribute anything).
     #[test]
     fn resolve_home_without_either_variable_is_none() {
@@ -2803,8 +2817,8 @@ mod tests {
 
     #[test]
     fn typed_flags_skip_their_prompts() {
-        // AILAB-551 §1.7: a flag the user typed wins over its prompt. Note
-        // `--harness both` IS the clap default — detection must be by source.
+        // AILAB-551: a flag the user typed wins over its prompt. Note
+        // `--harness both` is the clap default — detection must be by source.
         let plan = interactive_for(&["dreamd", "setup", "--harness", "both"]);
         assert!(
             !plan.ask_harness,

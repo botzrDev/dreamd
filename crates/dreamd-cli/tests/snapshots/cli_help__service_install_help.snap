@@ -2,13 +2,15 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "nested_subcommand_help(\"service\", \"install\")"
 ---
-Write a user-scope service for `dreamd watch` and enable it now (Linux systemd --user / macOS LaunchAgent / Windows scheduled task)
+Write a user-scope service for `dreamd watch` (Linux systemd --user unit, macOS LaunchAgent, Windows logon task).
+
+Linux and macOS also start it now. The Windows task first runs at the next logon or on `dreamd service start`, and install also writes the bearer token `dreamd watch` checks, ~/.agent/auth.json.
 
 Usage: install [OPTIONS]
 
 Options:
       --force
-          Overwrite an existing LaunchAgent plist (macOS) or scheduled-task XML (Windows). No effect on Linux
+          Overwrite an existing LaunchAgent plist (macOS) or scheduled task (Windows); on Windows this also rotates the bearer token. No effect on Linux
 
   -h, --help
-          Print help
+          Print help (see a summary with '-h')

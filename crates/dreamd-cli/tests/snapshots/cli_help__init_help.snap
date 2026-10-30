@@ -2,9 +2,9 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"init\")"
 ---
-Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged. If it is missing from the registry, init registers it.
+Scaffold a new per-project .agent/ store and register it.
 
-Requires a project-root sentinel in cwd or an ancestor.
+An existing .agent/ is left unchanged, and is registered if the registry lacks it. Requires a project-root sentinel in cwd or an ancestor.
 
 Usage: init [OPTIONS]
 

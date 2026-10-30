@@ -8,16 +8,16 @@ Usage: blame [OPTIONS] <QUERY>
 
 Arguments:
   <QUERY>
-          Free-text query (BM25 over episodic content)
+          Free-text query, matched with BM25 against stored events and lessons
 
 Options:
   -k, --k <K>
-          Max results (default 5 — recall stays at 10)
+          Max results
           
           [default: 5]
 
       --explain
-          Print per-hit salience factor breakdown (DR-204)
+          Print each hit's salience factor breakdown
 
       --json
           Print one compact JSON array instead of the markdown table
