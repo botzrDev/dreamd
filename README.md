@@ -97,7 +97,7 @@ Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
-`npx -y dreamd-mcp setup` (or `dreamd setup` after a cargo install) scaffolds the store by calling `init`, then writes the harness MCP config. `init` is the scaffold primitive and still works on its own when you want the store without touching any MCP config. Both are idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `npx -y dreamd-mcp init --uninstall-project` unregisters the current project and touches nothing else.
+`npx -y dreamd-mcp setup` (or `dreamd setup` after a cargo install) scaffolds the store by calling `init`, then writes the harness MCP config. `init` is the scaffold primitive and still works on its own when you want the store without touching any MCP config. Both are idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `npx -y dreamd-mcp init --uninstall-project` unregisters the current project and touches nothing else. `dreamd init` puts that registry entry back and does not rewrite the store.
 
 ---
 

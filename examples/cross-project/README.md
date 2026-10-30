@@ -20,7 +20,7 @@ cross-project/
 
 ## Try it
 
-The two fixture directories already contain an `.agent/`, so `dreamd init` there prints `dreamd: already initialized — .agent/ exists. nothing to do.` and does **not** register them. A daemon then answers requests for those roots with `404 {"error":"agent root not registered"}`. The fixtures are for reading (see Compare stores below). To see the routing live, use two fresh directories:
+The two fixture directories already contain an `.agent/`. `dreamd init` there registers them and does not rewrite the store. If they are already registered it prints `dreamd: already initialized — .agent/ exists. nothing to do.` The fixtures are for reading (see Compare stores below). To see the routing live, use two fresh directories:
 
 ```bash
 mkdir -p /tmp/xp/alpha /tmp/xp/beta

@@ -194,6 +194,7 @@ rm -f ~/.agent/dreamd.sock
 
 # 2. Unregister the project from the registry (run from the project root)
 dreamd init --uninstall-project
+# Drops the registry entry only. The store stays. A later `dreamd init` puts the entry back.
 
 # 3. Native binary cache
 rm -rf ~/.cache/dreamd-mcp                  # macOS/Linux

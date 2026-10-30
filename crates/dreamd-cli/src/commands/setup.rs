@@ -257,6 +257,11 @@ pub fn run(
                 "dry-run: {} already exists \u{2014} scaffold would be skipped",
                 agent_dir.display()
             )?;
+            writeln!(
+                out,
+                "dry-run: would register the project in {} if it is not already there",
+                DaemonHome::new(req.daemon_home).registry_toml().display()
+            )?;
         } else {
             writeln!(out, "dry-run: would scaffold {}", agent_dir.display())?;
             writeln!(
@@ -1536,6 +1541,45 @@ mod tests {
         let fresh = merge_claude_md("");
         assert!(fresh.starts_with("<!-- dreamd:start -->\n"));
         assert!(fresh.ends_with("<!-- dreamd:end -->\n"));
+    }
+
+    /// `setup` scaffolds through `init::run`, so an existing store with no
+    /// registry entry is registered and not rewritten.
+    #[cfg(unix)]
+    #[test]
+    fn setup_registers_an_existing_store_that_has_no_registry_entry() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("Cargo.toml"), b"[package]\n").unwrap();
+        let jsonl = project.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl");
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&jsonl, b"keep\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let req = SetupRequest {
+            cwd: project.path(),
+            daemon_home: home.path(),
+            harness: Harness::None,
+            write_mcp: false,
+            force: false,
+            start_watch: false,
+            dry_run: false,
+            yes: true,
+            interactive: Interactive::default(),
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(&req, &mut out, &mut err).expect("setup");
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(
+            stdout.contains("dreamd: registered existing .agent/ in ~/.agent/registry.toml"),
+            "{stdout}"
+        );
+        assert_eq!(std::fs::read(&jsonl).unwrap(), b"keep\n");
+        let registry = std::fs::read_to_string(home.path().join("registry.toml")).unwrap();
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        assert!(
+            registry.contains(&canonical.to_string_lossy().to_string()),
+            "{registry}"
+        );
     }
 
     #[test]
