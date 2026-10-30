@@ -72,15 +72,15 @@ serde_urlencoded = "0.7"
 # fs / cors / auth off. MIT — already covered by the deny.toml global allow
 # list, no new per-crate exception.
 tower-http = { version = "0.6", default-features = false, features = ["trace", "request-id"] }
-# Tantivy 0.26 — promoted to a real library dependency by WEG-42 (DR-202).
+# Tantivy 0.27 — promoted to a real library dependency by WEG-42 (DR-202).
 # `server::tantivy_handle::TantivyIndexHandle` opens the per-project index,
 # runs startup replay, and drives the 5-second commit cadence. The WEG-24
 # spike binary (`tests/bin/tantivy_spike.rs`, `test = false, bench = false,
 # doc = false`) continues to reach this dep; living in `[dependencies]`
 # (not `[dev-dependencies]`) is also the WEG-24 cargo-mechanics necessity
 # because `[[bin]]` targets in a library crate do not inherit dev-deps.
-# Version pin stays at "0.26" (resolved 0.26.1 in Cargo.lock); no bump.
-tantivy = "0.26"
+# Version pin stays at "0.27" (resolved 0.27.0 in Cargo.lock).
+tantivy = "0.27"
 # WEG-43 salience collector — `OrderedFloat<f64>` for the BinaryHeap
 # `Ord` impl (f64 alone is only `PartialOrd`). Pin at "5" to match the
 # version already resolved transitively via tantivy (5.3.0 in Cargo.lock),
