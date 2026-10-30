@@ -1,5 +1,5 @@
 //! Registry reader/resolver and the one locked writer for
-//! `~/.agent/registry.toml` (DR-412).
+//! `~/.agent/registry.toml`.
 //!
 //! [`resolve_project`] is the read side: pure, no side effects.
 //! [`RegistryCache`] is the same read for the daemon's per-request lookup: it
@@ -7,8 +7,9 @@
 //! [`update_registry`] is the only write path. `dreamd init`
 //! (`register_project`) and `dreamd init --uninstall-project`
 //! (`uninstall_project`) both go through it, so the flock, the re-read under
-//! the lock, the root canonicalization, `write_atomic`, and the `0600` chmod
-//! are stated once. Do not add a second writer; add a mutation closure.
+//! the lock, the root canonicalization, and the replace (on Unix,
+//! `write_atomic` plus the `0600` chmod) are stated once. Do not add a second
+//! writer; add a mutation closure.
 //!
 //! Key invariant: stored `ProjectEntry::root` values are canonicalized at
 //! write time. Reads canonicalize the query path the same way so that
@@ -28,8 +29,9 @@ use crate::io::lock_exclusive;
 use crate::io::write_atomic;
 use crate::layout::DaemonHome;
 
-/// Top-level shape of `~/.agent/registry.toml`. The daemon iterates
-/// `projects` at startup to discover which project stores to serve.
+/// Top-level shape of `~/.agent/registry.toml`. The daemon looks a request's
+/// `X-Agent-Root` up in `projects` ([`RegistryCache`]); other readers use
+/// [`resolve_project`]. Nothing iterates it at startup.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     /// Known project roots, each added by `dreamd init`.
@@ -179,9 +181,8 @@ impl RegistryCache {
 /// the path as given when that fails), and hands both to `mutate`. When
 /// `mutate` returns `true` the registry is replaced and chmodded `0600` on
 /// Unix (`write_atomic`). Windows uses `io::replace_renaming`: a temp file and
-/// a rename, with no parent flush and no chmod. When it
-/// returns `false` nothing is written. Returns what
-/// `mutate` returned.
+/// a rename, with no parent flush and no chmod. When it returns `false`
+/// nothing is written. Returns what `mutate` returned.
 ///
 /// Does not `create_dir_all` the daemon home and does not print: the caller
 /// owns both. `register_project` creates the home first; uninstall returns

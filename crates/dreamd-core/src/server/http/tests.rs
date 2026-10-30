@@ -1,4 +1,8 @@
 //! HTTP ingress contract tests and shared test fixtures.
+//!
+//! Every Unix `AppState` built here sets `auth_json: None`: Unix auth is the
+//! peer UID, so `build_router` mounts no bearer layer and never reads that
+//! path (AILAB-192).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -33,8 +37,6 @@ fn make_test_state(registry_path: PathBuf) -> AppState {
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
-        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
-        // bearer layer and this path is never read here.
         auth_json: None,
     }
 }
@@ -82,8 +84,6 @@ fn make_real_state_with_cadence(
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: Some((canonical, primary)),
-        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
-        // bearer layer and this path is never read here.
         auth_json: None,
     }
 }
@@ -98,7 +98,7 @@ fn test_router() -> (tempfile::TempDir, axum::Router) {
 }
 
 /// Inject the current process UID as PeerUid extension.
-/// Required because build_router now includes peer_uid_middleware which
+/// Required because build_router includes peer_uid_middleware, which
 /// expects PeerUid to be set (as serve_uds does at connection-accept time).
 #[cfg(unix)]
 fn with_peer_uid(mut req: axum::http::Request<Body>) -> axum::http::Request<Body> {
@@ -108,8 +108,8 @@ fn with_peer_uid(mut req: axum::http::Request<Body>) -> axum::http::Request<Body
 }
 
 fn write_registry(registry_path: &std::path::Path, root: &str) {
-    // Stored roots must be canonicalized to match `resolve_project`, which
-    // canonicalizes the query path (registry.rs:53). On macOS a tempdir lives
+    // Stored roots must be canonicalized to match `RegistryCache::resolve`,
+    // which canonicalizes the query path. On macOS a tempdir lives
     // under /var → /private/var (a symlink), so a raw tempdir path stored here
     // never matches the canonicalized query and every request 404s. This is
     // identity on Linux (tempdirs aren't symlinked), so it only changes macOS.
@@ -180,7 +180,7 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-// ── existing middleware tests (unchanged assertions) ──────────────────────
+// ── Middleware ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn missing_x_agent_root_returns_400() {
@@ -220,8 +220,7 @@ async fn registered_agent_root_passes_middleware() {
     let (_dir, root_str, router) = mock_router_with_dir();
 
     // Empty body without content-type: middleware passes (registered root),
-    // Json extractor rejects with 415. Confirms middleware no longer
-    // short-circuits with 501.
+    // and the Json extractor rejects with 415.
     let req = with_peer_uid(
         Request::builder()
             .method("POST")
@@ -236,9 +235,9 @@ async fn registered_agent_root_passes_middleware() {
 }
 
 #[tokio::test]
-async fn stub_learn_endpoint_returns_501() {
-    // Previously tested that the stub handler returned 501; now that
-    // post_learn is wired, an empty body without content-type yields 415.
+async fn learn_without_content_type_returns_415() {
+    // `post_learn` is wired, so an empty body without a content type fails
+    // the Json extractor with 415.
     let (_dir, root_str, router) = mock_router_with_dir();
 
     let req = with_peer_uid(
@@ -254,7 +253,7 @@ async fn stub_learn_endpoint_returns_501() {
     assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
-// ── 8 new tests (WEG-68) ──────────────────────────────────────────────────
+// ── POST /api/v1/learn (WEG-68) ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn learn_valid_body_returns_201() {
@@ -318,12 +317,12 @@ async fn learn_invalid_skill_action_returns_400() {
 
 #[tokio::test]
 async fn learn_skill_action_normalised() {
-    // Uppercase letters and leading/trailing whitespace must be normalised
+    // Uppercase letters and leading/trailing whitespace must be normalized
     // before validation. "  Rust::Cargo::TEST  " → "rust::cargo::test".
     let (dir, root_str, router) = real_router_with_dir();
     let agent_root = AgentRoot::new(dir.path());
 
-    let body = sample_body("  Rust::Cargo::TEST  ", "normalisation test");
+    let body = sample_body("  Rust::Cargo::TEST  ", "normalization test");
     let req = with_peer_uid(
         Request::builder()
             .method("POST")
@@ -338,10 +337,10 @@ async fn learn_skill_action_normalised() {
     assert_eq!(
         resp.status(),
         StatusCode::CREATED,
-        "normalised form is valid"
+        "normalized form is valid"
     );
 
-    // Verify the normalised skill_action landed on disk.
+    // Verify the normalized skill_action landed on disk.
     let jsonl = std::fs::read_to_string(agent_root.episodic_jsonl()).unwrap();
     let record: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
     assert_eq!(
@@ -488,8 +487,6 @@ async fn learn_channel_full_returns_503() {
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
-        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
-        // bearer layer and this path is never read here.
         auth_json: None,
     };
     let router = build_router(state);
@@ -542,10 +539,10 @@ async fn learn_oversized_content_returns_413() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-// ── WEG-275: tightened charset, score range-check, server-stamped schema ──
+// ── Learn validation: charset, score range, server stamps (WEG-275) ──────────
 
-/// The tightened charset rejects `.`, `-`, and `/` (all were previously
-/// accepted as `[a-z0-9_:.-]`); now only `[a-z0-9_]` segments joined by `::`.
+/// The charset rejects `.`, `-`, and `/`: a `skill_action` is `[a-z0-9_]`
+/// segments joined by `::`.
 #[tokio::test]
 async fn learn_dotted_or_slashed_skill_action_returns_400() {
     let (_dir, root_str, router) = mock_router_with_dir();
@@ -605,8 +602,8 @@ async fn learn_score_out_of_range_returns_400() {
 }
 
 /// The coordinator server-stamps `schema_version`: a client-supplied value
-/// is overwritten with `RECORD_SCHEMA_VERSION` on the durable write. This
-/// closes the HTTP client-trust gap (post_learn never re-stamped).
+/// is overwritten with `RECORD_SCHEMA_VERSION` on the durable write, so an
+/// HTTP client cannot choose the schema version its record is stored under.
 #[tokio::test]
 async fn learn_server_stamps_schema_version() {
     let dir = tempfile::tempdir().unwrap();
@@ -690,11 +687,11 @@ async fn learn_without_id_returns_201_and_mints_id() {
     EventId::parse(id).expect("minted id must parse as an EventId");
 }
 
-/// AILAB-175 AC: a client-sent `id` is **ignored, not rejected**. This exact
-/// body 400'd at the extractor before the DTO (`EventId::parse` requires the
-/// `evt_` prefix + 26 Crockford chars), which is the reported bug. Serde's
-/// default ignore-unknown behavior on the DTO is what makes this pass — see
-/// the type's doc-comment for why it must stay that way.
+/// A client-sent `id` is **ignored, not rejected** (AILAB-175), even one that
+/// would fail `EventId::parse` (which requires the `evt_` prefix + 26
+/// Crockford chars). The wire DTO has no `id` field, and serde's default
+/// ignore-unknown behavior on it is what makes this pass — see the type's
+/// doc-comment for why it must stay that way.
 #[tokio::test]
 async fn learn_ignores_bogus_client_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -736,7 +733,7 @@ async fn learn_ignores_bogus_client_id() {
     EventId::parse(id).expect("minted id must parse as an EventId");
 }
 
-/// AILAB-175 §1.9 regression guard: `build_agent_learning` hardcodes
+/// Regression guard (AILAB-175): `build_agent_learning` hardcodes
 /// `pinned: false` (MCP has no such param), so routing HTTP through it would
 /// silently drop a client's `"pinned": true`. The handler re-applies it; this
 /// test fails if that line is ever removed.
@@ -831,7 +828,7 @@ async fn learn_server_stamps_timestamp() {
     );
 }
 
-// ── WEG-69: GET /api/v1/recall tests ─────────────────────────────────────
+// ── GET /api/v1/recall (WEG-69) ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn recall_missing_q_param_returns_400() {
@@ -1010,7 +1007,8 @@ async fn recall_empty_index_returns_empty_results() {
     );
 }
 
-// BZR-195: GET /api/v1/observability/salience.
+// ── GET /api/v1/observability/salience (BZR-195) ─────────────────────────────
+
 #[tokio::test]
 async fn salience_report_empty_index_writes_today_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -1235,8 +1233,6 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         daemon_uid: wrong_uid,
         primary: None,
-        // AILAB-192: Unix auth is the peer UID, so `build_router` mounts no
-        // bearer layer and this path is never read here.
         auth_json: None,
     };
     let router = build_router(state);
@@ -1270,9 +1266,9 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
     );
 }
 
-// ── WEG-82: GET /api/v1/preferences tests (DR-115) ───────────────────────
+// ── GET /api/v1/preferences (WEG-82) ─────────────────────────────────────────
 
-/// T1: Absent PREFERENCES.md → 200, empty body, no truncation headers.
+/// Absent PREFERENCES.md → 200, empty body, no truncation headers.
 #[tokio::test]
 async fn preferences_absent_returns_200_empty() {
     let dir = tempfile::tempdir().unwrap();
@@ -1280,7 +1276,7 @@ async fn preferences_absent_returns_200_empty() {
     let root_str = dir.path().to_str().unwrap();
     write_registry(&registry_path, root_str);
 
-    // Deliberately do NOT write PREFERENCES.md.
+    // Deliberately do not write PREFERENCES.md.
     let state = make_test_state(registry_path);
     let router = build_router(state);
 
@@ -1312,7 +1308,8 @@ async fn preferences_absent_returns_200_empty() {
     );
 }
 
-/// T2: Present PREFERENCES.md ≤ 16 KB → full body returned, no truncation headers.
+/// PREFERENCES.md within `PREFERENCES_SIZE_CAP` (16 KiB) → full body returned,
+/// no truncation headers.
 #[tokio::test]
 async fn preferences_small_file_returns_full_body() {
     let dir = tempfile::tempdir().unwrap();
@@ -1357,7 +1354,8 @@ async fn preferences_small_file_returns_full_body() {
     );
 }
 
-/// T3: Present PREFERENCES.md > 16 KB → truncated body, truncation headers set.
+/// PREFERENCES.md over `PREFERENCES_SIZE_CAP` → truncated body, truncation
+/// headers set.
 #[tokio::test]
 async fn preferences_large_file_returns_truncated() {
     let dir = tempfile::tempdir().unwrap();
@@ -1411,7 +1409,7 @@ async fn preferences_large_file_returns_truncated() {
     );
 }
 
-/// T4: Missing X-Agent-Root header → 400.
+/// Missing X-Agent-Root header → 400.
 #[tokio::test]
 async fn preferences_missing_agent_root_header_400() {
     let dir = tempfile::tempdir().unwrap();
@@ -1431,11 +1429,11 @@ async fn preferences_missing_agent_root_header_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// T5: X-Agent-Root present but path not in registry → 404.
+/// X-Agent-Root present but path not in registry → 404.
 #[tokio::test]
 async fn preferences_unregistered_root_404() {
     let dir = tempfile::tempdir().unwrap();
-    // Registry file is absent entirely — resolve_project returns Ok(None).
+    // Registry file is absent entirely — `RegistryCache::resolve` returns Ok(None).
     let state = make_test_state(dir.path().join("registry.toml"));
     let router = build_router(state);
 
@@ -1452,9 +1450,9 @@ async fn preferences_unregistered_root_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// ── WEG-70: POST /api/v1/dream tests (DR-404) ────────────────────────────
+// ── POST /api/v1/dream (WEG-70) ──────────────────────────────────────────────
 
-/// T1 — Happy path: non-empty JSONL, POST /api/v1/dream → 200 {"status":"ok"}.
+/// Happy path: non-empty JSONL, POST /api/v1/dream → 200 {"status":"ok"}.
 #[tokio::test]
 async fn dream_happy_path_returns_200() {
     let dir = tempfile::tempdir().unwrap();
@@ -1474,8 +1472,8 @@ async fn dream_happy_path_returns_200() {
         )
         .unwrap();
 
-    // Real coordinator: the dream cycle now routes through it (WEG-271),
-    // so the mock backpressure supervisor would reject the dispatch.
+    // Real coordinator: the dream cycle routes through it (WEG-271), so the
+    // mock backpressure supervisor would reject the dispatch.
     let state = make_real_state(dir.path(), registry_path);
     let router = build_router(state);
 
@@ -1494,7 +1492,7 @@ async fn dream_happy_path_returns_200() {
     assert_eq!(json["status"], serde_json::json!("ok"));
 }
 
-/// T2 — 409 guard: state.json with "in_progress" → 409.
+/// 409 guard: state.json with "in_progress" → 409.
 #[tokio::test]
 async fn dream_in_progress_returns_409() {
     let dir = tempfile::tempdir().unwrap();
@@ -1535,10 +1533,10 @@ async fn dream_in_progress_returns_409() {
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
-/// T3 — Empty JSONL: POST /api/v1/dream → 200, LESSONS.md NOT created.
+/// Empty JSONL: POST /api/v1/dream → 200, LESSONS.md not created.
 ///
-/// The consolidation cluster engine early-returns when the JSONL is empty
-/// (no promoted clusters), so LESSONS.md is never written.
+/// An empty JSONL promotes no cluster, so the cycle's plan writes no
+/// LESSONS.md.
 #[tokio::test]
 async fn dream_empty_jsonl_returns_200_no_lessons_md() {
     let dir = tempfile::tempdir().unwrap();
@@ -1553,7 +1551,7 @@ async fn dream_empty_jsonl_returns_200_no_lessons_md() {
     std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
     std::fs::write(&jsonl_path, b"").unwrap();
 
-    // Real coordinator: the dream cycle now routes through it (WEG-271).
+    // Real coordinator: the dream cycle routes through it (WEG-271).
     let state = make_real_state(dir.path(), registry_path);
     let router = build_router(state);
 
@@ -1571,7 +1569,7 @@ async fn dream_empty_jsonl_returns_200_no_lessons_md() {
     let json = body_json(resp).await;
     assert_eq!(json["status"], serde_json::json!("ok"));
 
-    // LESSONS.md must NOT have been created for an empty JSONL.
+    // LESSONS.md must not have been created for an empty JSONL.
     let lessons_path = agent_root.semantic_dir().join("LESSONS.md");
     assert!(
         !lessons_path.exists(),
@@ -1579,19 +1577,19 @@ async fn dream_empty_jsonl_returns_200_no_lessons_md() {
     );
 }
 
-/// T4 — Regression (WEG-271): a dream cycle must not orphan the
-/// coordinator's append fd. After the cycle replaces AGENT_LEARNINGS.jsonl
-/// by atomic rename, a subsequent POST /learn must land on the live inode
-/// (the file at the path), not the unlinked inode the stale fd points at.
+/// A dream cycle must not orphan the coordinator's append fd (WEG-271).
+/// After the cycle replaces AGENT_LEARNINGS.jsonl by atomic rename, a
+/// subsequent POST /learn must land on the live inode (the file at the
+/// path), not the unlinked inode a stale fd would point at.
 ///
 /// Learning #1 is dated > 90 days in the past so the decay pruner archives
-/// it and rewrites the JSONL via rename — that rename is precisely what
-/// orphaned the fd pre-fix. (A single fresh learning would NOT decay and
-/// would trigger no rename, so the bug would not reproduce.) Learning #2 is
-/// appended after the cycle; pre-fix it was written to the orphaned inode
-/// and never appeared in the on-disk file.
+/// it and the commit renames a new JSONL into place — the rename a stale fd
+/// would miss. (A single fresh learning would not decay and would trigger no
+/// rename, so the defect could not show.) Learning #2 is appended after the
+/// cycle; through a stale fd it would land in the orphaned inode and never
+/// appear in the on-disk file.
 ///
-/// Learning #1 is seeded directly on disk: `POST /learn` now server-stamps
+/// Learning #1 is seeded directly on disk: `POST /learn` server-stamps
 /// `timestamp` with `Utc::now()`, which would defeat the >90d decay precondition.
 #[tokio::test]
 async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
@@ -1649,7 +1647,7 @@ async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
         "decay must have archived learning #1 (proves the JSONL was renamed)"
     );
 
-    // Learning #2 — appended AFTER the cycle. The marker is distinctive and
+    // Learning #2 — appended after the cycle. The marker is distinctive and
     // redaction-safe.
     const MARKER: &str = "second-learning-after-dream-marker";
     let body2 = serde_json::json!({
@@ -1688,9 +1686,9 @@ async fn dream_cycle_does_not_orphan_coordinator_append_fd() {
     );
 }
 
-/// BZR-1241 (V4): the coordinator's open cycle is the daemon's in-progress
-/// guard. While a prepared cycle's ticket is alive, `POST /dream` is 409; once
-/// the ticket drops, the next one runs.
+/// The coordinator's open cycle is the daemon's in-progress guard (BZR-1241).
+/// While a prepared cycle's ticket is alive, `POST /dream` is 409; once the
+/// ticket drops, the next one runs.
 #[tokio::test]
 async fn dream_while_a_prepared_cycle_is_live_returns_409() {
     let dir = tempfile::tempdir().unwrap();
@@ -1746,20 +1744,18 @@ async fn dream_while_a_prepared_cycle_is_live_returns_409() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-// -----------------------------------------------------------------------
-// WEG-264 Defect 2 — daemon shares one index handle between append + recall
-// -----------------------------------------------------------------------
+// ── Daemon shares one index handle between append and recall (WEG-264) ───────
 
 /// The daemon wires the coordinator's `indexer_tx` to the *same*
 /// `TantivyIndexHandle` that recall reads (the pinned primary). A learning
 /// appended through the coordinator therefore becomes visible to recall
-/// once that handle commits — no second handle, no stale empty reader. Before WEG-264 Defect 2, `run_watch` booted the
-/// coordinator with `indexer_tx = None` and recall opened a *separate*
-/// handle via `index_map`, so live appends never reached the recall reader.
+/// once that handle commits — no second handle, no stale empty reader. With
+/// `indexer_tx = None` the live append would never be indexed, and a recall
+/// that opened its own handle would read an index the append never reaches.
 ///
-/// BZR-170: the commit is driven by `flush().await` plus one reader reload,
-/// not by polling the cadence ticker. The cadence is set far past the test's
-/// lifetime so the only commit is the one this test asks for.
+/// The commit is driven by `flush().await` plus one reader reload, not by
+/// polling the cadence ticker (BZR-170). The cadence is set far past the
+/// test's lifetime so the only commit is the one this test asks for.
 #[tokio::test]
 async fn daemon_primary_handle_shares_index_between_append_and_recall() {
     use crate::server::tantivy_handle::TantivyIndexHandle;
@@ -1777,7 +1773,7 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
         TantivyIndexHandle::open(&agent_root, &lock, Duration::from_secs(3600))
             .expect("open primary handle"),
     );
-    // Coordinator is wired to the SAME handle's indexer.
+    // Coordinator is wired to the *same* handle's indexer.
     let supervisor = Supervisor::start(&agent_root, &lock, 8, Some(primary.sender()))
         .expect("start supervisor with indexer");
 
@@ -1845,11 +1841,9 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
     );
 }
 
-// -----------------------------------------------------------------------
-// WEG-272 — per-project Supervisor routing (stop misfiling B into A)
-// -----------------------------------------------------------------------
+// ── Per-project Supervisor routing (WEG-272) ─────────────────────────────────
 
-/// Build a daemon-shaped state with TWO registered projects: the pinned
+/// Build a daemon-shaped state with two registered projects: the pinned
 /// boot project A (real coordinator + pinned primary index, short commit
 /// cadence) and a second project B reachable only via `runtimes`
 /// routing. Mirrors how `run_watch` composes the daemon. Both projects have a
@@ -1870,8 +1864,8 @@ fn make_routing_state() -> (
     let canonical_a = std::fs::canonicalize(dir_a.path()).unwrap();
     let canonical_b = std::fs::canonicalize(dir_b.path()).unwrap();
 
-    // Registry holds BOTH canonical roots (canonicalized to match the
-    // middleware's resolve_project lookup).
+    // Registry holds both canonical roots (canonicalized to match the
+    // middleware's `RegistryCache::resolve` lookup).
     let registry_path = dir_a.path().join("registry.toml");
     let body = format!(
         "[[projects]]\nroot = \"{}\"\n[[projects]]\nroot = \"{}\"\n",
@@ -1906,9 +1900,9 @@ fn make_routing_state() -> (
     (dir_a, dir_b, canonical_a, canonical_b, state)
 }
 
-/// Plant a crash a pre-1.1.0 binary left on `project_root`: a legacy `intents`
-/// WAL with a partial tmp and no `Commit`, which 1.1.0 still recovers the old
-/// way.
+/// Plant a crash a pre-1.2.0 binary left on `project_root`: a legacy `intents`
+/// WAL with a partial tmp and no `Commit`, which this binary still recovers the
+/// old way.
 fn plant_mid_cycle_crash(project_root: &std::path::Path) -> AgentRoot {
     use crate::wal::{DreamWal, WalIntent};
 
@@ -1995,8 +1989,8 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
     );
 }
 
-/// A live non-boot root resolves to the SAME coordinator on every request:
-/// two coordinators on one JSONL corrupt it (DR-103).
+/// A live non-boot root resolves to the *same* coordinator on every request:
+/// two coordinators on one JSONL corrupt it.
 #[tokio::test]
 async fn resolve_supervisor_returns_the_same_arc_for_a_live_root() {
     let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
@@ -2010,15 +2004,15 @@ async fn resolve_supervisor_returns_the_same_arc_for_a_live_root() {
 
     assert!(
         Arc::ptr_eq(&first, &second),
-        "a live root must return the SAME Arc — two coordinators on one JSONL corrupt it (DR-103)"
+        "a live root must return the same Arc — two coordinators on one JSONL corrupt it"
     );
     assert_eq!(state.runtimes.lock().unwrap().len(), 1);
 }
 
-/// Headline AC: a `POST /learn` for project B appends to B's JSONL, leaves
-/// the boot project A's JSONL untouched, and recall(B) surfaces it.
-/// Before WEG-272 the append misfiled into A's JSONL (the live data-loss
-/// bug: dispatch went to the boot coordinator regardless of `entry.root`).
+/// A `POST /learn` for project B appends to B's JSONL, leaves the boot
+/// project A's JSONL untouched, and recall(B) surfaces it (WEG-272). A
+/// dispatch to the boot coordinator regardless of `entry.root` would misfile
+/// B's learning into A's JSONL.
 #[tokio::test]
 async fn learn_routes_to_owning_project_not_boot() {
     use crate::server::tantivy_handle::IndexerMsg;
@@ -2060,7 +2054,7 @@ async fn learn_routes_to_owning_project_not_boot() {
         .unwrap_or_default();
     assert!(
         !a_jsonl.contains(MARKER),
-        "the boot project A's JSONL must NOT contain B's learning; got: {a_jsonl:?}"
+        "the boot project A's JSONL must not contain B's learning; got: {a_jsonl:?}"
     );
 
     // (3) recall(B) surfaces it. The coordinator forwarded IndexerMsg::Append
@@ -2094,9 +2088,8 @@ async fn learn_routes_to_owning_project_not_boot() {
 }
 
 /// A `POST /learn` for the pinned boot project A still routes to the boot
-/// coordinator (`state.supervisor`) and lands in A's JSONL — and must NOT
-/// open a `runtimes` entry. This preserves the single-coordinator
-/// behaviour every pre-WEG-272 test relied on.
+/// coordinator (`state.supervisor`) and lands in A's JSONL — and must not
+/// open a `runtimes` entry: the boot project has exactly one coordinator.
 #[tokio::test]
 async fn learn_to_boot_root_uses_primary_supervisor() {
     let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
@@ -2126,7 +2119,7 @@ async fn learn_to_boot_root_uses_primary_supervisor() {
         "boot append must land in A's JSONL"
     );
 
-    // The boot project uses state.supervisor — routing must NOT create a
+    // The boot project uses state.supervisor — routing must not create a
     // per-root coordinator for it.
     assert_eq!(
         state.runtimes.lock().unwrap().len(),
@@ -2136,7 +2129,7 @@ async fn learn_to_boot_root_uses_primary_supervisor() {
 }
 
 /// Idempotency is per-coordinator (each owns its own LRU keyed by its
-/// canonical root), so the SAME dedup key sent to A and to B yields two
+/// canonical root), so the same dedup key sent to A and to B yields two
 /// distinct records — no cross-project collision — while a repeat on B is
 /// still deduplicated within B.
 #[tokio::test]
@@ -2191,7 +2184,7 @@ async fn dedup_key_does_not_collide_across_projects() {
 
     assert_ne!(
         a["id"], b["id"],
-        "same dedup key on different projects must NOT collide (per-coordinator LRU)"
+        "same dedup key on different projects must not collide (per-coordinator LRU)"
     );
     assert_eq!(a["deduplicated"], false, "first A append is fresh");
     assert_eq!(b["deduplicated"], false, "first B append is fresh");
@@ -2202,7 +2195,7 @@ async fn dedup_key_does_not_collide_across_projects() {
     );
 }
 
-// ── AILAB-192: bearer_auth_middleware — the off-Unix auth layer ───────────────
+// ── bearer_auth_middleware, the off-Unix auth layer (AILAB-192) ──────────────
 
 /// The token `auth.json` holds for most of these tests.
 const BEARER_TOKEN_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -2269,7 +2262,7 @@ async fn bearer_ping(
     (status, body_json(resp).await)
 }
 
-/// AC (AILAB-192): no `Authorization` header → 401. Not 403 — 403 is the
+/// AILAB-192: no `Authorization` header → 401. Not 403 — 403 is the
 /// peer-UID verdict and this layer can never reach it.
 #[tokio::test]
 async fn bearer_missing_authorization_is_401() {
@@ -2287,7 +2280,7 @@ async fn bearer_missing_authorization_is_401() {
     );
 }
 
-/// AC (AILAB-192): a well-formed `Bearer` header carrying the wrong 64-hex
+/// AILAB-192: a well-formed `Bearer` header carrying the wrong 64-hex
 /// token → 401.
 #[tokio::test]
 async fn bearer_wrong_token_is_401() {
@@ -2304,11 +2297,10 @@ async fn bearer_wrong_token_is_401() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// AC (AILAB-192): the right token reaches the handler. This is the "200 on
-/// right token" row of the spec's §4 table — the auth layer letting a request
-/// through, deliberately on a bare `/ping` and not on `GET /api/v1/health`,
-/// which is behind `agent_root_middleware` and opens the project (spec §1.5,
-/// BZR-1243).
+/// AILAB-192: the right token reaches the handler — the auth layer letting a
+/// request through, deliberately on a bare `/ping` and not on
+/// `GET /api/v1/health`, which is behind `agent_root_middleware` and opens the
+/// project (BZR-1243).
 #[tokio::test]
 async fn bearer_right_token_is_200() {
     let dir = tempfile::tempdir().unwrap();
@@ -2324,13 +2316,13 @@ async fn bearer_right_token_is_200() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// AC (AILAB-192): the per-request re-read proof, and the reason
+/// AILAB-192: the per-request re-read proof, and the reason
 /// `read_auth_token` is called in the middleware body with no cache, no
 /// `OnceCell` and no memoized `AuthToken` anywhere on the path.
 ///
 /// One router instance, one middleware layer, one state — only the file on disk
 /// changes between the two requests. A token resolved once at mount time (or
-/// memoized on first use) would keep honouring `BEARER_TOKEN_A` here and the
+/// memoized on first use) would keep honoring `BEARER_TOKEN_A` here and the
 /// second request would still be 200, which is exactly the bug: a
 /// `dreamd service install --force` rotation would not take effect until the
 /// daemon restarted, leaving a revoked credential working.
@@ -2369,7 +2361,7 @@ async fn bearer_rewritten_auth_json_401s_the_next_request() {
     assert_eq!(rotated, StatusCode::OK, "the rotated-in token is accepted");
 }
 
-/// AC (AILAB-192): `auth.json` does not exist yet (nothing has run
+/// AILAB-192: `auth.json` does not exist yet (nothing has run
 /// `dreamd service install`) → 401, with a body byte-identical to the
 /// wrong-token 401. Distinguishable answers here would be a probe oracle
 /// reporting the daemon's install state to an unauthenticated caller.
@@ -2404,7 +2396,7 @@ async fn bearer_absent_auth_file_is_401() {
     );
 }
 
-/// AC (AILAB-192): `auth_json` is `None` → 401 on every request, fail-closed.
+/// AILAB-192: `auth_json` is `None` → 401 on every request, fail-closed.
 /// A router built without a token path has no way to authenticate anyone, so it
 /// authenticates no one; reading `None` as "no auth required" would turn a
 /// forgotten `with_auth_json` call into an open daemon.
@@ -2426,7 +2418,7 @@ async fn bearer_none_auth_path_is_401() {
     }
 }
 
-/// AC (AILAB-192): the scheme grammar. Only `bearer <non-empty credential>`,
+/// AILAB-192: the scheme grammar. Only `bearer <non-empty credential>`,
 /// ASCII-case-insensitively and with exactly one space, is even considered — a
 /// correct credential presented under any other shape is still 401.
 #[tokio::test]
@@ -2467,7 +2459,7 @@ async fn bearer_malformed_scheme_is_401() {
     );
 }
 
-/// AC (AILAB-192): the scheme match is ASCII-case-insensitive, so a client that
+/// AILAB-192: the scheme match is ASCII-case-insensitive, so a client that
 /// sends `bearer` (RFC 7235 makes the scheme token case-insensitive, and HTTP
 /// clients differ) is accepted with the right credential.
 #[tokio::test]
@@ -2487,7 +2479,7 @@ async fn bearer_lowercase_scheme_is_accepted() {
     }
 }
 
-/// AC (AILAB-192): the Unix router's outermost layer is still the peer-UID one
+/// AILAB-192: the Unix router's outermost layer is still the peer-UID one
 /// and **no** bearer layer leaked onto this target.
 ///
 /// A real `build_router(state)` request with neither an `Authorization` header
@@ -2526,7 +2518,7 @@ async fn unix_router_has_no_bearer_layer() {
     );
 }
 
-// ── BZR-187: POST /api/v1/migrate stub ────────────────────────────────────
+// ── POST /api/v1/migrate stub (BZR-187) ──────────────────────────────────────
 
 #[tokio::test]
 async fn migrate_without_peer_uid_is_403() {
@@ -2605,7 +2597,7 @@ async fn migrate_registered_root_is_501() {
     );
 }
 
-// ── BZR-1243: /health reads the live marks ──────────────────────────────────
+// ── /health reads the live marks (BZR-1243) ──────────────────────────────────
 
 /// `POST /api/v1/learn` to `root`; returns the minted id.
 async fn post_learn(router: &axum::Router, root: &str, content: &str) -> String {

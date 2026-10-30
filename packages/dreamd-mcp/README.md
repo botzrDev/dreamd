@@ -41,11 +41,12 @@ No Rust installation required; the shim needs Node 18 or later and `tar` on `PAT
 `npx -y dreamd-mcp` with no arguments starts the MCP server over stdio. When the first argument is one of the commands below, the whole argument list is forwarded to the native `dreamd` binary unchanged:
 
 ```text
-blame, doctor, dream, forget, init, mcp, memory, reset, salience-drift,
-service, setup, uninstall, update, vectors, version, watch
+archive, blame, doctor, dream, forget, init, mcp, memory, migrate, recall,
+reset, salience-drift, score, service, setup, status, uninstall, update,
+vectors, version, watch
 ```
 
-Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --project-root /abs/path` works). That also means the native commands missing from the list — `status`, `recall`, `score`, `archive`, `migrate` — are **not** reachable through the shim; they need a `dreamd` binary on `PATH` (`cargo install --path crates/dreamd-cli` from a source checkout). A leading `--help` / `-h` or `--version` / `-V` is answered by the shim itself; `npx -y dreamd-mcp version` prints the native binary's build info.
+That is every `dreamd` subcommand. Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --project-root /abs/path` works). A leading `--help` / `-h` or `--version` / `-V` is answered by the shim itself; `npx -y dreamd-mcp version` prints the native binary's build info.
 
 Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor)
 
@@ -194,6 +195,7 @@ rm -f ~/.agent/dreamd.sock
 
 # 2. Unregister the project from the registry (run from the project root)
 dreamd init --uninstall-project
+# Drops the registry entry only. The store stays. A later `dreamd init` puts the entry back.
 
 # 3. Native binary cache
 rm -rf ~/.cache/dreamd-mcp                  # macOS/Linux

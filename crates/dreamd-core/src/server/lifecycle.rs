@@ -1,13 +1,13 @@
-//! Writer-process lifecycle (WEG-21 / DR-118).
+//! Supervisor lifecycle (WEG-21).
 //!
-//! [`Supervisor`] owns the [`MemoryCoordinator`] task handle plus all senders
-//! into the actor channel. Shutdown-drain contract (decision 2026-05-14,
-//! option a): the lifecycle layer guarantees no append is in flight when
-//! `Shutdown` is sent. We do this by dropping every sender before sending
-//! `Shutdown` on the supervisor's retained sender. `Shutdown` is terminal —
-//! any further send on a closed channel returns a typed `SendError`, never a
-//! silent drop. `MemoryCoordinator::run()` is NOT modified for this ticket;
-//! the invariant lives entirely in the supervisor.
+//! [`Supervisor`] owns the [`MemoryCoordinator`] task handle plus the
+//! canonical sender into the actor channel. Shutdown-drain contract: no append
+//! is in flight when `Shutdown` is sent, because the caller drops every sender
+//! it was handed before `Supervisor::shutdown` sends `Shutdown` on the
+//! supervisor's retained sender. `Shutdown` is terminal — any further send on
+//! the closed channel returns a typed `SendError`, never a silent drop. The
+//! invariant lives entirely in the supervisor; `MemoryCoordinator::run()` does
+//! not enforce it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,8 +21,9 @@ use crate::server::index_freshness::AppendMark;
 use crate::server::tantivy_handle::IndexerMsg;
 use crate::writer_lock::WriterLock;
 
-/// Default bound for the coordinator mpsc channel (architecture decision C14).
-/// Revisit after load-testing in DR-208 / DR-808.
+/// Default bound for the coordinator mpsc channel. When it is full, an HTTP
+/// handler's [`Supervisor::try_send`] gives up after
+/// [`COORDINATOR_SEND_TIMEOUT`] and returns 503. Not yet tuned by a load test.
 pub const COORDINATOR_CHANNEL_CAPACITY: usize = 256;
 
 /// Timeout for non-blocking coordinator sends from API handlers.
@@ -40,7 +41,8 @@ pub enum CoordinatorSendError {
     Closed,
 }
 
-/// Failure modes surfaced by the `server::run` entry point.
+/// Failure modes of [`Supervisor::start`] and of the `dreamd watch` startup
+/// around it (socket bind, index open).
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     /// Unix-only (AILAB-192): the variant carries
@@ -48,14 +50,19 @@ pub enum ServerError {
     /// `std::os::unix::net::UnixStream`. `server::uds` does not exist off Unix,
     /// so there is nothing for this variant to wrap there. Nothing matches
     /// `ServerError` exhaustively, so dropping the arm off-target is source- and
-    /// behaviour-compatible.
+    /// behavior-compatible.
     #[cfg(unix)]
     #[error("UDS bind failed: {0}")]
     UdsBind(#[from] crate::server::uds::UdsBindError),
+    /// `MemoryCoordinator::open` failed: the JSONL could not be opened or
+    /// recovered.
     #[error("coordinator open failed: {0}")]
     Coordinator(std::io::Error),
+    /// Any other filesystem or socket failure during startup.
     #[error("other I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// The project's index manifest is newer than this binary, corrupt, or
+    /// unreadable.
     #[error("index manifest check failed: {0}")]
     ManifestCheck(#[from] crate::index::ManifestVersionError),
     /// The token passed to [`Supervisor::start`] does not cover the project.
@@ -70,7 +77,7 @@ pub enum ServerError {
 ///   2. Spawn the coordinator task.
 ///   3. Retain one sender on the supervisor itself.
 ///
-/// On shutdown, the supervisor must be the LAST owner of any sender. After
+/// On shutdown, the supervisor must be the last owner of any sender. After
 /// dropping its `tx`, sending `Shutdown` on a retained handle requires
 /// constructing it before the drop — see [`Supervisor::shutdown`].
 pub struct Supervisor {
@@ -86,11 +93,12 @@ impl Supervisor {
     /// Boot a coordinator under `agent_root`, return a supervisor that owns
     /// the sole sender. The coordinator runs on the current tokio runtime.
     ///
-    /// WEG-49 (DR-210): before any coordinator state is opened, read the
-    /// per-project index manifest and compare its `schema_version` to the
-    /// binary's [`crate::index::SCHEMA_VERSION`]. A manifest newer than the
-    /// binary aborts startup via [`ServerError::ManifestCheck`]; older or
-    /// absent manifests log a `tracing::warn!` and proceed.
+    /// Before any coordinator state is opened, read the per-project index
+    /// manifest and compare its `schema_version` to the binary's
+    /// [`crate::index::SCHEMA_VERSION`] (WEG-49). A manifest newer than the
+    /// binary aborts startup via [`ServerError::ManifestCheck`]. An older one
+    /// logs a `warn!` (the index open rebuilds it), an absent one an `info!`,
+    /// and both proceed.
     ///
     /// `indexer_tx` is `Some` when this process opened a Tantivy handle for the
     /// project. `None` is append-only (tests, and a caller that has not opened
@@ -156,8 +164,8 @@ impl Supervisor {
             .clone()
     }
 
-    /// Clone a sender for a UDS client connection. The supervisor retains its
-    /// own copy on `self.tx`; the shutdown drain depends on that retention.
+    /// Clone a sender into the coordinator's channel. The supervisor retains
+    /// its own copy on `self.tx`; the shutdown drain depends on that retention.
     pub fn sender(&self) -> mpsc::Sender<MemoryCoordinatorMsg> {
         self.tx.clone()
     }
@@ -180,7 +188,7 @@ impl Supervisor {
 
     /// Test-only constructor: returns a `Supervisor` whose channel has capacity 1
     /// and whose receiver is handed back to the caller. The coordinator task is
-    /// replaced with a no-op handle. Use this to test `try_send` behaviour
+    /// replaced with a no-op handle. Use this to test `try_send` behavior
     /// without starting a real `MemoryCoordinator`.
     #[cfg(test)]
     pub fn for_backpressure_test() -> (Self, mpsc::Receiver<MemoryCoordinatorMsg>) {
@@ -198,15 +206,15 @@ impl Supervisor {
 
     /// Drain and shut down the coordinator cleanly.
     ///
-    /// Contract: the caller MUST drop every supervisor-issued sender clone
+    /// Contract: the caller must drop every supervisor-issued sender clone
     /// before calling `shutdown` — typically by joining all client tasks
     /// first. The supervisor's own `tx` is consumed here; combined with the
     /// caller's drops, the coordinator's `rx.recv().await` returns `None`
-    /// only AFTER our `Shutdown` lands, so the actor processes every queued
+    /// only after this `Shutdown` lands, so the actor processes every queued
     /// append before exiting.
     ///
-    /// Implementation detail: we send `Shutdown` BEFORE the final drop of
-    /// `self.tx` because `Shutdown` itself rides over the channel. Once
+    /// `Shutdown` is sent before the final drop of `self.tx` because
+    /// `Shutdown` itself rides over the channel. Once
     /// `Shutdown` is consumed inside `MemoryCoordinator::run`, it closes
     /// its `rx` and breaks the loop. Subsequent sends on cloned senders
     /// would return a typed `mpsc::error::SendError` — see
@@ -236,9 +244,9 @@ impl Supervisor {
     /// What the coordinator does **not** do is process anything enqueued
     /// *behind* `Shutdown`: that arm is `rx.close()` followed by a
     /// receive-and-discard loop, so a late append is dropped and its
-    /// `response_tx` resolves with a `RecvError`. This is unchanged from
-    /// [`Supervisor::shutdown`], whose documented contract — drop every issued
-    /// sender before calling — exists precisely to make that window empty.
+    /// `response_tx` resolves with a `RecvError`. [`Supervisor::shutdown`] has
+    /// the same window; its documented contract — drop every issued sender
+    /// before calling — exists precisely to make that window empty.
     /// `drain` cannot enforce that contract, because `run_watch` has no way to
     /// join axum's spawned per-connection tasks, so it inherits the window. It
     /// relaxes the *liveness* requirement only (it completes with senders
@@ -249,8 +257,7 @@ impl Supervisor {
     /// What it deliberately does **not** do, and why `shutdown` is kept for
     /// tests: it does not drop `self.tx` and does not join the coordinator's
     /// `JoinHandle`. Neither is possible through a shared reference. Callers
-    /// that need the task joined (every existing test) must keep using
-    /// `shutdown`.
+    /// that need the task joined (the tests) use `shutdown`.
     ///
     /// Idempotent in the only way that matters: a second call finds the
     /// channel closed, the send fails, and it returns without blocking.
@@ -279,8 +286,9 @@ impl Supervisor {
 
 /// Newtype wrapper around `tokio::sync::mpsc::error::SendError` so the
 /// supervisor's contract surface is independent of the coordinator's
-/// internal message type. Callers can match on this to distinguish "channel
-/// closed because Shutdown landed" from other I/O failures.
+/// internal message type: it means "channel closed because Shutdown landed".
+/// Only tests construct it today; production sends go through
+/// [`Supervisor::try_send`], which returns [`CoordinatorSendError`].
 #[derive(Debug, thiserror::Error)]
 #[error("memory coordinator channel closed (post-Shutdown send is rejected)")]
 pub struct SupervisorSendError;
@@ -291,13 +299,10 @@ impl<T> From<mpsc::error::SendError<T>> for SupervisorSendError {
     }
 }
 
-// Every `Supervisor::start` call below passes the third `indexer_tx` argument,
-// which AILAB-192 made a `#[cfg(unix)]` parameter — so the module's arity is
-// Unix's arity, and gating it to `all(test, unix)` is the honest expression of
-// that rather than sprinkling `#[cfg(unix)]` on each call's `None`. It also
-// preserves exactly today's behaviour: `server` was `#[cfg(unix)]` in `lib.rs`
-// before this ticket, so none of these ever compiled off-target. Linux is unix,
-// so the Linux count is unchanged.
+// The `unix` half of this gate is no longer needed: `Supervisor::start`'s
+// `indexer_tx` parameter is not `#[cfg(unix)]`, and no test here calls a
+// Unix-only API. It only keeps these tests off the Windows job, where they have
+// never run, and can be removed once they pass there.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -349,12 +354,12 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_drain_persists_in_flight_append_before_exit() {
-        // AC: AppendLearning + Shutdown in tight sequence — the append must
-        // land on disk and the coordinator must exit cleanly. We force the
-        // drain path by queuing the AppendLearning, immediately driving
-        // shutdown WITHOUT awaiting the append's oneshot first, and only
+        // AppendLearning + Shutdown in tight sequence — the append must
+        // land on disk and the coordinator must exit cleanly. The test forces
+        // the drain path by queuing the AppendLearning, immediately driving
+        // shutdown without awaiting the append's oneshot first, and only
         // then reading the append response. If the channel were empty when
-        // Shutdown was sent (the old test's bug), this would not test drain.
+        // Shutdown was sent, this would not test drain.
         let dir = unique_tmp_dir("drain");
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
@@ -366,7 +371,7 @@ mod tests {
         // Queue an append from a "client" sender, then drop it so the
         // supervisor's tx is the only remaining sender. The supervisor's
         // own retained tx is what `shutdown()` uses to enqueue Shutdown —
-        // guaranteed to land AFTER our AppendLearning in FIFO order.
+        // guaranteed to land after this AppendLearning in FIFO order.
         let (resp_tx, resp_rx) = oneshot::channel();
         client_tx
             .send(MemoryCoordinatorMsg::AppendLearning {
@@ -378,7 +383,7 @@ mod tests {
             .expect("send append");
         drop(client_tx);
 
-        // Critical: do NOT await `resp_rx` here. Drive Shutdown immediately
+        // Critical: do not await `resp_rx` here. Drive Shutdown immediately
         // so AppendLearning and Shutdown are both queued, with AppendLearning
         // first. This is the drain invariant under test.
         supervisor.shutdown().await;
@@ -408,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_persists_in_flight_append_behind_arc_with_live_sender_clone() {
-        // AC (AILAB-162): the `&self` drain must persist a queued append in the
+        // AILAB-162: the `&self` drain must persist a queued append in the
         // shape `run_watch` actually has — the supervisor behind an `Arc` with
         // at least one clone outstanding, and a client sender still alive.
         // `shutdown(self)` cannot be reached from here at all: `Arc::try_unwrap`
@@ -426,7 +431,7 @@ mod tests {
         // into `AppState`.
         let state_arc = std::sync::Arc::clone(&supervisor);
 
-        // A client sender that is deliberately NOT dropped — an in-flight
+        // A client sender that is deliberately not dropped — an in-flight
         // connection task at signal time.
         let client_tx = supervisor.sender();
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -439,7 +444,7 @@ mod tests {
             .await
             .expect("send append");
 
-        // Do NOT await `resp_rx` first: AppendLearning and Shutdown must both
+        // Do not await `resp_rx` first: AppendLearning and Shutdown must both
         // be queued, AppendLearning first, or this does not test drain.
         supervisor.drain().await;
 
@@ -497,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_on_closed_channel_returns_typed_send_error() {
-        // AC: post-Shutdown send returns SendError, not a silent drop.
+        // A post-Shutdown send returns SendError, not a silent drop.
         let dir = unique_tmp_dir("closed");
         let agent_root = AgentRoot::new(&dir);
         std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();

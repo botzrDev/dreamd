@@ -1,17 +1,12 @@
 //! Typed `.agent/.dreamd/state.json` and the single read-modify-write path
 //! that owns it (AILAB-167).
 //!
-//! `state.json` had three writers. Two of them — [`crate::wal`]'s cycle edges
-//! and [`crate::autobiography`]'s skip marker — write the *same* live file, and
-//! the wal writer rebuilt it from scratch on every call: it read back only
-//! `schema_version`, then emitted a fresh four-key object. Every key it did not
-//! know about was dropped. `last_autobiography_skip` is exactly such a key, so
-//! a skip marker written by the autobiography pass was eaten by the next
-//! `begin_cycle` **and** by `commit_cycle`, and `dreamd doctor` stopped being
-//! able to explain why the audit-trail commit had not happened. The same
-//! from-scratch shape also wrote JSON `null` into `last_dream_cycle_at`
-//! whenever the caller had no timestamp to hand, so `begin_cycle` wiped the
-//! previous cycle's completion time.
+//! [`crate::wal`]'s cycle edges and [`crate::autobiography`]'s skip marker
+//! write the same live file, and neither may drop the other's keys: a cycle
+//! that rebuilt the file from scratch would erase the skip marker doctor
+//! reports, and would null out `last_dream_cycle_at` when it had no timestamp
+//! to hand. `dreamd init` scaffolds the file once; every later write goes
+//! through [`update_daemon_state`].
 //!
 //! This module owns the one typed read-modify-write path, so "not patched"
 //! means "preserved": callers name only the fields they are changing and
@@ -31,8 +26,11 @@ pub const STATE_SCHEMA_VERSION: &str = "1.0";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonStateError {
+    /// Reading or writing `state.json` failed.
     #[error("state.json I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// `state.json` is not valid JSON for [`DaemonState`], or the new state
+    /// failed to serialize.
     #[error("state.json parse: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -47,23 +45,22 @@ pub struct AutobiographySkip {
 
 /// Typed `.agent/.dreamd/state.json`.
 ///
-/// Field DECLARATION ORDER IS LOAD-BEARING: `#[derive(Serialize)]` emits
-/// declaration order, and `dream_cycle_snapshot__state_json.snap` pins the
-/// BTreeMap-alphabetical order the old `serde_json::json!` writer produced
-/// (serde_json has no `preserve_order` feature here). Keep these five
-/// alphabetical or the snapshot breaks.
+/// **Field declaration order is load-bearing**: `#[derive(Serialize)]` emits
+/// declaration order, and `dream_cycle_snapshot__state_json.snap` pins
+/// BTreeMap-alphabetical key order (serde_json has no `preserve_order`
+/// feature here). Keep these five alphabetical or the snapshot breaks.
 ///
 /// The container-level `#[serde(default)]` is what lets a *partial* on-disk
-/// `state.json` — e.g. `{"schema_version":"1.0","daemon_version":"0.0.0"}`,
-/// the exact shape an existing `wal.rs` test writes — deserialize without
-/// error instead of failing the read and blocking the write.
+/// `state.json` — e.g. `{"schema_version":"1.0","daemon_version":"0.0.0"}` —
+/// deserialize without error instead of failing the read and blocking the
+/// write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonState {
     pub daemon_version: String,
     /// Absent-means-no-skip: serialized only when `Some`, so clearing the
-    /// marker omits the key rather than writing JSON `null` (matches the
-    /// pre-AILAB-167 `Map::remove` semantic that doctor reads).
+    /// marker omits the key rather than writing JSON `null`, which is the
+    /// absence doctor reads as "no skip".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_autobiography_skip: Option<AutobiographySkip>,
     pub last_dream_cycle_at: Option<String>,
@@ -97,8 +94,8 @@ pub fn read_daemon_state(agent_root: &AgentRoot) -> Result<DaemonState, DaemonSt
 /// Read-modify-write `state.json` through [`DaemonState`].
 ///
 /// `f` patches only the fields it names; every other field round-trips from
-/// disk. `daemon_version` is restamped on every write (pre-AILAB-167 wal
-/// behavior). Durability is `crate::io::write_atomic`.
+/// disk. `daemon_version` is restamped on every write. Durability is
+/// `crate::io::write_atomic`.
 pub fn update_daemon_state(
     agent_root: &AgentRoot,
     f: impl FnOnce(&mut DaemonState),

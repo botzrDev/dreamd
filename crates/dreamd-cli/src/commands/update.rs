@@ -21,6 +21,8 @@ use super::version::VERSION_SHORT;
 /// denied on the cache tree) are errors; everything else is guidance.
 #[derive(Debug)]
 pub enum UpdateError {
+    /// The native binary cache could not be removed; the message names the
+    /// path.
     Io(std::io::Error),
 }
 
@@ -44,7 +46,8 @@ impl std::error::Error for UpdateError {}
 /// real home-derived paths (socket via the shared `$DREAMD_SOCK` /
 /// `DaemonHome::socket_path()` resolver); tests pass temp dirs.
 pub struct UpdateRequest<'a> {
-    /// Resolved daemon socket. `None` — no home directory to resolve against.
+    /// Resolved daemon socket. `None` — no home directory to resolve against,
+    /// or a non-Unix target, where the daemon listens on loopback TCP.
     pub socket: Option<&'a Path>,
     /// Native binary cache tree (normally `~/.cache/dreamd-mcp`). `None` — no
     /// home directory.
@@ -93,7 +96,7 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), UpdateError> {
-    // Before line — printed even under --quiet: the version IS the output.
+    // Before line — printed even under --quiet: the version is the output.
     writeln!(out, "current: {VERSION_SHORT}")?;
 
     if req.dry_run {
@@ -158,20 +161,11 @@ pub fn run(
                 }
             }
             lifecycle_cleanup::SocketRemoval::RefusedLive => {
-                // Still answering after the grace window, so this is not a
-                // daemon mid-shutdown — the best-effort stop pass above did not
-                // land: no `kill` on the box, the signal was denied, or (the
-                // common case now) the daemon was deliberately spared as not
-                // attributable to this invocation's $HOME / native cache.
-                // Unlinking a live daemon's socket orphans it: it keeps serving
-                // while every client resolves a path that is gone.
-                //
-                // The remedy is deliberately NOT `pkill -f 'dreamd watch'`.
-                // This branch is reached precisely when scoping mattered, and
-                // that recipe is the machine-global kill AILAB-584 removed —
-                // the same commit's README calls it unsafe. Point at the pid
-                // the stop pass already named on stderr, or at the daemon's own
-                // terminal.
+                // Still answering after the grace window: the stop pass above
+                // did not land or spared the daemon (see
+                // `lifecycle_cleanup::remove_socket`). The remedy names a
+                // scoped stop, never a machine-global `pkill -f 'dreamd watch'`
+                // (`packages/dreamd-mcp/README.md` warns against it).
                 writeln!(
                     err,
                     "dreamd: warning — a daemon is still live on {}; left the socket in place. \
@@ -193,7 +187,7 @@ pub fn run(
         }
     }
 
-    // Clear the native binary cache. The npx cache is NOT touched on update.
+    // Clear the native binary cache. The npx cache is not touched on update.
     let mut cache_cleared = false;
     match req.cache_dir {
         Some(cache_dir) => {
@@ -227,21 +221,15 @@ pub fn run(
         // Step 1 reports the stop that already ran above. An unattempted stop
         // (non-unix) must hand the job back to the user, never claim success.
         //
-        // `spared` is what keeps this line honest on the AILAB-584 path: a
-        // process that matched but was not attributable to this invocation is
-        // still running, and reporting it as "nothing was running" contradicted
-        // the stderr warning printed seconds earlier in the same output. It is
-        // independent of `matched` — one pass can stop this home's `watch` and
-        // spare another home's `mcp`.
+        // A spared process is still running, so it must never read as "nothing
+        // was running" (see `lifecycle_cleanup::StopReport`). The line points
+        // at the stderr warnings rather than restating the reason, because
+        // `spared` covers both causes (not attributable, or the signal did not
+        // land) and each spared pid carries its own.
         //
-        // The line points at those stderr warnings rather than restating the
-        // reason, because `spared` covers both causes (not attributable, or the
-        // signal did not land) and each spared pid carries its own.
-        //
-        // The mixed line is deliberately the matched line plus a clause, not a
-        // rewrite: a mixed sweep is the *ordinary* result on a shared box (any
-        // other home's `dreamd mcp` is a spared candidate), so every assertion
-        // that pins the matched wording must keep holding when one shows up.
+        // The mixed line is the matched line plus a clause: a mixed sweep is
+        // the *ordinary* result on a shared box (any other home's `dreamd mcp`
+        // is a spared candidate), so the matched wording holds either way.
         let step_one = match (report.matched, report.spared, report.attempted) {
             (true, true, _) => {
                 "stopped local `dreamd mcp` / `dreamd watch` process(es); others were left \

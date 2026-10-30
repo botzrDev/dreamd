@@ -22,32 +22,33 @@ use crate::writer_lock::WriterKind;
 /// on a blocking thread.
 ///
 /// `supervisor` — the boot project's coordinator (the project `run_watch`
-/// started for `primary.0`). Handlers no longer dispatch to it directly; they
-/// call [`AppState::resolve_supervisor`], which returns this for the pinned
+/// started for `primary.0`). Handlers do not dispatch to it directly; they
+/// call `AppState::resolve_supervisor`, which returns this for the pinned
 /// boot project and a lazily-started per-root coordinator otherwise.
 ///
 /// `config` — layered runtime config loaded at startup.
 ///
 /// `runtimes` — lazily-opened, LRU + idle-evicting [`ProjectRuntime`]s for
 /// every registered root that is not the pinned boot project. Each holds the
-/// project writer lock, the project's index (Unix) and its coordinator wired to
+/// project writer lock, the project's index and its coordinator wired to
 /// that index, so the three open and evict as one entry. `Mutex` (not
-/// `RwLock`) because every lookup mutates LRU ordering. Opening a runtime does
-/// NOT happen under this lock; see [`AppState::with_runtime`] (AILAB-186).
+/// `RwLock`) because every lookup mutates LRU ordering. A runtime is not
+/// opened under this lock; see `AppState::with_runtime` (AILAB-186).
 ///
 /// `daemon_uid` — UID of the process that started the daemon. Used by
-/// `peer_uid_middleware` (WEG-72 / DR-407) to reject connections from other
-/// users. Set to `nix::unistd::Uid::current().as_raw()` at startup.
+/// `peer_uid_middleware` (WEG-72) to reject connections from other users.
+/// `run_watch` sets it to `nix::unistd::Uid::current().as_raw()` on Unix, and
+/// to 0 off Unix, where nothing reads it.
 ///
 /// `primary` — the pinned per-project Tantivy handle for the daemon's booted
-/// project (WEG-264 Defect 2). When set, recall and dream for this exact
+/// project (WEG-264). When set, recall and dream for this exact
 /// (canonicalized) project root use this handle instead of `runtimes`, so the
 /// coordinator's live appends and the recall reader share **one** index — and
 /// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
-/// Never evicted. `None` outside the daemon (in-process MCP fallback, tests).
+/// Never evicted. `None` only in tests; `run_watch` always pins one.
 ///
-/// `auth_json` — path to `~/.agent/auth.json`, the AILAB-203 bearer token file
-/// that `bearer_auth_middleware` re-reads on every request (AILAB-192). `None`
+/// `auth_json` — path to `~/.agent/auth.json`, the bearer token file
+/// (AILAB-203) that `bearer_auth_middleware` re-reads on every request. `None`
 /// on Unix because the peer UID from `SO_PEERCRED` is the auth there and
 /// `build_router` mounts no bearer layer at all, so the field is never read.
 /// `None` off Unix is **fail-closed**: the bearer layer *is* mounted there, and
@@ -60,7 +61,7 @@ pub struct AppState {
     pub registry_path: PathBuf,
     /// `registry_path`, parsed once per file identity (BZR-1243).
     pub registry: Arc<RegistryCache>,
-    /// Boot-project coordinator; prefer [`Self::resolve_supervisor`].
+    /// Boot-project coordinator; prefer `Self::resolve_supervisor`.
     pub supervisor: Arc<Supervisor>,
     /// Layered runtime config loaded at daemon start.
     pub config: Arc<Config>,
@@ -68,7 +69,7 @@ pub struct AppState {
     pub runtimes: Arc<Mutex<ProjectResourceMap<ProjectRuntime>>>,
     /// Daemon process UID for `peer_uid_middleware` (WEG-72).
     pub daemon_uid: u32,
-    /// Pinned boot-project index handle; `None` in in-process / test setups.
+    /// Pinned boot-project index handle; `None` only in tests.
     pub primary: Option<(PathBuf, Arc<TantivyIndexHandle>)>,
     /// Path to `~/.agent/auth.json` for `bearer_auth_middleware` (AILAB-192).
     /// `None` on Unix (peer UID is the auth) and fail-closed off Unix.
@@ -95,21 +96,20 @@ impl AppState {
     }
 
     /// Pin `handle` as the primary index for `root` (a canonicalized project
-    /// root, matching the canonical form `resolve_project` returns). Called
-    /// only by `run_watch`.
+    /// root, matching the canonical form `RegistryCache::resolve` returns).
+    /// Called only by `run_watch`.
     pub fn with_primary(mut self, root: PathBuf, handle: Arc<TantivyIndexHandle>) -> Self {
         self.primary = Some((root, handle));
         self
     }
 
     /// Point `bearer_auth_middleware` at `path` — `DaemonHome::auth_json()`,
-    /// the AILAB-203 token file (AILAB-192).
+    /// the bearer token file (AILAB-192, AILAB-203).
     ///
-    /// Additive on purpose: [`Self::new`] leaves `auth_json` as `None` so no
-    /// existing caller or test has to change, and the Unix daemon never calls
-    /// this at all — `peer_uid_middleware` is its auth and `build_router`
-    /// mounts no bearer layer on that target. Only the loopback-TCP
-    /// `run_watch` calls it, and it must, because `None` there is fail-closed.
+    /// [`Self::new`] leaves `auth_json` as `None`. The Unix daemon never calls
+    /// this: `peer_uid_middleware` is its auth and `build_router` mounts no
+    /// bearer layer on that target. Only the loopback-TCP `run_watch` calls
+    /// it, and it must, because `None` there is fail-closed.
     pub fn with_auth_json(mut self, path: PathBuf) -> Self {
         self.auth_json = Some(path);
         self
@@ -129,16 +129,16 @@ impl AppState {
     /// A hit is touched and `f` runs under the `runtimes` mutex. On a miss the
     /// mutex is **released before** [`ProjectRuntime::open`] runs, then re-taken
     /// to publish the result (AILAB-186). `open` takes the project writer lock,
-    /// runs WAL recovery, replays the entire JSONL into the index, issues a
-    /// Tantivy commit, allocates a 50 MB `IndexWriter` and starts a coordinator;
-    /// holding the map lock across that blocked every *other* project's requests
-    /// for its duration.
+    /// runs WAL recovery, runs the index coverage pass (indexing every log id
+    /// the index lacks), issues a Tantivy commit, allocates a 50 MB
+    /// `IndexWriter` and starts a coordinator; holding the map lock across that
+    /// would block every *other* project's requests for its duration.
     ///
     /// That window is racy by construction — two first-touches of one root can
     /// both try to open. The project writer lock refuses the second, and
     /// [`ProjectResourceMap::insert_or_adopt`] settles any pair that both
     /// opened: the runtime already in the map wins and the loser is released,
-    /// never leaked. If our own open *fails*, the map is re-checked before the
+    /// never leaked. If this caller's open *fails*, the map is re-checked before the
     /// error is surfaced, so a caller that lost the race to a concurrent opener
     /// still gets the winner's runtime.
     ///
@@ -225,18 +225,18 @@ impl AppState {
 
     /// Resolve the coordinator that owns `root` (WEG-272).
     ///
-    /// * `primary` is `None` (in-process MCP fallback / tests, single project) → the boot
-    ///   `state.supervisor`. Preserves every existing single-coordinator test.
-    /// * `root` IS the pinned boot project → the boot `state.supervisor`.
+    /// * `primary` is `None` (tests only) → the boot `state.supervisor`, the
+    ///   one coordinator those tests start.
+    /// * `root` is the pinned boot project → the boot `state.supervisor`.
     /// * otherwise → the coordinator of `root`'s [`ProjectRuntime`], opened on a
     ///   miss, wired to that root's index so its appends index into the same
     ///   handle recall and dream read.
     ///
-    /// Returns the SAME `Arc<Supervisor>` for repeated calls on one live root,
-    /// so two writers never open the same `AGENT_LEARNINGS.jsonl` (DR-103).
+    /// Returns the same `Arc<Supervisor>` for repeated calls on one live root,
+    /// so two writers never open the same `AGENT_LEARNINGS.jsonl`.
     pub(crate) fn resolve_supervisor(&self, root: &Path) -> Result<Arc<Supervisor>, IndexError> {
         match self.primary.as_ref() {
-            // No pinned project → single-coordinator behaviour (every test).
+            // No pinned project (tests only) → the one coordinator.
             None => return Ok(self.supervisor.clone()),
             // The request targets the pinned boot project → its coordinator.
             Some((boot_root, _)) if boot_root.as_path() == root => {

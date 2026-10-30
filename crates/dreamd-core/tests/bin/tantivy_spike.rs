@@ -1,10 +1,9 @@
 //! WEG-24 measurement spike: tantivy IndexWriter open-cost, multi-process
 //! reader reload, and lock-cleanup-under-SIGKILL.
 //!
-//! NOT a shipping binary. Tantivy is a dev-dep only; this binary is excluded
-//! from `test`, `bench`, and `doc` in `Cargo.toml`. Its single purpose is to
-//! produce numbers for `context/spikes/tantivy-indexwriter.md` so we can decide
-//! GO / ESCALATE on WEG-41.
+//! Not a shipping binary: `Cargo.toml` excludes it from `test`, `bench`, and
+//! `doc`. It produced the measurements behind adopting Tantivy (WEG-41); run
+//! it by hand to re-measure them.
 //!
 //! Modes (selected by argv[1]):
 //!
@@ -12,7 +11,7 @@
 //! - `cold-open <index-path>` — open IndexWriter once, print elapsed ms on
 //!   stdout, exit 0. Re-execed from the parent for cold-open samples.
 //! - `child-writer-stall <index-path>` — acquire writer lock, hold forever
-//!   (parent SIGKILLs us).
+//!   (the parent SIGKILLs it).
 //! - `child-reader-reload <index-path>` — open reader, reload, print elapsed
 //!   ms and doc count, exit 0.
 
@@ -31,13 +30,11 @@ use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
 const WRITER_HEAP_BYTES: usize = 50_000_000;
 const PLACEHOLDER_EVENT_ID: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
-// ---------------------------------------------------------------------------
-// Schema (matches ARCHITECTURE.md "Load-bearing engineering decisions" §2)
-// ---------------------------------------------------------------------------
+// ── Schema ──────────────────────────────────────────────────────────────────
 
-/// Local schema field cache matching the production `SchemaFields` layout in
-/// `dreamd-core::index`. Duplicated here so the spike carries no dependency
-/// on production-crate internals.
+/// Local schema field cache modeled on the production `SchemaFields` layout in
+/// `dreamd-core::index` as it stood when the spike ran. Duplicated here so the
+/// spike carries no dependency on production-crate internals.
 struct SchemaBundle {
     schema: Schema,
     content: tantivy::schema::Field,
@@ -64,9 +61,7 @@ fn build_schema() -> SchemaBundle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Synthetic AgentLearning generation
-// ---------------------------------------------------------------------------
+// ── Synthetic AgentLearning generation ──────────────────────────────────────
 
 /// Tiny deterministic LCG so corpora are reproducible without pulling `rand`.
 struct Lcg(u64);
@@ -138,9 +133,7 @@ fn synth_learning(i: u64, rng: &mut Lcg) -> AgentLearning {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Corpus build
-// ---------------------------------------------------------------------------
+// ── Corpus build ────────────────────────────────────────────────────────────
 
 fn build_corpus(path: &Path, n: u64) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(path)?;
@@ -163,9 +156,7 @@ fn build_corpus(path: &Path, n: u64) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Helper: stats
-// ---------------------------------------------------------------------------
+// ── Helper: stats ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct Stats {
@@ -187,9 +178,7 @@ fn stats_of(samples: &[Duration]) -> Stats {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Measurement #2 — IndexWriter open cost
-// ---------------------------------------------------------------------------
+// ── Measurement #2 — IndexWriter open cost ──────────────────────────────────
 
 fn measure_warm_open(index_path: &Path, samples: usize) -> Vec<Duration> {
     let mut out = Vec::with_capacity(samples);
@@ -232,9 +221,7 @@ fn measure_cold_open(index_path: &Path, samples: usize) -> Vec<Duration> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Child modes
-// ---------------------------------------------------------------------------
+// ── Child modes ─────────────────────────────────────────────────────────────
 
 fn run_cold_open_child(index_path: &Path) -> ExitCode {
     let t0 = Instant::now();
@@ -274,7 +261,7 @@ fn run_writer_stall_child(index_path: &Path) -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    // Signal readiness so parent doesn't SIGKILL before we hold the lock.
+    // Signal readiness so the parent doesn't SIGKILL before the lock is held.
     println!("LOCK_HELD");
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -315,9 +302,7 @@ fn run_reader_reload_child(index_path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// ---------------------------------------------------------------------------
-// Measurement #3 — multi-process reader reload
-// ---------------------------------------------------------------------------
+// ── Measurement #3 — multi-process reader reload ────────────────────────────
 
 fn measure_reader_reload(
     index_path: &Path,
@@ -384,9 +369,7 @@ fn measure_reader_reload(
     Ok((elapsed_ms, baseline_count, visible_count))
 }
 
-// ---------------------------------------------------------------------------
-// Measurement #4 — lock cleanup under SIGKILL
-// ---------------------------------------------------------------------------
+// ── Measurement #4 — lock cleanup under SIGKILL ─────────────────────────────
 
 struct LockObservation {
     lock_files_before_kill: Vec<String>,
@@ -433,7 +416,7 @@ fn measure_sigkill_lock_cleanup(
     }
 
     // 200 ms: enough for the child's IndexWriter thread to acquire flock
-    // before we SIGKILL. Raise this if the test becomes flaky on slow CI
+    // before the SIGKILL. Raise this if the test becomes flaky on slow CI
     // (flock acquisition exceeded budget).
     std::thread::sleep(Duration::from_millis(200));
     let lock_files_before_kill = list_lock_files(index_path);
@@ -464,9 +447,7 @@ fn measure_sigkill_lock_cleanup(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Suite
-// ---------------------------------------------------------------------------
+// ── Suite ───────────────────────────────────────────────────────────────────
 
 fn run_suite() -> Result<(), Box<dyn std::error::Error>> {
     // 100k generates ~tens of thousands of docs through tantivy; should be
@@ -555,8 +536,8 @@ fn run_suite() -> Result<(), Box<dyn std::error::Error>> {
         println!("fresh_writer_error={e}");
     }
 
-    // Decision line is computed by the human from warm mean @ 10k; we still
-    // print the relevant scalar to make the report write trivial.
+    // A person reads the decision off the warm mean at 10k; print that scalar
+    // so writing the report needs no arithmetic.
     if let Some((_, _, warm, _)) = per_size.iter().find(|(n, _, _, _)| *n == 10_000) {
         println!("decision_warm_mean_10k_ms={:.2}", warm.mean_ms);
     }
@@ -564,9 +545,7 @@ fn run_suite() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
+// ── main ────────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

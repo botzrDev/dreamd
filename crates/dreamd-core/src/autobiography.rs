@@ -1,4 +1,4 @@
-//! `commit_cycle` — git2 autobiography commit for the dream cycle (WEG-63 / DR-311).
+//! `commit_cycle` — git2 autobiography commit for the dream cycle (WEG-63).
 //!
 //! After every successful dream cycle, this module stages
 //! `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl`,
@@ -9,14 +9,14 @@
 //! Behavior is best-effort: every failure path returns a typed outcome or
 //! error, but neither the HTTP handler (WEG-70) nor the CLI (WEG-64) treats
 //! autobiography failure as a cycle failure. The cycle's data writes are
-//! already on disk by the time we run; nothing about the audit-trail commit
-//! is load-bearing for correctness.
+//! already on disk by the time this module runs; nothing about the audit-trail
+//! commit is load-bearing for correctness.
 //!
-//! Dirty-tree skip semantic (founder decision B11, 2026-05-10):
-//! the check fires at CYCLE START, not at commit time. If the user has
-//! uncommitted edits on either of the two tracked files when the cycle begins,
-//! the cycle still RUNS (and overwrites the user's edits) but the autobiography
-//! commit is skipped. The structured WARN log makes the overwrite explicit.
+//! Dirty-tree skip: the check fires at cycle start, not at commit time. If the
+//! user has uncommitted edits on either of the two tracked files when the cycle
+//! begins, the cycle still runs (and overwrites the user's edits) but the
+//! autobiography commit is skipped. The structured WARN log makes the
+//! overwrite explicit.
 
 use std::path::{Path, PathBuf};
 
@@ -29,19 +29,28 @@ use crate::layout::AgentRoot;
 const COMMITTER_NAME: &str = "dreamd";
 const COMMITTER_EMAIL: &str = "noreply@dreamd.dev";
 
-/// Paths checked for dirty state and staged at commit time. Relative to
-/// the project root (which is the git repo workdir).
+/// Paths checked for dirty state and staged at commit time, relative to the
+/// project root.
+///
+/// git2 reads them relative to the repo workdir, so they are right only when
+/// the project root is the workdir. `Repository::discover` walks up, so a
+/// project nested below its repo's root finds the repo, then checks and stages
+/// paths that do not name its store.
 const TRACKED_PATHS: &[&str] = &[
     ".agent/semantic/LESSONS.md",
     ".agent/episodic/AGENT_LEARNINGS.jsonl",
 ];
 
+/// Why an autobiography check or commit failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AutobiographyError {
+    /// A git2 call failed for a reason other than a missing repo.
     #[error("git: {0}")]
     Git(#[from] git2::Error),
+    /// Reading or writing `state.json` failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// `state.json` could not be parsed or serialized.
     #[error("state.json serialize: {0}")]
     Serde(#[from] serde_json::Error),
 }
@@ -68,10 +77,13 @@ pub enum AutobiographyOutcome {
     Skipped(SkipReason),
 }
 
+/// Why an autobiography commit was skipped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
+    /// The tracked files had user edits at cycle start; `files` names them.
     UserDirtyTree { files: Vec<String> },
+    /// Never constructed: a missing repo is [`AutobiographyOutcome::NoRepo`].
     NoRepo,
 }
 
@@ -81,7 +93,7 @@ pub enum SkipReason {
 pub use crate::daemon_state::AutobiographySkip;
 
 /// Check if any of the two tracked paths have unstaged or staged user edits
-/// relative to HEAD. Called at CYCLE START, before the cycle runs.
+/// relative to HEAD. Called at cycle start, before the cycle runs.
 ///
 /// Returns the subset of tracked paths that are dirty. Empty Vec → clean.
 /// Returns `Ok(Vec::new())` if no git repo is found (capability absence).
@@ -108,7 +120,7 @@ pub fn check_dirty_at_cycle_start(project_root: &Path) -> Result<Vec<PathBuf>, A
     Ok(dirty)
 }
 
-/// Run the autobiography commit. Called AFTER the dream cycle's data writes
+/// Run the autobiography commit. Called after the dream cycle's data writes
 /// have completed. `dirty_at_cycle_start` is the result of an earlier call
 /// to `check_dirty_at_cycle_start` — caller-provided so the dirty-tree
 /// semantic is "cycle-start state," not "commit-time state."
@@ -186,7 +198,7 @@ pub fn commit_cycle(
     let oid = repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parent_refs)?;
     index.write()?;
 
-    // 5. Clear any prior skip marker — we just committed cleanly.
+    // 5. Clear any prior skip marker — this commit went through cleanly.
     clear_skip_marker(agent_root)?;
 
     Ok(AutobiographyOutcome::Committed(oid))
@@ -345,7 +357,7 @@ mod tests {
             "expected Skipped(UserDirtyTree)"
         );
 
-        // Verify the commit was NOT made — HEAD still points to initial.
+        // Verify the commit was not made — HEAD still points to initial.
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(
             head_commit.message().unwrap(),

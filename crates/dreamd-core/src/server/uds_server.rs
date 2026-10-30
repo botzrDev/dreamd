@@ -1,9 +1,10 @@
-//! API socket bind helper for the writer-process HTTP server (WEG-71 / DR-406).
+//! API socket bind helper and accept loop for the daemon's HTTP server (WEG-71).
 //!
-//! Wraps [`bind_socket_raw`] with parent-directory creation and permissions so
-//! the server entry point gets a ready-to-use `UnixListener` in one call.
+//! Wraps `uds::bind_socket_raw` with parent-directory creation and permissions
+//! so `dreamd watch` gets a ready-to-use `UnixListener` in one call.
 //!
-//! Unix-only. Windows path is DR-121 / WEG-135, deferred to v0.1.1.
+//! Unix-only. Off Unix, `dreamd watch` serves loopback TCP instead
+//! (`watch::bind_listen` / `watch::serve_tcp`).
 
 #![cfg(unix)]
 
@@ -17,19 +18,19 @@ use crate::server::uds::bind_socket_raw;
 /// Bind the API unix-domain socket at `path`.
 ///
 /// Creates the parent directory (mode `0700`) if it does not yet exist, then
-/// delegates to [`bind_socket_raw`] for the bind-and-recover logic and `0600`
-/// permissions. Returns a `tokio::net::UnixListener` ready for async `accept`
-/// calls.
+/// delegates to `uds::bind_socket_raw` for the bind-and-recover logic and
+/// `0600` permissions. Returns a `tokio::net::UnixListener` ready for async
+/// `accept` calls.
 ///
 /// The directory is `0700` (not `0755`) so other users cannot stat the socket
 /// path at all — the socket `0600` alone would block connects but still expose
-/// the socket's existence. Defense-in-depth per DR-101 §Security.
+/// the socket's existence. Defense in depth.
 pub fn bind_api_socket(path: &Path) -> Result<tokio::net::UnixListener, ServerError> {
     if let Some(parent) = path.parent() {
-        // Atomic: mkdir each component WITH mode 0700 in one syscall, closing the
+        // Atomic: mkdir each component with mode 0700 in one syscall, closing the
         // create-then-chmod window where the dir briefly existed at the umask mode.
-        // recursive(true) is idempotent (no-op if present) and does NOT retro-chmod
-        // an existing dir — we must not silently downgrade an existing 0755 ~/.agent/.
+        // recursive(true) is idempotent (no-op if present) and does not chmod an
+        // existing dir, so an existing ~/.agent/ keeps whatever mode it has.
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -101,7 +102,7 @@ mod tests {
     #[tokio::test]
     async fn bind_api_socket_parent_dir_has_0700_perms() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // `subdir` does NOT exist before the call — forces a real mkdir.
+        // `subdir` does not exist before the call — forces a real mkdir.
         let sock_path = dir.path().join("subdir").join("dreamd.sock");
 
         let _listener = bind_api_socket(&sock_path).expect("bind should succeed");

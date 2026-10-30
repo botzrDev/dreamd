@@ -1,4 +1,4 @@
-//! `POST /api/v1/dream` — run a full deterministic dream cycle.
+//! `POST /api/v1/dream` — run a full dream cycle.
 
 use axum::extract::{Extension, State};
 use axum::http::HeaderMap;
@@ -17,7 +17,7 @@ use crate::server::lifecycle::{CoordinatorSendError, Supervisor};
 use super::super::router::error_500;
 use super::super::state::AppState;
 
-/// `POST /api/v1/dream` — run a full deterministic dream cycle.
+/// `POST /api/v1/dream` — run a full dream cycle.
 ///
 /// # Headers
 /// * `X-Agent-Root` (required) — canonical project root path (registered in `registry.toml`)
@@ -36,7 +36,6 @@ use super::super::state::AppState;
 /// * `404` — project not registered ([`agent_root_middleware`](crate::server::http::agent_root_middleware))
 /// * `503` — coordinator busy (`Retry-After: 1`)
 /// * `500` — coordinator, WAL, or indexer failure
-///
 pub(crate) async fn post_dream(
     State(state): State<AppState>,
     Extension(entry): Extension<crate::registry::ProjectEntry>,
@@ -58,7 +57,7 @@ pub(crate) async fn post_dream(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // WEG-272: route the cycle to the coordinator that OWNS this project root,
+    // WEG-272: route the cycle to the coordinator that owns this project root,
     // not the boot coordinator — otherwise project B's dream cycle would run
     // against (and prune) the boot project's JSONL.
     let supervisor = match state.resolve_supervisor(&project_root) {
@@ -81,8 +80,8 @@ pub(crate) async fn post_dream(
     // dispatch prepares in the coordinator actor, composes in this task, and
     // commits in the actor (`dispatch_cycle`): WEG-271 routes the commit
     // through the coordinator so its long-lived append fd is reopened after
-    // the cycle's atomic rename(s). Running the rewrites inline here would
-    // orphan that fd and silently drop every subsequent POST /learn.
+    // the cycle's atomic rename(s). Running the rewrites inline here would make
+    // this task a second writer racing the coordinator's appends.
     //
     // The whole sequencer runs on a spawned task, and this handler awaits its
     // handle: axum drops a handler future when its client disconnects, and a
@@ -232,7 +231,6 @@ async fn dispatch_cycle(
 /// `"yes"`, `"0"` and non-UTF-8 bytes all read as absent, so a client that
 /// guesses the wire format gets the documented default rather than a silent
 /// behavior change.
-///
 fn read_no_llm_header(headers: &HeaderMap) -> bool {
     headers
         .get(dream_cycle::NO_LLM_HEADER)
@@ -248,7 +246,6 @@ fn read_no_llm_header(headers: &HeaderMap) -> bool {
 /// stays out of the prompt. The value match is exact and case-sensitive — a
 /// client that guesses the wire format gets no disclosure rather than one it did
 /// not mean to authorize, which is the only direction this default may fail in.
-///
 fn read_share_personal_header(headers: &HeaderMap) -> bool {
     headers
         .get(dream_cycle::SHARE_PERSONAL_HEADER)
@@ -256,11 +253,10 @@ fn read_share_personal_header(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v == dream_cycle::SHARE_PERSONAL_HEADER_VALUE)
 }
 
-// Both header readers under test are `#[cfg(unix)]`, and every fixture below
-// builds its `HeaderMap` from a `crate::client` constant — also `#[cfg(unix)]`.
-// `all(test, unix)` therefore gates the module rather than each test, which also
-// keeps `use super::*` from becoming an unused glob import off-target
-// (AILAB-192). Linux is unix, so the Linux count is unchanged.
+// Every fixture below builds its `HeaderMap` from a `crate::client` constant,
+// and `crate::client` is `#[cfg(unix)]`. `all(test, unix)` therefore gates the
+// module rather than each test, which also keeps `use super::*` from becoming
+// an unused glob import off Unix. The header readers themselves are `cfg`-free.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

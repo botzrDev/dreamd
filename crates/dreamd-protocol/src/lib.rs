@@ -105,8 +105,8 @@ pub const RECORD_SCHEMA_VERSION: &str = "1.0.0";
 ///   coordinator.
 /// * **Coordinator / dream cycle / recall**: read the on-disk `String` as-is;
 ///   no re-validation. Legacy dotted keys (e.g. `rust.error_handling`) serde
-///   cleanly but cluster as opaque monoliths until `dreamd migrate` rewrites
-///   them.
+///   cleanly but cluster as opaque monoliths; `dreamd migrate` has no
+///   transform that rewrites them.
 /// * **Removing this type** does not break serde of existing JSONL lines — it
 ///   only removes the ingress gate that rejects new invalid keys.
 ///
@@ -129,7 +129,7 @@ impl fmt::Display for SkillActionParseError {
 impl std::error::Error for SkillActionParseError {}
 
 impl SkillAction {
-    /// Normalise then validate: trim → lowercase → collapse interior
+    /// Normalize then validate: trim → lowercase → collapse interior
     /// whitespace → spaces→`_` → split on `::` → each segment non-empty and
     /// `[a-z0-9_]+` → rejoin with `::`. Total ≤ 256 bytes.
     pub fn parse(s: &str) -> Result<Self, SkillActionParseError> {
@@ -137,7 +137,7 @@ impl SkillAction {
         let normalised: String = lowercased.split_whitespace().collect::<Vec<_>>().join("_");
         if normalised.is_empty() {
             return Err(SkillActionParseError {
-                reason: "empty after normalisation",
+                reason: "empty after normalization",
             });
         }
         if normalised.len() > 256 {
@@ -180,8 +180,8 @@ impl SkillAction {
 /// at write time; any `id` on an inbound learning is overwritten.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentLearning {
-    /// Forward-compatible schema tag. Always `"1.0.0"` in v0.1; bump requires
-    /// a `dreamd migrate` path.
+    /// Forward-compatible schema tag. Always `"1.0.0"`; a bump needs a
+    /// registered transform in `dreamd_core::migrate`.
     pub schema_version: String,
     /// Daemon-assigned event identifier (`evt_` + 26-char ULID). Overwritten
     /// by the coordinator on every append; callers may pass a placeholder.
@@ -197,7 +197,7 @@ pub struct AgentLearning {
     /// Sticky flag: pinned learnings survive dream-cycle pruning.
     #[serde(default)]
     pub pinned: bool,
-    /// Clustering key (e.g., `"rust::borrow_checker"`). Validated and normalised
+    /// Clustering key (e.g., `"rust::borrow_checker"`). Validated and normalized
     /// at ingress via [`SkillAction`]; persisted as `String` so legacy dotted
     /// records and hand-edited JSONL deserialize without a custom deserializer.
     /// See ARCHITECTURE.md §9.

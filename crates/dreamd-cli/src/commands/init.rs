@@ -1,9 +1,9 @@
-//! `dreamd init` — scaffold the per-project `.agent/` store (DR-105 / WEG-9).
+//! `dreamd init` — scaffold the per-project `.agent/` store (WEG-9).
 //!
-//! Output is byte-locked against `tests/fixtures/init.golden.txt` and
-//! `tests/fixtures/init.rerun.golden.txt`. Any change to stdout text, ordering,
-//! or whitespace must be coordinated with the Clip A beat-sheet
-//! (`context/video/scripts/clip-a/`). Em-dashes are U+2014 (3 bytes).
+//! Output is byte-locked against the `tests/fixtures/init*.golden.txt` files
+//! (`tests/init_golden.rs`). Any change to stdout text, ordering, or
+//! whitespace updates those fixtures in the same commit. Em-dashes are U+2014
+//! (3 bytes).
 
 use std::fs;
 use std::io::{Read, Write};
@@ -20,11 +20,17 @@ use serde::Serialize;
 
 const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing to do.";
 const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
+/// One line when `.agent/` is already on disk and the registry had no entry.
+const REREGISTER_MSG: &str = "dreamd: registered existing .agent/ in ~/.agent/registry.toml";
 
 /// Failure modes for init scaffolding and registry operations.
 #[derive(Debug)]
 pub enum InitError {
+    /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
+    /// or `pyproject.toml`); the message is already on stderr. Exit code 2.
     NoProjectRoot,
+    /// Writing output, scaffolding the store, or reading or writing the
+    /// registry failed. Exit code 1.
     Io(std::io::Error),
 }
 
@@ -56,9 +62,12 @@ struct State {
 /// Scaffold the per-project `.agent/` directory tree and register it with
 /// the daemon home registry (`~/.agent/registry.toml`).
 ///
-/// Idempotent: if `.agent/` already exists, prints a rerun message and
-/// returns `Ok(())`. Staging is done in a temp dir; the final rename is
-/// atomic within a single filesystem.
+/// Idempotent. If `.agent/` already exists and the project is registered,
+/// prints the rerun message and returns `Ok(())` without touching the store.
+/// If `.agent/` exists but the registry has no entry, registers it, prints
+/// one line, and does not rewrite anything under `.agent/`. Staging a new
+/// store is done in a temp dir; the final rename is atomic within a single
+/// filesystem.
 ///
 /// Returns [`InitError::NoProjectRoot`] if no sentinel (`.git/`,
 /// `Cargo.toml`, etc.) is found walking up from `cwd`.
@@ -82,16 +91,24 @@ pub fn run(
 
     let agent = AgentRoot::new(&project_root);
 
-    // Idempotency guard: only the committed path counts.
+    // The store is already there. Register it when the registry lost the
+    // entry; otherwise the rerun message, and neither path rewrites `.agent/`.
     if agent.agent_dir().exists() {
-        writeln!(out, "{}", if quiet { RERUN_MSG_QUIET } else { RERUN_MSG })?;
+        let added = register_project(daemon_home, &project_root)?;
+        if added {
+            if !quiet {
+                writeln!(out, "{REREGISTER_MSG}")?;
+            }
+        } else {
+            writeln!(out, "{}", if quiet { RERUN_MSG_QUIET } else { RERUN_MSG })?;
+        }
         return Ok(());
     }
 
     // Stage the entire scaffold inside a tmp directory so that any failure
     // before the rename leaves .agent/ untouched.  Rename is atomic within a
-    // single filesystem, which is the only case we need to handle (project
-    // root and its parent share a mount in all realistic scenarios).
+    // single filesystem, the only case handled here (the staging dir sits in
+    // the project root, next to `.agent/`).
     let tmp_dir = project_root.join(format!(".agent.tmp-{}", std::process::id()));
 
     // Clean up the tmp dir on any error so repeated failed runs don't
@@ -108,8 +125,9 @@ pub fn run(
     // Atomic commit: move the staging tree into the final position.
     fs::rename(&tmp_dir, agent.agent_dir())?;
 
-    // Register this project's `.agent/` root with the daemon home (DR-412).
-    // Side-effect runs regardless of --quiet; only the stdout line is gated.
+    // Register this project's `.agent/` root with the daemon home, so the
+    // daemon can serve it. Runs regardless of --quiet; only the stdout line
+    // is gated.
     register_project(daemon_home, &project_root)?;
 
     // .gitignore is an append-style side-effect that lives outside the rename
@@ -128,7 +146,7 @@ pub fn run(
 
 /// Remove the current project's entry from `~/.agent/registry.toml`.
 ///
-/// Does NOT delete the project's `.agent/` store. Idempotent: returns
+/// Does **not** delete the project's `.agent/` store. Idempotent: returns
 /// `Ok(())` with a benign "nothing to do" message if the project is not
 /// registered or the registry file is absent.
 pub fn uninstall_project(
@@ -155,9 +173,9 @@ pub fn uninstall_project(
     // `daemon_home` just to take the flock — uninstall must not scaffold
     // `~/.agent/` as a locking side effect. Gate on `registry.toml`, not on
     // `daemon_home.exists()`: the latter is a TOCTOU against a concurrent
-    // first `dreamd init` that creates the home between the check and the RMW
-    // (AILAB-161 report-back). A false-negative here (init wins the race) is
-    // fine — the user re-runs uninstall.
+    // first `dreamd init` that creates the home between the check and the
+    // RMW. A false-negative here (init wins the race) is fine — the user
+    // re-runs uninstall.
     //
     // Registry present ⇒ its parent exists, so `update_registry` can take the
     // flock. It re-reads under the lock: a racer that removed the file between
@@ -183,21 +201,26 @@ pub fn uninstall_project(
     Ok(())
 }
 
-fn register_project(daemon_home: &DaemonHome, project_root: &Path) -> Result<(), InitError> {
+/// `true` when this call added the project. Already present is `Ok(false)`
+/// and writes nothing. The flock and the re-read live in [`update_registry`].
+fn register_project(daemon_home: &DaemonHome, project_root: &Path) -> Result<bool, InitError> {
     // `create_dir_all` stays outside the lock — it is the precondition for
-    // creating the lockfile at all. Silent: no stdout line,
-    // `tests/fixtures/init.golden.txt` is byte-locked.
+    // creating the lockfile at all. Prints nothing: `run` decides which line,
+    // if any, the golden fixtures expect.
     fs::create_dir_all(daemon_home.root())?;
-    update_registry(daemon_home, project_root, |registry, root| {
-        if registry.projects.iter().any(|p| p.root == root) {
-            return false;
-        }
-        registry.projects.push(ProjectEntry {
-            root: root.to_owned(),
-        });
-        true
-    })?;
-    Ok(())
+    Ok(update_registry(
+        daemon_home,
+        project_root,
+        |registry, root| {
+            if registry.projects.iter().any(|p| p.root == root) {
+                return false;
+            }
+            registry.projects.push(ProjectEntry {
+                root: root.to_owned(),
+            });
+            true
+        },
+    )?)
 }
 
 fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), InitError> {
@@ -226,9 +249,9 @@ fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), Ini
     if !quiet {
         writeln!(out, "initialized .agent/.dreamd/state.json")?;
     }
-    // WEG-14 / DR-112 — silent config template write. No stdout line; the
-    // init.golden.txt byte-lock (651 B) forbids adding a line here (D1).
-    // Idempotency is enforced by the top-level `.agent/` existence guard.
+    // Silent config template write (WEG-14). No stdout line: init.golden.txt
+    // locks init's stdout byte for byte. Idempotency is enforced by the
+    // top-level `.agent/` existence guard.
     fs::write(dreamd_dir.join("config.toml"), CONFIG_TEMPLATE.as_bytes())?;
 
     Ok(())
@@ -407,5 +430,126 @@ mod tests {
             roots.contains(&canonical_a.as_str()),
             "lost update: registered root missing after init∥uninstall race: {roots:?}"
         );
+    }
+
+    fn project_with_store(label: &str) -> (tempfile::TempDir, tempfile::TempDir, DaemonHome) {
+        let project = tempfile::tempdir().expect("project");
+        fs::write(project.path().join("Cargo.toml"), b"[package]\n").unwrap();
+        let agent = project.path().join(".agent/episodic");
+        fs::create_dir_all(&agent).unwrap();
+        fs::write(agent.join("AGENT_LEARNINGS.jsonl"), b"keep\n").unwrap();
+        let home = tempfile::tempdir().expect("home");
+        let daemon_home = DaemonHome::new(home.path().join(label));
+        (project, home, daemon_home)
+    }
+
+    fn registered_roots(daemon_home: &DaemonHome) -> Vec<String> {
+        let raw = fs::read_to_string(daemon_home.registry_toml()).expect("registry");
+        let registry: Registry = toml::from_str(&raw).expect("parse");
+        registry.projects.into_iter().map(|p| p.root).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_store_without_a_registry_entry_is_registered() {
+        let (project, _home, daemon_home) = project_with_store("reregister");
+        let jsonl = project.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl");
+        let before = fs::read(&jsonl).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(project.path(), &daemon_home, false, &mut out, &mut err).expect("init");
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{REREGISTER_MSG}\n")
+        );
+        assert!(err.is_empty());
+        assert_eq!(
+            fs::read(&jsonl).unwrap(),
+            before,
+            "the store is not rewritten"
+        );
+        let canonical = fs::canonicalize(project.path()).unwrap();
+        assert_eq!(
+            registered_roots(&daemon_home),
+            vec![canonical.to_string_lossy().into_owned()]
+        );
+
+        let mut out = Vec::new();
+        run(
+            project.path(),
+            &daemon_home,
+            false,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{RERUN_MSG}\n"));
+        assert_eq!(registered_roots(&daemon_home).len(), 1);
+        assert_eq!(fs::read(&jsonl).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_then_init_registers_without_touching_the_store() {
+        let (project, _home, daemon_home) = project_with_store("uninstall-then-init");
+        let jsonl = project.path().join(".agent/episodic/AGENT_LEARNINGS.jsonl");
+        run(
+            project.path(),
+            &daemon_home,
+            true,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        // The first call scaffolded nothing (the store was already there) and
+        // registered. Uninstall drops the entry. The bytes stay.
+        uninstall_project(
+            project.path(),
+            &daemon_home,
+            true,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let before = fs::read(&jsonl).unwrap();
+
+        let mut out = Vec::new();
+        run(
+            project.path(),
+            &daemon_home,
+            false,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{REREGISTER_MSG}\n")
+        );
+        assert_eq!(fs::read(&jsonl).unwrap(), before);
+        assert_eq!(registered_roots(&daemon_home).len(), 1);
+
+        uninstall_project(
+            project.path(),
+            &daemon_home,
+            true,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let mut quiet_out = Vec::new();
+        run(
+            project.path(),
+            &daemon_home,
+            true,
+            &mut quiet_out,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(quiet_out.is_empty(), "quiet re-register prints nothing");
+        assert_eq!(fs::read(&jsonl).unwrap(), before);
+        assert_eq!(registered_roots(&daemon_home).len(), 1);
     }
 }

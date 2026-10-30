@@ -1,15 +1,15 @@
 //! MCP config merge writer for `dreamd setup` (AILAB-550).
 //!
-//! Splits into a pure classifier ([`classify`]) and the disk-touching
-//! [`plan`] / [`apply`] pair so the ratified AILAB-548 §3 taxonomy is
-//! unit-testable without a filesystem.
+//! Splits into a pure classifier (`classify`) and the disk-touching
+//! `plan` / `apply` pair, so the compatible-or-conflict verdict on an
+//! existing `dreamd` entry is unit-testable without a filesystem.
 
 use std::path::{Path, PathBuf};
 
 use dreamd_core::io::write_atomic;
 use serde_json::{Map, Value};
 
-/// Verdict for an existing `mcpServers.dreamd` entry (AILAB-548 §3).
+/// Verdict for an existing `mcpServers.dreamd` entry.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     /// `command == "npx"` and some `args` element is exactly `dreamd-mcp`.
@@ -18,16 +18,16 @@ pub(crate) enum Verdict {
     Conflict(String),
 }
 
-/// The unscoped npm package we wire, matched exactly (AGENTS.md
+/// The unscoped npm package `setup` wires, matched exactly (AGENTS.md
 /// `npm-dreamd-mcp-unscoped`).
 const PACKAGE: &str = "dreamd-mcp";
 
 /// Classify an existing `mcpServers.dreamd` block against the floating pin.
 ///
-/// Compatible iff BOTH `command == "npx"` AND some `args` element is exactly
+/// Compatible iff `command == "npx"` and some `args` element is exactly
 /// the string `dreamd-mcp`. Everything else conflicts, and the match is exact:
 /// a version-pinned token, a scoped name, or a longer package name all conflict
-/// because none of them re-resolve to the `latest` dist-tag we ship.
+/// because none of them re-resolve to the package's `latest` dist-tag.
 pub(crate) fn classify(block: &Value) -> Verdict {
     let Some(obj) = block.as_object() else {
         return Verdict::Conflict("entry is not a JSON object".into());
@@ -81,14 +81,15 @@ pub(crate) struct TargetPlan {
     pub contents: Option<String>,
 }
 
-/// Failure modes of the MCP merge. All map to exit code 1 (AILAB-548 §5).
+/// Failure modes of the MCP merge. `dreamd setup` exits 1 on every one.
 #[derive(Debug)]
 pub enum McpError {
-    /// Existing config is not parseable JSON. `--force` cannot override this
-    /// (AILAB-548 §6C) — we never overwrite a file we could not read.
+    /// Existing config is not parseable JSON. `--force` cannot override this:
+    /// a file `setup` could not read is never overwritten.
     Malformed { label: &'static str, detail: String },
     /// An incompatible `dreamd` entry blocked the write and `--force` was absent.
     Conflict { label: &'static str, reason: String },
+    /// Reading the target, creating its parent directory, or writing it failed.
     Io {
         label: &'static str,
         source: std::io::Error,
@@ -134,8 +135,7 @@ pub(crate) fn plan(project_root: &Path, label: &'static str) -> Result<TargetPla
         Err(source) => return Err(McpError::Io { label, source }),
     };
 
-    // A file we cannot parse is never overwritten — not even with `--force`
-    // (AILAB-548 §6C).
+    // A file that does not parse is never overwritten, not even with `--force`.
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| McpError::Malformed {
         label,
         detail: e.to_string(),
@@ -165,7 +165,7 @@ pub(crate) fn plan(project_root: &Path, label: &'static str) -> Result<TargetPla
         },
     };
     if action == Action::AlreadyWired {
-        // Byte-preserving no-op: we do not reformat a file we agree with.
+        // Byte-preserving no-op: a file that is already wired is not reformatted.
         return Ok(TargetPlan {
             path,
             label,
@@ -187,11 +187,11 @@ pub(crate) fn plan(project_root: &Path, label: &'static str) -> Result<TargetPla
 /// Write the planned document, creating parent directories (`.cursor/`) as
 /// needed. A no-op for [`Action::AlreadyWired`].
 ///
-/// The write is atomic ([`write_atomic`], as `init` does for `registry.toml`)
-/// because the target holds OTHER people's MCP servers: a truncating write that
-/// dies mid-flight would destroy them and leave JSON we can no longer parse —
-/// which is exactly the §6C malformed path `--force` deliberately cannot clear,
-/// so the user would be locked out of their own repair route.
+/// The write is atomic ([`write_atomic`]) because the target also holds the
+/// user's other MCP servers: a truncating write that dies mid-flight would
+/// destroy them and leave JSON that no longer parses, which is the
+/// [`McpError::Malformed`] case `--force` deliberately cannot clear, so the
+/// user would be locked out of their own repair route.
 pub(crate) fn apply(planned: &TargetPlan) -> Result<(), McpError> {
     let Some(contents) = planned.contents.as_deref() else {
         return Ok(());
@@ -204,8 +204,8 @@ pub(crate) fn apply(planned: &TargetPlan) -> Result<(), McpError> {
         .map_err(|source| McpError::Io { label, source })
 }
 
-/// 2-space pretty JSON plus a trailing newline (AILAB-548 §6B). The user's
-/// original formatting is deliberately not preserved.
+/// 2-space pretty JSON plus a trailing newline. The user's original
+/// formatting is deliberately not preserved.
 fn render(doc: &Value) -> String {
     let mut rendered =
         serde_json::to_string_pretty(doc).expect("a serde_json::Value always serializes");

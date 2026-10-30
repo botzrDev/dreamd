@@ -231,8 +231,9 @@ the API is answering — `dreamd status` is the daemon-liveness question. Learn,
 the dream cycle, and the Tantivy index run on that daemon. The directory flush
 is not a power-loss proof. There is no prebuilt `dreamd-mcp` Windows binary —
 see [windows.md](./windows.md). `dreamd init`
-does register the project on Windows, which is what `POST /api/v1/learn` needs;
-a second init, when `.agent/` already exists, still does not register.
+does register the project on Windows, which is what `POST /api/v1/learn` needs.
+A second init, when `.agent/` already exists, leaves the store as-is and
+registers the project if the registry entry is missing.
 
 ## Restart is a bounce, not a reinstall
 

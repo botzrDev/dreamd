@@ -59,13 +59,13 @@ function validateRedirect(location, currentUrl) {
   return next.toString();
 }
 
-// Native `dreamd` subcommands. KEEP IN SYNC with the clap `Command` enum in
+// Native `dreamd` subcommands. Keep in sync with the clap `Command` enum in
 // crates/dreamd-cli/src/cli.rs — adding a `dreamd` subcommand without adding it
 // here silently routes `npx dreamd-mcp <newcmd>` to `dreamd mcp <newcmd>`.
 const DREAMD_SUBCOMMANDS = new Set([
   'init', 'setup', 'watch', 'doctor', 'dream', 'reset', 'service', 'uninstall', 'update',
   'version', 'mcp', 'blame', 'salience-drift', 'memory', 'forget',
-  'vectors',
+  'vectors', 'archive', 'migrate', 'recall', 'score', 'status',
 ]);
 
 // A recognized first token is forwarded to `dreamd` verbatim; a bare invocation
@@ -76,8 +76,8 @@ function resolveDreamdArgs(args) {
 }
 
 // Leading top-level flags the shim answers itself (no binary download). Only the
-// FIRST token counts: `npx dreamd-mcp init --help` still routes to the binary.
-// We handle these in the shim rather than forwarding because `dreamd mcp <flag>`
+// first token counts: `npx dreamd-mcp init --help` still routes to the binary.
+// The shim handles these rather than forwarding them because `dreamd mcp <flag>`
 // is a clap error, and the native `dreamd --help` prints `dreamd` usage — wrong
 // invocation for an npx user.
 function topLevelFlag(args) {
@@ -112,8 +112,8 @@ Environment:
 `;
 
 function getPlatformTarget() {
-  // v0.1 ships linux-x86_64 + darwin; Windows is out of scope until v0.1.1
-  // (AGENTS.md). Cache helpers below still tolerate win32 paths defensively.
+  // Prebuilt targets are linux-x86_64 and darwin; the shim has no prebuilt
+  // Windows binary. Cache helpers below still tolerate win32 paths defensively.
   const { platform, arch } = process;
   if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
   if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
@@ -240,7 +240,7 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
       throw new Error('extracted binary escaped the extraction dir');
     }
 
-    // Verify BEFORE promoting into the cache. Throw (not exit) so `finally`
+    // Verify before promoting into the cache. Throw (not exit) so `finally`
     // still cleans up; the exec-gate verify at the call site stays for cache hits.
     if (sha256File(extracted) !== expectedSha256) {
       throw new Error(
@@ -347,6 +347,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DREAMD_SUBCOMMANDS,
   resolveDreamdArgs,
   topLevelFlag,
   isAllowedRedirectHost,

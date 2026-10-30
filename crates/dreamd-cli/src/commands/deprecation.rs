@@ -1,4 +1,4 @@
-//! One-line stderr notices for the surfaces deprecated in 1.1.0 and removed in
+//! One-line stderr notices for the surfaces deprecated in 1.2.0 and removed in
 //! 2.0 (BZR-1245). The text is stable: `tests/cli_help.rs` snapshots it.
 
 pub const MEMORY_BRANCH: &str = "dreamd: warning — `dreamd memory branch` is deprecated and will be removed in dreamd 2.0; .agent/ is plain files, so use git to branch, diff and bisect it";

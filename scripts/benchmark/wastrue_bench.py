@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WasTrue benchmark — Week-0 bake-off gate (ANTH-20).
+"""WasTrue benchmark — a bake-off of memory systems on current vs stale facts.
 
 Neutral referee: every memory system is one row. Programmatic oracle with an
 explicit AMBIGUOUS bucket. Determinism is checked, not assumed.
@@ -38,9 +38,7 @@ BOOTSTRAP_SAMPLES = 2000
 CI_LEVEL = 0.95
 
 
-# ---------------------------------------------------------------------------
-# Scenario + oracle
-# ---------------------------------------------------------------------------
+# ── Scenario + oracle ────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -146,9 +144,7 @@ def _rate(values: Sequence[str], label: str) -> float:
     return sum(1 for v in adjudicated if v == label) / len(adjudicated)
 
 
-# ---------------------------------------------------------------------------
-# Metrics + bootstrap CI
-# ---------------------------------------------------------------------------
+# ── Metrics + bootstrap CI ───────────────────────────────────────────────────
 
 
 @dataclass
@@ -214,9 +210,7 @@ def aggregate_rates(trials: list[TrialOutcome]) -> AxisRates:
     )
 
 
-# ---------------------------------------------------------------------------
-# Adapter interface
-# ---------------------------------------------------------------------------
+# ── Adapter interface ────────────────────────────────────────────────────────
 
 
 class MemoryAdapter(ABC):
@@ -243,9 +237,7 @@ class MemoryAdapter(ABC):
         return a == b
 
 
-# ---------------------------------------------------------------------------
-# Reference / floor systems (self-proving)
-# ---------------------------------------------------------------------------
+# ── Reference / floor systems (self-proving) ─────────────────────────────────
 
 
 class ReferenceFaithfulAdapter(MemoryAdapter):
@@ -363,9 +355,7 @@ class FloorVectorRagAdapter(MemoryAdapter):
         return top[-1]
 
 
-# ---------------------------------------------------------------------------
-# dreamd adapter (HTTP over Unix socket)
-# ---------------------------------------------------------------------------
+# ── dreamd adapter (HTTP over Unix socket) ───────────────────────────────────
 
 
 def _http_unix(
@@ -505,9 +495,7 @@ class DreamdAdapter(MemoryAdapter):
         self._stop()
 
 
-# ---------------------------------------------------------------------------
-# Mem0 adapter (REST, v3)
-# ---------------------------------------------------------------------------
+# ── Mem0 adapter (REST, v3) ──────────────────────────────────────────────────
 
 
 class Mem0Adapter(MemoryAdapter):
@@ -566,9 +554,7 @@ class Mem0Adapter(MemoryAdapter):
         return "\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Zep adapter (REST, graph search)
-# ---------------------------------------------------------------------------
+# ── Zep adapter (REST, graph search) ─────────────────────────────────────────
 
 
 class ZepAdapter(MemoryAdapter):
@@ -645,9 +631,7 @@ class ZepAdapter(MemoryAdapter):
         return "\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
+# ── Runner ───────────────────────────────────────────────────────────────────
 
 
 def reference_adapters() -> list[MemoryAdapter]:
@@ -757,9 +741,7 @@ def gate_verdict(reports: list[SystemReport]) -> str:
     return "PIVOT — CIs overlap on all axes; ship neutral cross-field map"
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 
 def load_env_file(path: Path) -> None:

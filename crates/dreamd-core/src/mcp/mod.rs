@@ -8,10 +8,10 @@
 //! Start-up logic on **Unix**:
 //!   1. If the dreamd daemon socket is reachable, serve the same MCP tool
 //!      surface over stdio but back each tool call with an HTTP-over-UDS client
-//!      to the daemon (`Backend::Remote`) so memory is shared across every
+//!      to the daemon (`DaemonStore::uds`) so memory is shared across every
 //!      harness pointed at the same daemon.
 //!   2. If the daemon is not running, fall back to an in-process MCP server
-//!      that answers tool calls directly (`Backend::Local`).
+//!      that answers tool calls directly ([`InProcessStore`]).
 //!
 //! Both paths expose identical tools: `search_nodes` performs recall (WEG-78)
 //! and `append_node` writes the learning durably (WEG-79).
@@ -19,18 +19,20 @@
 //! **Off Unix** (AILAB-192) there is step 1 and nothing else: if the daemon
 //! published a live loopback address to `~/.agent/server.json` and
 //! `~/.agent/auth.json` holds a readable bearer token, tool calls are proxied
-//! over loopback TCP (`Backend::RemoteTcp`); otherwise `run_mcp_server` returns
+//! over loopback TCP with the bearer token (`DaemonStore::tcp`); otherwise
+//! `run_mcp_server` returns
 //! [`McpRunError::Unsupported`]. There is no in-process fallback: tool calls
 //! go to `dreamd watch`, which holds the project writer lock and the index.
 //!
 //! **Transport** (AILAB-206): stdio by default. `dreamd mcp --bind <ADDR>`
 //! serves the same server, chosen by the same steps above, over Streamable HTTP
 //! at `/mcp` instead (see `docs/mcp-transports.md`). That transport is compiled
-//! only with the non-default `mcp-http` cargo feature (NFR-2: it adds ~1.5 MB to
-//! the stripped binary); without it `--bind` is
+//! only with the non-default `mcp-http` cargo feature (it adds ~1.5 MB to the
+//! stripped binary, which CI's size gate, `MAX_BYTES` in
+//! `.github/workflows/ci.yml`, holds under 24 MiB); without it `--bind` is
 //! [`McpRunError::HttpTransportNotBuilt`] before anything binds. With it, the
-//! listener is bound first, through the AILAB-197 gate
-//! [`bind_listen`](crate::server::bind_listen), so a refused address fails
+//! listener is bound first, through the non-loopback gate (AILAB-197)
+//! [`server::bind_listen`](crate::server::bind_listen), so a refused address fails
 //! before any backend is chosen. `--bind` is not a way around "proxy or
 //! refuse": off Unix it still needs a live daemon.
 
@@ -51,8 +53,9 @@ use crate::memory_store::{new_index_map, SharedIndexMap};
 use crate::memory_store::{
     AppendRequest, DaemonStore, InProcessStore, MemoryStoreError, SharedMemoryStore,
 };
-// AILAB-174: `server` is `#[cfg(unix)]` in lib.rs (DR-121 defers the Windows
-// daemon), and the disclosure is only printed by the unix `run_mcp_server`.
+// These three are used only by the Unix `run_mcp_server`, whose in-process
+// arm prints the disclosure and opens a `ProjectRuntime`; off Unix they would
+// be unused imports (AILAB-174).
 #[cfg(unix)]
 use crate::privacy::DR413_DISCLOSURE;
 #[cfg(unix)]
@@ -96,18 +99,17 @@ pub enum McpRunError {
     /// `DREAMD_SOCK` was set to a relative path.
     #[error("DREAMD_SOCK is not an absolute path: {0}")]
     InvalidSockPath(PathBuf),
-    /// Non-Unix host with no daemon to proxy to (AILAB-174, narrowed by
-    /// AILAB-192). Off Unix `dreamd mcp` is proxy-or-refuse: with a live
-    /// loopback daemon it serves `Backend::RemoteTcp`, and without one it
-    /// returns this rather than booting an in-process store. `dreamd watch`
-    /// is the writer.
+    /// Non-Unix host with no daemon to proxy to (AILAB-174, AILAB-192). Off
+    /// Unix `dreamd mcp` is proxy-or-refuse: with a live loopback daemon it
+    /// serves a `DaemonStore::tcp`, and without one it returns this rather
+    /// than booting an in-process store. `dreamd watch` is the writer.
     /// Declared unconditionally so this copy is testable on Linux.
     #[error(
         "start `dreamd watch` before `dreamd mcp`; there is no in-process server on Windows (see docs/windows.md)"
     )]
     Unsupported,
     /// `dreamd mcp --bind` was refused by
-    /// [`bind_listen`](crate::server::bind_listen) (AILAB-206): a non-loopback
+    /// [`server::bind_listen`](crate::server::bind_listen) (AILAB-206): a non-loopback
     /// address without `--insecure`, or a listener that came up non-loopback.
     /// The payload is the gate's own sentence, which names `--insecure`, and is
     /// the whole `Display`. A start failure, exit 1.
@@ -115,7 +117,8 @@ pub enum McpRunError {
     Bind(String),
     /// `dreamd mcp --bind` on a build without the `mcp-http` cargo feature
     /// (AILAB-206). Streamable HTTP is off by default so the release binary
-    /// stays under NFR-2; the flag still parses, and is refused here — before
+    /// stays under CI's size gate (`MAX_BYTES` in `.github/workflows/ci.yml`);
+    /// the flag still parses, and is refused here — before
     /// anything binds — rather than silently serving stdio. Declared
     /// unconditionally so the copy is testable in every build. A usage refusal,
     /// exit 2.
@@ -142,8 +145,8 @@ impl McpRunError {
 
 // Tool parameter structs
 
-/// AILAB-191 / DR-505 v2 -- three-element progressive disclosure (one-line
-/// summary, v1 trigger phrases, event-vs-lesson distinction).
+/// The `search_nodes` description, in three parts: a one-line summary, the
+/// trigger phrases, and the event-vs-lesson distinction (AILAB-191).
 ///
 /// rmcp 1.7 parses `#[tool(description = ...)]` as a darling `Option<String>`
 /// (`rmcp-macros-1.7.0/src/tool.rs:85`), so the attribute demands a string
@@ -192,8 +195,8 @@ pub struct AppendNodeParams {
 // MCP server struct
 
 /// MCP error for a [`MemoryStoreError`]. Kind and message are carried over
-/// unchanged, so every error a tool call returned before BZR-173 still comes
-/// back with the same code and text.
+/// as they are: `InvalidRequest` becomes `invalid_request` and `Internal`
+/// becomes `internal_error`, each with the store's message.
 impl From<MemoryStoreError> for McpError {
     fn from(e: MemoryStoreError) -> Self {
         match e {
@@ -204,9 +207,10 @@ impl From<MemoryStoreError> for McpError {
 }
 
 /// MCP server exposing the `search_nodes` / `append_node` tool pair over one
-/// [`MemoryStore`] (BZR-173): an in-process [`InProcessStore`], or a
-/// [`DaemonStore`] proxying to the daemon over UDS on Unix and over loopback
-/// TCP off it. The tool methods never branch on which one they hold.
+/// [`MemoryStore`](crate::memory_store::MemoryStore) (BZR-173): an
+/// in-process [`InProcessStore`], or a [`DaemonStore`] proxying to the daemon
+/// over UDS on Unix and over loopback TCP off it. The tool methods never
+/// branch on which one they hold.
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     // Used by the #[tool_router] macro-generated dispatch code; the Rust
@@ -334,7 +338,7 @@ impl MemoryMcpServer {
         }
     }
 
-    /// Test-only: how many Tantivy handles the Phase-1 map currently holds.
+    /// Test-only: how many Tantivy handles the in-process store's map holds.
     #[cfg(all(test, unix))]
     fn index_map_len(&self) -> usize {
         self.index_map.lock().expect("index map lock").len()
@@ -394,7 +398,7 @@ impl MemoryMcpServer {
 
     /// Append a new learning node to episodic memory.
     ///
-    /// The entry is durably fsynced before this call returns (DR-103). Writes
+    /// The entry is durably fsynced before this call returns. Writes
     /// `AGENT_LEARNINGS.jsonl` only -- `.agent/semantic/LESSONS.md` is the
     /// dream cycle's output, not this tool's.
     #[tool(
@@ -497,7 +501,7 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 
 /// Start the MCP server process.
 ///
-/// Daemon proxy ([`Backend::Remote`], Unix only): if the daemon socket is
+/// Daemon proxy ([`DaemonStore::uds`]): if the daemon socket is
 /// reachable, serve the MCP tool surface over stdio backed by an HTTP-over-UDS
 /// client to the daemon ([`MemoryMcpServer::with_remote`]) and return when the
 /// session ends.
@@ -507,8 +511,8 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// the Unix `run_mcp_server`: the `not(unix)` twin below is proxy-or-refuse,
 /// because it has no durable local write path (AILAB-192).
 ///
-/// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr when this
-/// is the first invocation in a directory that has no `.agent/` store yet.
+/// Privacy disclosure ([`DR413_DISCLOSURE`]) is printed to stderr whenever no
+/// `.agent/` store is found from `cwd` upward.
 ///
 /// Shutdown is driven by the stdio transport: `rmcp::transport::stdio()` reads
 /// stdin, and when the MCP client closes it (stdin EOF — the conventional stdio
@@ -516,16 +520,17 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// `initialize`), `svc.waiting()` resolves `Ok(())` and this returns 0 — so
 /// `dreamd mcp` self-exits cleanly on disconnect with no orphaned process. A
 /// disconnect *before* `initialize` surfaces as a `.serve()` error (non-zero
-/// exit) but still terminates promptly. Do NOT wrap `svc.waiting()` in anything
+/// exit) but still terminates promptly. Do not wrap `svc.waiting()` in anything
 /// that would block EOF from completing it; the in-process branch relies on
-/// `waiting()` returning so `supervisor` drops. Both paths are regression-tested
-/// in `dreamd-cli/tests/mcp_stdin_eof.rs`.
+/// `waiting()` returning so the project runtime shuts down. Both paths are
+/// regression-tested in `dreamd-cli/tests/mcp_stdin_eof.rs`.
 ///
 /// `listen` is `dreamd mcp --bind` / `--insecure` (AILAB-206). `None` is the
 /// stdio transport described above. `Some` binds through `bind_listen`
 /// *before* anything else — no disclosure, no socket probe, no Tantivy — so a
 /// refused address is [`McpRunError::Bind`] with nothing opened; then the same
-/// Remote / Local / Empty decision is served over Streamable HTTP
+/// choice (daemon store, in-process store, or a store with no project) is
+/// served over Streamable HTTP
 /// (`http::serve_streamable_http`) until Ctrl-C or SIGTERM, not stdin EOF. In a
 /// build without the `mcp-http` feature `Some` is
 /// [`McpRunError::HttpTransportNotBuilt`], equally before anything opens.
@@ -542,16 +547,16 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
     // Resolve daemon socket path.
     let sock_path = resolve_sock_path()?;
 
-    // Daemon proxy: if reachable over UDS, serve MCP over stdio backed by
-    // Remote.
+    // Daemon proxy: if reachable over UDS, serve MCP backed by the daemon
+    // store.
     match tokio::net::UnixStream::connect(&sock_path).await {
         Ok(_) => {
             // The connect only probes reachability; each tool call opens its
             // own short-lived connection. Derive the X-Agent-Root header from
             // the discovered project root, canonicalized to match
-            // resolve_project's server-side lookup (registry roots are stored
-            // canonicalized — see registry.rs). No `.agent/` in ancestry → send
-            // the cwd; Remote calls will 404, which is the correct
+            // `RegistryCache::resolve`'s server-side lookup (registry roots are
+            // stored canonicalized — see registry.rs). No `.agent/` in ancestry
+            // → send the cwd; proxied calls will 404, which is the correct
             // "not registered" signal.
             let agent_root_header: String = match AgentRoot::discover(cwd) {
                 Ok(root) => std::fs::canonicalize(root.project_root())
@@ -621,22 +626,19 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
 ///    bounded connect, because a `server.json` a killed watch left behind still
 ///    parses.
 ///
-/// All three pass → serve [`Backend::RemoteTcp`] over stdio, exactly as the Unix
-/// path serves [`Backend::Remote`]. Any one fails → [`McpRunError::Unsupported`],
-/// which `dreamd mcp` maps to exit 2.
+/// All three pass → serve a `DaemonStore::tcp` over the chosen transport, as
+/// the Unix path serves a `DaemonStore::uds`. Any one fails →
+/// [`McpRunError::Unsupported`], which `dreamd mcp` maps to exit 2.
 ///
-/// There is deliberately **no in-process fallback**: this path never calls
-/// `Supervisor::start` and never constructs [`Backend::Local`]. AILAB-174
-/// deleted that branch. `dreamd watch` is the writer. An in-process server
-/// would be a second writer of the log. The deleted branch would have accepted
-/// `append_node` calls it could never durably
-/// persist: the dream cycle, the index sidecar and `LESSONS.md` all go through
-/// that one seam. Refusing is the honest answer; a silent lossy accept is not.
-/// The daemon is the only writer that can persist, hence "proxy or refuse".
+/// There is deliberately **no in-process fallback** off Unix: this path never
+/// calls `Supervisor::start` and never constructs an `InProcessStore`
+/// (AILAB-174). `dreamd watch` is the writer there, and the only one that can
+/// persist, hence "proxy or refuse". Refusing is the honest answer; a silent
+/// lossy accept is not.
 ///
 /// `listen` (AILAB-206) changes the transport and nothing above: the listener
 /// is bound first, as on Unix, and the three preconditions still decide
-/// between [`Backend::RemoteTcp`] and [`McpRunError::Unsupported`]. `--bind` is
+/// between a `DaemonStore::tcp` and [`McpRunError::Unsupported`]. `--bind` is
 /// not a back door to an in-process store.
 #[cfg(not(unix))]
 pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(), McpRunError> {
@@ -659,7 +661,7 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
     }
 
     // Derive the X-Agent-Root header exactly as the Unix path does: the
-    // discovered project root, canonicalized to match `resolve_project`'s
+    // discovered project root, canonicalized to match `RegistryCache::resolve`'s
     // server-side lookup (registry roots are stored canonicalized — see
     // registry.rs). No `.agent/` in ancestry → send the cwd; remote calls then
     // 404, which is the correct "not registered" signal.
@@ -724,8 +726,8 @@ impl Transport {
 
     /// Serve `server` until the session (stdio) or the process (HTTP) ends.
     ///
-    /// The stdio arm is the pre-AILAB-206 body verbatim: `svc.waiting()` must
-    /// resolve on stdin EOF (`mcp_stdin_eof.rs`), so nothing wraps it.
+    /// In the stdio arm `svc.waiting()` must resolve on stdin EOF
+    /// (`mcp_stdin_eof.rs`), so nothing wraps it.
     async fn serve(self, server: MemoryMcpServer) -> Result<(), McpRunError> {
         match self {
             Transport::Stdio => {
@@ -870,9 +872,8 @@ mod tests {
         );
     }
 
-    /// AILAB-174: the Windows refusal copy is a product string shared by
-    /// `dreamd mcp` and `dreamd watch` (both exit 2). Pin it here so the two
-    /// call sites cannot drift and so `docs/windows.md` stays true.
+    /// AILAB-174: the Windows refusal copy is a product string (`dreamd mcp`
+    /// exits 2 on it). Pin it here so `docs/windows.md` stays true.
     #[test]
     fn unsupported_display_points_at_watch() {
         assert_eq!(
@@ -997,7 +998,7 @@ mod tests {
         );
     }
 
-    /// WEG-252: repeated Phase-1 `search_nodes` must reuse one Tantivy handle
+    /// WEG-252: repeated in-process `search_nodes` must reuse one Tantivy handle
     /// (one IndexWriter allocation), not open-per-call.
     #[cfg(unix)]
     #[tokio::test]
@@ -1023,7 +1024,7 @@ mod tests {
         assert_eq!(
             server.index_map_len(),
             1,
-            "Phase-1 search_nodes must reuse a single ProjectIndexMap entry (no per-call open)"
+            "in-process search_nodes must reuse a single ProjectIndexMap entry (no per-call open)"
         );
     }
 
@@ -1076,7 +1077,7 @@ mod tests {
                 .expect("send append");
             }
 
-            // Flush to ensure the commit lands before we query.
+            // Flush to ensure the commit lands before the query.
             let (ack_tx, ack_rx) = oneshot::channel();
             tx.send(IndexerMsg::Flush { ack: ack_tx })
                 .await
@@ -1269,11 +1270,11 @@ mod tests {
         assert_eq!(
             record.timestamp.to_rfc3339(),
             resp_ts,
-            "Phase 1 response timestamp must match on-disk daemon stamp"
+            "in-process response timestamp must match on-disk daemon stamp"
         );
     }
 
-    /// MCP Phase 1 `append_node` must redact secrets before persist (via
+    /// In-process `append_node` must redact secrets before persist (via
     /// [`LearnIngress`] — same rules as HTTP `post_learn`).
     #[cfg(unix)]
     #[tokio::test]
@@ -1314,8 +1315,8 @@ mod tests {
         );
     }
 
-    /// WEG-275: the `Backend::Local` ingress rejects a dotted/slashed
-    /// `skill_action` (tightened charset) and an out-of-range score via
+    /// WEG-275: the in-process store's ingress rejects a dotted/slashed
+    /// `skill_action` (`[a-z0-9_]` segments only) and an out-of-range score via
     /// `invalid_request` — both validated before the coordinator is touched.
     #[cfg(unix)]
     #[tokio::test]
@@ -1357,7 +1358,7 @@ mod tests {
         assert!(bad_pain.is_err(), "out-of-range pain must be rejected");
     }
 
-    // WEG-259: Remote backend (HTTP-over-UDS)
+    // ── Daemon store over HTTP-over-UDS (WEG-259) ────────────────────────────
 
     /// Unit: `build_recall_request` sets GET, the percent-encoded URI, and the
     /// `X-Agent-Root` header. Pure — no socket, no async.
@@ -1425,7 +1426,7 @@ mod tests {
         assert_eq!(parsed.content, "body content");
     }
 
-    /// Spawn an in-process daemon over UDS for the Remote integration tests.
+    /// Spawn an in-process daemon over UDS for the daemon-store integration tests.
     /// `with_coordinator` controls whether append writes are durable (real
     /// coordinator) or whether only read paths are exercised.
     #[cfg(unix)]
@@ -1471,7 +1472,7 @@ mod tests {
         .expect("write registry");
     }
 
-    /// Integration: search_nodes over the Remote backend returns daemon results.
+    /// Integration: search_nodes over the daemon store returns daemon results.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_search_nodes_round_trips_via_uds() {
@@ -1486,7 +1487,7 @@ mod tests {
         let root = setup_agent_root(&canonical);
 
         // Seed one learning into the on-disk Tantivy index, then release the
-        // writer so the daemon's index_map can open its own handle.
+        // writer so the daemon can open its own handle.
         {
             let lock = writer_lock(&root);
             let handle =
@@ -1557,7 +1558,7 @@ mod tests {
         );
     }
 
-    /// Integration: append_node over the Remote backend writes durably and the
+    /// Integration: append_node over the daemon store writes durably and the
     /// daemon mints the EventId.
     #[cfg(unix)]
     #[tokio::test]
@@ -1618,11 +1619,11 @@ mod tests {
         assert_eq!(
             record.timestamp.to_rfc3339(),
             resp_ts,
-            "Phase 2 response timestamp must match on-disk daemon stamp"
+            "daemon-store response timestamp must match on-disk daemon stamp"
         );
     }
 
-    /// Integration: Phase 2 forwards a dotted `skill_action` to the daemon;
+    /// Integration: the daemon store forwards a dotted `skill_action` to the daemon;
     /// daemon validation must reject it and nothing is persisted.
     #[cfg(unix)]
     #[tokio::test]
@@ -1667,7 +1668,7 @@ mod tests {
         );
     }
 
-    /// Integration: Phase 2 forwards out-of-range `pain` to the daemon;
+    /// Integration: the daemon store forwards out-of-range `pain` to the daemon;
     /// daemon validation must reject it and nothing is persisted.
     #[cfg(unix)]
     #[tokio::test]
@@ -1712,12 +1713,12 @@ mod tests {
         );
     }
 
-    /// Integration: Phase 2 sends raw, un-redacted content to the daemon
-    /// (`build_learn_request` skips redaction on purpose); the daemon MUST
-    /// re-do the redaction the local path performs, so the secret never
-    /// reaches disk. Closes the "the daemon re-does what build_learn_request
-    /// skips" contract for the redaction dimension (skill_action / range are
-    /// the sibling Remote rejection tests above).
+    /// Integration: the daemon store sends raw, un-redacted content to the
+    /// daemon (`build_learn_request` skips redaction on purpose); the daemon
+    /// **must** redo the redaction the in-process path performs, so the secret
+    /// never reaches disk. This is the redaction half of "the daemon redoes
+    /// what `build_learn_request` skips"; `skill_action` and score range are
+    /// the sibling rejection tests above.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_redacts_content_via_daemon() {
@@ -1761,7 +1762,7 @@ mod tests {
     }
 
     /// Integration: an unregistered agent root yields a 404 from the daemon,
-    /// which the Remote backend surfaces as `invalid_request` (not a dropped
+    /// which the daemon store surfaces as `invalid_request` (not a dropped
     /// connection).
     #[cfg(unix)]
     #[tokio::test]
@@ -1770,7 +1771,7 @@ mod tests {
         let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let root = setup_agent_root(&canonical);
 
-        // registry.toml is never written → resolve_project returns Ok(None) → 404.
+        // registry.toml is never written → the registry lookup returns Ok(None) → 404.
         let registry_path = canonical.join("registry.toml");
         let sock_path = canonical.join("daemon.sock");
         spawn_test_daemon(&root, registry_path, &sock_path, false).await;

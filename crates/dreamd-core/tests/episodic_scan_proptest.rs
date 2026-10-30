@@ -1,4 +1,4 @@
-//! Property and corpus tests for the episodic JSONL scan path (WEG-132 / DR-812).
+//! Property and corpus tests for the episodic JSONL scan path (WEG-132).
 //!
 //! Exercises [`dreamd_core::episodic::assess_bytes`] with arbitrary byte
 //! sequences and a fixed corpus of hand-edit failure modes: BOM prefixes,
@@ -51,7 +51,7 @@ fn clean_len_from_health(bytes: &[u8], health: &EpisodicLogHealth) -> usize {
     bytes.len() - health.torn_tail_bytes as usize
 }
 
-// ── Corpus: AC-mandated failure modes ────────────────────────────────────────
+// ── Corpus: hand-edit failure modes ─────────────────────────────────────────
 
 #[test]
 fn corpus_bom_prefixed_line_is_malformed() {
@@ -117,7 +117,7 @@ fn corpus_truncated_mid_line_is_torn_tail() {
 }
 
 #[test]
-fn corpus_trailing_whitespace_on_json_is_malformed() {
+fn corpus_invalid_json_with_trailing_whitespace_is_malformed() {
     let good = make_learning(7, "before");
     let later = make_learning(8, "after");
     let mut bytes = line_of(&good);
@@ -177,7 +177,7 @@ fn jsonl_bytes_strategy() -> impl Strategy<Value = Vec<u8>> {
                 bytes.extend(tail);
                 bytes
             }),
-        // Lines built from printable ASCII with forced newlines sprinkled in.
+        // Arbitrary bytes with a newline forced in every 64 bytes.
         prop::collection::vec(any::<u8>(), 0..4096).prop_map(|mut bytes| {
             for i in (0..bytes.len()).step_by(64) {
                 bytes[i] = b'\n';
@@ -187,8 +187,17 @@ fn jsonl_bytes_strategy() -> impl Strategy<Value = Vec<u8>> {
     ]
 }
 
+/// 512 cases per run. `PROPTEST_CASES` overrides it, which is how the nightly
+/// workflow runs 1024; a fixed `with_cases(512)` would ignore that variable.
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
     /// Core property: assess_bytes never panics and torn tail has no `\n`.
     #[test]
@@ -209,7 +218,7 @@ proptest! {
             );
         }
 
-        // Counts are non-negative and bounded.
+        // Counts never exceed the input length.
         prop_assert!(health.valid_record_count <= bytes.len());
         prop_assert!(health.malformed_line_count <= bytes.len());
 

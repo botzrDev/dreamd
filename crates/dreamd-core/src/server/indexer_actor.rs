@@ -1,5 +1,4 @@
-//! The per-project indexer actor (WEG-42 / DR-202), split out of
-//! `tantivy_handle` by BZR-170.
+//! The per-project indexer actor (WEG-42, BZR-170).
 //!
 //! One tokio task owns the Tantivy `IndexWriter`. The coordinator and the
 //! dream cycle talk to it only through [`IndexerMsg`]. Everything that mutates
@@ -7,7 +6,7 @@
 //! [`IndexerMsg::Flush`] commits, the coverage pass on [`IndexerMsg::Resync`],
 //! the decay prune, and the semantic (LESSONS.md) pass that
 //! `TantivyIndexHandle::open` also runs. Every commit goes through
-//! [`IndexerPersist::commit`] (BZR-1236). Recall's recurrence is not written
+//! `IndexerPersist::commit` (BZR-1236). Recall's recurrence is not written
 //! here: it is derived per searcher (`crate::recurrence`, BZR-1242).
 
 use std::collections::HashMap;
@@ -33,13 +32,14 @@ use crate::server::index_freshness::{
 use crate::server::index_map::{tantivy_to_index, IndexError};
 
 /// Default mpsc capacity for the coordinator → indexer hand-off. Sized so a
-/// 5-second commit window plus replay headroom fits without blocking the
-/// coordinator. The coordinator **awaits** `send` on this channel: once the
-/// buffer fills, the append handler blocks and the actor stops reading its own
-/// inbox, so in-flight learns queue in the 256-slot coordinator channel and
-/// simply wait — nothing times out a queued request, so a brief park surfaces as
-/// latency. Only once that inbox is also full does `Supervisor::try_send`'s
-/// 100 ms `COORDINATOR_SEND_TIMEOUT` start returning HTTP 503, and that is the
+/// commit window's worth of appends ([`DEFAULT_COMMIT_CADENCE`](crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE))
+/// fits without blocking the coordinator. The coordinator **awaits** `send` on
+/// this channel: once the buffer fills, the append handler blocks and the actor
+/// stops reading its own inbox, so in-flight learns queue in the coordinator
+/// channel (`COORDINATOR_CHANNEL_CAPACITY`) and simply wait — nothing times out
+/// a queued request, so a brief park surfaces as latency. Only once that inbox
+/// is also full does `Supervisor::try_send`'s `COORDINATOR_SEND_TIMEOUT` start
+/// returning HTTP 503, and that is the
 /// HTTP ingress alone: the in-process `dreamd mcp` path sends on the coordinator
 /// channel without that timeout, so it waits rather than 503ing.
 ///
@@ -48,9 +48,9 @@ use crate::server::index_map::{tantivy_to_index, IndexError};
 /// is still what keeps live recall whole.
 pub(crate) const DEFAULT_INDEXER_CHANNEL_CAPACITY: usize = 1024;
 
-/// Relative filename for the semantic pass's report of lessons it could not
-/// index, joined under the project's `.dreamd/` directory. Written by
-/// [`index_semantic_lessons`], read by `dreamd doctor` (AILAB-700).
+/// Filename of the semantic pass's report of lessons it could not index,
+/// under the project's `.agent/.dreamd/` directory. Written by
+/// `index_semantic_lessons`, read by `dreamd doctor` (AILAB-700).
 pub const SEMANTIC_PASS_FILENAME: &str = "semantic_pass.json";
 
 /// What the last semantic (LESSONS.md) pass could not index (AILAB-700).
@@ -96,9 +96,8 @@ pub fn read_semantic_pass_record(
 
 /// Messages accepted by the indexer task.
 ///
-/// `#[non_exhaustive]` keeps the enum forward-compatible — additional
-/// variants (e.g., `Delete`, `Rewrite`) will land in later tickets without
-/// breaking exhaustive matches in callers.
+/// `#[non_exhaustive]`, so adding a variant does not break a caller's match
+/// outside this crate.
 #[non_exhaustive]
 pub enum IndexerMsg {
     /// Coordinator → indexer hand-off after a durable JSONL append.
@@ -111,25 +110,28 @@ pub enum IndexerMsg {
         event_id: EventId,
         learning: AgentLearning,
     },
-    /// Drives deterministic flush in tests; production commits run on the
-    /// cadence ticker. The `ack` oneshot resolves with `Ok(())` after a
-    /// successful Tantivy commit + progress-file update, or `Err(IndexError)`
-    /// if either step failed.
+    /// Commit pending appends now rather than at the next cadence tick.
+    /// `TantivyIndexHandle::flush` sends it: the shutdown drain when the index
+    /// handle is still shared, and tests. The `ack` oneshot resolves with
+    /// `Ok(())` after a successful persist step (or when nothing was pending),
+    /// or `Err(IndexError)` if it failed.
     Flush {
         ack: oneshot::Sender<Result<(), IndexError>>,
     },
-    /// Decay pruner hook (WEG-62 / DR-309): delete decayed event IDs from the index.
+    /// Decay pruner hook (WEG-62): delete decayed event IDs from the index.
     /// Does not touch the JSONL — the JSONL rewrite is the cycle's plan
     /// (`plan_cycle`), committed with the cycle.
     PruneDecayedEvents {
         event_ids: Vec<EventId>,
         response: oneshot::Sender<Result<(), IndexError>>,
     },
-    /// Dream-cycle hook (DR-211 / AILAB-205): re-read `semantic/LESSONS.md`,
-    /// replace every `layer=semantic` document with the file's current lesson
-    /// set, then commit. Lets a running daemon pick up the lessons consolidation
-    /// just wrote without waiting for a restart. Never touches episodic
-    /// documents or the episodic watermark. Resolves after the commit completes.
+    /// Dream-cycle hook (AILAB-205): re-read `semantic/LESSONS.md`, replace
+    /// every `layer=semantic` document with the file's current lesson set,
+    /// then commit. Lets a running daemon pick up the lessons consolidation
+    /// just wrote without waiting for a restart. It adds or deletes no episodic
+    /// document, but its commit is the persist step, so any appends still
+    /// pending are committed with it and the watermark advances to cover them.
+    /// Resolves after the commit completes.
     IndexSemanticLessons {
         agent_root: AgentRoot,
         response: oneshot::Sender<Result<(), IndexError>>,
@@ -464,7 +466,7 @@ pub(crate) struct SemanticPassOutcome {
 }
 
 /// Identity token for a lesson document: the exemplar's id in a distinct
-/// namespace (DR-211 / AILAB-205).
+/// namespace (AILAB-205).
 ///
 /// Load-bearing, not cosmetic. Both delete sites key on the raw `event_id`
 /// term — the decay pruner and the upsert in [`add_document`] — so a lesson
@@ -478,7 +480,7 @@ pub(crate) fn semantic_event_id(lesson_id: &str) -> String {
 }
 
 /// Index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
-/// documents (DR-211 / AILAB-205).
+/// documents (AILAB-205).
 ///
 /// Wholesale replace: delete every semantic document, then add the file's
 /// current lesson set. LESSONS.md is rewritten in full each dream cycle, so the
@@ -489,9 +491,9 @@ pub(crate) fn semantic_event_id(lesson_id: &str) -> String {
 /// coverage pass's single commit inside [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open).
 ///
 /// Exemplar lookup is the live episodic log only; a miss skips the lesson with
-/// a `warn!` (AILAB-205 rev 3 cut the snapshot fallback — `plan_cycle` pins
-/// every cited exemplar (`cited_pins`) and its decay skips pinned records, so
-/// a cited exemplar does not age out). A lesson is never indexed with defaulted
+/// a `warn!`. There is no snapshot fallback: `plan_cycle` pins every cited
+/// exemplar (`cited_pins`) and its decay skips pinned records, so a cited
+/// exemplar does not age out. A lesson is never indexed with defaulted
 /// pain/importance: that document would score exactly 0.0 and could never rank.
 ///
 /// Tolerate-and-report, in the posture `episodic::read_all` uses — but the two
@@ -558,7 +560,7 @@ pub(crate) fn index_semantic_lessons(
         }
     };
 
-    // Only read the episodic log once we know there is a LESSONS.md to index,
+    // Read the episodic log only once there is a LESSONS.md to index,
     // so a project that has never dreamed pays no extra I/O here.
     let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
     let exemplars: HashMap<&str, &AgentLearning> =
@@ -706,8 +708,9 @@ pub(crate) fn add_document(
 /// Record what the semantic pass could not index, for `dreamd doctor`
 /// (AILAB-700).
 ///
-/// Best-effort by design, unlike [`write_progress`]: the watermark is
-/// crash-recovery state, this is a diagnostic. A store whose `.dreamd/` is
+/// Best-effort by design, unlike [`write_progress`], whose failure fails the
+/// persist step: the watermark is what Windows `/health` reports, and this is
+/// only a diagnostic. A store whose `.dreamd/` is
 /// read-only must still open its index and serve recall, so a failure here
 /// logs and returns rather than failing the pass — doctor then reports the
 /// previous pass, which is a stale hint, not a wrong index.

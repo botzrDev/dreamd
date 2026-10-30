@@ -89,8 +89,9 @@ pub fn plan_cycle(
 ///   stays absent. `prior_lessons` is only tested for presence, never parsed,
 ///   so a corrupt prior file does not fail the cycle.
 /// - The ids to pin and the ledger edges come from the *rendered* file parsed
-///   back, which is what the pin pass and the commit's edge reader saw before
-///   BZR-1240. A rendered file that does not parse fails the plan.
+///   back, so they name what the `LESSONS.md` on disk names, even when a body
+///   contains the lesson delimiter. A rendered file that does not parse fails
+///   the plan.
 /// - Every unpinned cited record is pinned; no pin is ever cleared.
 /// - Decay drops old records that are neither pinned nor pinned by this plan.
 pub fn plan_cycle_with(
@@ -623,11 +624,11 @@ mod tests {
         assert!(matches!(err, ForgetError::Lessons(_)), "got {err:?}");
     }
 
-    // ── Amendment 1: ids come from the rendered file parsed back ─────────────
+    // ── Ids come from the rendered file parsed back ────────────────────────
 
     /// A body line that closes the lesson and opens another for record `1`:
-    /// the rendered file parses to two lessons, so `1` is pinned, as it was
-    /// before BZR-1240. The edges are the first lesson's.
+    /// the rendered file parses to two lessons, so `1` is pinned, as the file
+    /// on disk names it. The edges are the first lesson's.
     #[test]
     fn plan_cycle_pins_the_ids_the_rendered_file_parses_to() {
         let events = promoting();

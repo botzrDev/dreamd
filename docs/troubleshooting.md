@@ -143,7 +143,7 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 | Remove one memory | `dreamd forget <event id>` — stop the daemon first; `--dry-run` previews. Find the id with `dreamd recall <query>` |
 | Uninstall dreamd (stop servers, unregister project, clear caches; keeps `.agent/` stores) | `dreamd uninstall` — flags and details: [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
 | Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
-| Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project` |
+| Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project`. The store stays. Run `dreamd init` again to put the registry entry back. |
 | Remove the login service (systemd unit / LaunchAgent / scheduled task) | `dreamd service uninstall` — see [install.md](./install.md#removing-the-service) |
 | Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair` (or use *Full fresh store* below for a clean slate) |
 | Full fresh store | Delete `.agent/` and re-run `dreamd init` |

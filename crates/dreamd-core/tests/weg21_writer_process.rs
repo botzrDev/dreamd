@@ -9,10 +9,9 @@
 //!   * the writer's `episodic/AGENT_LEARNINGS.jsonl` ends up with exactly
 //!     one parseable record.
 //!
-//! Subprocess wiring is the only way to satisfy the AC's "two processes"
-//! requirement — same-process threads can't exercise the bind/connect path
-//! through the OS, and Tantivy's eventual single-IndexWriter constraint is
-//! about real process boundaries.
+//! The test needs two real processes: same-process threads can't exercise the
+//! bind/connect path through the OS, and the single-writer rule (one project
+//! writer lock, one Tantivy `IndexWriter`) is about process boundaries.
 
 #![cfg(unix)]
 
@@ -45,7 +44,7 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
     std::fs::create_dir_all(&project_root).unwrap();
 
     // macOS caps UDS sun_path at 104 bytes; its $TMPDIR is the long
-    // /private/var/folders/<…>/T/ prefix, so nesting our unique dir +
+    // /private/var/folders/<…>/T/ prefix, so nesting the test's unique dir +
     // agent-home/dreamd.sock under it overflows the limit (Linux is 108 +
     // $TMPDIR=/tmp, so this only bites macOS CI). Bind the socket under a
     // short, dedicated tempdir; the project tree has no path-length limit and
@@ -53,7 +52,7 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
     let sock_dir = tempfile::tempdir().expect("socket tempdir");
     let socket = sock_dir.path().join("dreamd.sock");
 
-    // Spawn writer; pipe stdout so we can read its BIND_OK readiness signal.
+    // Spawn writer; pipe stdout so the test can read its BIND_OK readiness signal.
     let mut writer = Command::new(helper_bin())
         .arg("writer")
         .arg(&socket)
@@ -63,8 +62,8 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
         .spawn()
         .expect("spawn writer");
 
-    // Wait up to 3s for the writer to print BIND_OK. We tail one line off
-    // its stdout to keep the lifecycle ordering observable.
+    // Wait up to 3s for the writer to print BIND_OK. Tail one line off its
+    // stdout to keep the lifecycle ordering observable.
     let stdout = writer.stdout.take().expect("writer stdout");
     let mut reader = BufReader::new(stdout);
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -117,8 +116,8 @@ fn first_process_binds_socket_and_second_forwards_through_it() {
         "client reply must be a freshly minted EventId, got {client_minted:?}"
     );
 
-    // Drain remaining writer stdout through the BufReader we already own —
-    // `wait_with_output()` can't be used here because we took stdout off the
+    // Drain remaining writer stdout through the BufReader already held —
+    // `wait_with_output()` can't be used here because stdout was taken off the
     // child earlier to detect BIND_OK.
     let mut writer_remaining = String::new();
     let drain_deadline = Instant::now() + Duration::from_secs(3);

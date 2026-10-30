@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # dreamd alpha suite — automated cross-harness append->recall smoke test.
 #
-# Reconstructs the core of the 2026-06-18 alpha suite (which kept living in
-# ephemeral scratchpads). Proves the demo-critical claim: a learning appended by
-# one harness (source_harness=claude-code) is recalled by an independent second
-# harness process (cursor), on BOTH the daemon path (Phase 2) and the no-daemon
-# path (Phase 1).
+# Proves the demo-critical claim: a learning appended by one harness
+# (source_harness=claude-code) is recalled by an independent second harness
+# process (cursor), on both the daemon path (Phase 2) and the no-daemon path
+# (Phase 1).
 #
 # Fully sandboxed: HOME is redirected to a temp dir, so the real ~/.agent daemon,
 # registry, and memory are never touched. Cleans up the daemon + temp dir on exit.
@@ -38,7 +37,7 @@ trap cleanup EXIT
 echo "=== dreamd alpha suite (sandbox HOME=$SANDBOX) ==="
 "$BIN" version 2>/dev/null | head -3 || true
 
-# --- Setup: a real project with a root sentinel + registered store ------------
+# ── Setup: a real project with a root sentinel + registered store ────────────
 mkdir -p "$PROJ"
 ( cd "$PROJ" && git init -q )                 # .git = ROOT_SENTINEL for `init`
 ( cd "$PROJ" && "$BIN" init ) >/dev/null 2>&1 \
@@ -57,9 +56,7 @@ search_call() { # <query>
   printf '[{"name":"search_nodes","arguments":{"query":"%s","k":5}}]' "$1"
 }
 
-# =============================================================================
-# PHASE 2 — daemon up: harness A appends, independent harness B recalls
-# =============================================================================
+# ── Phase 2 — daemon up: harness A appends, independent harness B recalls ────
 echo "--- Phase 2 (daemon / shared index) ---"
 # Must run from $PROJ: `dreamd watch` discovers AgentRoot from cwd. Starting
 # from the repo root fails on CI (no checked-in `.agent/`) with NoProjectRoot
@@ -97,10 +94,10 @@ else bad "phase2 cross-harness recall FAILED — cursor did not surface claude-c
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
 for i in $(seq 1 10); do [ -S "$SANDBOX/.agent/dreamd.sock" ] || break; sleep 0.3; done
 
-# =============================================================================
-# PHASE 1 — no daemon: in-process append (harness A), JSONL-replay recall (B)
-# =============================================================================
-echo "--- Phase 1 (no daemon / JSONL replay) ---"
+# ── Phase 1 — no daemon ──────────────────────────────────────────────────────
+# In-process append (harness A), then recall from an index built off the JSONL
+# at open (harness B).
+echo "--- Phase 1 (no daemon / JSONL indexed at open) ---"
 [ -S "$SANDBOX/.agent/dreamd.sock" ] && bad "socket still present; not a true Phase 1" || ok "daemon stopped (Phase 1 path active)"
 
 # Harness A appends in-process (durable JSONL write), process exits.
@@ -109,15 +106,15 @@ if echo "$A1_RESP" | grep -q '"isError": *true\|"error"'; then bad "phase1 appen
 elif echo "$A1_RESP" | grep -q 'evt_'; then ok "phase1 append (cursor) accepted"
 else bad "phase1 append: no event id minted: $A1_RESP"; fi
 
-# Harness B — fresh process — replays the JSONL and searches.
+# Harness B — fresh process — indexes the JSONL at open and searches.
 B1_RESP="$(search_call "$CUR_QUERY" | python3 "$DRIVER" "$BIN" "$PROJ")"
-if echo "$B1_RESP" | grep -q "wombat retry jitter budget"; then ok "phase1 cross-harness recall: replay surfaced the write"
+if echo "$B1_RESP" | grep -q "wombat retry jitter budget"; then ok "phase1 cross-harness recall: the index built at open surfaced the write"
 else bad "phase1 recall FAILED"; echo "    last: $B1_RESP"; fi
 
-# Phase 1 must ALSO still see the Phase 2 write (same JSONL, WEG-378 read path).
+# Phase 1 must also still see the Phase 2 write (same JSONL, WEG-378 read path).
 B2_RESP="$(search_call "$CC_QUERY" | python3 "$DRIVER" "$BIN" "$PROJ")"
-if echo "$B2_RESP" | grep -q "capybara telemetry pipeline"; then ok "phase1 replay also recalls the earlier claude-code write (WEG-378 read path)"
-else bad "phase1 did NOT recall the earlier write — possible WEG-378 read-path regression"; echo "    last: $B2_RESP"; fi
+if echo "$B2_RESP" | grep -q "capybara telemetry pipeline"; then ok "phase1 index built at open also recalls the earlier claude-code write (WEG-378 read path)"
+else bad "phase1 did not recall the earlier write — possible WEG-378 read-path regression"; echo "    last: $B2_RESP"; fi
 
 echo "=== RESULT: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

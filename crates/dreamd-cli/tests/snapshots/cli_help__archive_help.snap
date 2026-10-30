@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"archive\")"
 ---
-Maintain the on-disk memory log. Today: unpin entries with --force-unpin
+Maintain the on-disk memory log; its one operation is unpinning entries (--force-unpin)
 
 Usage: archive [OPTIONS] [EVENT_ID]
 
@@ -15,7 +15,7 @@ Options:
           Clear the `pinned` flag so the next pruning pass can remove the entry
 
       --all
-          Unpin every entry. Refused unless explicitly set
+          Unpin every entry. Mutually exclusive with EVENT_ID
 
   -h, --help
           Print help

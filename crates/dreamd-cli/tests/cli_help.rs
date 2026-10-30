@@ -1,12 +1,12 @@
-//! WEG-20 (DR-803) — in-process snapshot tests for every published CLI surface.
+//! WEG-20 — in-process snapshot tests for every published CLI surface.
 //!
 //! Snapshots, all bound directly to in-process symbols (no subprocess):
 //! top-level `--help`, each subcommand `--help` (archive, blame, forget, init, dream, mcp,
 //! memory, migrate, doctor, recall, salience-drift, score, watch, reset, service,
 //! setup, status, uninstall, update, vectors, version), nested `reset workspace --help`,
-//! `memory branch|checkout|branches|delete|bisect --help`,
+//! `memory branch|checkout|branches|delete|diff|bisect --help`,
 //! `memory bisect start|good|bad|run --help`, and
-//! `service install|start|restart|status|uninstall --help`,
+//! `service install|start|restart|status|uninstall --help`, `vectors enable --help`,
 //! plus the WEG-18 version output contract
 //! (`VERSION_SHORT` and `render_long()`) and the BZR-1245 deprecation notices
 //! (`deprecation::ALL`).
@@ -295,6 +295,14 @@ fn snapshot_service_uninstall_help() {
 #[test]
 fn snapshot_vectors_help() {
     assert_snapshot!("vectors_help", subcommand_help("vectors"));
+}
+
+#[test]
+fn snapshot_vectors_enable_help() {
+    assert_snapshot!(
+        "vectors_enable_help",
+        nested_subcommand_help("vectors", "enable")
+    );
 }
 
 /// BZR-1245: the eight deprecation notices are a stable interface; scripts

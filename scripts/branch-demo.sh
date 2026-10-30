@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Walk the `dreamd memory` branch and bisect commands in a throwaway project.
+# Those commands are deprecated in 1.2.0 and removed in 2.0; each prints a
+# warning on stderr.
 #
 # Uses the `dreamd` binary on PATH. Everything happens in a temp directory,
 # which is removed on exit; the caller's repo is never touched. HOME is pointed

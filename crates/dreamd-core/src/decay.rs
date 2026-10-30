@@ -1,4 +1,4 @@
-//! Episodic decay pruner (DR-309 / WEG-62).
+//! Episodic decay pruner (WEG-62).
 //!
 //! Archives `AGENT_LEARNINGS.jsonl` records older than 90 days whose salience
 //! has fallen below 2.0 into a date-stamped snapshot file under
@@ -47,11 +47,6 @@ pub fn should_decay(now_sec: i64, learning: &AgentLearning) -> bool {
     sal < DECAY_SALIENCE_THRESHOLD
 }
 
-// DECISION (WEG-25 T06): No function in this module takes >3 parameters.
-// `should_decay(2)`, `plan_decay(3)` and `merge_archive(2)` have focused
-// signatures; grouping into a struct would add ceremony without reducing
-// cognitive load. Keeping flat parameters.
-
 /// What a cycle's decay did, as `run_filesystem_phases` returns it
 /// ([`crate::plan::CyclePlan::decay_result`]).
 #[derive(Debug, Default)]
@@ -63,8 +58,9 @@ pub struct DecayResult {
 }
 
 impl DecayResult {
-    /// Returns `true` when the pruner ran but made no changes: no events
-    /// decayed and nothing was kept (i.e., the JSONL was absent or empty).
+    /// Returns `true` when there was nothing to prune: no events decayed and
+    /// none were kept (the JSONL was absent or empty). A run that kept every
+    /// event is not empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.decayed_ids.is_empty() && self.kept_count == 0
@@ -153,9 +149,7 @@ pub fn merge_archive(existing: Option<Vec<u8>>, rows: &[RawLine]) -> Vec<u8> {
     archive
 }
 
-// ===========================================================================
-// Tests
-// ===========================================================================
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -216,8 +210,6 @@ mod tests {
             .filter(|l| !l.is_empty())
             .collect()
     }
-
-    // -----------------------------------------------------------------------
 
     #[test]
     fn decay_result_default_is_empty() {
@@ -316,7 +308,7 @@ mod tests {
         let log_lines = non_empty_lines(&log);
         assert_eq!(log_lines.len(), 70, "JSONL has 70 lines");
 
-        // Decayed IDs must NOT appear in the pruned log.
+        // Decayed IDs must not appear in the pruned log.
         let kept_ids: Vec<String> = log_lines
             .iter()
             .map(|l| {
@@ -335,7 +327,7 @@ mod tests {
 
     #[test]
     fn plan_decay_respects_pinned() {
-        // Old + pinned: should NOT decay.
+        // Old + pinned: should not decay.
         let pinned_id = make_event_id('P');
         let pinned = make_learning(pinned_id.clone(), OLD_TS, true);
 

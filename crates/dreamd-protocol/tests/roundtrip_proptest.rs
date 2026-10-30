@@ -1,5 +1,5 @@
 //! Property tests proving JSONL round-trip equivalence for arbitrary
-//! [`AgentLearning`] records (WEG-159 / DR-802).
+//! [`AgentLearning`] records (WEG-159).
 //!
 //! The property under test is simple and load-bearing for the on-disk format:
 //! for any structurally-valid learning, `to_string` → `from_str` yields an
@@ -10,10 +10,9 @@
 //! `dreamd-core` and does **not** apply here, so `content` is exercised well
 //! past 4 KiB on purpose.
 //!
-//! Field strategies match the ground-truth struct at
-//! `dreamd-protocol/src/lib.rs` (9 fields). Note the ticket's AC field list is
-//! drifted: it names a nonexistent `layer` field and omits the required
-//! `source_harness` — this suite follows the struct, not the AC.
+//! Field strategies follow the struct in `dreamd-protocol/src/lib.rs`, one
+//! strategy per field. There is no `layer` field on a record, and
+//! `source_harness` is required.
 
 use chrono::{DateTime, TimeZone, Utc};
 use dreamd_protocol::{AgentLearning, EventId};
@@ -69,7 +68,8 @@ fn source_harness_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// `"1.0.0"` (the only v0.1 value) plus arbitrary semver-ish and free strings.
+/// `"1.0.0"` (the only value written today) plus arbitrary semver-ish and free
+/// strings.
 fn schema_version_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("1.0.0".to_string()),
@@ -78,8 +78,8 @@ fn schema_version_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Content strategy that deliberately hits the encoding edge cases called out
-/// in the AC: empty, arbitrary Unicode (incl. control chars), embedded
+/// Content strategy that deliberately hits the encoding edge cases: empty,
+/// arbitrary Unicode (incl. control chars), embedded
 /// newlines, and very long bodies (past the 4 KiB append cap — which does not
 /// apply to a pure serde round-trip).
 fn content_strategy() -> impl Strategy<Value = String> {
@@ -138,14 +138,23 @@ fn agent_learning_strategy() -> impl Strategy<Value = AgentLearning> {
         )
 }
 
+/// 512 cases per run. `PROPTEST_CASES` overrides it, which is how the nightly
+/// workflow runs 1024; a fixed `with_cases(512)` would ignore that variable.
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
     /// The core property: serialize → parse → assert structural equality.
     ///
     /// `AgentLearning` derives `PartialEq`, and the bounded timestamp means the
-    /// parsed-back instant equals the original, so we assert on the whole struct
-    /// directly (no field-by-field carve-out).
+    /// parsed-back instant equals the original, so the assertion covers the
+    /// whole struct directly (no field-by-field carve-out).
     #[test]
     fn agent_learning_jsonl_round_trip(learning in agent_learning_strategy()) {
         let line = serde_json::to_string(&learning).expect("serialize to JSONL");

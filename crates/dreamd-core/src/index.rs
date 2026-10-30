@@ -1,15 +1,14 @@
-//! Tantivy schema, layer enum, and index manifest for dreamd (WEG-41 / DR-202).
+//! Tantivy schema, layer enum, and index manifest for dreamd (WEG-41).
 //!
-//! Defines the index schema only; it does not open a Tantivy index, write to
-//! disk, or implement `IndexHandle`. Those responsibilities belong to WEG-42
-//! (`TantivyIndexHandle`) and the indexer that lives in `dreamd-core::server`.
+//! Defines the index schema only; it does not open a Tantivy index or write to
+//! disk. `server::TantivyIndexHandle` and the indexer actor in `server` do that.
 //!
 //! Key invariant (ARCHITECTURE.md decision #2): **no indexed score field.** Three
 //! salience inputs (`pain`, `importance`, `timestamp_sec`) are stored as
 //! FastFields; the fourth, `recurrence`, is derived per searcher
 //! (`crate::recurrence`). `collector::recall` reweights at query time.
-//! Do NOT add an indexed `score` field without re-reading DR-202 §4.2 and
-//! updating `crate::collector::SalienceCollector`.
+//! Do not add an indexed `score` field; salience depends on the query's clock,
+//! so a stored score would be stale the moment it was written.
 
 use serde::{Deserialize, Serialize};
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
@@ -24,15 +23,16 @@ use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 /// is episodic `RECORD_SCHEMA_VERSION` only — see `crate::migrate`,
 /// ARCHITECTURE.md §4 / §7, AGENTS.md `migrate-from-to-is-record-schema`).
 ///
-/// WEG-49 (DR-210) is the startup gate that compares this constant to the
-/// per-project index manifest.
-// bumped in WEG-43 when content gained STORED
-// bumped in WEG-45 when event_id (STRING | STORED) was added for delete-and-re-add
+/// [`check_manifest_version`] is the startup gate that compares this constant
+/// to the per-project index manifest.
+// 1.1: `content` gained STORED (WEG-43).
+// 1.2: `event_id` (STRING | STORED) added for delete-and-re-add (WEG-45).
+// 1.3: `skill_action` and `source_harness` (STRING | STORED) added.
 pub const SCHEMA_VERSION: &str = "index/1.3";
 
 /// Canonical field-name strings for the dreamd Tantivy schema.
 ///
-/// Tantivy 0.26 `FastFieldReader::u64` / `::f64` take `&str` field names
+/// The pinned Tantivy's `FastFieldReader::u64` / `::f64` take `&str` field names
 /// — not `Field` IDs from [`SchemaFields`]. These constants are the
 /// single source of truth used in both `build_schema()` and the
 /// salience collector (WEG-43), so a typo cannot drift across the two
@@ -47,7 +47,7 @@ pub const LAST_UPDATED_SEC_FIELD: &str = "last_updated_sec";
 pub const CITED_EVENT_COUNT_FIELD: &str = "cited_event_count";
 /// Exact-match indexed field carrying the `EventId` string (`evt_` + ULID).
 /// `STRING | STORED` — not tokenized — so `Term::from_field_text` resolves to
-/// exactly one document during the delete-and-re-add cycle (WEG-45 / DR-205′).
+/// exactly one document during the delete-and-re-add cycle (WEG-45).
 pub const EVENT_ID_FIELD: &str = "event_id";
 /// Hierarchical clustering key from `AgentLearning::skill_action` (`STRING | STORED`).
 pub const SKILL_ACTION_FIELD: &str = "skill_action";
@@ -110,8 +110,10 @@ pub struct SchemaFields {
     /// `FAST` only -- written as 0 and read by nothing. Recall's recurrence
     /// comes from the per-searcher table in `crate::recurrence` (BZR-1242).
     pub recurrence: Field,
-    /// `STRING | STORED` -- raw-tokenized layer tag, e.g. `"episodic"`. Used
-    /// by `collector::recall` to filter results by [`Layer`].
+    /// `STRING | STORED` -- raw-tokenized layer tag, e.g. `"episodic"`.
+    /// Hydrated into `RecallResult::layer` (reported as `source`); recall does
+    /// not filter on it. The indexer's whole-layer lesson replace deletes by
+    /// this term.
     pub layer: Field,
     /// `FAST` only -- Unix seconds of last cluster reconciliation (future use).
     pub last_updated_sec: Field,
@@ -129,7 +131,6 @@ pub struct SchemaFields {
 
 /// Build the canonical dreamd Tantivy schema.
 ///
-/// See PRD Tech Schemas §3.1 and PRD Part IV §4 for the field list.
 /// ARCHITECTURE.md load-bearing decision #2 binds the salience-at-query-time
 /// invariant — no indexed score field, only FastFields the collector
 /// reads at query time.
@@ -171,13 +172,13 @@ pub fn build_schema() -> (Schema, SchemaFields) {
 
 /// On-disk manifest for a per-project Tantivy index.
 ///
-/// **WEG-41 defines the type and constants only.** First-write to disk
-/// is owned by WEG-42 (the indexer creates the manifest the first time
-/// it opens an index for a project). Startup enforcement — refusing to
-/// start when `binary.expected < manifest.version` — is owned by WEG-49.
+/// This module defines the type and constants only. `TantivyIndexHandle::open`
+/// writes the manifest the first time it opens an index for a project, and
+/// [`check_manifest_version`] (called from `server::lifecycle` and
+/// `TantivyIndexHandle::open`) refuses to start when the manifest is newer
+/// than the binary.
 ///
-/// Canonical on-disk path (locked here so WEG-42 and WEG-49 agree):
-/// `<agent_root>/.dreamd/index_manifest.json`.
+/// Canonical on-disk path: `<project>/.agent/.dreamd/index_manifest.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexManifest {
     pub schema_version: String,
@@ -193,15 +194,16 @@ impl IndexManifest {
 }
 
 /// Relative filename for the index manifest, joined under the project's
-/// `.dreamd/` directory. Used by WEG-42 to write and WEG-49 to read.
+/// `.dreamd/` directory by both the writer and [`check_manifest_version`]'s
+/// callers.
 pub const INDEX_MANIFEST_FILENAME: &str = "index_manifest.json";
 
 /// On-disk sidecar that records per-cluster recurrence counts: the dream
-/// cycle's promotion report (WEG-45 / DR-205′), its windowed, deepest-prefix
+/// cycle's promotion report (WEG-45), its windowed, deepest-prefix
 /// counts. Read by doctor `--cluster-health` and the provenance `recurrence`
 /// edges. Recall does not read it; recall's recurrence is `crate::recurrence`.
 ///
-/// Canonical path: `<agent_root>/.agent/semantic/recurrence_counts.json`.
+/// Canonical path: `<project>/.agent/semantic/recurrence_counts.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecurrenceSidecar {
     pub schema_version: String,
@@ -209,8 +211,8 @@ pub struct RecurrenceSidecar {
 }
 
 /// One entry in [`RecurrenceSidecar::clusters`]: maps a `skill_action`
-/// clustering key to its authoritative global recurrence count after the
-/// current dream cycle.
+/// clustering key to its windowed promotion count from the dream cycle that
+/// wrote the sidecar.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClusterCount {
     pub skill_action: String,
@@ -234,27 +236,32 @@ pub enum ManifestCheckOutcome {
     NeedsMigration { from: String },
 }
 
+/// Why [`check_manifest_version`] could not clear the index manifest.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestVersionError {
+    /// The manifest was written by a newer binary; startup must abort.
     #[error(
         "index schema {manifest:?} is newer than binary {binary:?}; \
          upgrade dreamd, or wipe the index dir to rebuild under this binary"
     )]
     TooNew { manifest: String, binary: String },
+    /// The manifest is not valid JSON for [`IndexManifest`].
     #[error("index manifest is corrupt: {0}")]
     Corrupt(#[from] serde_json::Error),
+    /// Reading the manifest failed for a reason other than its absence.
     #[error("reading index manifest: {0}")]
     Io(std::io::Error),
 }
 
-/// Read `<agent_root>/.dreamd/index_manifest.json` and compare its
+/// Read the index manifest at `manifest_path` (normally
+/// `<project>/.agent/.dreamd/index_manifest.json`) and compare its
 /// `schema_version` against [`SCHEMA_VERSION`].
 ///
 /// Returns [`ManifestVersionError::TooNew`] when the on-disk index was
 /// written by a newer binary — the only case that must abort startup.
 /// Missing-manifest is reported as [`ManifestCheckOutcome::Absent`] (not
-/// an error) so cold starts on a fresh `agent_root` succeed before
-/// WEG-42 has written the first manifest.
+/// an error) so cold starts on a fresh project succeed before
+/// `TantivyIndexHandle::open` has written the first manifest.
 pub fn check_manifest_version(
     manifest_path: &std::path::Path,
 ) -> Result<ManifestCheckOutcome, ManifestVersionError> {

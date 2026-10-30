@@ -2,17 +2,18 @@
 //!
 //! Compiled only with the non-default `mcp-http` cargo feature: rmcp's server
 //! half adds ~1.5 MB to the stripped binary, and the default release build must
-//! stay under NFR-2 (20 MB). CI's clippy and test jobs run `--all-features`.
+//! stay under CI's size gate (`MAX_BYTES` in `.github/workflows/ci.yml`,
+//! 24 MiB). CI's clippy and test jobs run `--all-features`.
 //!
 //! The opt-in sibling of the default stdio transport: the same
-//! [`MemoryMcpServer`] — same backend decision, same `search_nodes` /
+//! [`MemoryMcpServer`] — same store decision, same `search_nodes` /
 //! `append_node` tools — served at `http://<ADDR>/mcp` with rmcp's
 //! [`StreamableHttpService`]. This is **not** the `dreamd watch` REST surface:
 //! nothing under `/api/v1` is mounted here, and the watch router never mounts
 //! this service.
 //!
 //! The listener comes from [`bind_listen`](crate::server::bind_listen), so the
-//! bind policy is the AILAB-197 one and only that one: loopback needs no flag,
+//! bind policy is `dreamd watch`'s (AILAB-197) and only that one: loopback needs no flag,
 //! a non-loopback address needs `--insecure`, and `--insecure` warns on every
 //! start. The port is unauthenticated — there is no bearer layer and no
 //! `server.json` publish — so a loopback bind is reachable by any local process.
@@ -67,7 +68,7 @@ where
     F: Future<Output = std::io::Result<()>>,
 {
     let config = http_config(insecure);
-    // Cancelling the config's token on shutdown ends every open session and
+    // Canceling the config's token on shutdown ends every open session and
     // SSE stream, rather than leaving them to the runtime teardown.
     let sessions = config.cancellation_token.clone();
     let router = router(server, config);
@@ -99,8 +100,9 @@ fn http_config(insecure: bool) -> StreamableHttpServerConfig {
 }
 
 /// The router `serve_until` serves: the MCP service at [`MCP_PATH`] and
-/// nothing else. Every session gets a clone of `server`, so a `Local` backend's
-/// coordinator channel and index handle are shared, not reopened.
+/// nothing else. Every session gets a clone of `server`, so an
+/// `InProcessStore`'s coordinator channel and index handle are shared, not
+/// reopened.
 fn router(server: MemoryMcpServer, config: StreamableHttpServerConfig) -> axum::Router {
     let service: StreamableHttpService<MemoryMcpServer, LocalSessionManager> =
         StreamableHttpService::new(move || Ok(server.clone()), Default::default(), config);
@@ -269,7 +271,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn loopback_initialize_returns_200_and_the_tool_pair_is_unchanged() {
-        // AC (AILAB-206): `--bind 127.0.0.1:0` goes through the 197 bind gate
+        // AILAB-206: `--bind 127.0.0.1:0` goes through the non-loopback bind gate
         // with no `--insecure`, and POST `initialize` to `/mcp` is a 200 with a
         // JSON-RPC result.
         let listener = bind_listen(WatchListen {
@@ -333,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_loopback_without_insecure_is_refused_before_anything_binds() {
-        // AC (AILAB-206): `run_mcp_server` hands `--bind` to the 197 gate first,
+        // AILAB-206: `run_mcp_server` hands `--bind` to the bind gate first,
         // so `0.0.0.0` without `--insecure` is `McpRunError::Bind` naming the
         // flag. The port is held on 127.0.0.1 — as in the watch test — so a
         // bind *attempt* would surface as `Io(AddrInUse)`, not `Bind`.
@@ -359,16 +361,16 @@ mod tests {
             other => panic!("expected a pre-bind McpRunError::Bind, got {other:?}"),
         }
 
-        // Nothing was left bound: the port is free again once we let go of it.
+        // Nothing was left bound: the port is free again once the hold is released.
         drop(held);
         std::net::TcpListener::bind(requested).expect("no listener left on the refused address");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn insecure_bind_disables_the_host_allowlist() {
-        // AC (AILAB-206): with `--insecure`, `0.0.0.0` binds and a LAN `Host:`
+        // AILAB-206: with `--insecure`, `0.0.0.0` binds and a LAN `Host:`
         // is not refused by rmcp's loopback allowlist. The contrast server shows
-        // the same request IS a 403 on the default (loopback) config, so the
+        // the same request *is* a 403 on the default (loopback) config, so the
         // 200 is the `disable_allowed_hosts` path and not a lenient default.
         let _warn = hold_warn_subscriber();
         let lan_host = "192.0.2.1";
@@ -424,7 +426,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rest_api_is_not_mounted_on_the_mcp_port() {
-        // AC (AILAB-206): the MCP port serves `/mcp` only — the watch REST
+        // AILAB-206: the MCP port serves `/mcp` only — the watch REST
         // surface (`/api/v1`) is a different server.
         let listener = bind_listen(WatchListen::default()).await.expect("loopback");
         let server = Running::start(listener, false);

@@ -1,6 +1,6 @@
-//! `dreamd migrate --from <ver> --to <ver>` — episodic schema migration (WEG-133 / DR-108).
+//! `dreamd migrate --from <ver> --to <ver>` — episodic schema migration (WEG-133).
 //!
-//! v0.1 is a **stub**: the only registered path is the identity migration
+//! This is a **stub**: the only registered path is the identity migration
 //! `1.0.0` → `1.0.0` (a no-op success). `--from` / `--to` are **episodic record**
 //! schema strings ([`dreamd_protocol::RECORD_SCHEMA_VERSION`]); they are not the
 //! daemon `state.json` schema (`STATE_SCHEMA_VERSION`, which the `dreamd version`
@@ -11,7 +11,7 @@
 //! error enum, [`AgentRoot::discover`] for root resolution, and injectable
 //! `out`/`err` writers for testability.
 //!
-//! On the registered no-op path we still copy the present durable files
+//! On the registered no-op path the command still copies the present durable files
 //! (`AGENT_LEARNINGS.jsonl` and `state.json`) to sibling `.bak` files before the
 //! migration runs, so a future non-identity transform inherits the safety net.
 //! The index is **read-only** here: its schema-version self-heal owns index
@@ -33,7 +33,7 @@ pub enum MigrateError {
     NotFound,
     /// No migration is registered for the requested `from → to` pair.
     NoMigration { from: String, to: String },
-    /// A registered migration's `apply` failed (never hit by the v0.1 no-op).
+    /// A registered migration's `apply` failed (never hit by the identity no-op).
     Apply(CoreMigrateError),
     /// Failure copying a durable file to `.bak`, or writing to `out`/`err`.
     Io(std::io::Error),
@@ -70,7 +70,7 @@ impl std::error::Error for MigrateError {}
 ///
 /// Resolves the store, reports the three observed on-disk version streams, looks
 /// up the requested transform, `.bak`s the present durable files, then applies
-/// the (v0.1 no-op) migration. Prints a `migrate: <from> → <to> (no-op)` summary
+/// the (identity no-op) migration. Prints a `migrate: <from> → <to> (no-op)` summary
 /// on success.
 pub fn run(
     cwd: &Path,
@@ -260,7 +260,7 @@ mod tests {
             br#"{"schema_version":"1.0","daemon_version":"0.0.0"}"#,
         )
         .unwrap();
-        // Seed an index manifest so we can prove migrate never `.bak`s it.
+        // Seed an index manifest so the test can prove migrate never `.bak`s it.
         let manifest = root.dreamd_dir().join("index_manifest.json"); // never bak'd by migrate
         fs::write(&manifest, br#"{"schema_version":"index/1.3"}"#).unwrap();
 
@@ -343,7 +343,7 @@ mod tests {
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        // A pair the v0.1 stub does not register (forward transform).
+        // A pair the stub does not register (forward transform).
         let result = run(tmp.path(), "1.0.0", "1.1.0", &mut out, &mut err);
 
         assert!(matches!(result, Err(MigrateError::NoMigration { .. })));

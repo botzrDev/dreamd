@@ -1,10 +1,10 @@
-//! Privacy disclosure surface (DR-413).
+//! Privacy disclosure surface.
 //!
-//! Hoisted from `dreamd-cli::commands::init` in WEG-17 so future surfaces
-//! (README, MCP tool descriptions, error messages) can reuse the locked
-//! disclosure text. Stdout output of `dreamd init` is byte-locked against
-//! `tests/fixtures/init.golden.txt`. Keep both in lockstep — a release that
-//! changes whether the daemon can make network calls must rewrite this text.
+//! The first-run banner that `dreamd init` and the first MCP spawn print lives
+//! here so every surface reuses the one locked text. Stdout output of
+//! `dreamd init` is byte-locked against `tests/fixtures/init.golden.txt`. Keep
+//! both in lockstep — a release that changes whether the daemon can make
+//! network calls must rewrite this text.
 
 /// Privacy disclosure, ASCII-rendered, 60-col wrapped (locked against
 /// `tests/fixtures/init.golden.txt`).
@@ -15,6 +15,7 @@ present; --no-llm stays offline).
 See https://github.com/botzrDev/dreamd/blob/main/SECURITY.md
 for details.";
 
+/// The security-policy URL the disclosure names.
 pub const PRIVACY_DISCLOSURE_LINK: &str =
     "https://github.com/botzrDev/dreamd/blob/main/SECURITY.md";
 

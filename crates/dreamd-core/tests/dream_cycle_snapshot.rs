@@ -1,4 +1,4 @@
-//! WEG-65 / DR-313 — Snapshot tests for deterministic dream-cycle output.
+//! WEG-65 — Snapshot tests for deterministic dream-cycle output.
 //!
 //! Runs [`dream_cycle::run_filesystem_phases`] against a frozen 7-event JSONL corpus
 //! and pins the three output files: LESSONS.md, recurrence_counts.json, state.json.
@@ -17,7 +17,7 @@ use dreamd_core::layout::AgentRoot;
 use dreamd_core::writer_lock::{WriterKind, WriterLock};
 
 /// Fixed reference clock. All age calculations resolve against this.
-/// Do NOT replace with Utc::now() — snapshot must be reproducible across machines.
+/// Do not replace with Utc::now() — snapshot must be reproducible across machines.
 const NOW_SEC: i64 = 1_747_137_600;
 
 /// Path to the frozen fixture corpus, relative to CARGO_MANIFEST_DIR.

@@ -8,10 +8,11 @@
 //! lesson that remains. It never decays other rows, never re-selects a lesson,
 //! and never copies the forgotten row into `snapshots/`.
 //!
-//! The JSONL has one writer. `dreamd forget` runs [`cascade`] in-process and
-//! refuses while a daemon probes live, so no coordinator holds the append fd
-//! during the rewrite. This module does not touch the index; the CLI refreshes
-//! an existing index afterwards.
+//! The JSONL has one writer. `dreamd forget` takes the project writer lock
+//! (`WriterLock::acquire`) before it runs [`cascade`] in-process, so no
+//! coordinator — a daemon's or an in-process `dreamd mcp`'s — holds the append
+//! fd during the rewrite. This module does not touch the index; the CLI
+//! refreshes an existing index afterwards.
 //!
 //! Existing ledger lines are left in place. A forgotten id's old edge stays in
 //! the file, and `provenance::verify` reports it as an orphan.
@@ -69,16 +70,22 @@ pub struct ForgetReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgetError {
+    /// `state.json` says a dream cycle is in progress.
     #[error("dream cycle already in progress")]
     InProgress,
+    /// Reading or patching the episodic log failed.
     #[error("episodic log: {0}")]
     Episodic(#[from] EpisodicError),
+    /// Opening the stage, staging the plan, or committing the redo WAL failed.
     #[error("WAL: {0}")]
     Wal(#[from] WalError),
+    /// `LESSONS.md` could not be read, was not UTF-8, or did not parse.
     #[error("lessons: {0}")]
     Lessons(io::Error),
+    /// Serializing the recounted recurrence sidecar failed.
     #[error("recurrence sidecar: {0}")]
     Sidecar(#[from] ConsolidationError),
+    /// A provenance ledger operation failed.
     #[error("provenance: {0}")]
     Provenance(#[from] ProvenanceError),
 }
@@ -134,9 +141,6 @@ pub fn cascade(
     let prior = stage
         .read(&agent_root.lessons_md())
         .map_err(ForgetError::Lessons)?;
-    // Every other line, in read order and byte for byte, pinned or not,
-    // including lines the reader skips; the lesson that names `id`; the sidecar
-    // recounted without it; and the edges of the lesson that remains.
     let (plan, lesson) = plan::plan_forget(&raw, prior.as_deref(), id, now_sec)?;
     stage
         .apply_plan(&plan, &dream_cycle::cycle_date_from_now_sec(now_sec))

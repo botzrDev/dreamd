@@ -1,4 +1,4 @@
-//! WEG-14 / DR-112 — layered runtime configuration.
+//! Layered runtime configuration (WEG-14).
 //!
 //! Precedence, low to high: hardcoded `Default` → user TOML
 //! (`~/.config/dreamd/config.toml`, XDG-style) → project TOML
@@ -13,8 +13,8 @@
 //! build the dream cycle's LLM backend. `cost_cap_usd` is read and enforced by
 //! the dream cycle (AILAB-196): the composition prompt is priced before the
 //! call, and an over-cap estimate composes the deterministic body instead.
-//! `DREAMD_LOG` env-var handling is owned by DR-004 / WEG-32 (tracing
-//! baseline), implemented in [`crate::observability`] — not here.
+//! `DREAMD_LOG` env-var handling belongs to the tracing baseline (WEG-32) in
+//! [`crate::observability`], not here.
 
 use std::path::{Path, PathBuf};
 
@@ -30,11 +30,14 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// DR-111 — redact secrets/PII on `POST /api/v1/learn`. Default `true`.
+    /// Redact secrets/PII on `POST /api/v1/learn`. Default `true`.
     pub redaction: bool,
-    /// Log level filter for the daemon. `trace | debug | info | warn | error`.
+    /// Parsed and merged like any other key, but nothing reads it: the log
+    /// filter is the `DREAMD_LOG` environment variable (default `info`). Kept
+    /// so existing `config.toml` files that set it still parse.
     pub log_level: String,
-    /// Dream-cycle scheduling mode. 1.0.0 is manual-only; `"auto"` is rejected.
+    /// Dream-cycle scheduling mode. Only `"manual"` is supported; `"auto"` is
+    /// rejected with [`AUTO_MODE_UNSUPPORTED`].
     pub dream_cycle_mode: DreamCycleMode,
     /// LLM provider id (`"anthropic"` | `"openai"`). Read by [`crate::llm`]
     /// (AILAB-204). Empty — the default — lets genai infer the provider from
@@ -45,20 +48,23 @@ pub struct Config {
     /// Base URL override for the LLM provider. Read by [`crate::llm`]
     /// (AILAB-204). Empty — the default — uses the provider's own endpoint.
     pub endpoint: String,
-    /// DR-307 — per-cycle USD spend cap. **Enforced** by the dream cycle
+    /// Per-cycle USD spend cap. **Enforced** by the dream cycle
     /// (AILAB-196): [`crate::llm::estimate_prompt_cost`] prices the composition
     /// prompt before the model call, and an over-cap estimate skips the call
     /// and writes the deterministic exemplar body.
     pub cost_cap_usd: f64,
 }
 
-/// Dream-cycle scheduling mode (DR-315). Flat key `dream_cycle_mode` with
-/// values `"manual" | "auto"`; v0.1 hard-locks to `manual`.
+/// Dream-cycle scheduling mode. Flat key `dream_cycle_mode` with values
+/// `"manual" | "auto"`; only `manual` is supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DreamCycleMode {
+    /// Cycles run only when invoked (`dreamd dream` or `POST /api/v1/dream`).
     #[default]
     Manual,
+    /// Parsed so the rejection can name it; `dreamd watch`, `dreamd mcp` and
+    /// `dreamd dream` refuse to run with it.
     Auto,
 }
 
@@ -98,21 +104,22 @@ dream_cycle_mode = auto is not supported; \
 set dream_cycle_mode = \"manual\" in config.toml. \
 Cycles run only when you invoke them.";
 
-/// Commented-out template written by `dreamd init` (D1 of WEG-14.v2) to
-/// `<project>/.agent/.dreamd/config.toml`. Every key disabled by default;
-/// origin DR called out inline so editors don't have to grep.
+/// Commented-out template written by `dreamd init` to
+/// `<project>/.agent/.dreamd/config.toml`. Every key is commented out, so a
+/// fresh file yields the built-in defaults. `docs/configuration.md` quotes it
+/// verbatim.
 pub const CONFIG_TEMPLATE: &str = "\
 # dreamd config — all keys optional. Precedence: this file > ~/.config/dreamd/config.toml > built-in defaults.
 
-# redaction = true              # redact secrets/PII on POST /api/v1/learn (DR-111)
-# log_level = \"info\"            # trace | debug | info | warn | error
+# redaction = true              # redact secrets/PII on POST /api/v1/learn
+# log_level = \"info\"            # parsed but unused; logs follow the DREAMD_LOG env var
 # dream_cycle_mode = \"manual\"   # \"manual\" | \"auto\" — manual only; auto is rejected
 
-# --- LLM keys: read by the dream cycle (AILAB-204) ---
+# --- LLM keys: read by the dream cycle ---
 # provider = \"\"                 # \"anthropic\" | \"openai\"; empty infers from model
 # model = \"claude-haiku-4-5\"    # model id
 # endpoint = \"\"                 # base URL override; empty uses the provider default
-# cost_cap_usd = 0.10           # hard per-cycle spend cap — enforced pre-call (AILAB-196)
+# cost_cap_usd = 0.10           # hard per-cycle spend cap, enforced before the model call
 ";
 
 /// User-config path on this platform (Linux/macOS XDG, Windows Roaming).
@@ -141,8 +148,8 @@ pub fn load_config_from(
 ) -> Result<Config, ConfigError> {
     let mut fig = Figment::new().merge(Serialized::defaults(Config::default()));
     // path.exists() guards keep behavior independent of the figment minor
-    // version's "missing file" semantics — missing-is-empty is the contract
-    // WEG-14.v2 §3.2 calls out, not a figment internal we should depend on.
+    // version's "missing file" semantics — missing-is-empty is this loader's
+    // contract, not a figment internal to depend on.
     if let Some(p) = user_path {
         if p.exists() {
             fig = fig.merge(Toml::file(p));
@@ -199,11 +206,11 @@ mod tests {
 
     #[test]
     fn commented_template_parses_after_uncommenting_one_key() {
-        // §3.4 template — confirm a user can uncomment a key without
+        // A user must be able to uncomment a template key without
         // re-typing it. Flip redaction off to prove the value actually
         // landed (Default is `true`).
         let mut customized = CONFIG_TEMPLATE.replace("# redaction = true", "redaction = false");
-        // Sanity-check that the replace hit exactly the line we expected.
+        // Sanity-check that the replace hit exactly the expected line.
         assert!(
             customized.contains("\nredaction = false"),
             "template line for redaction did not uncomment cleanly:\n{customized}"
@@ -232,7 +239,7 @@ mod tests {
 
     #[test]
     fn uncommented_endpoint_key_parses() {
-        // AILAB-204 §3.2 — `endpoint` ships commented like the other LLM keys;
+        // `endpoint` ships commented like the other LLM keys (AILAB-204);
         // prove an operator can uncomment it verbatim and have the value land.
         let customized = CONFIG_TEMPLATE.replace(
             "# endpoint = \"\"                 #",

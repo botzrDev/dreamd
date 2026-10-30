@@ -12,9 +12,9 @@ use super::super::state::AppState;
 /// Responses exceeding this cap are truncated and annotated with
 /// `X-Dreamd-Truncated: true` and `X-Dreamd-Original-Size: <n>`.
 ///
-/// AILAB-199 gave the dream-cycle prompt the same 16 KiB ceiling on the same
-/// `personal/` bytes, so the number now has one definition and this is a
-/// re-export of it rather than a second copy. Behavior here is unchanged.
+/// The dream-cycle prompt has the same ceiling on the same `personal/` bytes
+/// (AILAB-199), so this re-exports that one definition rather than keeping a
+/// second copy.
 pub(crate) use crate::llm::PERSONAL_LAYER_MAX_BYTES as PREFERENCES_SIZE_CAP;
 
 /// `GET /api/v1/preferences` — read `.agent/personal/PREFERENCES.md`.
@@ -25,7 +25,8 @@ pub(crate) use crate::llm::PERSONAL_LAYER_MAX_BYTES as PREFERENCES_SIZE_CAP;
 /// # Response (`200`)
 /// `{"body":"<markdown>","last_modified":"<rfc3339>|null"}`
 ///
-/// Files over 16 KiB are truncated; see `X-Dreamd-Truncated` / `X-Dreamd-Original-Size`.
+/// Files over [`PREFERENCES_SIZE_CAP`] are truncated; see `X-Dreamd-Truncated` /
+/// `X-Dreamd-Original-Size`.
 pub(crate) async fn get_preferences(
     State(_state): State<AppState>,
     Extension(entry): Extension<ProjectEntry>,

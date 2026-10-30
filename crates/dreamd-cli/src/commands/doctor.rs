@@ -1,13 +1,14 @@
-//! `dreamd doctor` — structured health-check output (WEG-66 / DR-315,
-//! extended by AILAB-223).
+//! `dreamd doctor` — structured health-check output (WEG-66, extended by
+//! AILAB-223).
 //!
 //! Prints one line per check to stdout. Exit 0 if all checks pass; exit 1 if
 //! any check emits a WARNING or ERROR. Default checks (when applicable):
-//! dream-cycle mode, scaffolded subdirs, on-disk index freshness vs JSONL
-//! watermark, lessons the last semantic pass could not index, episodic log
-//! health (malformed lines / torn tail), record and index schema versions,
-//! orphaned daemon socket, Tantivy lock-file presence, and last autobiography
-//! skip.
+//! dream-cycle mode, scaffolded subdirs, index coverage of the episodic log
+//! (the set difference between log ids and committed index ids), lessons the
+//! last semantic pass could not index, episodic log health (malformed lines /
+//! torn tail), record and index schema versions, orphaned daemon socket,
+//! Tantivy lock-file presence, last autobiography skip, and whether the
+//! dream-cycle WAL is readable.
 //!
 //! `--repair` unlinks an orphaned daemon socket and rebuilds the derived
 //! Tantivy cache by replaying the episodic log, which it only ever reads. The
@@ -15,7 +16,10 @@
 //! index-schema migration — so any `.tantivy-*.lock` living inside it goes
 //! with it. What doctor must never do, and does not, is target those flock
 //! files on their own: flock is advisory, carries no PID, and self-clears when
-//! its holder exits (WEG-24-A / AILAB-402; see [`check_tantivy_locks`]).
+//! its holder exits (WEG-24-A / AILAB-402; see `check_tantivy_locks`). When
+//! the dream-cycle WAL cannot be parsed or validated, taking the writer lock
+//! for the repair moves it aside to a `.corrupt-<date>` sidecar, and the
+//! repair then reports the store's invariant check.
 //!
 //! `--cluster-health` recomputes the clusters the dream cycle would promote
 //! and compares them against the recurrence sidecar it last wrote.
@@ -44,9 +48,11 @@ use dreamd_protocol::{AgentLearning, RECORD_SCHEMA_VERSION};
 /// clap into the command module; every flag composes with the default checks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DoctorFlags {
-    /// Unlink an orphaned daemon socket and rebuild the Tantivy cache.
+    /// Unlink an orphaned daemon socket, move an unparseable dream-cycle WAL
+    /// aside, and rebuild the Tantivy cache.
     pub repair: bool,
-    /// Compare episodic prefix counts against the recurrence sidecar.
+    /// Compare the clusters the dream cycle would promote against the
+    /// recurrence sidecar.
     pub cluster_health: bool,
     /// Print the provenance ledger verify report; flag orphans, missing
     /// edges, and corrupt lines.
@@ -56,7 +62,9 @@ pub struct DoctorFlags {
 /// Run `dreamd doctor` and write output to `out` (repair refusals go to `err`).
 ///
 /// `socket` is the resolved daemon UDS path (`$DREAMD_SOCK` else the
-/// daemon-home socket), or `None` when no path could be resolved.
+/// daemon-home socket), or `None` when no path could be resolved. Off Unix the
+/// caller always passes `None`: the daemon there is loopback TCP, and
+/// `--repair` probes it through `server.json` instead.
 ///
 /// `now_sec` is caller-provided (unix seconds) so the recurrence windows
 /// `--cluster-health` recomputes stay deterministic under test, matching the
@@ -77,7 +85,7 @@ pub fn run(
 ) -> io::Result<bool> {
     let mut all_ok = true;
 
-    // DR-315 — dream-cycle mode line.
+    // Dream-cycle mode line.
     match config.dream_cycle_mode {
         DreamCycleMode::Manual => {
             writeln!(out, "dream_cycle_mode: manual")?;
@@ -170,7 +178,8 @@ pub fn run(
         }
     }
 
-    // WEG-132 / DR-812 — episodic log malformed-line check (DR-107 doctor).
+    // Episodic log health: malformed `\n`-terminated lines and a torn tail
+    // (WEG-132).
     let episodic_path = agent_root.episodic_jsonl();
     if episodic_path.exists() {
         match dreamd_core::episodic::assess_log_health(&episodic_path) {
@@ -212,7 +221,7 @@ pub fn run(
     }
 
     // One read of the episodic log backs both the record-schema check and
-    // --cluster-health prefix derivation (an absent log reads as no records).
+    // --cluster-health cluster derivation (an absent log reads as no records).
     let events = match dreamd_core::episodic::read_all(&episodic_path) {
         Ok(events) => Some(events),
         Err(e) => {
@@ -266,7 +275,7 @@ pub fn run(
 
 /// Hard integrity over the five dirs `dreamd init` scaffolds. `skills/` and
 /// `protocols/` are deliberately not checked: init does not create them, so
-/// their absence is normal on a healthy store (AILAB-223 open Q1 default).
+/// their absence is normal on a healthy store (AILAB-223).
 fn check_subdirs(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<bool> {
     let scaffolded = [
         ("working/", agent_root.working_dir()),
@@ -546,7 +555,7 @@ fn check_cluster_health(
     }
 }
 
-/// `--cluster-health` addendum (AILAB-196 / DR-307): price what the **next**
+/// `--cluster-health` addendum (AILAB-196): price what the **next**
 /// dream cycle's LLM composition would cost, before it happens.
 ///
 /// This is a *report, not a gate*. It returns `io::Result<()>`, not a health
@@ -694,8 +703,10 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
 /// Read the dream-cycle WAL without taking the project writer lock.
 ///
 /// A lock acquire would run recovery and this line would never print. With
-/// `--repair`, an unreadable WAL does not by itself fail the run: repair
-/// quarantines it, and a repair that then fails still fails the run.
+/// `--repair`, a WAL with an unknown format, a bad redo path or invalid JSON
+/// does not by itself fail the run: repair quarantines it, and a repair that
+/// then fails still fails the run. An I/O error reading the WAL (the lines
+/// labeled `unreadable`) always fails the run, because repair cannot move it.
 fn check_dream_cycle_wal(
     agent_root: &AgentRoot,
     repair: bool,
@@ -744,7 +755,10 @@ fn check_dream_cycle_wal(
 
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
-/// (which repair only ever reads). On Windows the wipe is also how a segment
+/// (which repair only ever reads). Taking the writer lock as
+/// `WriterKind::Repair` also moves an unparseable dream-cycle WAL aside; when
+/// it does, the store invariants are checked and reported against the
+/// quarantined file. On Windows the wipe is also how a segment
 /// file that Tantivy could not delete while it was still mapped leaves the
 /// index directory: stop the daemon first, then this removes the directory
 /// and rebuilds it. Fails closed when a live daemon is detected — wiping the
@@ -872,7 +886,7 @@ fn run_repair(
     // A current-thread runtime is enough — the rebuild is one blocking replay,
     // not a serving daemon — and matches `TantivyIndexHandle::close`.
     //
-    // Caller contract (AILAB-575): `out`/`err` must NOT be held
+    // Caller contract (AILAB-575): `out`/`err` must not be held
     // `StdoutLock`/`StderrLock` values. `open` below blocks on Tantivy's
     // single-threaded `segment_updater`, and that thread emits `tracing` events
     // which the console layer writes to `std::io::stderr`. A held lock makes the
@@ -1052,7 +1066,7 @@ mod tests {
         run_with(cfg, root, skip, None, DoctorFlags::default())
     }
 
-    // Fixed young timestamp (2026-07-03Z) — checks here are count-based.
+    // Fixed young timestamp (2025-07-03Z) — checks here are count-based.
     const NOW_SEC: i64 = 1751500800;
 
     /// Distinct valid `evt_` ids for fixtures (26-char Crockford ULID tail).
@@ -1368,7 +1382,7 @@ mod tests {
     }
 
     // AILAB-700 — lessons the semantic pass could not index. Note these are
-    // NOT the `AutobiographySkip` lines above: that skip is the dirty-tree git
+    // not the `AutobiographySkip` lines above: that skip is the dirty-tree git
     // commit skip and has nothing to do with the semantic layer.
 
     /// Write `.dreamd/semantic_pass.json` by hand — the writer lives in
@@ -1665,7 +1679,7 @@ mod tests {
         );
         // `rust` is a parent of the promoted `rust::borrow` cluster. Deepest-wins
         // means the engine never writes a `rust` row, so doctor must not derive
-        // one either — deriving raw prefix counts here was the AILAB-223 defect.
+        // one either (AILAB-223).
         assert!(
             !output.contains("cluster_health: rust jsonl="),
             "unpromoted parent prefix must not be derived; got: {output:?}"
@@ -1712,10 +1726,9 @@ mod tests {
         );
     }
 
-    /// The regression that motivated mirroring the engine: let the real cluster
-    /// engine write the sidecar, then audit it. Deriving raw prefix-tree counts
-    /// reported `rust jsonl=3 sidecar=(none) [WARNING: drift]` here and exited 1
-    /// on a store that had just been dreamed.
+    /// Let the real cluster engine write the sidecar, then audit it: a store
+    /// that was just dreamed reports no drift. Deriving raw prefix-tree counts
+    /// instead would report `rust jsonl=3 sidecar=(none) [WARNING: drift]` here.
     #[test]
     fn cluster_health_matches_a_sidecar_written_by_the_real_engine() {
         let cfg = Config::default();
@@ -1777,7 +1790,7 @@ mod tests {
         assert!(!ok, "genuine drift must return all_ok=false");
     }
 
-    /// AILAB-196 §3.3 — the cost report rides along with `--cluster-health`
+    /// AILAB-196: the cost report rides along with `--cluster-health`
     /// and must stay read-only. The fixture is seeded with `seed_events` alone
     /// rather than `run_cluster_engine`, unlike the drift tests above, so that
     /// the three absence assertions actually mean something: any write found

@@ -21,12 +21,12 @@ allow = [
     "Zlib",
 ]
 
-# Per-crate license exceptions (reviewed; deliberately NOT in the global allow
+# Per-crate license exceptions (reviewed; deliberately not in the global allow
 # list so each stays auditable). option-ext (transitive via dirs → dirs-sys,
 # used for ~/.agent path resolution) is MPL-2.0 — OSI-approved weak, file-level
 # copyleft. As an unmodified linked dependency it imposes no copyleft on
 # dreamd's Apache-2.0 code; MPL obligations are per-file and trigger only on
-# modifying the MPL-licensed source itself, which we do not.
+# modifying the MPL-licensed source itself, which dreamd does not do.
 exceptions = [
     { name = "option-ext", allow = ["MPL-2.0"] },
     # AILAB-204 — webpki-root-certs is the Mozilla CA root-certificate bundle,
@@ -34,8 +34,8 @@ exceptions = [
     # is the Linux Foundation's permissive *data* license: it grants unrestricted
     # use/modification/redistribution of the data and imposes no obligation on the
     # code that links it, so it does not reach dreamd's Apache-2.0 source. Scoped
-    # to this crate deliberately — any OTHER CDLA-licensed dependency still fails
-    # the gate and gets its own review. Reviewed 2026-08-22 (founder sign-off).
+    # to this crate deliberately: any other CDLA-licensed dependency still fails
+    # the gate and gets its own review. Reviewed 2026-08-22.
     # Removable if genai ever exposes a root store under an allow-listed license.
     { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
@@ -44,7 +44,7 @@ exceptions = [
 # (cargo-deny now denies unlicensed and copyleft dependencies by default)
 
 [bans]
-# Deny multiple versions of the same crate to avoid dependency bloat.
+# Warn (not fail) when the graph holds several versions of one crate.
 multiple-versions = "warn"
 # Deny wildcard dependencies. (Internal path deps each carry an explicit
 # `version` — required for crates.io publish — so they are not wildcards.)
@@ -56,16 +56,10 @@ wildcards = "deny"
 unmaintained = "workspace"
 yanked = "deny"
 
-# No per-advisory `ignore` entries as of 2026-06-23. When adding one, document:
-#   - RUSTSEC ID and crate version
-#   - Why the risk is accepted (no fix path, false positive, dev-only, etc.)
-#   - Review date and planned removal
-# Example:
-# ignore = [
-#   { id = "RUSTSEC-XXXX-NNNN", reason = "transitive via foo; fixed in bar 2.0 (blocked on MSRV)" },
-# ]
+# No per-advisory `ignore` entries. When adding one, give its RUSTSEC id and
+# crate version, why the risk is accepted, and when it is due for removal.
 
 [sources]
-# Only allow crates from crates.io and your own git repositories.
+# Only crates.io: any other registry or git source fails the check.
 unknown-registry = "deny"
 unknown-git = "deny"

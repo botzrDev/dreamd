@@ -1,15 +1,15 @@
-//! Cluster engine and pin/unpin lifecycle (DR-301 / WEG-58).
+//! Cluster engine and the pin rule (WEG-58).
 //!
 //! `run_cluster_engine` reads the episodic JSONL, builds a prefix tree over
 //! `skill_action` (split on `::`), applies deepest-wins disambiguation, and
 //! writes `semantic/recurrence_counts.json`. A dream cycle computes the same
 //! counts inside [`crate::plan::plan_cycle`] ([`compute_promoted_clusters`],
-//! [`sidecar_bytes`]) and stages them with the cycle's other outputs.
+//! `sidecar_bytes`) and stages them with the cycle's other outputs.
 //!
 //! [`cited_pins`] is the pin rule: every unpinned record a `LESSONS.md` cites
-//! is pinned, **unioned** with any `pinned` flag an external writer already
-//! set — the cycle never unsets a pin it did not itself set (SPEC §67 /
-//! WEG-426). [`crate::plan::plan_cycle`] applies it to the lesson it plans,
+//! is pinned, **unioned** with any `pinned` flag already set. The cycle never
+//! clears a pin, whoever set it (SPEC.md "Node schema (episodic)", the
+//! `pinned` field; WEG-426). [`crate::plan::plan_cycle`] applies it to the lesson it plans,
 //! and pins nothing when no lesson is written.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,12 +26,18 @@ use crate::provenance::Ledger;
 use crate::salience::{salience_with_context, RecurrenceContext};
 use crate::wal::{self, CycleKind, WalError};
 
+/// Errors from the cluster engine and from planning a cycle's log, sidecar
+/// and lessons.
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidationError {
+    /// Reading the log or writing the sidecar failed, or a planned
+    /// `LESSONS.md` did not parse back after rendering (`InvalidData`).
     #[error("reading AGENT_LEARNINGS.jsonl: {0}")]
     Io(#[from] std::io::Error),
-    /// Retained for the serialize side (WEG-378); the read side no longer
-    /// produces a per-line parse error — `episodic::scan` tolerates a torn tail.
+    /// Serializing the recurrence sidecar failed, or `episodic::patch_lines`
+    /// could not serialize a line it flips. `line` is always 0: neither path
+    /// knows a line number, so the message reads "line 0". Reading the log
+    /// never produces this; readers skip bad lines (WEG-378).
     #[error("parsing event at line {line}: {source}")]
     Json {
         line: usize,
@@ -60,8 +66,8 @@ impl From<EpisodicError> for ConsolidationError {
 /// member events.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterOutput {
-    /// Promoted clusters in deepest-wins order. Each event belongs to exactly
-    /// one cluster.
+    /// Promoted clusters, sorted by `cluster_key`. Deepest-wins claiming puts
+    /// each event in exactly one cluster.
     pub promoted: Vec<PromotedCluster>,
 }
 
@@ -168,8 +174,9 @@ pub(crate) fn sidecar_bytes(promoted: &[PromotedCluster]) -> Result<Vec<u8>, Con
 /// raw prefix-tree counts instead would report drift on every healthy store,
 /// since the sidecar only ever holds promoted, deepest-wins-claimed counts.
 pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<PromotedCluster> {
-    // Step 2: build prefix tree. Each event contributes to ALL prefixes of
-    // its skill_action. We store event indices to avoid cloning until the end.
+    // Step 2: build prefix tree. Each event contributes to every prefix of
+    // its skill_action. The tree holds event indices, so nothing is cloned
+    // until the end.
     let depth_map = build_prefix_tree(events);
 
     // Step 3: deepest-wins. Sort prefixes longest-first so each event is
@@ -235,7 +242,7 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
 /// maps to `true`.
 ///
 /// Union only: the result never holds `false`, so a cycle can pin an event it
-/// cites but never clears a pin it did not set (SPEC §67 / WEG-426). A record
+/// cites but never clears a pin (SPEC.md `pinned` field; WEG-426). A record
 /// that is already pinned is left out, so a file that flips nothing gives an
 /// empty map and the cycle leaves the log alone.
 #[must_use]
@@ -243,7 +250,7 @@ pub fn cited_pins(raw: &[RawLine], file: &LessonsFile) -> HashMap<EventId, bool>
     // Union, not either-or (AILAB-200). `Lesson.id` is the exemplar the lesson
     // is filed under; `citations` is every cluster member the model said it
     // drew on. Both must outlive decay or the lesson outlives its evidence. A
-    // pre-AILAB-200 file has no `citations` key, so the union collapses to the
+    // file with no `citations` key (written before AILAB-200) gives the
     // exemplar-only set.
     let cited_ids: HashSet<&str> = file
         .lessons
@@ -265,10 +272,15 @@ pub fn cited_pins(raw: &[RawLine], file: &LessonsFile) -> HashMap<EventId, bool>
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum LessonPhaseError {
+    /// Clustering or planning the cycle failed.
     #[error("cluster engine: {0}")]
     Cluster(#[from] ConsolidationError),
+    /// Beginning, staging or committing the cycle failed. Reads through the
+    /// stage, `LESSONS.md` included, report their I/O errors here.
     #[error("WAL: {0}")]
     Wal(#[from] WalError),
+    /// An I/O error on `LESSONS.md` outside the stage. No path in this crate
+    /// returns it.
     #[error("lessons write: {0}")]
     Lessons(#[from] std::io::Error),
 }
@@ -322,7 +334,7 @@ pub struct SelectedLesson {
 }
 
 /// Select the lesson for `promoted`: the top cluster by `salience_sum`, then
-/// its exemplar ([`pick_exemplar`]).
+/// its exemplar (`pick_exemplar`).
 ///
 /// `None` means **nothing promoted**. Pure: it reads nothing and stages
 /// nothing. On a real cycle [`crate::plan::plan_cycle`] turns `None` into the
@@ -390,9 +402,9 @@ pub fn lessons_file_from_selected(
             citations,
         } if !content.trim().is_empty() => (content, prompt_version, citations),
         // The deterministic body cites exactly the event it copied. Writing the
-        // exemplar here rather than an empty list is what keeps `--no-llm` pin
-        // behavior identical to the pre-AILAB-200 `Lesson.id`-only pass, and
-        // what makes an LLM fallback byte-identical to a deterministic cycle.
+        // exemplar here rather than an empty list means a `--no-llm` cycle pins
+        // exactly its exemplar, and an LLM fallback is byte-identical to a
+        // deterministic cycle.
         _ => (
             selected.exemplar_content.clone(),
             DETERMINISTIC_PROMPT_ID.to_string(),
@@ -402,7 +414,7 @@ pub fn lessons_file_from_selected(
 
     let lessons = vec![Lesson {
         // Always the exemplar id — never minted here. Semantic indexing
-        // inherits pain/importance from this event (AILAB-204 §1.7).
+        // inherits pain/importance from this event (AILAB-204).
         id: selected.exemplar_id.clone(),
         content,
         pinned: false,
@@ -417,7 +429,7 @@ pub fn lessons_file_from_selected(
     }
 }
 
-/// Orchestrate the full dream cycle in `--no-llm` deterministic mode (DR-308).
+/// Orchestrate the full dream cycle in `--no-llm` deterministic mode.
 ///
 /// Writes one `LESSONS.md` entry: the highest-salience exemplar from the
 /// top promoted cluster (highest `salience_sum`). No network calls are made.
@@ -460,7 +472,7 @@ pub fn run_deterministic_dream_cycle(
 }
 
 /// Pick the cluster exemplar: highest salience, then pain, then importance,
-/// then reverse EventId string (deterministic total order when scores tie).
+/// then the smallest `EventId` (the oldest event), so a tie has one answer.
 fn pick_exemplar(events: &[AgentLearning], now_sec: i64) -> &AgentLearning {
     let recurrence = RecurrenceContext::dream_cycle(events.len());
     events
@@ -802,7 +814,7 @@ mod tests {
     fn cited_pins_never_unpins() {
         // Ids 0,1 are pinned=true (external, uncited); ids 2,3 are pinned=false.
         // The file cites 2,3. Under union semantics the external pins on 0,1
-        // SURVIVE and cited 2,3 get pinned → all four true.
+        // survive and cited 2,3 get pinned → all four true.
         let events = vec![
             make_event(0, "rust::types", true),
             make_event(1, "rust::types", true),
@@ -861,7 +873,7 @@ mod tests {
         ];
 
         // Nothing cited: no pin is set, and the external pin on 0 is not
-        // cleared (SPEC §67 / WEG-426).
+        // cleared (SPEC.md `pinned` field; WEG-426).
         let pins = cited_pins(&raw_of(&events), &file_citing(&[], &[]));
 
         assert_eq!(pins, HashMap::new());
@@ -963,23 +975,22 @@ mod tests {
         assert!(out.promoted.is_empty());
     }
 
-    // --- WEG-61: run_deterministic_dream_cycle tests ---
+    // ── run_deterministic_dream_cycle (WEG-61) ─────────────────────────────
 
     #[test]
     fn deterministic_cycle_empty_jsonl_no_lessons_md() {
         let dir = unique_tmpdir("dc-empty");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
-        // Scaffold a real (empty) `.agent/` store. Previously this test relied
-        // on begin_cycle's create_dir_all to conjure `.agent/`; WEG-281 makes
-        // begin_cycle refuse a missing store, so the test sets one up — empty
-        // JSONL still exercises the no-promotion path.
+        // Scaffold a real (empty) `.agent/` store: begin_cycle refuses a
+        // missing store (WEG-281). The empty JSONL exercises the
+        // no-promotion path.
         write_jsonl(&root, &[]);
         run_deterministic_dream_cycle(&root, &ledger(&root), NOW_SEC).unwrap();
         assert!(!root.lessons_md().exists());
     }
 
-    // --- AILAB-341: the read-only preview twin ---
+    // ── The read-only preview twin (AILAB-341) ─────────────────────────────
 
     /// The write path unlinks a stale `LESSONS.md` when nothing promotes
     /// (AILAB-699). `preview_select_lesson` must reach the same *decision* —
@@ -1070,7 +1081,7 @@ mod tests {
         assert_eq!(previewed.exemplar_content, written.lessons[0].content);
     }
 
-    // --- AILAB-699: a cycle that promotes nothing retires LESSONS.md ---
+    // ── A cycle that promotes nothing retires LESSONS.md (AILAB-699) ───────
 
     #[test]
     fn deterministic_cycle_no_promotion_retires_lessons_md_and_keeps_pins() {
@@ -1108,7 +1119,7 @@ mod tests {
         );
 
         // Cycle 2: one later run whose `now_sec` is past the 30-day window. The
-        // same events now fall outside BOTH windows (`count_in_window` keeps
+        // same events now fall outside both windows (`count_in_window` keeps
         // `ts >= now_sec - window`), so nothing promotes. No hysteresis, no
         // second no-promotion cycle needed.
         let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;
