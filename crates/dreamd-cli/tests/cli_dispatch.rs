@@ -220,7 +220,7 @@ fn dream_auto_prints_the_deprecation_notice_first() {
         ),
         (
             &["dream", "--dry", "--auto"],
-            "dreamd: --dry and --auto are mutually exclusive: auto mode performs real writes on a schedule",
+            "dreamd: --dry and --auto are mutually exclusive; --auto is not supported",
         ),
     ];
     for (args, old) in cases {
