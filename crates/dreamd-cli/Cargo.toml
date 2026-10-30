@@ -42,9 +42,9 @@ chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive"] }
 # WEG-51 / DR-703 — `dreamd recall` opens the per-project index read-only with
 # `Index::open_in_dir` (never `TantivyIndexHandle::open`, which spawns a
-# competing indexer). Pinned to match dreamd-core (0.26); already linked into
+# competing indexer). Pinned to match dreamd-core (0.27.0); already linked into
 # the binary transitively via dreamd-core, so this direct edge adds no weight.
-tantivy = "0.26"
+tantivy = "0.27"
 clap_mangen = "0.2"
 # AILAB-203 — `dreamd service install` mints ~/.agent/auth.json (32 random
 # bytes). Pinned to 0.2 (already resolved as 0.2.17 in Cargo.lock); 0.3/0.4

@@ -24,7 +24,7 @@
 //!
 //! **Lock-file behavior.** The on-disk `.tantivy-writer.lock` /
 //! `.tantivy-meta.lock` files persist after SIGKILL but are not the gate —
-//! Tantivy 0.26 uses `fs4` advisory flock, which the kernel releases when
+//! Tantivy 0.27 uses `fs4` advisory flock, which the kernel releases when
 //! the holder dies. Do NOT unlink them on startup or recovery. See drift
 //! catalog entry `tantivy-lock-file-no-rm-on-startup`.
 //!
@@ -1385,6 +1385,74 @@ mod tests {
 
         drop(tx);
         handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A tantivy 0.26.1 index (dreamd schema `index/1.3`) opens in place.
+    /// The sentinel is not a managed segment, so only `remove_dir_all` deletes it.
+    #[tokio::test]
+    async fn index_from_0_26_opens_in_place() {
+        use crate::index::{IndexManifest, SCHEMA_VERSION};
+
+        let dir = unique_tmpdir("bzr1297-open");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bzr1297-index-1.3");
+
+        let jsonl = agent_root.episodic_jsonl();
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::copy(fixture.join("log.jsonl"), &jsonl).unwrap();
+
+        let dreamd_dir = agent_root.dreamd_dir();
+        std::fs::create_dir_all(&dreamd_dir).unwrap();
+        std::fs::copy(
+            fixture.join("index_manifest.json"),
+            dreamd_dir.join(INDEX_MANIFEST_FILENAME),
+        )
+        .unwrap();
+        let index_dir = dreamd_dir.join(INDEX_DIR_NAME);
+        copy_tree_skip_locks(&fixture.join("index"), &index_dir);
+
+        let sentinel = index_dir.join("bzr1297-keep");
+        std::fs::write(&sentinel, b"keep\n").unwrap();
+
+        let lock = writer_lock(&agent_root);
+        let handle = TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE)
+            .expect("open 0.26 index in place");
+
+        assert_eq!(std::fs::read(&sentinel).expect("sentinel"), b"keep\n");
+
+        let (_, fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let results = crate::recall(handle.reader(), &fields, "bzr1297-keep-token", 5, now_sec)
+            .expect("recall fixture doc");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].skill_action, "rust::bzr1297::fixture");
+
+        let manifest_text =
+            std::fs::read_to_string(dreamd_dir.join(INDEX_MANIFEST_FILENAME)).unwrap();
+        let manifest: IndexManifest = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(manifest.schema_version, SCHEMA_VERSION);
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    fn copy_tree_skip_locks(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == ".tantivy-writer.lock" || name_str == ".tantivy-meta.lock" {
+                continue;
+            }
+            let to = dst.join(&name);
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree_skip_locks(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
     }
 
     // Schema migration — self-healing rebuild surfaces provenance anchors
