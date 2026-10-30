@@ -1,12 +1,12 @@
-//! `dreamd score` — top-N by query-time salience with no lexical filter (WEG-52 / DR-704).
+//! `dreamd score` — top-N by query-time salience with no lexical filter (WEG-52).
 //!
 //! One-shot, read-only. Discovers the project `.agent/` store, opens the
 //! per-project Tantivy index **read-only** with [`tantivy::Index::open_in_dir`]
 //! (never the writer-spawning `TantivyIndexHandle` open constructor), runs
 //! [`dreamd_core::score_by_salience`] (`AllQuery` + `SalienceCollector`), and
 //! prints via [`crate::commands::recall::render_report`] — same nine locked
-//! columns as `dreamd recall`. `--explain` appends the same per-hit DR-204
-//! blocks (default **off**).
+//! columns as `dreamd recall`. `--explain` appends the same per-hit salience
+//! factor blocks (default **off**).
 //!
 //! Under `AllQuery`, Tantivy scores every doc **1.0**, so printed rows show
 //! `bm25 ≈ 1` and `score ≈ salience`. That is expected collector behavior, not
@@ -18,17 +18,13 @@
 use std::io::Write;
 use std::path::Path;
 
+use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader};
 use tantivy::{Index, ReloadPolicy};
 
 use crate::commands::recall::render_report;
 
-/// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
-///
-/// Mirrors `dreamd_core::server::tantivy_handle::INDEX_DIR_NAME`, which is
-/// `pub(crate)` and so not importable here.
-const INDEX_DIR_NAME: &str = "index";
-
+/// Why a `dreamd score` run failed.
 #[derive(Debug)]
 pub enum ScoreError {
     /// No `.agent/` store found walking up from `cwd`.

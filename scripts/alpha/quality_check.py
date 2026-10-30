@@ -14,14 +14,15 @@ Subcommands
   ranking <high_marker> <low_marker>
       The result whose content contains <high_marker> (built with high
       pain/importance) must outrank the <low_marker> result (built with low
-      pain/importance but *higher* BM25), proving salience re-ranking — not raw
-      lexical match — drives recall order. Gate: high is rank 0, and both
-      high.salience > low.salience and high.score > low.score. Also reports
-      whether salience overrode a BM25 disadvantage.
+      pain/importance and a payload built to score a *higher* BM25), showing
+      salience re-ranking — not raw lexical match — drives recall order. Gate:
+      high is rank 0, and both high.salience > low.salience and
+      high.score > low.score. Also reports whether salience overrode a BM25
+      disadvantage.
 
   attribution <content_marker> <expected_source_harness> <expected_skill_action>
       The result containing <content_marker> must report the exact
-      source_harness and skill_action it was appended with (WEG provenance
+      source_harness and skill_action it was appended with (the provenance
       fields survive the append -> index -> recall round-trip through MCP).
 
 Usage:
@@ -42,7 +43,7 @@ def load_results(stream):
         return [], f"driver output was not JSON: {e}"
     if not isinstance(rpc, list) or not rpc:
         return [], f"expected a non-empty JSON-RPC array, got: {rpc!r}"
-    msg = rpc[-1]  # the last tool call is the search we care about
+    msg = rpc[-1]  # the last tool call is the search under test
     if not isinstance(msg, dict) or "result" not in msg:
         return [], f"no `result` in tool response: {msg!r}"
     content = msg["result"].get("content") or []

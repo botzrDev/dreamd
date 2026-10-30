@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Lifecycle parameters for a [`ProjectResourceMap`]. Defaults match the WEG-21
-/// founder-decision values (cap 10, idle 30 min) shared by index and supervisor maps.
+/// Lifecycle parameters for a [`ProjectResourceMap`]. The defaults (cap 10,
+/// idle 30 min) are shared by the index and runtime maps (WEG-21).
 #[derive(Debug, Clone)]
 pub struct ProjectResourceMapConfig {
     pub capacity: usize,
@@ -28,7 +28,8 @@ impl Default for ProjectResourceMapConfig {
 
 /// Per-entry lifecycle hooks consumed by [`ProjectResourceMap`].
 pub trait ProjectMapResource: Send + 'static {
-    /// Error from [`Self::release`]. Use [`Infallible`] when release cannot fail.
+    /// Error from [`Self::release`]. Use [`std::convert::Infallible`] when
+    /// release cannot fail.
     type ReleaseError;
     fn last_used(&self) -> Instant;
     fn release(self) -> Result<(), Self::ReleaseError>;
@@ -37,11 +38,15 @@ pub trait ProjectMapResource: Send + 'static {
 }
 
 /// Lazy-opened, LRU + idle-evicting map of per-project resources.
+///
+/// It has no `Drop`: dropping the map drops each resource without calling
+/// [`ProjectMapResource::release`]. Call [`Self::close_all`] first when release
+/// matters. `ProjectIndexMap` wraps this map and does that in its own `Drop`.
 pub struct ProjectResourceMap<R: ProjectMapResource> {
     config: ProjectResourceMapConfig,
     /// Insertion-order list of (root, resource). Most-recently-used is at the
-    /// back; we keep it in a `Vec` rather than `LruCache` because we need to
-    /// walk for idle eviction anyway and the cap is small (~10).
+    /// back. A `Vec` rather than an `LruCache`, because idle eviction walks
+    /// every entry anyway and the cap is small (~10).
     entries: Vec<(PathBuf, R)>,
 }
 

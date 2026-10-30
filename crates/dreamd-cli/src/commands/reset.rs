@@ -1,8 +1,7 @@
-//! `dreamd reset workspace` — clear `working/WORKSPACE.md` (DR-113 / WEG-15).
+//! `dreamd reset workspace` — clear `working/WORKSPACE.md` (WEG-15).
 //!
-//! Reframed from the original `POST /api/v1/session/end`: no harness actually
-//! invoked that route. This is now a manual scratchpad-clear users run at
-//! session boundaries; real session-model lifecycle ships in v0.2.
+//! A manual scratchpad clear users run at session boundaries. There is no
+//! session-end route: no harness called one, and dreamd has no session model.
 //!
 //! Resolution walks ancestors of `cwd` for `.agent/` via
 //! [`AgentRoot::discover`] (post-init resolver, distinct from the project-root
@@ -16,11 +15,16 @@ use std::path::Path;
 use dreamd_core::io::write_atomic;
 use dreamd_core::{AgentRoot, LayoutError, DEFAULT_WORKSPACE_MD};
 
+/// Why a `dreamd reset workspace` run did not clear the workspace.
 #[derive(Debug)]
 pub enum ResetError {
+    /// No `.agent/` store found walking up from `cwd`.
     NotFound,
+    /// No `--yes`, and stdin is not a terminal to confirm on.
     NotATty,
+    /// The user answered something other than `y` at the prompt.
     Declined,
+    /// Failure reading the prompt answer or writing the workspace file.
     Io(std::io::Error),
 }
 

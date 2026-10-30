@@ -4,7 +4,7 @@
 //! calls [`MemoryStore::recall_json`], `append_node` calls
 //! [`MemoryStore::append`]. Two adapters implement it:
 //!
-//! * [`InProcessStore`] — the Phase-1 path. Recall reads the project's Tantivy
+//! * [`InProcessStore`] — the in-process path. Recall reads the project's Tantivy
 //!   index through the handle pinned at construction — the one the coordinator
 //!   indexes into — or, with none pinned, the session's shared
 //!   `ProjectIndexMap` (one handle per root, never a per-call open; WEG-252).
@@ -17,7 +17,7 @@
 //!
 //! The HTTP handlers are not adapters. `GET /api/v1/recall` keeps its reader
 //! pinned to the primary handle through `AppState::with_index_handle` and
-//! shares only [`recall_to_json`]. `POST /api/v1/learn` keeps
+//! shares only `recall_to_json`. `POST /api/v1/learn` keeps
 //! `Supervisor::try_send` and its 503 on a full inbox; it shares only
 //! [`LearnIngress`] and [`LearnResponse::from_append_outcome`].
 //!
@@ -55,10 +55,9 @@ const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
 
 /// Errors a [`MemoryStore`] call can return.
 ///
-/// Two kinds, mirroring the two MCP error codes the tool methods have always
-/// surfaced: a caller mistake (`InvalidRequest`) and everything else
-/// (`Internal`). The `Display` is the message alone, so the MCP mapping keeps
-/// every pre-BZR-173 message byte-identical.
+/// Two kinds, mirroring the two MCP error codes the tool methods surface: a
+/// caller mistake (`InvalidRequest`) and everything else (`Internal`). The
+/// `Display` is the message alone, so the MCP error carries it unchanged.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryStoreError {
     /// Bad input, an unregistered project, or an index that cannot be opened.
@@ -106,7 +105,7 @@ pub trait MemoryStore: Send + Sync {
     async fn append(&self, req: AppendRequest) -> Result<LearnResponse, MemoryStoreError>;
 }
 
-/// Run a BM25 × salience recall on `reader` and serialise it to the canonical
+/// Run a BM25 × salience recall on `reader` and serialize it to the canonical
 /// `{"results":[...]}` string. The single recall body shared by the in-process
 /// adapter and `GET /api/v1/recall`; each caller chooses its own reader.
 pub(crate) fn recall_to_json(
@@ -364,8 +363,8 @@ impl MemoryStore for DaemonStore {
 
 /// Percent-encode a query-string value (RFC 3986 unreserved set passes
 /// through; everything else becomes `%XX`). Inlined rather than pulling a
-/// URL-encoding crate — WEG-259 deliberately adds only hyper / http-body-util
-/// / bytes as new deps.
+/// URL-encoding crate: the daemon proxy depends only on hyper, http-body-util
+/// and bytes.
 ///
 /// Cfg-free: byte arithmetic on a string, shared by both remote transports.
 fn percent_encode_query(value: &str) -> String {
@@ -438,9 +437,14 @@ pub(crate) fn build_learn_request(
         .map_err(|e| MemoryStoreError::internal(format!("build learn request failed: {e}")))
 }
 
-/// Map a non-success daemon HTTP status per the WEG-259 error table. Never
+/// Map a non-success daemon HTTP status to a [`MemoryStoreError`]. Never
 /// panics. Cfg-free: one status table for both transports, so a Windows
 /// client and a Unix client explain the same 404 the same way.
+///
+/// 400, 404, 413 and 415 are caller errors (`InvalidRequest`); every other
+/// status is `Internal` and quotes the body. Every 400 is labeled
+/// "invalid X-Agent-Root", even when the daemon's body names a different
+/// problem; the body follows the label.
 fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
     let body_str = String::from_utf8_lossy(body);
     match status.as_u16() {
@@ -467,9 +471,9 @@ fn map_transport_error(e: crate::daemon_client::DaemonTransportError) -> MemoryS
 }
 
 /// Open a fresh HTTP-over-UDS connection to the daemon, send one request, and
-/// collect the response into `(status, body)`. Per-call connect (no pooling) —
-/// MCP tool calls are infrequent; the WEG-78-A "fresh handle per call"
-/// rationale applies.
+/// collect the response into `(status, body)`. Per-call connect (no pooling):
+/// MCP tool calls are infrequent, so a pool would hold idle connections for
+/// nothing (WEG-78-A).
 #[cfg(unix)]
 async fn send_remote(
     sock_path: &Path,

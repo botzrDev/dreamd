@@ -1,16 +1,22 @@
 //! `episodic` — the single seam for `AGENT_LEARNINGS.jsonl` I/O (WEG-378).
 //!
-//! The episodic log is an append-only, single-writer JSONL file (DR-103): the
-//! [`MemoryCoordinator`](crate::coordinator::MemoryCoordinator) actor is its
-//! only mutator. Every read, durable append, open-time recovery, and full-file
-//! rewrite of that log funnels through this module so the torn-tail recovery
-//! policy lives in exactly one place — [`scan`].
+//! The episodic log is an append-only, single-writer JSONL file. Every writer
+//! holds the project writer lock ([`crate::writer_lock`]). Inside a daemon or
+//! an in-process `dreamd mcp`, the
+//! [`MemoryCoordinator`](crate::coordinator::MemoryCoordinator) actor is the
+//! only appender. A dream cycle or a forget plans the rewritten log with
+//! [`patch_lines`] and its redo WAL renames it in; `dreamd archive` rewrites it
+//! with [`rewrite_atomic`]; `dreamd memory checkout` replaces it with an
+//! object's bytes. Every read, durable append, open-time recovery and
+//! byte-preserving rewrite goes through this module, so the line rule lives in
+//! one place: `lines` and `parse_record`.
 //!
-//! **Recovery policy (SPEC §88): skip mid-file corruption; halt torn tail.**
+//! **Recovery policy (SPEC.md "Corrupt input"): skip mid-file corruption;
+//! halt at a torn tail.**
 //! A `\n`-terminated line that is blank or fails schema validation is skipped
 //! (logged with line number + reason); scanning continues. A torn final line
 //! with no trailing `\n` (crash mid-append) halts ingestion — everything after
-//! the last complete line is dropped. [`read_all`] emits ONE `tracing::warn!`
+//! the last complete line is dropped. [`read_all`] emits one `tracing::warn!`
 //! for a genuine torn tail and rewrites nothing. Open-time [`recover`] leaves
 //! every complete line where it is, skipped ones included. It ends a torn final
 //! line with `\n` when that line parses as a record, and truncates it
@@ -23,8 +29,9 @@
 //! know survive a rewrite (SPEC forward compatibility).
 //!
 //! Free-function module by design (matches `io.rs` / `wal.rs` / `lessons.rs`):
-//! the single mutable owner is already the coordinator actor, so no struct is
-//! introduced. Blocking `std::io` is intentional for v0.1 (DR: no `tokio::fs`).
+//! the writer lock and the coordinator actor already serialize writers, so no
+//! struct is introduced. Blocking `std::io` is intentional; there is no
+//! `tokio::fs` here.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -48,8 +55,11 @@ pub const MAX_LEARNING_LINE_BYTES: usize = 4096;
 /// Errors surfaced by the episodic I/O seam.
 #[derive(Debug, thiserror::Error)]
 pub enum EpisodicError {
+    /// Reading or writing the log failed.
     #[error("episodic I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// A record could not be serialized, or a line being patched is not a
+    /// JSON object.
     #[error("serialize record: {0}")]
     Serialize(#[source] serde_json::Error),
     /// Serialized line exceeds [`MAX_LEARNING_LINE_BYTES`].
@@ -110,7 +120,7 @@ pub fn assess_log_health(path: &Path) -> Result<EpisodicLogHealth, EpisodicError
     Ok(assess_bytes(&bytes))
 }
 
-/// The single episodic scan policy (SPEC §88). Returns parsed records, the byte
+/// The single episodic scan policy (SPEC.md "Corrupt input"). Returns parsed records, the byte
 /// end of the last `\n`-terminated line (`clean_len`), and any skipped lines.
 /// A final line without a trailing `\n` is a torn tail: `clean_len` stops before
 /// it so [`recover`] can end or truncate it; [`read_all`] never ingests it.
@@ -139,7 +149,7 @@ fn scan(bytes: &[u8]) -> (Vec<AgentLearning>, u64, Vec<ScanSkip>) {
     (out, clean_len, skips)
 }
 
-/// What one line of the log is, under the SPEC §88 policy.
+/// What one line of the log is, under SPEC.md's "Corrupt input" rule.
 enum LineKind {
     Record(AgentLearning),
     /// A `\n`-terminated line that is blank or not a record; the reason.
@@ -203,7 +213,7 @@ fn warn_torn_tail(path: &Path, dropped_bytes: u64, records: usize) {
 /// Read every well-formed record from the episodic log at `path`. An absent
 /// file is `Ok(empty)`. Mid-file blank or invalid `\n`-terminated lines are
 /// skipped (each logged at `warn!`). A torn final line (no trailing `\n`)
-/// halts ingestion; ONE `tracing::warn!` records the dropped bytes. Never
+/// halts ingestion; one `tracing::warn!` records the dropped bytes. Never
 /// errors on a torn tail; only a genuine I/O failure opening/reading the file
 /// is an error.
 pub fn read_all(path: &Path) -> Result<Vec<AgentLearning>, EpisodicError> {
@@ -362,8 +372,8 @@ fn set_pinned(line: &[u8], pinned: bool) -> Result<Vec<u8>, EpisodicError> {
 /// Coordinator open-time recovery. Reads the whole log, then:
 ///
 /// * **Mid-file skips** — blank or schema-invalid `\n`-terminated lines — stay
-///   where they are; readers skip them (SPEC §88), and one `warn!` gives the
-///   count.
+///   where they are; readers skip them (SPEC.md "Corrupt input"), and one
+///   `warn!` gives the count.
 /// * **A torn final line** with no trailing `\n` gets one appended when it
 ///   parses as a record, and that record is returned with the others;
 ///   otherwise `set_len` truncates it, at `debug!`.
@@ -498,7 +508,7 @@ mod tests {
         assert_eq!(entries, vec![log.to_path_buf()], "recovery wrote a sidecar");
     }
 
-    // ── Test 1: absent → empty; clean → all records ────────────────────────
+    // ── absent → empty; clean → all records ────────────────────────
     #[test]
     fn read_all_absent_then_clean() {
         let dir = unique_tmpdir("absent-clean");
@@ -521,7 +531,7 @@ mod tests {
         assert_eq!(got[1].content, "second");
     }
 
-    // ── Test 2: good + partial-no-newline tail → good only, no error ───────
+    // ── good + partial-no-newline tail → good only, no error ───────
     #[test]
     fn read_all_tolerates_torn_no_newline_tail() {
         let dir = unique_tmpdir("torn-tail");
@@ -539,7 +549,7 @@ mod tests {
         assert_eq!(got[0].content, "kept");
     }
 
-    // ── Test 3: good + blank line + more → skip blank, both records survive ─
+    // ── good + blank line + more → skip blank, both records survive ─
     #[test]
     fn read_all_skips_blank_midfile_line() {
         let dir = unique_tmpdir("blank-skip");
@@ -559,7 +569,7 @@ mod tests {
         assert_eq!(got[1].content, "after-gap");
     }
 
-    // ── Test 4a: good + unparseable torn tail (no \n) → halts ──────────────
+    // ── good + unparseable torn tail (no \n) → halts ──────────────
     #[test]
     fn read_all_halts_at_unparseable_torn_tail() {
         let dir = unique_tmpdir("bad-torn-tail");
@@ -576,7 +586,7 @@ mod tests {
         assert_eq!(got[0].content, "before-bad");
     }
 
-    // ── Test 4b: good + {bad}\n + later-good → skip bad, later survives ────
+    // ── good + {bad}\n + later-good → skip bad, later survives ────
     #[test]
     fn read_all_skips_unparseable_midfile_line() {
         let dir = unique_tmpdir("bad-midfile-skip");
@@ -596,7 +606,7 @@ mod tests {
         assert_eq!(got[1].content, "after-bad");
     }
 
-    // ── Test 5c: torn tail only → truncate as before, no sidecar ───────────
+    // ── torn tail only → truncated, no sidecar ─────────────────────────────
     #[test]
     fn recover_torn_tail_only_writes_no_sidecar() {
         let dir = unique_tmpdir("recover-torn-only");
@@ -709,7 +719,7 @@ mod tests {
         assert_eq!(got, vec![a]);
     }
 
-    // ── Test 6: recover truncates torn tail; append lands on clean boundary ─
+    // ── recover truncates torn tail; append lands on clean boundary ─
     #[test]
     fn recover_truncates_torn_tail_to_clean_prefix() {
         let dir = unique_tmpdir("recover");
@@ -743,7 +753,7 @@ mod tests {
         assert_eq!(got[1].content, "appended");
     }
 
-    // ── Test 7: append rejects >4 KiB serialized line, file untouched ──────
+    // ── append rejects >4 KiB serialized line, file untouched ──────
     #[test]
     fn append_rejects_oversized_payload_untouched() {
         let dir = unique_tmpdir("toobig");
@@ -777,12 +787,12 @@ mod tests {
         );
     }
 
-    // ── Test 8: CLI-path regression — torn tail no longer aborts the cycle ─
+    // ── CLI path: a torn tail does not abort the cycle ─────────────────────
     //
-    // The whole point of WEG-378. On the `dreamd dream` CLI path there is no
-    // coordinator to pre-truncate a torn tail, so a normal post-SIGKILL torn
-    // final line used to abort the decay pass with a JSON error. Now the
-    // shared line scan tolerates it, and `plan_cycle` plans over those lines.
+    // On the `dreamd dream` CLI path no coordinator ends or truncates a torn
+    // tail first, so after a SIGKILL the cycle can read a log whose final line
+    // is torn. The shared line scan tolerates it, and `plan_cycle` plans over
+    // those lines (WEG-378).
     #[test]
     fn cli_path_torn_tail_decay_cycle_succeeds() {
         // Two young (never-decay) records + a torn final line.
@@ -805,7 +815,7 @@ mod tests {
         assert!(outcome.decayed_ids.is_empty(), "young records do not decay");
     }
 
-    // ── Test 9: health reports 1-indexed line numbers of malformed lines ───
+    // ── health reports 1-indexed line numbers of malformed lines ───
     #[test]
     fn assess_bytes_reports_malformed_line_numbers() {
         let mut bytes = line_of(&make_learning('A', "one")); // line 1: valid
@@ -820,7 +830,7 @@ mod tests {
         assert_eq!(health.malformed_line_numbers, vec![2, 4]);
     }
 
-    // ── Test 10: >CAP malformed lines → numbers capped, count uncapped ─────
+    // ── >CAP malformed lines → numbers capped, count uncapped ─────
     #[test]
     fn assess_bytes_caps_malformed_line_numbers() {
         let mut bytes = line_of(&make_learning('A', "one")); // line 1: valid
@@ -838,7 +848,7 @@ mod tests {
         assert_eq!(health.malformed_line_numbers, vec![2, 3, 4, 5, 6]);
     }
 
-    // ── Test 11: clean log → no malformed line numbers ─────────────────────
+    // ── clean log → no malformed line numbers ─────────────────────
     #[test]
     fn assess_bytes_clean_log_has_no_malformed_line_numbers() {
         let mut bytes = line_of(&make_learning('A', "one"));

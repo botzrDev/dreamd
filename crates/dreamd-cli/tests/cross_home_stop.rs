@@ -11,10 +11,10 @@
 //! runs the built binary end to end against a really-running `dreamd watch`.
 //!
 //! **Two assertions, and the negative one is worthless alone** — a stopper that
-//! never signalled anything would sail through it. So the *same* daemon is
+//! never signaled anything would sail through it. So the *same* daemon is
 //! first spared by another home's `update` and then stopped by its own:
 //!
-//! 1. **Spare** — the AILAB-554 F1 regression. `HOME=A` serves a daemon;
+//! 1. **Spare** — the AILAB-554 regression. `HOME=A` serves a daemon;
 //!    `HOME=B dreamd update` (non-dry-run) must exit 0, leave A's process
 //!    alive, and leave A's socket answering.
 //! 2. **Stop** — the positive control. `HOME=A dreamd update` must actually
@@ -59,7 +59,7 @@ fn dreamd_bin() -> &'static str {
 /// loaded CI box is not fast — but a hard ceiling, never a sleep.
 const SOCKET_DEADLINE: Duration = Duration::from_secs(30);
 
-/// How long the signalled daemon gets to actually exit.
+/// How long the signaled daemon gets to actually exit.
 ///
 /// `kill` returns once SIGTERM is *delivered*, not once the target exits, and
 /// `run_watch` drains the coordinator and the Tantivy indexer (commit cadence
@@ -75,7 +75,7 @@ const POLL: Duration = Duration::from_millis(50);
 ///
 /// A one-shot "is it still alive?" check straight after `HOME=B dreamd update`
 /// is a race, not an assertion: `kill` returns on signal delivery, so a daemon
-/// that was wrongly signalled is still running — and still answering — for a
+/// that was wrongly signaled is still running — and still answering — for a
 /// moment afterwards. Holding the check open for a window that comfortably
 /// exceeds the shutdown of a daemon with nothing to drain (milliseconds) turns
 /// the snapshot into a real observation.
@@ -183,7 +183,7 @@ impl Drop for Watch {
     /// `unsafe_code = "forbid"` would reject anyway), it does not fork a helper
     /// process during panic unwinding, and — unlike a raw pid signal — it
     /// refuses to fire once the child has been reaped, so the positive-control
-    /// path cannot end up signalling a recycled pid. Both results are ignored:
+    /// path cannot end up signaling a recycled pid. Both results are ignored:
     /// an already-exited daemon is the success case, not an error.
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -287,11 +287,12 @@ fn update_spares_another_homes_watch_and_stops_its_own() {
     wait_for_live_socket(&mut watch, &socket_a);
     let watch_pid = watch.pid();
 
-    // ---- 1. Cross-HOME spare (AILAB-554 F1) --------------------------------
-    // A sandboxed `HOME=B dreamd update` used to `pkill -f 'dreamd watch'`,
-    // which is machine-global: it SIGTERMed daemons serving every other home on
-    // the box. Nothing about A is attributable to B — different `HOME=`, and
-    // the target/debug binary is under neither home's `~/.cache/dreamd-mcp`.
+    // ── 1. Cross-HOME spare (AILAB-554) ─────────────────────────────────────
+    // The stop pass signals only daemons attributable to the caller's home; a
+    // machine-global `pkill -f 'dreamd watch'` would SIGTERM daemons serving
+    // every other home on the box. Nothing about A is attributable to B —
+    // different `HOME=`, and the target/debug binary is under neither home's
+    // `~/.cache/dreamd-mcp`.
     let update_b = run(project_b.path(), home_b.path(), &["update"]);
     assert_ok(&update_b, "HOME=B dreamd update");
 
@@ -301,7 +302,7 @@ fn update_spares_another_homes_watch_and_stops_its_own() {
     // `STOP_PATTERNS` had silently stopped matching and the daemon were never
     // considered at all.
     //
-    // Anchored to ONE substring spanning both facts. Two independent
+    // Anchored to one substring spanning both facts. Two independent
     // `contains` calls would pass on a box where some *other* unattributable
     // dreamd process supplied "not attributable" while these bare pid digits
     // matched inside a longer pid (`5406` ⊂ `540696`) or inside a path — the
@@ -314,7 +315,7 @@ fn update_spares_another_homes_watch_and_stops_its_own() {
     );
     assert_stays_live(&mut watch, &socket_a, "HOME=B `dreamd update`");
 
-    // ---- 2. Same-HOME stop (positive control) ------------------------------
+    // ── 2. Same-HOME stop (positive control) ────────────────────────────────
     // Without this, assertion 1 would pass against a stopper that never
     // signals anything at all.
     let update_a = run(project_a.path(), home_a.path(), &["update"]);

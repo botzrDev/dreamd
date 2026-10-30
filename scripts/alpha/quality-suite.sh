@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# dreamd quality suite — deterministic golden gate for MEMORY QUALITY.
+# dreamd quality suite — deterministic golden gate for memory quality.
 #
 # The plumbing suite (alpha-suite.sh) proves a write is *retrievable*; it uses
 # lexically-unique payloads so recall is unambiguous — which means it cannot see
-# a RANKING regression (only ever one match). This suite proves the memory is
+# a ranking regression (only ever one match). This suite proves the memory is
 # actually *good* through the exact MCP surface a real harness uses:
 #
 #   Axis 1 — Salience ranking (the wedge): a painful/important lesson outranks a
-#            benign one that has HIGHER raw BM25, proving salience re-ranking —
-#            not lexical match — drives recall order (score = bm25 × salience).
+#            benign one built to score a higher raw BM25 (score = bm25 ×
+#            salience). The gate asserts the order; quality_check.py reports
+#            whether BM25 really favored the benign one.
 #   Axis 2 — Attribution: a recalled record reports the exact source_harness +
 #            skill_action it was appended with (provenance survives the round-trip).
 #   Axis 3 — Dream-cycle promotion: ≥3 events sharing a skill_action cluster get
@@ -16,7 +17,7 @@
 #
 # The core library already unit-tests the salience formula in isolation
 # (crates/dreamd-core/tests/bm25_fastfield_integration.rs); this closes the gap
-# that NONE of those tests cross the MCP boundary.
+# that none of those tests cross the MCP boundary.
 #
 # Fully sandboxed (HOME -> mktemp); the real ~/.agent is never touched.
 # Usage: scripts/alpha/quality-suite.sh   (run from repo root; needs target/debug/dreamd)
@@ -75,7 +76,7 @@ poll_markers() { # <query> <marker...>
   printf '%s' "$resp"; return 1
 }
 
-# --- Bring up the daemon (Phase 2 shared index; the realistic surface) --------
+# ── Bring up the daemon (Phase 2 shared index; the realistic surface) ────────
 # Run from $PROJ so AgentRoot discovery succeeds on CI (no repo `.agent/`).
 # `exec` so $! is dreamd (not a wrapping subshell).
 ( cd "$PROJ" && exec "$BIN" watch ) >"$SANDBOX/daemon.log" 2>&1 &
@@ -88,12 +89,11 @@ else
   sed 's/^/    /' "$SANDBOX/daemon.log" 2>/dev/null || echo "    (empty)"
 fi
 
-# =============================================================================
-# AXIS 1 — Salience ranking (the wedge claim, end-to-end through MCP)
+# ── Axis 1 — Salience ranking (the wedge claim, end-to-end through MCP) ──────
 # HIGH: high pain/importance, minimal lexical repetition.
-# LOW : low pain/importance, but repeats the query terms -> HIGHER BM25.
-# If HIGH still wins, salience (not BM25) drove the order.
-# =============================================================================
+# LOW : low pain/importance, but repeats the query terms for a higher BM25.
+# quality_check.py reports whether LOW's BM25 was higher; if it was and HIGH
+# still wins, salience drove the order.
 echo "--- Axis 1: salience ranking ---"
 Q1="database connection pool"
 HI="MARKERHI database connection pool exhaustion took down prod checkout during peak"
@@ -107,9 +107,8 @@ else
   bad "ranking records never both indexed (index lag?)"; echo "    last: $resp"
 fi
 
-# =============================================================================
-# AXIS 2 — Attribution: provenance survives append -> index -> recall via MCP
-# =============================================================================
+# ── Axis 2 — Attribution ─────────────────────────────────────────────────────
+# Provenance survives append -> index -> recall via MCP.
 echo "--- Axis 2: attribution ---"
 Q2="redis cache stampede"
 AT="MARKERATTR redis cache stampede avoided with jittered ttl and single-flight"
@@ -121,15 +120,14 @@ else
   bad "attribution record never indexed"; echo "    last: $resp"
 fi
 
-# --- Stop the daemon: the dream cycle (--no-commit) runs in-process ----------
+# ── Stop the daemon: the dream cycle (--no-commit) runs in-process ───────────
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null; DAEMON_PID=""
 for i in $(seq 1 10); do [ -S "$SANDBOX/.agent/dreamd.sock" ] || break; sleep 0.3; done
 
-# =============================================================================
-# AXIS 3 — Dream-cycle promotion: 3 events in ONE skill_action cluster promote
-# to semantic/LESSONS.md (PROMOTION_THRESHOLD = 3). Only rust::lifetime_elision
+# ── Axis 3 — Dream-cycle promotion ───────────────────────────────────────────
+# 3 events in one skill_action cluster promote to semantic/LESSONS.md
+# (PROMOTION_THRESHOLD = 3). Only rust::lifetime_elision
 # reaches the threshold, so a non-empty LESSONS.md means that cluster promoted.
-# =============================================================================
 echo "--- Axis 3: dream-cycle promotion ---"
 for n in 1 2 3; do
   case $n in

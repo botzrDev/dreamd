@@ -1,4 +1,4 @@
-//! Foreground daemon: `dreamd watch` (WEG-88 / DR-702).
+//! Foreground daemon: `dreamd watch` (WEG-88).
 //!
 //! Two transports, one router (AILAB-192). Unix serves the `/api/v1` surface
 //! over `~/.agent/dreamd.sock` and authenticates callers by peer UID
@@ -35,7 +35,7 @@
 //! `insecure` is set, and every start with `insecure` set logs a `WARN`. The flag
 //! lifts that one refusal and nothing else: the bearer token and `auth.json` are
 //! still required, and `server.json` still publishes a loopback host (see
-//! [`server_json_body`]) because `daemon_client::read_server_json` will not dial
+//! `server_json_body`) because `daemon_client::read_server_json` will not dial
 //! anything else. Unix has no TCP listener, so either option there is a usage
 //! error ([`WatchError::TcpFlagsOnUnix`]), not a silent no-op.
 //!
@@ -50,9 +50,11 @@
 //! `tokio::signal::unix` and its `SignalKind` do not exist off Unix, so there is
 //! no SIGTERM to wait for — and unlinks `~/.agent/server.json` instead of the
 //! socket. Both then drain the boot coordinator and the primary index, bounded
-//! by [`DRAIN_TIMEOUT`] — see [`drain_daemon`]. Lazily-opened
-//! per-project coordinators and index handles are not touched on either path;
-//! eviction reaps them on drop (AILAB-306).
+//! by `DRAIN_TIMEOUT` — see `drain_daemon`. Lazily opened per-project runtimes
+//! are not drained on either path: they are dropped without
+//! `ProjectRuntime::release`, so an append whose index commit had not landed
+//! is indexed by the coverage pass the next time that project opens. The
+//! append itself is already durable in the JSONL.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -79,18 +81,27 @@ use crate::writer_lock::{WriterKind, WriterLock, WriterLockError};
 /// Failure modes surfaced by [`run_watch`].
 #[derive(Debug, thiserror::Error)]
 pub enum WatchError {
+    /// No `.agent/` was found from the working directory upward.
     #[error("no project root found from {0:?}; run `dreamd init` first")]
     NoProjectRoot(String),
+    /// `config.toml` asks for a dream-cycle mode the daemon refuses
+    /// (`dream_cycle_mode = "auto"`, WEG-66).
     #[error("config: {0}")]
     DreamMode(String),
+    /// The supervisor failed to start, or the socket bind failed.
     #[error("supervisor: {0}")]
     Server(#[from] ServerError),
+    /// A filesystem or listener failure, including a home directory that
+    /// cannot be determined.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// `config.toml` could not be loaded or parsed.
     #[error("config load: {0}")]
     Config(String),
+    /// The boot project's Tantivy index failed to open.
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
+    /// Dream-cycle WAL recovery failed.
     #[error("wal recovery: {0}")]
     Wal(#[from] crate::wal::WalError),
     /// The project writer lock was refused (another dreamd writes this
@@ -145,9 +156,9 @@ pub struct WatchListen {
 /// signal. Called by `dreamd watch`.
 ///
 /// A dispatcher, not a body: the transports differ enough (listener type, auth
-/// layer, whether Tantivy can be opened at all, which signals exist) that one
-/// function with cfg branches sprinkled through it would be less honest than two
-/// whole sequences. Unix runs [`run_watch_uds`] and off Unix runs
+/// layer, which signals exist) that one function with cfg branches sprinkled
+/// through it would be less honest than two whole sequences. Unix runs
+/// `run_watch_uds` and off Unix runs
 /// `run_watch_loopback` — see the module docs for the two topologies.
 ///
 /// `listen` configures the TCP listener only. On Unix any `--bind` or
@@ -195,9 +206,10 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     let writer_lock = WriterLock::acquire(&agent_root, WriterKind::Watch)?;
 
     // 3. Open the project index up front and wire it as the coordinator's live
-    //    indexer (the "Option B" hand-off documented in tantivy_handle.rs). The
-    //    same handle is pinned into AppState below so recall reads exactly what
-    //    appends write — one handle, one Tantivy writer (WEG-264 Defect 2).
+    //    indexer (the coordinator → indexer wiring documented in
+    //    tantivy_handle.rs). The same handle is pinned into AppState below so
+    //    recall reads exactly what appends write — one handle, one Tantivy
+    //    writer (WEG-264).
     let primary_handle = Arc::new(TantivyIndexHandle::open(
         &agent_root,
         &writer_lock,
@@ -211,7 +223,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     )?;
 
     // 4. Compose AppState. daemon_uid is this process's UID — peer_uid_middleware
-    //    (WEG-72 / DR-407) rejects any connection whose peer UID differs.
+    //    (WEG-72) rejects any connection whose peer UID differs.
     let home = crate::layout::home_dir().ok_or_else(|| {
         WatchError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -221,13 +233,14 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     let daemon_home = DaemonHome::new(home.join(".agent"));
     let registry_path = daemon_home.registry_toml();
     let daemon_uid = nix::unistd::Uid::current().as_raw();
-    // Pin under the canonical project root: `resolve_project` canonicalizes
-    // every X-Agent-Root lookup, so recall/dream must match on the same form.
+    // Pin under the canonical project root: `RegistryCache::resolve`
+    // canonicalizes every X-Agent-Root lookup, so recall/dream must match on
+    // the same form.
     let primary_root = std::fs::canonicalize(agent_root.project_root())
         .unwrap_or_else(|_| agent_root.project_root().to_path_buf());
     let state = AppState::new(registry_path, supervisor, config, daemon_uid)
         .with_primary(primary_root, primary_handle);
-    // Retain shutdown handles BEFORE `state` moves into `build_router`
+    // Retain shutdown handles before `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
     // connection tasks, so there would be nothing left here to drain.
     let drain_supervisor = Arc::clone(&state.supervisor);
@@ -260,20 +273,20 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
         }
     };
 
-    // Unlink the socket FIRST, on every shutdown path — SIGINT, SIGTERM, or a
+    // Unlink the socket first, on every shutdown path — SIGINT, SIGTERM, or a
     // serve error. Best-effort: the next bind would recover a stale socket
     // anyway (bind_socket_raw), but a service-managed daemon stopped via
     // SIGTERM must not leave ~/.agent/dreamd.sock behind (WEG-268).
     //
     // Ordering against the drain is deliberate. The drain below is bounded by
-    // DRAIN_TIMEOUT (AILAB-748). A `Shutdown` no longer waits behind a dream
+    // DRAIN_TIMEOUT (AILAB-748). A `Shutdown` does not wait behind a dream
     // cycle's model call: it waits at most behind one cycle Prepare or Commit,
     // which is file I/O, and a cycle mid-compose at shutdown commits nothing.
     // The drain can still park behind a full indexer channel for the full
     // bound, though — so putting the unlink after it would put a shipped
     // guarantee behind that wait, and systemd's `TimeoutStopSec` SIGKILL could
-    // land first and strand the socket. AILAB-162 requires only that the drain
-    // happen before process exit, not before the unlink. A client that
+    // land first and strand the socket. The drain only has to happen before
+    // process exit, not before the unlink (AILAB-162). A client that
     // connects in the window between the two gets ECONNREFUSED instead of a
     // 503, which is the better failure anyway.
     let _ = std::fs::remove_file(&sock_path);
@@ -356,7 +369,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
 
     // 3. Resolve the daemon home through `layout::home_dir()`, exactly as the
     //    Unix arm and the CLI do (BZR-168): `HOME`, else `USERPROFILE`, empty
-    //    counts as unset. That is the same rule `service install` used to mint
+    //    counts as unset. That is the same rule `service install` follows to mint
     //    `auth.json`, so the scheduled task and a foreground watch agree on
     //    which `~/.agent` they mean.
     let home = crate::layout::home_dir().ok_or_else(|| {
@@ -367,7 +380,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     })?;
     let daemon_home = DaemonHome::new(home.join(".agent"));
 
-    // 4. Require the bearer credential BEFORE binding anything — with or without
+    // 4. Require the bearer credential before binding anything — with or without
     //    `--insecure`, which lifts only the non-loopback bind refusal. This
     //    listener has no `SO_PEERCRED` to fall back on, so a missing or malformed
     //    `auth.json` is a start failure (the CLI maps it to exit 1 — an operator
@@ -402,7 +415,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
             agent_root.project_root().to_path_buf(),
             Arc::clone(&primary_handle),
         );
-    // Retain the shutdown handle BEFORE `state` moves into `build_router`
+    // Retain the shutdown handle before `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
     // connection tasks, so there would be nothing left here to drain.
     // `primary_handle` stays here for the drain below.
@@ -410,7 +423,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     let router = build_router(state);
 
     // 7. Bind (loopback unless `--insecure` allowed otherwise), then publish
-    //    the port the kernel actually gave us. Order matters: publishing first
+    //    the port the kernel actually assigned. Order matters: publishing first
     //    would advertise a port nothing is listening on, and a client that read
     //    the file in that window would get a refused connect and conclude the
     //    daemon is down. Once the bind has returned the address is real — a
@@ -434,7 +447,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    Unix, so `ctrl_c()` is the whole signal set this arm handles.
     //    `tokio::signal::windows` additionally offers `ctrl_close` /
     //    `ctrl_shutdown`, which an abrupt service stop delivers instead of
-    //    CTRL_C; wiring those is out of scope for AILAB-192. The cost of an
+    //    CTRL_C; those are not wired. The cost of an
     //    unhandled stop is a stale `server.json`: the next start overwrites it,
     //    and until then every liveness probe fails its TCP connect and reports
     //    the daemon down, which is the truth.
@@ -446,10 +459,10 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
         }
     };
 
-    // 9. Unlink `server.json` FIRST, on every shutdown path — Ctrl-C, a clean
+    // 9. Unlink `server.json` first, on every shutdown path — Ctrl-C, a clean
     //    serve return, or a serve error. This is the sibling of the socket
-    //    unlink in `run_watch_uds` and the ordering argument there transfers
-    //    unchanged: the drain below is bounded by DRAIN_TIMEOUT (AILAB-748), a
+    //    unlink in `run_watch_uds`, and the same ordering argument applies: the
+    //    drain below is bounded by DRAIN_TIMEOUT (AILAB-748), a
     //    `Shutdown` queued behind other work can still consume that whole
     //    budget (not a dream cycle's model call: at most one cycle Prepare or
     //    Commit, which is file I/O, and a cycle mid-compose at shutdown commits
@@ -499,8 +512,8 @@ pub async fn bind_loopback() -> Result<tokio::net::TcpListener, WatchError> {
 /// Without `insecure` there are two checks. The **requested** IP is checked
 /// before binding, so a refused address is never bound even briefly; then the
 /// **bound** address is read back off the listener and refused unless it is
-/// loopback — the AILAB-192 belt, which guards against a future edit rather
-/// than against the kernel. With `insecure` both refusals are lifted and a
+/// loopback — a belt-and-braces check (AILAB-192) that guards against a
+/// future edit rather than against the kernel. With `insecure` both refusals are lifted and a
 /// `WARN` naming the bound address is logged on every call, loopback included,
 /// so a service that carries the flag says so on every start. Nothing here ever
 /// reads or logs the bearer token, and `insecure` never changes auth.
@@ -654,9 +667,9 @@ where
 /// is handed `primary_handle.sender()`, so the coordinator task owns a clone of
 /// the indexer channel. Draining the coordinator first lets that task exit and
 /// release the clone, and puts every append it had queued on the indexer
-/// channel ahead of our `Flush` — FIFO then guarantees the commit sees them.
+/// channel ahead of this `Flush` — FIFO then guarantees the commit sees them.
 /// Flushing first would commit a batch that the coordinator was still adding
-/// to. The coordinator now *awaits* its indexer `send`, so nothing is shed on a
+/// to. The coordinator *awaits* its indexer `send`, so nothing is shed on a
 /// full channel and everything it queued is genuinely ahead of the `Flush`.
 /// That await also couples the two phases: [`Supervisor::drain`] sends
 /// `Shutdown` and waits for the ack with no deadline of its own, so a
@@ -665,10 +678,9 @@ where
 /// leaving the index flush below unrun — best-effort as ever: a lost commit
 /// costs a rebuild on next open, not data.
 ///
-/// `primary` is `None` on two paths: outside the daemon (in-process MCP
-/// fallback) and on the loopback-TCP watch, which never opens an index at all
-/// (AILAB-192). The index phase is then a no-op and the coordinator drain still
-/// runs — the JSONL half is the durable half.
+/// `primary` is `None` only in tests: both transports open the boot project's
+/// index and pass it here. With `None` the index phase is a no-op and the
+/// coordinator drain still runs — the JSONL half is the durable half.
 ///
 /// Which index arm runs depends on who still holds the handle.
 /// `tokio::select!` drops the losing `serve_uds` future and with it the
@@ -678,7 +690,7 @@ where
 /// sender and awaits the indexer task's own final commit. But `serve_uds`
 /// `tokio::spawn`s a task per connection holding a cloned `AppState`, and
 /// dropping the serve future does not cancel them; while any is still in
-/// flight the unwrap fails, and we fall back to [`TantivyIndexHandle::flush`],
+/// flight the unwrap fails, and the drain falls back to [`TantivyIndexHandle::flush`],
 /// which rides the existing `IndexerMsg::Flush` path and awaits the same
 /// persist step. `IndexHandle::close` is deliberately not used on
 /// either arm: called from inside a runtime it `abort`s the indexer task and
@@ -717,12 +729,13 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // AILAB-192: the imports and the fixture below are read only by the
-    // `drain_daemon_*` tests, which open a real `TantivyIndexHandle` and pass
-    // `Supervisor::start`'s `#[cfg(unix)]` `indexer_tx`. They are gated together
-    // with those tests so nothing goes unused off-target. Nothing about what
-    // Linux runs changes — this whole module was `#![cfg(unix)]` until AILAB-192,
-    // and Linux is where every proof in this ticket runs.
+    // The imports and the fixtures below are read only by the
+    // `drain_daemon_*` tests, and carry the same gate so nothing goes unused
+    // off Unix. That gate is no longer needed: `Supervisor::start`'s
+    // `indexer_tx` parameter is not `#[cfg(unix)]`, and the drain tests call no
+    // Unix-only API. It only keeps them off the Windows job, where they have
+    // never run, and can be removed (here and on the three tests) once they
+    // pass there.
     #[cfg(unix)]
     use crate::coordinator::MemoryCoordinatorMsg;
     #[cfg(unix)]
@@ -793,7 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_tcp_round_trips_on_loopback() {
-        // AC (AILAB-192): the transport Windows serves, proved on Linux. Bind
+        // AILAB-192: the transport Windows serves, proved on Linux. Bind
         // through the production helper, serve with the production `serve_tcp`,
         // and drive a real HTTP/1 request over TCP end to end.
         let listener = bind_loopback().await.expect("bind loopback");
@@ -820,7 +833,7 @@ mod tests {
 
     #[test]
     fn server_json_body_is_the_locked_wire_shape() {
-        // AC (AILAB-192): byte-exact. `daemon_client::read_server_json` parses
+        // AILAB-192: byte-exact. `daemon_client::read_server_json` parses
         // these bytes and the CLI liveness probes dial the port they name, so the
         // trailing newline and the field order are part of the contract.
         assert_eq!(
@@ -831,7 +844,7 @@ mod tests {
 
     #[test]
     fn write_server_json_creates_the_parent_and_writes_the_body() {
-        // AC (AILAB-192): on a first start `~/.agent/` may not exist yet, and
+        // AILAB-192: on a first start `~/.agent/` may not exist yet, and
         // nothing else on the loopback path creates it — there is no
         // `bind_api_socket` here to do it as a side effect.
         let dir = tempdir().expect("tempdir");
@@ -853,7 +866,7 @@ mod tests {
 
     #[test]
     fn remove_server_json_is_idempotent() {
-        // AC (AILAB-192): it runs on every shutdown path, including one that
+        // AILAB-192: it runs on every shutdown path, including one that
         // never got as far as publishing, so "already gone" must be a no-op and
         // not an error.
         let dir = tempdir().expect("tempdir");
@@ -870,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_loopback_uses_an_ephemeral_port() {
-        // AC (AILAB-192): port 0 is the *request*. `local_addr` must report the
+        // AILAB-192: port 0 is the *request*. `local_addr` must report the
         // port the kernel assigned, because that number is what goes into
         // `server.json` — and `read_server_json` rejects a 0 there.
         let listener = bind_loopback().await.expect("bind loopback");
@@ -881,7 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_default_is_the_ailab_192_listener() {
-        // AC (AILAB-197): no `--bind` is still `127.0.0.1:0`.
+        // AILAB-197: no `--bind` is still `127.0.0.1:0`.
         let listener = bind_listen(WatchListen::default())
             .await
             .expect("default bind");
@@ -892,7 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_accepts_explicit_ipv4_loopback_without_insecure() {
-        // AC (AILAB-197): a loopback `--bind` needs no `--insecure`.
+        // AILAB-197: a loopback `--bind` needs no `--insecure`.
         let listen = WatchListen {
             bind: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
             insecure: false,
@@ -915,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_accepts_ipv6_loopback_without_insecure() {
-        // AC (AILAB-197): `[::1]:0` is loopback (`IpAddr::is_loopback`), so it
+        // AILAB-197: `[::1]:0` is loopback (`IpAddr::is_loopback`), so it
         // needs no `--insecure`. Skipped, not failed, on a host without IPv6.
         let listen = WatchListen {
             bind: Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))),
@@ -936,7 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_refuses_unspecified_without_insecure_before_binding() {
-        // AC (AILAB-197): `0.0.0.0` is not loopback, so without `--insecure` it
+        // AILAB-197: `0.0.0.0` is not loopback, so without `--insecure` it
         // is refused, the message names the flag, and nothing is bound. The
         // port is held on 127.0.0.1 so that on Linux a bind *attempt* at
         // 0.0.0.0:<port> would fail `AddrInUse` and surface as
@@ -966,7 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_refuses_a_unicast_address_without_insecure_before_binding() {
-        // AC (AILAB-197): an interface address is refused the same way. 192.0.2.1
+        // AILAB-197: an interface address is refused the same way. 192.0.2.1
         // is TEST-NET-1 (RFC 5737) and never assigned to a local interface, so an
         // attempted bind would fail `AddrNotAvailable` as `WatchError::Io` on
         // every platform — `Bind` proves the gate ran first.
@@ -984,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_insecure_binds_unspecified_and_server_json_stays_loopback() {
-        // AC (AILAB-197): with `--insecure` the wildcard bind is allowed, and the
+        // AILAB-197: with `--insecure` the wildcard bind is allowed, and the
         // address local clients are told to dial is still loopback on the real
         // port — `read_server_json` accepts it rather than being widened.
         let (log, _guard) = capture_warnings();
@@ -1018,7 +1031,7 @@ mod tests {
 
     #[test]
     fn published_host_is_always_loopback() {
-        // AC (AILAB-197): `server.json` never names a routable host. Loopback
+        // AILAB-197: `server.json` never names a routable host. Loopback
         // publishes itself; unspecified and unicast publish their family's
         // loopback.
         let cases: [(IpAddr, IpAddr); 7] = [
@@ -1048,7 +1061,7 @@ mod tests {
 
     #[test]
     fn server_json_for_an_ipv6_wildcard_bind_reads_back_as_ipv6_loopback() {
-        // AC (AILAB-197): `[::]` publishes `::1`, which `read_server_json`
+        // AILAB-197: `[::]` publishes `::1`, which `read_server_json`
         // accepts. Pure file round trip; no socket.
         let bound = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4243));
         assert_eq!(
@@ -1121,7 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listen_warns_on_every_insecure_start_and_only_then() {
-        // AC (AILAB-197): the WARN follows the flag, not the address — an
+        // AILAB-197: the WARN follows the flag, not the address — an
         // `--insecure` start on the default loopback bind still warns, every
         // time, naming the bound address; a start without the flag does not.
         // `#[tokio::test]` is a current-thread runtime, so the thread-scoped
@@ -1155,7 +1168,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn run_watch_refuses_tcp_flags_on_unix() {
-        // AC (AILAB-197): Unix has no TCP listener, so `--bind` or `--insecure`
+        // AILAB-197: Unix has no TCP listener, so `--bind` or `--insecure`
         // is a usage error — its own variant, not `Bind` — and it is reported
         // before project discovery (this tempdir has no `.agent/`).
         let dir = tempdir().expect("tempdir");
@@ -1197,8 +1210,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drain_daemon_persists_in_flight_append_and_commits_index() {
-        // AC (AILAB-162): this is what `run_watch` runs after the `select!`.
-        // An append accepted just before the signal must be on disk AND
+        // AILAB-162: this is what `run_watch` runs after the `select!`.
+        // An append accepted just before the signal must be on disk and
         // committed to Tantivy by the time the process exits. Both handles are
         // held behind shared `Arc`s (the prod shape), so `Supervisor::shutdown`
         // is unreachable and `Arc::try_unwrap` on the index handle fails —
@@ -1222,7 +1235,7 @@ mod tests {
         let state_supervisor = Arc::clone(&supervisor);
         let state_index = Arc::clone(&handle);
 
-        // Queue an append from a live "connection" sender and do NOT await its
+        // Queue an append from a live "connection" sender and do not await its
         // response — it must be drained, not raced.
         let client_tx = supervisor.sender();
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1277,7 +1290,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drain_daemon_sole_owner_takes_shutdown_arm_and_commits_index() {
-        // AC (AILAB-162): the arm an ordinary `systemctl stop` on an idle
+        // AILAB-162: the arm an ordinary `systemctl stop` on an idle
         // daemon actually takes. `tokio::select!` drops the losing
         // `serve_uds` future along with the router and its `AppState`, so with
         // no live connection task nothing else owns the handle and
@@ -1338,8 +1351,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drain_daemon_without_primary_index_drains_coordinator() {
-        // `primary` is `None` outside the daemon (in-process MCP fallback) and
-        // on the loopback-TCP watch, which never opens an index (AILAB-192).
+        // Production always passes a primary index; this pins the `None` arm.
         // The coordinator must still drain, and the index arm must be a no-op
         // rather than a panic.
         let dir = tempdir().expect("tempdir");
@@ -1392,13 +1404,13 @@ mod tests {
 
     #[tokio::test]
     async fn with_drain_timeout_completes_when_inner_finishes() {
-        // AC (AILAB-748): a drain that finishes inside the bound reports so.
+        // AILAB-748: a drain that finishes inside the bound reports so.
         assert!(with_drain_timeout(Duration::from_millis(50), async {}).await);
     }
 
     #[tokio::test]
     async fn with_drain_timeout_returns_false_when_inner_hangs() {
-        // AC (AILAB-748): a drain that outlives the bound is abandoned —
+        // AILAB-748: a drain that outlives the bound is abandoned —
         // `false`, not a hang and not an error.
         let hung = tokio::time::sleep(Duration::from_secs(5));
         assert!(!with_drain_timeout(Duration::from_millis(50), hung).await);

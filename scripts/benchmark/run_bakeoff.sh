@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ANTH-20 gate runner — sources keys from env file, runs bake-off.
+# WasTrue bake-off runner — sources API keys from an env file (first argument),
+# then runs `wastrue_bench.py --bakeoff`.
 set -euo pipefail
 ENV_FILE="${1:-/tmp/anth20_bakeoff.env}"
 if [[ ! -f "$ENV_FILE" ]]; then

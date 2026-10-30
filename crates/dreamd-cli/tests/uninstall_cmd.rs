@@ -13,7 +13,7 @@ use dreamd::commands::lifecycle_cleanup::StopReport;
 use dreamd::commands::version::VERSION_SHORT;
 use dreamd::commands::{init, uninstall, update};
 
-/// Fake stop hook: reports "attempted, nothing matched" without signalling
+/// Fake stop hook: reports "attempted, nothing matched" without signaling
 /// any real process.
 fn no_op_stop(_: &mut dyn std::io::Write) -> StopReport {
     StopReport {
@@ -391,7 +391,7 @@ fn update_real_path_clears_cache_and_socket() {
     );
     assert!(
         f.npx_ours().exists(),
-        "update must NOT touch the npx cache (scoped clear is uninstall-only)"
+        "update must not touch the npx cache (scoped clear is uninstall-only)"
     );
     let stdout = String::from_utf8(out.into_inner()).unwrap();
     assert!(

@@ -7,7 +7,7 @@
 //! Harness modeled on `reset_workspace.rs` (raw `std::process::Command` +
 //! `CARGO_BIN_EXE_dreamd`); store setup modeled on
 //! `dreamd-core/tests/dream_cycle_snapshot.rs`. These commands resolve via
-//! `.agent/` existence, so the setup creates `.agent/...` directly — NOT an
+//! `.agent/` existence, so the setup creates `.agent/...` directly — not an
 //! `init` root-sentinel like `Cargo.toml`. `std::env::temp_dir()` is under
 //! `/tmp` on Linux, so its ancestors never reach `~/.agent`; `discover`
 //! correctly finds nothing in the bare-tmpdir cases.
@@ -50,11 +50,11 @@ fn dream_from_subdir_operates_on_parent_store() {
     );
     assert!(
         !sub.join(".agent").exists(),
-        "must NOT scaffold a `.agent/` in the subdirectory",
+        "must not scaffold a `.agent/` in the subdirectory",
     );
     assert!(
         tmp.path().join(".agent/.dreamd/state.json").exists(),
-        "the cycle must have operated on the PARENT store (state.json written there)",
+        "the cycle must have operated on the parent store (state.json written there)",
     );
 }
 
@@ -65,8 +65,8 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
     // daemon proxy, so no --no-commit is needed.
     // Daemon HOME, separate from the project dir, so anything this invocation
     // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
-    // Since AILAB-184 `dream` writes nothing there (one-shots are console-only,
-    // and discover fails first), so the split is defensive suite hygiene.
+    // `dream` writes nothing there (one-shots are console-only, and discover
+    // fails first), so the split is defensive suite hygiene.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
@@ -89,7 +89,7 @@ fn dream_with_no_store_errors_and_scaffolds_nothing() {
     );
     assert!(
         !tmp.path().join(".agent").exists(),
-        "must NOT scaffold a phantom `.agent/` on the error path",
+        "must not scaffold a phantom `.agent/` on the error path",
     );
 }
 
@@ -98,8 +98,8 @@ fn doctor_with_no_store_errors() {
     let tmp = tempfile::tempdir().unwrap();
     // Daemon HOME, separate from the project dir, so anything this invocation
     // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
-    // Since AILAB-184 `doctor` writes nothing there (one-shots are console-only,
-    // and discover fails first), so the split is defensive suite hygiene.
+    // `doctor` writes nothing there (one-shots are console-only, and discover
+    // fails first), so the split is defensive suite hygiene.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
@@ -122,7 +122,7 @@ fn doctor_with_no_store_errors() {
     );
     assert!(
         !tmp.path().join(".agent").exists(),
-        "doctor must NOT create a `.agent/` on the error path",
+        "doctor must not create a `.agent/` on the error path",
     );
 }
 

@@ -21,6 +21,8 @@ use super::lifecycle_cleanup::{self, Stopper};
 /// cache tree, unreadable registry) surface here.
 #[derive(Debug)]
 pub enum UninstallError {
+    /// A cache tree or the registry could not be read or removed; the message
+    /// names the path.
     Io(std::io::Error),
 }
 
@@ -49,7 +51,8 @@ pub struct UninstallRequest<'a> {
     pub cwd: &'a Path,
     /// Daemon home (normally `~/.agent`).
     pub daemon_home: &'a Path,
-    /// Resolved daemon socket. `None` — no home directory to resolve against.
+    /// Resolved daemon socket. `None` — no home directory to resolve against,
+    /// or a non-Unix target, where the daemon listens on loopback TCP.
     pub socket: Option<&'a Path>,
     /// Native binary cache tree (normally `~/.cache/dreamd-mcp`). `None` — no
     /// home directory.
@@ -65,7 +68,7 @@ pub struct UninstallRequest<'a> {
     pub quiet: bool,
 }
 
-/// `dreamd uninstall` entry point. Step order per spec: stop servers →
+/// `dreamd uninstall` entry point. Step order: stop servers →
 /// remove socket → registry unregister (benign skip outside a project) →
 /// cache clears (unless `keep_caches`) → leftover guidance.
 pub fn run(
@@ -79,11 +82,8 @@ pub fn run(
     // `spared` — at least one matching process left running, normally because
     // it was not attributable to this invocation's $HOME / native cache
     // (AILAB-584) — gets its own line, pointing at the stderr warnings that
-    // name each pid and its reason. Without it this printed "no running dreamd
-    // mcp/watch processes found" directly above the stderr warning naming the
-    // pid that is still running, which is the one scenario the scoping fix
-    // exists for. `matched` and `spared` are independent: one pass can stop
-    // ours and spare another's.
+    // name each pid and its reason, and suppresses "no running ... found".
+    // See `lifecycle_cleanup::StopReport` for the flags.
     let report = stop(err);
     if !req.quiet {
         if report.matched {
@@ -113,17 +113,10 @@ pub fn run(
                 }
             }
             lifecycle_cleanup::SocketRemoval::RefusedLive => {
-                // Still answering after the grace window, so this is not a
-                // daemon mid-shutdown — the best-effort stop pass above did not
-                // land: no `kill` on the box, the signal was denied, or (the
-                // common case now) the daemon was deliberately spared as not
-                // attributable to this invocation's $HOME / native cache.
-                // Unlinking a live daemon's socket orphans it: it keeps serving
-                // while every client resolves a path that is gone.
-                //
-                // The remedy is deliberately NOT `pkill -f 'dreamd watch'`:
-                // this branch is reached precisely when scoping mattered, and
-                // that recipe is the machine-global kill AILAB-584 removed.
+                // Still answering after the grace window: the stop pass above
+                // did not land or spared the daemon (see
+                // `lifecycle_cleanup::remove_socket`). The remedy names a
+                // scoped stop, never a machine-global `pkill -f 'dreamd watch'`.
                 writeln!(
                     err,
                     "dreamd: warning — a daemon is still live on {}; left the socket in place. \
@@ -183,7 +176,7 @@ pub fn run(
         clear_caches(req, out, err)?;
     }
 
-    // 5. Leftover guidance — what an uninstall deliberately does NOT touch.
+    // 5. Leftover guidance — what an uninstall deliberately does not touch.
     if !req.quiet {
         writeln!(out)?;
         writeln!(out, "left in place:")?;
@@ -234,7 +227,7 @@ fn clear_caches(
     match req.npx_dir {
         Some(npx_dir) => {
             if req.all_npx {
-                // Loud warning BEFORE deleting: this removes every npx-cached
+                // Loud warning before deleting: this removes every npx-cached
                 // package on the machine, not just dreamd-mcp.
                 writeln!(
                     err,

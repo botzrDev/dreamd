@@ -1,4 +1,4 @@
-//! Per-project incremental Tantivy indexer (WEG-42 / DR-202).
+//! Per-project incremental Tantivy indexer (WEG-42).
 //!
 //! Wires the episodic JSONL at `<agent_root>/.agent/episodic/AGENT_LEARNINGS.jsonl`
 //! into a per-project Tantivy index under `<agent_root>/.agent/.dreamd/index/`.
@@ -24,12 +24,13 @@
 //!
 //! **Lock-file behavior.** The on-disk `.tantivy-writer.lock` /
 //! `.tantivy-meta.lock` files persist after SIGKILL but are not the gate —
-//! Tantivy 0.27 uses `fs4` advisory flock, which the kernel releases when
-//! the holder dies. Do NOT unlink them on startup or recovery. See drift
-//! catalog entry `tantivy-lock-file-no-rm-on-startup`.
+//! the pinned Tantivy takes an `fs4` advisory flock, which the kernel releases
+//! when the holder dies. Do not unlink them on startup or recovery: removing a
+//! lock file another live process holds would let a second writer in.
 //!
-//! **Coordinator → indexer wiring.** Option B (per the WEG-42 spec): the
-//! supervisor opens a `TantivyIndexHandle`, extracts its
+//! **Coordinator → indexer wiring.** The caller (`run_watch`,
+//! `ProjectRuntime::open`, the in-process `dreamd mcp`) opens a
+//! `TantivyIndexHandle`, extracts its
 //! `mpsc::Sender<IndexerMsg>` via [`TantivyIndexHandle::sender`], and threads
 //! that sender into `MemoryCoordinator::open` so each successful append can
 //! `send` (awaited) an [`IndexerMsg::Append`]. The coordinator never holds the
@@ -41,7 +42,7 @@
 //! `shutdown`, and `close`. The writer-owning task and its message enum live in
 //! [`crate::server::indexer_actor`]; the on-disk watermark and
 //! [`assess_index_freshness`] live in [`crate::server::index_freshness`]. Both
-//! are re-exported here so existing `tantivy_handle::…` imports still resolve.
+//! are re-exported here, so `tantivy_handle::…` imports resolve too.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -71,9 +72,9 @@ use crate::server::indexer_actor::{
 };
 use crate::writer_lock::WriterLock;
 
-// BZR-170: freshness and the indexer actor moved to sibling modules. Re-export
-// their public surface so `crate::server::tantivy_handle::…` paths (including
-// `memory_store.rs` and the `server/mod.rs` list) keep compiling unchanged.
+// Freshness and the indexer actor live in sibling modules (BZR-170). Their
+// public surface is re-exported so `crate::server::tantivy_handle::…` paths
+// (including `memory_store.rs` and the `server/mod.rs` list) resolve.
 pub use crate::server::index_freshness::{
     assess_index_freshness, IndexFreshness, INDEX_PROGRESS_FILENAME,
 };
@@ -81,12 +82,11 @@ pub use crate::server::indexer_actor::{
     read_semantic_pass_record, IndexerMsg, SemanticPassRecord, SEMANTIC_PASS_FILENAME,
 };
 
-/// `commit_cadence_seconds` is not read from config. Callers pass the
-/// duration. Production uses [`DEFAULT_COMMIT_CADENCE`].
+/// Wall-clock cadence at which the indexer commits accumulated `add_document`
+/// calls to Tantivy.
 ///
-/// Wall-clock cadence at which the indexer flushes accumulated `add_document`
-/// calls to Tantivy. Production callers pass this value;
-/// tests pass shorter durations for observability.
+/// Not read from config: callers pass the duration. Production callers pass
+/// this value; tests pass shorter durations for observability.
 pub const DEFAULT_COMMIT_CADENCE: Duration = Duration::from_secs(5);
 
 /// Writer heap budget, identical to the WEG-24 spike measurement
@@ -142,7 +142,8 @@ impl TantivyIndexHandle {
         let jsonl_path = agent_root.episodic_jsonl();
 
         // Index schema bump => rebuild the derived cache from JSONL (ARCHITECTURE.md §4).
-        // This is NOT `dreamd migrate` (§7, durable data); the index is a rebuildable cache.
+        // This is not `dreamd migrate` (ARCHITECTURE.md §7, durable data); the
+        // index is a rebuildable cache.
         match check_manifest_version(&manifest_path) {
             Ok(ManifestCheckOutcome::NeedsMigration { from }) => {
                 tracing::warn!(
@@ -190,10 +191,10 @@ impl TantivyIndexHandle {
         // 2. The set difference between the log and the index.
         let events = read_jsonl_events(&jsonl_path)?;
         cover(&mut writer, &fields, &coverage, &events)?;
-        // 3. DR-211 / AILAB-205: fold `semantic/LESSONS.md` into the same
-        //    commit. One insertion point covers three recovery paths — cold
-        //    start, the schema-migration rebuild above, and `dreamd doctor
-        //    --repair` (which reopens through this same function).
+        // 3. Fold `semantic/LESSONS.md` into the same commit (AILAB-205). One
+        //    insertion point covers three recovery paths — cold start, the
+        //    schema-migration rebuild above, and `dreamd doctor --repair`
+        //    (which reopens through this same function).
         index_semantic_lessons(&mut writer, &fields, agent_root)?;
         // 4–5. Every log id is pending, so the commit backfills any `index_doc`
         //    edge a crash skipped, and the watermark becomes the log's largest
@@ -214,7 +215,7 @@ impl TantivyIndexHandle {
         //    the moment `open()` returns — the cross-harness read-after-open
         //    case (a fresh process indexing a prior process's append).
         //    Steady-state cadence commits from `run_indexer` are still picked
-        //    up by OnCommitWithDelay. (WEG-264 Defect 1.)
+        //    up by OnCommitWithDelay (WEG-264).
         reader.reload().map_err(tantivy_to_index)?;
 
         // 7. The indexer task.
@@ -260,13 +261,13 @@ impl TantivyIndexHandle {
         &self.reader
     }
 
-    /// Update `last_used` to `Instant::now()`. Called by the supervisor on
-    /// each access through `ProjectIndexMap::get_or_open`.
+    /// Update `last_used` to `Instant::now()`. The in-process MCP store calls
+    /// it after each recall through its `ProjectIndexMap::get_or_open`.
     pub fn touch(&self) {
         *self.last_used.lock().expect("last_used mutex poisoned") = Instant::now();
     }
 
-    /// Remove decayed event IDs from the Tantivy index (WEG-62 / DR-309).
+    /// Remove decayed event IDs from the Tantivy index (WEG-62).
     /// Called by the dream cycle orchestrator after the cycle's plan
     /// (`plan_cycle`) has committed the log rewrite.
     /// No-op if `event_ids` is empty (still sends message to stay on the indexer task).
@@ -284,7 +285,7 @@ impl TantivyIndexHandle {
     }
 
     /// Re-index `<agent_root>/.agent/semantic/LESSONS.md` as `layer=semantic`
-    /// documents (DR-211 / AILAB-205). Called by the dream cycle after
+    /// documents (AILAB-205). Called by the dream cycle after
     /// consolidation rewrites the file so a live daemon serves the new lessons
     /// without a restart.
     ///
@@ -306,8 +307,8 @@ impl TantivyIndexHandle {
 
     /// Force a Tantivy commit + progress-file update and wait for it.
     ///
-    /// Promoted from the test-only helper for AILAB-162: `run_watch`'s
-    /// shutdown drain prefers [`Self::shutdown`], but that consumes `self` and
+    /// The shutdown drain's fallback (AILAB-162): `run_watch`'s drain prefers
+    /// [`Self::shutdown`], but that consumes `self` and
     /// the primary handle is an `Arc` shared with `AppState`. When
     /// `Arc::try_unwrap` cannot recover sole ownership, this is the drain — it
     /// rides the existing [`IndexerMsg::Flush`] path, so there is exactly one
@@ -357,15 +358,14 @@ impl IndexHandle for TantivyIndexHandle {
     /// Sync close path for [`crate::server::ProjectIndexMap`] eviction.
     ///
     /// When invoked from outside a tokio runtime (typical `Drop` /
-    /// supervisor-shutdown timing), `close` builds a fresh current-thread
+    /// map-eviction timing), `close` builds a fresh current-thread
     /// runtime and drains the indexer task — that path produces the same
     /// final commit as [`Self::shutdown`].
     ///
     /// When invoked from inside a runtime, `close` cannot safely block on
-    /// the indexer's `JoinHandle`: this crate's tokio features
-    /// (`["sync", "rt", "macros", "time"]`, drift slug
-    /// `tokio-feature-split-bin-target-exception`) deliberately exclude
-    /// `rt-multi-thread`, so `tokio::task::block_in_place` is unavailable.
+    /// the indexer's `JoinHandle`: this crate's tokio features (see
+    /// `crates/dreamd-core/Cargo.toml`) deliberately exclude `rt-multi-thread`,
+    /// so `tokio::task::block_in_place` is unavailable.
     /// In that case `close` drops the sender and `abort`s the task —
     /// the in-flight batch is lost. Async callers should prefer
     /// [`Self::shutdown`] for guaranteed drain.
@@ -394,7 +394,7 @@ impl IndexHandle for TantivyIndexHandle {
     }
 }
 
-// Manifest persistence
+// ── Manifest persistence ─────────────────────────────────────────────────────
 
 fn write_manifest_if_absent(path: &Path) -> Result<(), IndexError> {
     if path.exists() {
@@ -456,23 +456,22 @@ fn try_open_or_create(
 /// Deliberately does not try to catch `TantivyError::IncompatibleIndex` (a
 /// tantivy index-*format* mismatch). That variant renders through
 /// `Incompatibility`'s hand-written `Debug`, which emits `"Library version: N,
-/// index version: M. …"` — containing neither "incompatible" nor "schema". The
-/// `|| msg.contains("incompatible")` alternative that used to sit here
-/// therefore never matched it and only widened the false-positive surface. A
-/// format mismatch stays a loud startup error, not a silent wipe.
+/// index version: M. …"` — containing neither "incompatible" nor "schema", so
+/// a string match on "incompatible" would never catch it and would only widen
+/// the false-positive surface. A format mismatch stays a loud startup error,
+/// not a silent wipe.
 fn is_schema_incompatible(err: &IndexError) -> bool {
     matches!(err, IndexError::SchemaIncompatible(_))
 }
 
-// Tests
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // AILAB-192: the four coordinator↔indexer tests below are the only readers,
-    // and each drives `MemoryCoordinator::open_at`'s `#[cfg(unix)]` `indexer_tx`
-    // parameter. Gated together with them so the import does not go unused
-    // off-target; the module's other 35 tests are portable and stay ungated.
+    // Read only by the `#[cfg(unix)]` coordinator↔indexer tests below, so the
+    // import carries the same gate and does not go unused off Unix. Those
+    // tests say per test whether their gate is still needed.
     #[cfg(unix)]
     use crate::coordinator::{MemoryCoordinator, MemoryCoordinatorMsg};
     use crate::index::{Layer, SchemaFields};
@@ -575,12 +574,10 @@ mod tests {
     }
 
     async fn flush(handle: &TantivyIndexHandle) -> Result<(), IndexError> {
-        // Delegates to the promoted `pub(crate)` method (AILAB-162) so tests
-        // and the shutdown drain exercise the same flush path.
+        // Delegates to the `pub(crate)` method (AILAB-162) so tests and the
+        // shutdown drain exercise the same flush path.
         handle.flush().await
     }
-
-    // AC-1
 
     #[tokio::test]
     async fn lock_files_present_post_sigkill_do_not_block_open() {
@@ -598,12 +595,12 @@ mod tests {
             .expect("open succeeds despite leftover lock files");
         handle.shutdown().await.expect("shutdown");
 
-        // Files were NOT unlinked by open.
+        // Open did not unlink the files.
         assert!(index_dir.join(".tantivy-writer.lock").exists());
         assert!(index_dir.join(".tantivy-meta.lock").exists());
     }
 
-    // AC-2 — open-time cluster counts; BZR-1236 coverage ignores the watermark
+    // Recurrence after open; the coverage pass ignores the watermark (BZR-1236).
 
     #[tokio::test]
     async fn open_assigns_final_cluster_count() {
@@ -634,8 +631,8 @@ mod tests {
         assert_eq!(ones, 1, "lone python.pytest doc carries count 1");
     }
 
-    /// V9 at unit level: an event at or below the watermark is still indexed.
-    /// The old assertion here, that it was not, was the defect.
+    /// An event at or below the watermark is still indexed: an event merged in
+    /// below the newest indexed id must not be skipped (BZR-1236).
     #[tokio::test]
     async fn open_indexes_events_at_or_below_the_watermark() {
         let dir = unique_tmpdir("open-watermark");
@@ -666,12 +663,12 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
 
         let values = read_recurrence_values(&agent_root);
-        // All three events are indexed, each with the cluster count from pass
-        // 1 over the entire JSONL.
+        // All three events are indexed, each with its cluster's all-time
+        // count over the whole JSONL.
         assert_eq!(values, vec![3, 3, 3]);
     }
 
-    // AC-3 — steady-state recurrence is the all-time count (BZR-1242)
+    // Steady-state recurrence is the all-time count (BZR-1242).
 
     #[tokio::test]
     async fn live_appends_carry_the_all_time_count() {
@@ -754,8 +751,6 @@ mod tests {
         );
     }
 
-    // AC-5 — progress file written after commit only
-
     #[tokio::test]
     async fn progress_file_written_after_commit_only() {
         let dir = unique_tmpdir("progress-after");
@@ -828,8 +823,6 @@ mod tests {
         assert_eq!(progress.last_indexed_id.as_deref(), Some(id.as_str()));
     }
 
-    // AC-7 — manifest written on first open only
-
     #[tokio::test]
     async fn manifest_written_on_first_open_only() {
         let dir = unique_tmpdir("manifest-once");
@@ -858,8 +851,6 @@ mod tests {
             .unwrap();
         assert_eq!(mtime1, mtime2, "manifest must not be rewritten on re-open");
     }
-
-    // AC-9 — commit cadence drives a tick (short cadence)
 
     #[tokio::test]
     async fn commit_cadence_constructor_arg_drives_tick() {
@@ -896,7 +887,8 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // AC-16 — replay skips mid-file blank/corrupt lines (SPEC §88 / WEG-427)
+    // Open skips mid-file blank and corrupt lines (SPEC.md "Corrupt input",
+    // WEG-427).
 
     #[tokio::test]
     async fn replay_skips_blank_midfile_line_in_jsonl() {
@@ -957,10 +949,9 @@ mod tests {
         );
     }
 
-    // AC-23 — coordinator routes appends to indexer sender
-
-    // Unix-only: passes `Some(idx_tx)` to `MemoryCoordinator::open_at`, whose
-    // `indexer_tx` parameter is `#[cfg(unix)]` (AILAB-192).
+    // The `unix` gate is no longer needed: `MemoryCoordinator::open_at`'s
+    // `indexer_tx` parameter is not `#[cfg(unix)]`, and nothing here is
+    // Unix-only. It can be removed once this test passes on Windows.
     #[cfg(unix)]
     #[tokio::test]
     async fn coordinator_routes_appends_to_indexer_sender() {
@@ -1011,7 +1002,7 @@ mod tests {
         coord_handle.await.unwrap();
     }
 
-    /// A full indexer channel must BLOCK the coordinator, not shed the message.
+    /// A full indexer channel must **block** the coordinator, not shed the message.
     ///
     /// A shed event would stay out of recall until the next coverage pass (the
     /// next open, or a resync), while later events answer queries.
@@ -1022,7 +1013,7 @@ mod tests {
     /// buys: the inbox permit is released at the coordinator's `recv`, strictly
     /// *before* `route_to_indexer` runs, so `coord_tx.send(second)` returning
     /// proves only that the first message was dequeued. On the current-thread
-    /// runtime `#[tokio::test]` gives us, the coordinator then runs on to its
+    /// runtime `#[tokio::test]` provides, the coordinator then runs on to its
     /// first await — the indexer `send`, which has no room — before this task is
     /// polled again; under `flavor = "multi_thread"` that last step would be a
     /// race. The count assertion, not the timing, is what makes the test sound:
@@ -1030,8 +1021,9 @@ mod tests {
     /// `IndexerMsg::Append`s total (the filler plus both appends). A
     /// drop-on-`Full` regression loses one or both and fails the count.
     ///
-    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
-    /// `#[cfg(unix)]` (AILAB-192).
+    /// The `unix` gate is no longer needed: `MemoryCoordinator::open_at`'s
+    /// `indexer_tx` parameter is not `#[cfg(unix)]`, and nothing here is
+    /// Unix-only. It can be removed once this test passes on Windows.
     #[cfg(unix)]
     #[tokio::test]
     async fn coordinator_blocks_then_delivers_when_indexer_channel_full() {
@@ -1092,7 +1084,7 @@ mod tests {
 
         // Returns once the coordinator has dequeued the first message (the inbox
         // permit frees at `recv`); on this current-thread runtime it then runs on
-        // into the parked `route_to_indexer` send before we are polled again.
+        // into the parked `route_to_indexer` send before this task is polled again.
         let (r2_tx, r2_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::AppendLearning {
@@ -1160,8 +1152,9 @@ mod tests {
         );
     }
 
-    // Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
-    // `#[cfg(unix)]` (AILAB-192).
+    // The `unix` gate is no longer needed: `MemoryCoordinator::open_at`'s
+    // `indexer_tx` parameter is not `#[cfg(unix)]`, and nothing here is
+    // Unix-only. It can be removed once this test passes on Windows.
     #[cfg(unix)]
     #[tokio::test]
     async fn idempotency_hit_does_not_emit_indexer_append() {
@@ -1228,8 +1221,6 @@ mod tests {
         coord_handle.await.unwrap();
     }
 
-    // AC-24 — shutdown flushes final batch to disk
-
     #[tokio::test]
     async fn shutdown_flushes_final_batch_to_disk() {
         let dir = unique_tmpdir("shutdown-flush");
@@ -1261,8 +1252,6 @@ mod tests {
         );
     }
 
-    // WEG-69 — reader() accessor
-
     #[tokio::test]
     async fn tantivy_handle_reader_is_accessible() {
         let dir = unique_tmpdir("reader-access");
@@ -1278,15 +1267,12 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // WEG-264 Defect 1 — fresh handle's reader reflects the open-time replay
-
-    /// Regression: a process that opens a `TantivyIndexHandle` and is the
-    /// first to index a JSONL record must see that record on its *first* query
-    /// through `reader()`. Before the WEG-264 fix the reader was created
-    /// pre-commit with `ReloadPolicy::OnCommitWithDelay` and never reloaded on
-    /// the production path, so the open-time replay commit was invisible until
-    /// some later process re-opened the index. This reproduces the
-    /// cross-harness demo where agent #2 is the first process to index agent
+    /// A process that opens a `TantivyIndexHandle` and is the first to index a
+    /// JSONL record must see that record on its *first* query through
+    /// `reader()` (WEG-264). The reader is created before the open's commit
+    /// with `ReloadPolicy::OnCommitWithDelay`, so without the forced reload in
+    /// `open` that commit stays invisible until a later reload. This is the
+    /// cross-harness case where agent #2 is the first process to index agent
     /// #1's append.
     #[tokio::test]
     async fn fresh_handle_reader_sees_replayed_events_without_reload() {
@@ -1316,13 +1302,11 @@ mod tests {
             .expect("count");
         assert_eq!(
             count, 1,
-            "freshly opened reader must reflect the open-time replay commit"
+            "freshly opened reader must reflect the open-time commit"
         );
 
         handle.shutdown().await.expect("shutdown");
     }
-
-    // WEG-62 — prune_decayed_events removes docs from index
 
     #[tokio::test]
     async fn prune_decayed_events_removes_docs_from_index() {
@@ -1510,8 +1494,6 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // AC-11 — trait conformance + ProjectIndexMap integration
-
     #[test]
     fn tantivy_handle_satisfies_index_handle_trait() {
         fn assert_index_handle<H: IndexHandle>() {}
@@ -1556,9 +1538,9 @@ mod tests {
         assert_eq!(map.len(), 2, "below capacity, no eviction");
 
         // close_all drives `IndexHandle::close` on each handle. Inside the
-        // runtime this aborts indexer tasks (see close() docs); we are
-        // verifying that `ProjectIndexMap<H>` composes with the concrete
-        // handle type, not the drain guarantee.
+        // runtime this aborts indexer tasks (see close() docs); this checks
+        // that `ProjectIndexMap<H>` composes with the concrete handle type,
+        // not the drain guarantee.
         map.close_all();
         assert_eq!(map.len(), 0);
     }
@@ -1588,8 +1570,8 @@ mod tests {
             .expect("indexer task must be gone after close");
     }
 
-    // v0.1 index-vs-JSONL contract — open-time healing. The `assess_index_freshness`
-    // cases moved to `index_freshness::tests` with the function (BZR-170).
+    // Open heals a divergence between the JSONL and the index. The
+    // `assess_index_freshness` cases live in `index_freshness::tests`.
 
     #[tokio::test]
     async fn open_heals_jsonl_index_divergence() {
@@ -1700,7 +1682,7 @@ mod tests {
     /// A capacity-1 channel sits in front of the real [`TantivyIndexHandle`]
     /// sender, pre-filled so there is no room for the coordinator's `send`. The
     /// forwarder that relays into the live indexer is held shut by `gate_rx` so
-    /// the channel *stays* full until we say otherwise — an ungated forwarder
+    /// the channel *stays* full until the test opens the gate — an ungated forwarder
     /// would drain the filler before the coordinator ever sent, and the
     /// coordinator would never meet a full channel at all. The coordinator inbox
     /// is capacity 1 for the same reason as
@@ -1714,8 +1696,9 @@ mod tests {
     /// recall assertion fails. No reopen and no resync runs here, so nothing
     /// else could have indexed it.
     ///
-    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
-    /// `#[cfg(unix)]` (AILAB-192).
+    /// The `unix` gate is no longer needed: `MemoryCoordinator::open_at`'s
+    /// `indexer_tx` parameter is not `#[cfg(unix)]`, and nothing here is
+    /// Unix-only. It can be removed once this test passes on Windows.
     #[cfg(unix)]
     #[tokio::test]
     async fn full_indexer_channel_still_reaches_recall_after_flush() {
@@ -1804,7 +1787,7 @@ mod tests {
             .unwrap();
         coord_handle.await.unwrap();
         // Coordinator dropped => `idx_tx` dropped => the forwarder drains and
-        // exits, so the real indexer has both messages before we flush.
+        // exits, so the real indexer has both messages before the flush.
         forwarder.await.expect("forwarder joined");
 
         flush(&handle).await.expect("flush");
@@ -1829,7 +1812,7 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // BZR-1236 — the persist step, the failpoint, and resync
+    // The persist step, the failpoint, and resync (BZR-1236).
 
     /// The id `index_progress.json` holds, or `None` when the file is absent.
     fn progress_id(agent_root: &AgentRoot) -> Option<String> {
@@ -2040,8 +2023,9 @@ mod tests {
     /// An append that finds the log replaced makes the coordinator send
     /// `Resync`, and the indexer indexes the line the replacement brought in.
     ///
-    /// Unix-only: `MemoryCoordinator::open_at`'s `indexer_tx` parameter is
-    /// `#[cfg(unix)]` (AILAB-192).
+    /// Unix-only, and the gate is still needed: the coordinator checks the
+    /// log's identity before an append (`ensure_live_log`) only on Unix, so off
+    /// Unix it never notices the replacement and never sends `Resync`.
     #[cfg(unix)]
     #[tokio::test]
     async fn resync_on_append_mismatch_indexes_a_merged_line() {
@@ -2203,7 +2187,7 @@ mod tests {
         );
         assert!(!is_schema_incompatible(&other));
 
-        // A store whose path merely contains "schema" must NOT wipe the index.
+        // A store whose path merely contains "schema" must not wipe the index.
         // `tantivy_io_to_index` embeds the directory path in its message.
         let path_err = IndexError::TantivyDirectory(
             "Failed to open the directory: \
@@ -2215,7 +2199,7 @@ mod tests {
             "a path containing 'schema' must not trigger a wipe: {path_err:?}"
         );
 
-        // A tantivy index-FORMAT mismatch renders through Incompatibility's
+        // A tantivy index-*format* mismatch renders through Incompatibility's
         // Debug and contains neither "incompatible" nor "schema error:". It
         // stays a loud error rather than a silent rebuild.
         let format_err = IndexError::Tantivy(
@@ -2240,7 +2224,7 @@ mod tests {
         );
     }
 
-    // DR-211 / AILAB-205 — semantic (LESSONS.md) pass, pure-helper unit level.
+    // The semantic (LESSONS.md) pass at the pure-helper level (AILAB-205).
     // End-to-end recall behavior lives in tests/semantic_indexing.rs.
 
     /// In-RAM writer, so these cases exercise the pass without a 50 MB
@@ -2736,7 +2720,7 @@ mod tests {
     }
 }
 
-/// Tantivy 0.26 keeps a segment file that is still mapped. On Windows
+/// The pinned Tantivy keeps a segment file that is still mapped. On Windows
 /// `delete` of that file fails, garbage collection retries later, and the
 /// index directory holds the file until the mapping is dropped.
 /// `dreamd doctor --repair` removes the directory only after the daemon

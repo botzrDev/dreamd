@@ -51,17 +51,20 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 
 /// Run `dreamd status` and write the report to `out`.
 ///
-/// `socket` is the resolved daemon address path — the UDS path on Unix,
-/// `~/.agent/server.json` off it (`None` when the home directory can't be
-/// resolved); `registry_path` is the daemon-home `registry.toml` (`None` when
-/// the home directory can't be resolved — the project then reports
-/// `not registered` without reading anything); `log_tail` holds the daemon
-/// log's last lines, pre-read by the caller (see [`read_log_tail`]).
-/// Returns `Ok(true)` when the daemon appears live — a bounded connect probe on
-/// that address succeeds — so the caller exits 0 — and `Ok(false)` otherwise
-/// (exit 1).
-/// Reads that fail on malformed on-disk state degrade to a fallback string rather than aborting the
-/// report, so `status` always prints a clean block.
+/// Arguments:
+/// - `socket` is the resolved daemon address path: the UDS path on Unix,
+///   `~/.agent/server.json` off it, and `None` when the home directory can't
+///   be resolved.
+/// - `registry_path` is the daemon-home `registry.toml`, `None` when the home
+///   directory can't be resolved; the project then reports `not registered`
+///   without reading anything.
+/// - `log_tail` holds the daemon log's last lines, pre-read by the caller
+///   (see `read_log_tail`).
+///
+/// Returns `Ok(true)` when a bounded connect probe on that address succeeds
+/// (the caller exits 0) and `Ok(false)` otherwise (exit 1). Reads that fail on
+/// malformed on-disk state print a fallback string instead of aborting, so
+/// `status` always prints a complete block.
 pub fn run(
     cwd: &Path,
     socket: Option<&Path>,
@@ -78,8 +81,8 @@ pub fn run(
     // Label the address line for the transport that is actually in use. On Unix
     // the daemon's address *is* a filesystem socket. Off Unix it is
     // `~/.agent/server.json` — the file a loopback-TCP daemon publishes its
-    // host/port into (AILAB-192) — and calling that a socket would be a lie the
-    // operator then greps for. The Unix line is unchanged, byte for byte.
+    // host/port into (AILAB-192) — and calling that a socket would mislead an
+    // operator searching for it.
     #[cfg(unix)]
     const ADDRESS_LABEL: &str = "socket";
     #[cfg(not(unix))]
@@ -120,9 +123,8 @@ pub fn run(
         }
     }
 
-    // Tail of the daemon log. Lines are pre-read by the caller before the
-    // tracing subscriber truncates the log at startup; an empty slice means the
-    // log was absent or empty.
+    // Tail of the daemon log, pre-read by the caller (see `read_log_tail_n`);
+    // an empty slice means the log was absent or empty.
     if log_tail.is_empty() {
         writeln!(out, "recent log: (none)")?;
     } else {

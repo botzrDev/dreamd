@@ -1,17 +1,18 @@
-//! Byte-exact golden-file tests for `dreamd init` (DR-105 / WEG-9).
+//! Byte-exact golden-file tests for `dreamd init` (WEG-9).
 //!
-//! Three scenarios via subprocess:
+//! Five scenarios via subprocess:
 //!   1. **First run** -- stdout must match `tests/fixtures/init.golden.txt`
-//!      verbatim (13 lines / 454 bytes). Validates directory scaffold, state.json
-//!      schema, gitignore append, WORKSPACE.md, and privacy disclosure.
-//!   2. **Re-run** -- stdout must match `tests/fixtures/init.rerun.golden.txt`
-//!      (1 line / 63 bytes). Validates the idempotency guard.
-//!   3. **No project root** -- exit non-zero, empty stdout, stderr explains
+//!      verbatim. Validates directory scaffold, state.json schema, gitignore
+//!      append, WORKSPACE.md, and privacy disclosure.
+//!   2. **Re-run** -- stdout must match `tests/fixtures/init.rerun.golden.txt`.
+//!      Validates the idempotency guard.
+//!   3. **Quiet first run** and 4. **quiet re-run** -- `init --quiet` stdout
+//!      must match `init.quiet.golden.txt` and `init.quiet.rerun.golden.txt`.
+//!   5. **No project root** -- exit non-zero, empty stdout, stderr explains
 //!      the failure. Validates that `.agent/` is never partially created.
 //!
 //! Any change to `init.rs` stdout text, ordering, or whitespace must update the
-//! golden fixtures AND coordinate with the Clip A beat-sheet
-//! (`context/video/scripts/clip-a/`).
+//! golden fixtures in the same commit.
 
 use std::process::Command;
 
@@ -33,9 +34,7 @@ fn first_run_matches_golden() {
     // Daemon HOME, separate from the project dir. `init` registers the project
     // by writing ~/.agent/registry.toml (commands::init::register_project), so
     // sharing tmp would pre-create the project .agent/ and make init report
-    // "already initialized". (Pre-AILAB-184 init_tracing also created
-    // ~/.agent/dreamd.log here; it no longer does — one-shots are console-only
-    // — but the registry write keeps this separation load-bearing.)
+    // "already initialized".
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())

@@ -1,8 +1,8 @@
 //! CLI subcommand implementations.
 //!
-//! Dispatch lives in `cli.rs` (clap + exit codes). Prefer `dreamd init` for
-//! first-time `.agent/` layout; `doctor` / discover paths diagnose an existing
-//! workspace without rewriting golden files.
+//! Dispatch lives in `cli.rs` (clap + exit codes). Each module here
+//! implements one subcommand, or a helper that subcommands call
+//! (`setup_mcp`, `lifecycle_cleanup`, `deprecation`).
 
 pub mod archive;
 pub mod blame;

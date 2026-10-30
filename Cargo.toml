@@ -26,13 +26,13 @@ unsafe_code = "forbid"
 # enables redaction of build-specific values (SHA, date, target triple).
 insta = { version = "1", features = ["filters"] }
 # MCP SDK — server-side tooling + stdin/stdout transport for `dreamd mcp` (WEG-77).
-# Implements MCP spec 2025-11-25. Pinned to exact version; no crate adds this
-# directly until the mcp subcommand is wired.
+# Implements MCP spec 2025-11-25. `"1.7.0"` is a caret requirement (>= 1.7.0,
+# < 2); dreamd-core's `mcp` module is the consumer.
 rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
 
-# NFR-2 (stripped `dreamd` ≤ 20 MB at the time; 24 MB since 2026-10-29) was already
-# red on main at ~20.5 MB under the default profile; fat LTO is the shrink, not a
-# gate raise (AILAB-196).
+# Fat LTO and one codegen unit keep the stripped `dreamd` under the NFR-2 size
+# gate (`MAX_BYTES` in ci.yml); the default profile measured about 20.5 MB
+# (AILAB-196).
 [profile.release]
 lto = "fat"
 codegen-units = 1

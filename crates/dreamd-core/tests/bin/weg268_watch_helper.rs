@@ -1,9 +1,9 @@
 //! Test-only helper binary for the WEG-268 SIGTERM socket-cleanup regression
 //! test.
 //!
-//! NOT a shipping binary: `Cargo.toml` flags it `test = false, bench = false,
-//! doc = false`, and it lives under `tests/bin/`. Compiled only when the
-//! dreamd-core test suite is built.
+//! Not a shipping binary: `Cargo.toml` flags it `test = false, bench = false,
+//! doc = false`, it lives under `tests/bin/`, and no release artifact
+//! includes it.
 //!
 //! Usage: `weg268_watch_helper <project-root>`
 //!
@@ -13,10 +13,11 @@
 //! home; the parent then polls for that socket, delivers SIGTERM, and asserts
 //! the socket is gone after the daemon exits.
 
-// AILAB-174: was `#![cfg(unix)]`, which strips the whole crate on Windows —
-// including `main` — so the `[[bin]]` target failed with `E0601: main function
-// not found` rather than being skipped. Gate the items instead and give `main`
-// a `not(unix)` twin. `run_watch` itself stays Unix-only (DR-121 / AILAB-203).
+// AILAB-174: the helper is Unix-only because its test signals the daemon with
+// SIGTERM and checks the UDS socket; `run_watch` itself also runs on Windows.
+// Items are gated individually and `main` has a `not(unix)` twin, because a
+// crate-level `#![cfg(unix)]` strips `main` on Windows and the `[[bin]]` build
+// fails with `E0601: main function not found`.
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -58,6 +59,6 @@ fn main() -> ExitCode {
 /// consumer, `tests/weg268_sigterm_socket.rs`, is `#![cfg(unix)]`.
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
-    eprintln!("weg268_watch_helper: unix-only test helper (DR-121)");
+    eprintln!("weg268_watch_helper: unix-only test helper");
     std::process::ExitCode::from(64)
 }

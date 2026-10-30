@@ -21,7 +21,7 @@
 //! edge, and keeps them in memory (BZR-1243).
 //!
 //! The learn path never opens the ledger. The reserved vector kind in the
-//! format has no variant here: a writer MUST NOT emit it. This module has no
+//! format has no variant here: the format forbids writing it. This module has no
 //! signature and no key. `dreamd forget --proof` writes a forget receipt
 //! (BZR-151) and does not write the signed membership proof.
 //!
@@ -71,12 +71,16 @@ impl Kind {
     }
 }
 
+/// Errors from appending to or verifying the provenance ledger.
 #[derive(Debug, thiserror::Error)]
 pub enum ProvenanceError {
+    /// Opening, reading, writing or syncing the ledger failed.
     #[error("provenance ledger io: {0}")]
     Io(#[from] io::Error),
+    /// An edge could not be serialized as a ledger line.
     #[error("provenance ledger encode: {0}")]
     Encode(#[from] serde_json::Error),
+    /// `verify` could not read the episodic log it checks edges against.
     #[error("provenance verify: episodic log: {0}")]
     Episodic(#[from] EpisodicError),
 }
@@ -342,7 +346,7 @@ fn classify(line: &VerifyLine) -> LineClass {
                 && !line.to.is_empty()
                 && !line.to.chars().any(char::is_whitespace)
         }
-        // Reserved: a writer MUST NOT emit it, so its presence is corruption.
+        // Reserved: the format forbids writing it, so its presence is corruption.
         "embedding" => false,
         _ => return LineClass::UnknownKind,
     };
@@ -604,10 +608,9 @@ mod tests {
         assert!(!dir.path().join("provenance").exists());
     }
 
-    /// V12 (BZR-1230 audit): appends from several threads at once all land,
-    /// each as one whole line. Before the shared appender, every call opened
-    /// its own fd and wrote at the end it had seen, so two writers could land
-    /// on one offset, and one's tail repair could cut the other's line.
+    /// Appends from several threads at once all land, each as one whole line:
+    /// the one shared appender serializes them, so no two writers land on one
+    /// offset and no tail repair cuts another's line (BZR-1236).
     #[test]
     fn ledger_appends_from_many_threads_keep_every_line() {
         use std::sync::Barrier;
@@ -729,7 +732,7 @@ mod tests {
         assert_eq!(lesson_edges(&file, true), Vec::new());
     }
 
-    // ---- verify (BZR-148) ----
+    // ── verify (BZR-148) ───────────────────────────────────────────────────
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         use sha2::{Digest, Sha256};

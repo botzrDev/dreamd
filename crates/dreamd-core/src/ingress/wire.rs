@@ -2,7 +2,7 @@
 //!
 //! Field units and stamping rules live here so both surfaces stay identical.
 //! Daemon-minted fields (`id`, `timestamp`) are never trusted from the client
-//! on learn; see [`crate::ingress::learn`].
+//! on learn; see [`LearnIngress`](crate::ingress::LearnIngress).
 
 use crate::coordinator::AppendOutcome;
 
@@ -31,7 +31,8 @@ impl LearnResponse {
     }
 }
 
-/// Query params / tool args for recall (`GET /api/v1/recall`, MCP `search_nodes`).
+/// Query params for `GET /api/v1/recall`. MCP `search_nodes` takes its own
+/// `mcp::SearchNodesParams` (`query`, `k`).
 #[derive(serde::Deserialize)]
 pub struct RecallParams {
     /// Free-text BM25 query.

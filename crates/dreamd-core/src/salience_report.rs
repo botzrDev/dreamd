@@ -90,14 +90,19 @@ struct SnapshotMean {
     mean: f64,
 }
 
+/// Why [`build_report`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
+    /// Scanning the index, or building its recurrence table, failed.
     #[error("index scan failed: {0}")]
     Search(#[from] tantivy::TantivyError),
+    /// Writing the day's snapshot failed.
     #[error("snapshot write failed: {0}")]
     Io(#[from] std::io::Error),
+    /// Encoding the day's snapshot failed.
     #[error("snapshot encode failed: {0}")]
     Json(#[from] serde_json::Error),
+    /// `now_sec` is outside the range a calendar date can represent.
     #[error("timestamp {0} is out of range")]
     Timestamp(i64),
 }

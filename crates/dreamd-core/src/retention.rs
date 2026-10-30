@@ -28,23 +28,28 @@ pub const OBJECT_GC_GRACE: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RetentionError {
+    /// Reading, listing or removing a path under `branches/` failed.
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
+    /// `branches/HEAD` names neither a ref nor an object id.
     #[error("HEAD {path}: line 1 is neither `ref: refs/<name>` nor a 64-hex object id")]
     BadHead { path: PathBuf },
+    /// A ref file's first line is not an object id.
     #[error("ref {path}: line 1 is not a 64-hex object id")]
     BadRef { path: PathBuf },
+    /// The `branches/bisect` state could not be read.
     #[error("bisect state: {0}")]
     Bisect(#[from] BisectError),
 }
 
 /// Log a retention step that failed; a committed cycle never fails on one.
 /// `commit` calls this on both sides of the commit, so there is one
-/// `tracing::warn!` site, not two (BZR-1245 r1, NFR-2).
+/// `tracing::warn!` site, not two (each site counts against the release size
+/// gate).
 pub(crate) fn warn_skipped(e: &RetentionError, what: &str) {
     tracing::warn!(error = %e, "{what}");
 }
@@ -154,7 +159,8 @@ pub fn plan_ref_prune(agent_root: &AgentRoot, staged: &str) -> Result<Vec<String
 
 /// Insert `name` into the sorted, duplicate-free `names` unless it is there.
 /// Not a `BTreeSet`: nothing else in the binary sorts `String`s, and the
-/// generic code one linked here cost 17,632 bytes (BZR-1245 r1, NFR-2).
+/// generic code one linked here cost 17,632 bytes against the release size
+/// gate (BZR-1245).
 fn insert_sorted(names: &mut Vec<String>, name: &str) {
     if let Err(at) = names.binary_search_by(|n| n.as_str().cmp(name)) {
         names.insert(at, name.to_string());
@@ -433,7 +439,7 @@ mod tests {
     }
 
     /// A ref being written lands as a dot-prefixed temp file before its rename,
-    /// so the object it names must survive (BZR-1245 Amendment 3, test 21).
+    /// so the object it names must survive (BZR-1245).
     #[test]
     fn gc_keeps_the_object_a_dot_prefixed_temp_ref_names() {
         let (_dir, root) = scaffold();

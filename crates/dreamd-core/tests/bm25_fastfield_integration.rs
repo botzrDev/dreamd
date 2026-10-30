@@ -1,9 +1,9 @@
-//! WEG-46 / DR-206 — BM25 + FastField integration test.
+//! WEG-46 — BM25 + FastField integration test.
 //!
 //! Backs the wedge claim "recent painful important learnings outrank stale
 //! benign ones on identical lexical-match queries" with a green CI check.
-//! Uses the DR-922 demo-corpus fixture; canonical expectations live in
-//! `tests/fixtures/demo-corpus/EXPECTED.md`. First consumer of that fixture.
+//! Uses the demo-corpus fixture; canonical expectations live in
+//! `tests/fixtures/demo-corpus/EXPECTED.md`.
 //!
 //! Per-query assertion layers:
 //!   1. ordering (strict for Query A; set membership for Query B — see
@@ -33,8 +33,8 @@ use dreamd_core::{recall, RecallReader, RecallResult};
 const NOW_SEC: i64 = 1_780_401_600;
 
 // Top-3 result IDs from EXPECTED.md (2026-05-16 amendment), keyed by
-// timestamp_sec for unique matching against RecallResult (the schema
-// doesn't STORE the ULID).
+// timestamp_sec for unique matching against RecallResult (the fixture docs
+// carry no `event_id`).
 const E1_TS: u64 = 1_780_228_800; // 2026-05-31T12:00:00Z, evt_01JR05311200... (result_vs_panic)
 const E2_TS: u64 = 1_780_052_400; // 2026-05-29T11:00:00Z, evt_01JR05291100... (tokio_select_branches)
 const E3_TS: u64 = 1_779_699_600; // 2026-05-25T09:00:00Z, evt_01JR05250900... (thiserror_derive)
@@ -117,7 +117,7 @@ fn bm25_by_content(
     let searcher = reader.searcher();
     let parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
     let query = parser.parse_query(query_text).expect("parse query");
-    // Tantivy 0.26: `TopDocs::with_limit` is a builder; `.order_by_score()`
+    // In the pinned Tantivy, `TopDocs::with_limit` is a builder; `.order_by_score()`
     // produces the `Collector<Fruit = Vec<(Score, DocAddress)>>` impl.
     let hits = searcher
         .search(&query, &TopDocs::with_limit(limit).order_by_score())
@@ -136,7 +136,7 @@ fn bm25_by_content(
 }
 
 /// Recompute salience from a `RecallResult`'s fastfield-cached values
-/// (NOT from `result.score` — that would tautologically pass the
+/// (not from `result.score` — that would tautologically pass the
 /// decomposition check). Inputs flow: index FastFields → SalienceCollector
 /// → RecallResult → here → `salience()` → assert.
 fn recompute_salience(r: &RecallResult) -> f64 {

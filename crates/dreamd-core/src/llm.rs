@@ -1,4 +1,4 @@
-//! AILAB-204 / DR-304 — LLM client wrapper with deterministic auto-fallback.
+//! LLM client wrapper with deterministic auto-fallback (AILAB-204).
 //!
 //! The dream cycle composes `LESSONS.md` bodies through an [`LlmBackend`] when
 //! credentials are present, and silently runs the deterministic exemplar-copy
@@ -6,14 +6,11 @@
 //! error path here is a fallback signal, not a cycle error. Callers translate
 //! `Err` / empty text into [`crate::consolidation::LessonBodySource::Deterministic`].
 //!
-//! Since AILAB-201 this module also owns the composition prompt itself:
+//! This module also owns the composition prompt itself (AILAB-201):
 //! [`crate::llm::LESSON_PROMPT`] and the [`crate::llm::VERSIONED_PROMPT_ID`]
-//! stamped on every LLM-composed `LESSONS.md`. (Paths are fully qualified
-//! because `lib.rs` carries an outer doc comment on `pub mod llm;`, which makes
-//! rustdoc resolve this block in `lib.rs` scope — the same trap the unresolved
-//! `LlmBackend` link on the line above has been sitting in.)
+//! stamped on every LLM-composed `LESSONS.md`.
 //!
-//! Since AILAB-196 it also owns the **pre-call** cost estimate behind
+//! It also owns the **pre-call** cost estimate (AILAB-196) behind
 //! `cost_cap_usd`: [`crate::llm::estimate_prompt_cost`] prices the prompt with a
 //! bundled tokenizer and [`crate::llm::exceeds_cap`] compares that to the
 //! configured cap. Both are pure functions — they decide nothing. The abort
@@ -24,26 +21,27 @@
 //! tested without a backend, and what keeps the count from being re-run per
 //! retry attempt.
 //!
-//! Since AILAB-199 it also owns [`crate::llm::load_personal_prompt_context`],
+//! It also owns [`crate::llm::load_personal_prompt_context`] (AILAB-199),
 //! the reader that turns `.agent/personal/` into prompt bytes. The reader is
 //! here rather than in `dream_cycle` for the same reason the cost estimate is:
 //! it is a pure input-shaping function with no authority to run. Whether it is
 //! *called* is `dream_cycle::compose_lesson_body`'s decision, gated on the
 //! per-call `--share-personal` consent, and default-off.
 //!
-//! ## What this module does NOT own
+//! ## What this module does not own
 //!
 //! * Redaction of the JSONL event bodies it forwards. `build_lesson_prompt`
-//!   still includes them verbatim — AILAB-199 governs the **personal layer**,
-//!   which this module now excludes by default and appends only on consent.
+//!   includes them verbatim. The consent gate (AILAB-199) covers only the
+//!   **personal layer**, which this module excludes by default and appends
+//!   only on consent.
 //!
 //! ## Credentials
 //!
 //! Environment first (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`), else
 //! `~/.config/dreamd/secrets.toml` at mode `0600`. A world- or group-readable
 //! secrets file is **ignored with a warning**, never parsed. There is no OS
-//! keychain path at v0.1.1 (`docs/v0.1.1-scope.md` §6), and this module never
-//! writes or chmods the secrets file.
+//! keychain path (`docs/v0.1.1-scope.md`, "Resolved implementation
+//! decisions"), and this module never writes or chmods the secrets file.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -73,7 +71,7 @@ pub const VERSIONED_PROMPT_ID: &str = "dream-cycle/v1.2@2026-08-23";
 
 /// INFO line emitted when the cycle falls back for lack of credentials.
 ///
-/// The wording is the exact Linear AC phrase and is asserted by tests — it is
+/// The wording is fixed and asserted by tests — it is
 /// emitted even when the trigger is a missing/ill-permissioned `secrets.toml`
 /// rather than a missing env var, because to the operator the two are the same
 /// condition: dreamd has no key it is willing to use.
@@ -100,8 +98,10 @@ pub struct LlmCompletion {
 /// the cycle" — see the module docs.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
+    /// The request failed or timed out. The string says why.
     #[error("llm request failed: {0}")]
     Transport(String),
+    /// The model answered with no text, or only whitespace.
     #[error("llm empty completion")]
     Empty,
 }
@@ -167,7 +167,8 @@ pub fn secrets_toml_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("dreamd").join("secrets.toml"))
 }
 
-/// Snake_case key names, matching `docs/v0.1.1-scope.md` §6.
+/// Snake_case key names, matching `docs/v0.1.1-scope.md` ("Resolved
+/// implementation decisions").
 #[derive(Debug, Default, Deserialize)]
 struct SecretsToml {
     anthropic_api_key: Option<String>,
@@ -275,10 +276,9 @@ fn read_secrets_toml(path: &Path) -> Option<SecretsToml> {
 
 // ── Prompt ───────────────────────────────────────────────────────────────────
 
-/// Versioned instruction block (AILAB-201). Shape is dictated by
-/// `assignments/14-day-blitz.md` §"Lesson shape": rule first, one rejected
-/// alternative when the cluster shows one, never invent `evt_` ids, at most
-/// eight sentences.
+/// Versioned instruction block (AILAB-201). The lesson shape it asks for: rule
+/// first, one rejected alternative when the cluster shows one, never invent
+/// `evt_` ids, at most eight sentences.
 ///
 /// The bytes live in a `.txt` file rather than a string literal so a prompt edit
 /// is a reviewable one-file diff and so [`VERSIONED_PROMPT_ID`] names something a
@@ -288,7 +288,8 @@ fn read_secrets_toml(path: &Path) -> Option<SecretsToml> {
 ///
 /// A unit snapshot makes an edit here **loud**, not impossible — it fails review,
 /// but `cargo insta accept` will still land it with [`VERSIONED_PROMPT_ID`]
-/// stale. Moving the id is a reviewer's job, not the test harness's.
+/// stale. Whoever edits the prompt moves the id in the same commit; no test
+/// enforces it.
 pub const LESSON_PROMPT: &str = include_str!("prompts/v1.1.txt");
 
 /// Build the composition prompt for one promoted cluster.
@@ -316,7 +317,7 @@ pub fn build_lesson_prompt(cluster_key: &str, events: &[AgentLearning]) -> Strin
     s
 }
 
-// ── Personal layer (AILAB-199 / DR-310) ──────────────────────────────────────
+// ── Personal layer (AILAB-199) ───────────────────────────────────────────────
 
 /// Byte cap on personal-layer content handed to one consumer in one shot.
 ///
@@ -362,9 +363,9 @@ pub const PERSONAL_CONTEXT_HEADING: &str = "Personal (operator opted in with --s
 /// a WARN when over — the prompt is priced immediately after this returns
 /// (AILAB-196), so an unbounded read here would be an unbounded bill.
 pub fn load_personal_prompt_context(agent_root: &AgentRoot) -> Option<String> {
-    // Canonical `personal/` is both the directory we read and the containment
-    // yardstick below. `personal/` being a symlink itself is fine; a *member*
-    // resolving outside it is not.
+    // Canonical `personal/` is both the directory this reads and the
+    // containment yardstick below. `personal/` being a symlink itself is
+    // fine; a *member* resolving outside it is not.
     let canonical_dir = std::fs::canonicalize(agent_root.personal_dir()).ok()?;
 
     // (rank, file_name, resolved_path) — rank pins the two documented files to
@@ -440,7 +441,7 @@ pub fn load_personal_prompt_context(agent_root: &AgentRoot) -> Option<String> {
     Some(out)
 }
 
-// ── Cost estimate (AILAB-196 / DR-307) ───────────────────────────────────────
+// ── Cost estimate (AILAB-196) ────────────────────────────────────────────────
 
 /// Completion-token reserve. The prompt caps the lesson at 8 sentences; 512
 /// tokens is the conservative pre-call pad. Errs toward abort, not surprise bills.
@@ -560,7 +561,7 @@ pub fn exceeds_cap(estimate: &CostEstimate, cap_usd: f64) -> bool {
     cap_usd <= 0.0 || estimate.estimated_usd > cap_usd
 }
 
-// ── Citation gate (AILAB-200 / DR-306) ───────────────────────────────────────
+// ── Citation gate (AILAB-200) ────────────────────────────────────────────────
 
 /// Trailer key the prompt asks the model to end with.
 const CITATIONS_PREFIX: &str = "citations:";
@@ -596,10 +597,10 @@ pub fn split_citation_trailer(text: &str) -> Option<(String, Vec<String>)> {
     let prose = lines[..trailer_idx].join("\n").trim().to_string();
 
     // A *second* `citations:` line above the trailer is not prose. Stripping only
-    // the last one would store an unvalidated `citations: evt_…` line as the
-    // lesson body, which §1.5 forbids — and those ids never pass through
-    // `citations_are_valid`, so a hallucinated id would survive as indexed text.
-    // A doubled trailer is malformed input: fall back like any other.
+    // the last one would store an unvalidated `citations: evt_…` line in the
+    // lesson body. Its ids never pass through `citations_are_valid`, so a
+    // hallucinated id would survive as indexed text. A doubled trailer is
+    // malformed input: fall back like any other.
     if prose
         .lines()
         .rev()
@@ -802,7 +803,7 @@ impl LlmBackend for GenaiBackend {
 ///
 /// `None` is returned — and [`NO_API_KEY_FALLBACK`] logged at INFO — when no
 /// usable credential exists. This is the single place that decision is made on
-/// the production path, so the AC phrase has exactly one emitter.
+/// the production path, so the fallback line has exactly one emitter.
 pub fn resolve_backend(config: &Config) -> Option<GenaiBackend> {
     let key = match resolve_llm_credentials() {
         Some(k) => k,
@@ -883,7 +884,7 @@ pub(crate) mod fake {
     impl LlmBackend for FakeLlm {
         async fn complete(&self, _model: &str, prompt: &str) -> Result<LlmCompletion, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            // Record BEFORE the failure arm: a retried transport error still
+            // Record before the failure arm: a retried transport error still
             // sent these bytes, so a leak on a failing call is still a leak.
             *self
                 .last_prompt
@@ -1064,7 +1065,7 @@ mod tests {
         assert!(prompt.contains(events[0].id.as_str()));
         assert!(prompt.contains(events[1].id.as_str()));
         assert!(prompt.contains("unwrap panicked in the handler"));
-        // Shape contract from assignments/14-day-blitz.md.
+        // The lesson shape `LESSON_PROMPT` asks for.
         assert!(prompt.contains("Never invent an id."));
         assert!(prompt.contains("At most 8 sentences."));
         // AILAB-200: the trailer the citation gate parses is asked for by name.

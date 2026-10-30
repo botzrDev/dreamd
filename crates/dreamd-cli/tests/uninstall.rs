@@ -6,9 +6,9 @@
 //!   3. Quiet-mode output suppression (golden-file byte-lock contract).
 //!
 //! These tests exercise the public `init::uninstall_project` function
-//! directly (in-process), not via subprocess. Subprocess-level testing
-//! of the `--uninstall-project` flag is covered by the CLI help snapshot
-//! tests in `tests/snapshots/`.
+//! directly (in-process), not via subprocess. No subprocess test runs the
+//! `--uninstall-project` flag; the CLI help snapshot
+//! (`cli_help__init_help.snap`) pins only its help text.
 
 use std::io::Cursor;
 
@@ -161,7 +161,7 @@ fn quiet_uninstall_produces_no_output() {
     );
 }
 
-/// M4 (DR-421): registry.toml must be 0600 after a register write.
+/// registry.toml must be 0600 after a register write.
 #[cfg(unix)]
 #[test]
 fn register_project_registry_file_has_0600_perms() {
@@ -176,7 +176,7 @@ fn register_project_registry_file_has_0600_perms() {
     );
 }
 
-/// M4 (DR-421): uninstall rewrites registry.toml via write_atomic — perms must survive.
+/// Uninstall rewrites registry.toml via write_atomic — perms must survive.
 #[cfg(unix)]
 #[test]
 fn uninstall_project_registry_file_keeps_0600_perms() {

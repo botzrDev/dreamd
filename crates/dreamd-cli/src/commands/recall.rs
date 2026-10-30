@@ -1,12 +1,12 @@
-//! `dreamd recall <query>` — BM25 × salience recall as a markdown table (WEG-51 / DR-703).
+//! `dreamd recall <query>` — BM25 × salience recall as a markdown table (WEG-51).
 //!
 //! One-shot, read-only. Discovers the project `.agent/` store, opens the
 //! per-project Tantivy index **read-only** with [`tantivy::Index::open_in_dir`]
 //! (never the writer-spawning `TantivyIndexHandle` open constructor, which
 //! starts an indexer task that would race a live daemon), runs the shared
 //! [`dreamd_core::recall`] collector, and prints the top-k hits with a
-//! score-breakdown column layout. `--explain` appends the per-hit DR-204
-//! salience factor arithmetic.
+//! score-breakdown column layout. `--explain` appends the per-hit salience
+//! factor arithmetic.
 //!
 //! Modeled on [`crate::commands::archive`]: a typed error enum, [`AgentRoot::discover`]
 //! for root resolution, and injectable `out`/`err` writers for testability. The
@@ -15,8 +15,8 @@
 //!
 //! **Daemon lag caveat (correctness, not scope):** appends still buffered inside
 //! a live daemon may not yet be committed to the on-disk index, so a
-//! back-to-back append→recall can miss the newest event (same class of caveat as
-//! `dreamd doctor`'s watermark warning). This command reads the committed index
+//! back-to-back append→recall can miss the newest event (the gap `dreamd
+//! doctor`'s `index_freshness` line reports). This command reads the committed index
 //! directly; it does not proxy live recall over the daemon UDS.
 
 use std::io::Write;
@@ -24,21 +24,15 @@ use std::path::Path;
 
 use dreamd_core::collector::RecallExclusion;
 use dreamd_core::salience::clamp_score;
+use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
 use tantivy::{Index, ReloadPolicy};
-
-/// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
-///
-/// Mirrors `dreamd_core::server::tantivy_handle::INDEX_DIR_NAME`, which is
-/// `pub(crate)` and so not importable here. The canonical path is
-/// `AgentRoot::dreamd_dir().join(INDEX_DIR_NAME)` — identical to the path the
-/// daemon's `TantivyIndexHandle` opens.
-const INDEX_DIR_NAME: &str = "index";
 
 /// Max width of the rendered `content` cell, in characters. Longer text is
 /// truncated with a trailing `…` so the table stays screencast-readable.
 const CONTENT_WIDTH: usize = 60;
 
+/// Why a `dreamd recall` run failed.
 #[derive(Debug)]
 pub enum RecallError {
     /// No `.agent/` store found walking up from `cwd`.
@@ -71,13 +65,13 @@ impl std::fmt::Display for RecallError {
 
 impl std::error::Error for RecallError {}
 
-/// The six DR-204 salience factors for one hit, plus the two products the
-/// `--explain` block prints. `salience_product` must equal `RecallResult::salience`
-/// within float noise; `score` must equal `RecallResult::score`.
+/// The age and four salience factors for one hit, plus the two products the
+/// `--explain` block prints. `salience_product` equals `RecallResult::salience`
+/// bit-for-bit; `score` equals `RecallResult::score`.
 ///
 /// The arithmetic mirrors [`dreamd_core::salience::salience`] verbatim, including
 /// its input clamp (the `/ 10.0` shape is intentionally not factored out) so
-/// `--explain` reads the same as ARCHITECTURE.md decision #2 / PRD FR-4.2.
+/// `--explain` reads the same as ARCHITECTURE.md decision #2.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExplainFactors {
     /// Age in days, floored at 0.
@@ -96,7 +90,8 @@ pub struct ExplainFactors {
     pub score: f64,
 }
 
-/// Header row of the markdown table. Column order is locked by the AC (WEG-51):
+/// Header row of the markdown table. The column order is a fixed output
+/// contract (WEG-51):
 /// `rank, id, score, bm25, salience, age_days, pain, recurrence, content`.
 /// `importance` is deliberately absent — it appears only under `--explain`.
 const HEADER_LINE: &str =
@@ -112,7 +107,7 @@ fn age_days(now_sec: i64, timestamp_sec: u64) -> f64 {
     dreamd_core::salience::age_days(now_sec, timestamp_sec as i64)
 }
 
-/// Derive the DR-204 salience factor breakdown for one recall hit.
+/// Derive the salience factor breakdown for one recall hit.
 ///
 /// The arithmetic mirrors [`dreamd_core::salience::salience`] verbatim (same
 /// input clamp, same factor order, `/ 10.0` not factored out) so the printed
@@ -188,7 +183,7 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
 
     if explain {
         out.push('\n');
-        out.push_str("explain (DR-204 salience factors):\n");
+        out.push_str("explain (salience factors):\n");
         for (i, r) in results.iter().enumerate() {
             let rank = i + 1;
             let f = explain_factors(r, now_sec);
@@ -223,7 +218,7 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
 /// Discovers the store, opens the index read-only, runs the salience-scored
 /// recall, and writes the rendered report to `out`. Documents matching
 /// `exclusion` (`--without` / `--without-cluster`, BZR-194) are dropped before
-/// top-k; the index is opened read-only and never modified. `now_sec` is the query
+/// top-k. `now_sec` is the query
 /// instant (wall clock at the call site) used to derive `age_days` and the
 /// salience decay. Errors are written to `err` as `dreamd: error — …` and
 /// returned typed for exit-code mapping in `cli::run`.
@@ -297,7 +292,7 @@ mod tests {
     const DAY: i64 = 86_400;
 
     /// Build a synthetic `RecallResult` with `salience`/`score` set consistently
-    /// with the DR-204 formula, so `--explain` products can be checked against
+    /// with the salience formula, so `--explain` products can be checked against
     /// the stored fields.
     fn result(
         content: &str,
@@ -329,12 +324,12 @@ mod tests {
         "| rank | id | score | bm25 | salience | age_days | pain | recurrence | content |";
 
     #[test]
-    fn table_header_has_nine_ac_columns_in_order() {
+    fn table_header_has_nine_columns_in_order() {
         let out = render_report(&[], NOW_SEC, false);
         let header = out.lines().next().expect("at least a header line");
         assert_eq!(
             header, HEADER,
-            "column order/labels must match the AC exactly"
+            "the recall table must have these nine columns, in this order"
         );
         // `importance` is an --explain-only factor, never a table column.
         assert!(
@@ -532,7 +527,7 @@ mod tests {
             out.starts_with(HEADER),
             "explain output still leads with the table"
         );
-        // ...then a per-hit factor block naming the id and the DR-204 factors.
+        // ...then a per-hit factor block naming the id and the salience factors.
         assert!(
             out.contains("evt_01ARZ3NDEKTSV4RRFFQ69G5FAF"),
             "explain names the hit id"

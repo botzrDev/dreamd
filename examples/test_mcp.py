@@ -16,7 +16,6 @@ def main():
         cwd=os.getcwd(),
     )
 
-    # Send initialize request
     init_req = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -32,7 +31,6 @@ def main():
     proc.stdin.write(msg.encode())
     proc.stdin.flush()
 
-    # Read response line
     line = proc.stdout.readline()
     if not line:
         stderr = proc.stderr.read().decode()
@@ -42,7 +40,6 @@ def main():
     resp = json.loads(line.decode())
     print(f"Initialize response OK: {json.dumps(resp, indent=2)[:200]}")
 
-    # Send tools/list
     list_req = {
         "jsonrpc": "2.0",
         "id": 2,
@@ -61,7 +58,6 @@ def main():
     resp = json.loads(line.decode())
     print(f"tools/list response: {json.dumps(resp, indent=2)[:500]}")
 
-    # Send tools/call for search_nodes
     search_req = {
         "jsonrpc": "2.0",
         "id": 3,

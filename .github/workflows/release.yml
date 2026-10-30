@@ -25,9 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # asset_name matches the npx shim's platform target (see
-          # packages/dreamd-mcp/bin/dreamd-mcp.js getPlatformTarget); the shim
-          # downloads `<asset_name>.tar.gz` and extracts the `dreamd` binary.
+          # For the three Unix targets the shim downloads, asset_name matches the
+          # npx shim's platform target (see packages/dreamd-mcp/bin/dreamd-mcp.js
+          # getPlatformTarget); the shim downloads `<asset_name>.tar.gz` and
+          # extracts the `dreamd` binary.
           # Linux (GNU)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -48,7 +49,8 @@ jobs:
             os: macos-latest
             artifact_name: dreamd
             asset_name: darwin-aarch64
-          # Windows (deferred per Q6; asset name kept consistent with the shim)
+          # Windows: built and attached, but continue-on-error and not consumed
+          # by the shim (there is no prebuilt Windows `dreamd-mcp` target).
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact_name: dreamd.exe
@@ -175,8 +177,8 @@ jobs:
             ```
             ${{ steps.checksums.outputs.content }}
             ```
-          # Draft ensures we can review release notes and binaries before
-          # making them public.
+          # A draft leaves the release notes and binaries for human review
+          # before they go public.
           draft: true
           # Tags containing a hyphen (e.g. v0.1.0-rc1) are automatically
           # marked as prereleases to avoid breaking stable downstreams.

@@ -1,9 +1,8 @@
-//! Property tests for query-time salience scoring (WEG-47 / DR-207).
+//! Property tests for query-time salience scoring (WEG-47).
 //!
-//! Exercises [`dreamd_core::salience::salience`] over the valid input ranges
-//! mandated by the formula spec. Hand-written monotonicity spot checks in
-//! `salience.rs` were replaced by this generative suite so future formula
-//! tweaks cannot silently break ordering invariants.
+//! Exercises [`dreamd_core::salience::salience`] over the formula's valid
+//! input ranges (pain and importance in `[0, 10]`, any age and recurrence), so
+//! a formula change cannot silently break an ordering invariant.
 //!
 //! Properties under test:
 //! - Monotonic decreasing in `age_days` (holding pain, importance, recurrence).
@@ -133,7 +132,7 @@ fn check_monotonicity(case: MonotonicCase) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-// ── Edge cases (AC-mandated) ─────────────────────────────────────────────────
+// ── Edge cases ──────────────────────────────────────────────────────────────
 
 #[test]
 fn edge_zero_pain_produces_zero_score() {
@@ -161,8 +160,17 @@ fn edge_zero_recurrence_ln_factor_is_one() {
     );
 }
 
+/// 512 cases per run. `PROPTEST_CASES` overrides it, which is how the nightly
+/// workflow runs 1024; a fixed `with_cases(512)` would ignore that variable.
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
     /// Table-driven monotonicity over age (decreasing) and pain, importance,
     /// recurrence (non-decreasing).

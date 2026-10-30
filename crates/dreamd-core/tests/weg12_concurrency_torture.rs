@@ -1,15 +1,15 @@
 #![cfg(unix)]
 
-//! WEG-12 / DR-110 — concurrency torture test (1000 concurrent appends).
+//! WEG-12 — concurrency torture test (1000 concurrent appends).
 //!
 //! Fans out 1000 concurrent `AppendLearning` messages against a live in-process
-//! [`MemoryCoordinator`] (the DR-114 actor) and asserts durable DR-103 JSONL
+//! [`MemoryCoordinator`] (the single-writer actor) and asserts durable JSONL
 //! integrity: exact line count, every line parseable, all minted ids unique, and
 //! no torn tail. Runs both a small and a near-4-KiB "large" payload, each under a
 //! wall-clock budget (see `BUDGET_*` — WEG-511 widened the large budget after
 //! loaded CI runners flaked the 10s gate while durability still held).
 //!
-//! Locked to the DIRECT coordinator channel rather than the HTTP learn endpoint:
+//! Locked to the direct coordinator channel rather than the HTTP learn endpoint:
 //! the Supervisor's HTTP ingress uses a `try_send` with a 100 ms timeout and a
 //! capacity-256 channel, so a naïve 1000-way HTTP hammer races into `503 Full`
 //! and cannot assert "exactly 1000 lines". A direct `mpsc::Sender::send().await`
@@ -45,11 +45,11 @@ const BUDGET_SMALL: Duration = Duration::from_secs(10);
 
 /// Wall-clock budget for the near-4-KiB payload fan-out.
 ///
-/// WEG-511: the hard gate is durability (`assert_jsonl_intact`). The original
-/// shared 10s budget flaked on loaded ubuntu/windows CI runners (passed on
-/// rerun with no code change) because ~4 KiB × 1000 fsynced appends contend
-/// with the rest of the `cargo test` matrix. 60s keeps a regression signal
-/// without reddening main on runner starvation.
+/// WEG-511: the hard gate is durability (`assert_jsonl_intact`). About
+/// 4 KiB × 1000 fsynced appends contend with the rest of the `cargo test`
+/// matrix, and a shared 10s budget flaked on loaded CI runners with no code
+/// change. 60s keeps a regression signal without reddening main on runner
+/// starvation.
 const BUDGET_LARGE: Duration = Duration::from_secs(60);
 
 /// Serialize the two torture cases so they do not starve each other when
@@ -158,7 +158,7 @@ fn assert_jsonl_intact(path: &Path) {
 /// `\n`) is just under `MAX_LEARNING_LINE_BYTES` and comfortably over 3 KiB.
 /// Sized dynamically from the empty-content overhead, leaving headroom below the
 /// cap because the coordinator overwrites `timestamp` with `Utc::now()`, whose
-/// RFC3339 form can be longer than our fixed placeholder timestamp.
+/// RFC3339 form can be longer than the fixture's placeholder timestamp.
 fn large_content() -> String {
     let overhead = serde_json::to_string(&learning(String::new()))
         .expect("serialize probe")

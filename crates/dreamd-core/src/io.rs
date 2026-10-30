@@ -1,12 +1,12 @@
-//! Atomic file writes (DR-104 / WEG-8).
+//! Atomic file writes (WEG-8).
 //!
 //! [`write_atomic`] is the durable replace for the index sidecars, `state.json`,
 //! the dream cycle's redo WAL, and the one-shot CLI rewrites. It writes to
 //! `<path>.tmp`, `sync_data`s the bytes, renames into place, then flushes the
-//! parent directory ([`sync_dir`]). A dream cycle's own outputs are staged and
+//! parent directory (`sync_dir`). A dream cycle's own outputs are staged and
 //! committed by the redo WAL instead (`crate::stage`, `crate::wal`).
-//! `registry.toml` is the exception: [`replace_renaming`] is a temp-file rename
-//! with no parent flush, on every target.
+//! `registry.toml` off Unix is the exception: `replace_renaming` is a
+//! temp-file rename with no parent flush.
 //!
 //! The parent flush is the Unix call order. It is not a power-loss proof of
 //! the directory entry: on Windows `sync_all` is `FlushFileBuffers`, and a
@@ -15,9 +15,9 @@
 //! the rename leaves `path` untouched. A parent-flush error after the rename
 //! is still returned.
 //!
-//! Single-writer assumption holds: every mutation in v0.1 funnels through the
-//! `MemoryCoordinator` (ARCHITECTURE.md "Load-bearing engineering decisions" §1), so
-//! a fixed `.tmp` neighbour name is acceptable.
+//! Every process that writes a project's store first takes the project writer
+//! lock (`crate::writer_lock`, ARCHITECTURE.md "Load-bearing decisions" §1),
+//! so a fixed `.tmp` neighbor name is acceptable.
 //!
 //! [`lock_exclusive`] is the companion primitive for the files the single-writer
 //! assumption does *not* cover — `~/.agent/registry.toml` is written by any
@@ -37,7 +37,7 @@ const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 /// Flush the directory entry at `dir`.
 ///
 /// Unix opens the directory and `sync_all`s it. Windows opens it for read and
-/// write with [`FILE_FLAG_BACKUP_SEMANTICS`] and `sync_all`s that handle. The
+/// write with `FILE_FLAG_BACKUP_SEMANTICS` and `sync_all`s that handle. The
 /// Windows probe test calls this function, not a lookalike.
 pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(windows)]
@@ -102,7 +102,7 @@ pub(crate) fn write_atomic_with_hook(
 /// use [`write_atomic`]; Windows registry writes use this function.
 ///
 /// Compiled into Unix test builds so the rename can be checked without a
-/// Windows host. Production Unix registry writes still use [`write_atomic`].
+/// Windows host.
 #[cfg(any(test, not(unix)))]
 pub(crate) fn replace_renaming(path: &Path, contents: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
@@ -122,9 +122,8 @@ pub(crate) fn replace_renaming(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// not to the path: unlinking would let a process that already opened the old
 /// file keep a lock that a later process — which re-creates the path and gets
 /// a fresh file — cannot see, so both would enter the critical section at
-/// once. A stale zero-byte `*.lock` neighbour is the intended steady state,
-/// the same convention the Tantivy index lock follows
-/// (`tantivy-lock-file-no-rm-on-startup`).
+/// once. A stale zero-byte `*.lock` neighbor is the intended steady state,
+/// the same convention as the Tantivy index lock, which startup never removes.
 ///
 /// Unix takes `flock`; Windows takes `LockFileEx`. Both go through
 /// [`File::lock`](File::lock), which has been in std since 1.89.
@@ -142,7 +141,7 @@ impl Drop for ExclusiveLock {
 /// Take a blocking exclusive advisory lock on `path`, creating the lockfile if
 /// it is absent.
 ///
-/// Callers use this to serialize a read-modify-write over a *neighbouring*
+/// Callers use this to serialize a read-modify-write over a *neighboring*
 /// file (e.g. `registry.toml.lock` guarding `registry.toml`): [`write_atomic`]
 /// gives durability, not mutual exclusion, so two concurrent RMW cycles both
 /// read the same snapshot and the later `rename` silently drops the earlier
@@ -215,7 +214,7 @@ mod tests {
         assert!(tmp.exists(), ".tmp must remain after failure");
     }
 
-    /// Two threads contending on ONE lock path must not overlap inside the
+    /// Two threads contending on one lock path must not overlap inside the
     /// critical section. Each thread stamps a shared cell with its own id,
     /// sleeps while holding the guard, then checks the stamp is still its own;
     /// without mutual exclusion the other thread overwrites it mid-sleep.

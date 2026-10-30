@@ -1,4 +1,4 @@
-//! `dreamd dream` — deterministic dream cycle from the CLI.
+//! `dreamd dream` — run a dream cycle from the CLI.
 //!
 //! ## Execution modes
 //!
@@ -6,9 +6,16 @@
 //!    `POST /api/v1/dream` over the UDS. Returns early on HTTP 409 (cycle in progress).
 //! 2. **In-process** (no daemon, or `--no-commit`): runs the full cycle via
 //!    [`dreamd_core::dream_cycle::run_in_process`], the in-process caller of
-//!    [`dreamd_core::dream_cycle::run_guarded_cycle`].
+//!    [`dreamd_core::dream_cycle::run_guarded_cycle`]. It takes the project
+//!    writer lock first, so `--no-commit` against a live daemon refuses instead
+//!    of running a second writer.
 //!
-//! `--no-commit` is the ONLY flag that skips the proxy. `--no-llm` (AILAB-204)
+//! Off Unix there is no proxy (`try_proxy_to_daemon` is Unix-only): the command
+//! always runs in-process, and refuses at the writer lock while a daemon holds
+//! the project.
+//!
+//! `--no-commit` and `--dry` (below) are the only flags that skip the proxy.
+//! `--no-llm` (AILAB-204)
 //! travels *through* it as the `x-dreamd-no-llm: 1` header — skipping the daemon
 //! to honor it locally would run a second writer against a JSONL the daemon's
 //! coordinator owns. `--share-personal` (AILAB-199) follows the same rule, as
@@ -30,6 +37,9 @@
 //! is a write by definition, so proxying a dry run would perform the very
 //! mutation the flag exists to avoid (AILAB-341). `--no-commit` is meaningless
 //! alongside `--dry` and is ignored rather than rejected.
+//!
+//! `--auto` is deprecated (BZR-1245); `cli.rs` prints the notice and this
+//! module never sees the flag.
 
 use std::fmt;
 use std::io::Write;
@@ -41,7 +51,10 @@ use dreamd_core::dream_cycle::{self, DreamCycleError};
 /// Errors produced by the `dreamd dream` command.
 #[derive(Debug)]
 pub enum DreamCliError {
+    /// The in-process cycle failed, including a refusal at the writer lock.
     DreamCycle(DreamCycleError),
+    /// Failure writing output or building the proxy's runtime, or a
+    /// `SOURCE_DATE_EPOCH` that is not an integer.
     Io(std::io::Error),
     /// HTTP 409 from the daemon — a cycle is already running for this project.
     DaemonInProgress,
@@ -95,9 +108,9 @@ pub fn run(
     no_llm: bool,
     share_personal: bool,
 ) -> Result<(), DreamCliError> {
-    // WEG-271 fast-follow: if a daemon owns this project, proxy the cycle to it
-    // (one writer). --no-commit always runs in-process (determinism / commit
-    // semantics the HTTP API can't express). `no_llm` is passed INTO the proxy,
+    // If a daemon owns this project, proxy the cycle to it (one writer,
+    // WEG-271). --no-commit always runs in-process (determinism / commit
+    // semantics the HTTP API can't express). `no_llm` is passed into the proxy,
     // never AND-ed into this condition.
     #[cfg(unix)]
     if !no_commit {
@@ -130,7 +143,7 @@ pub fn run(
 /// `Ok(Some(()))` → the daemon ran it (caller returns success). `Ok(None)` →
 /// no daemon owns this project (socket unresolved, unreachable, or 404
 /// not-registered); the caller runs the in-process cycle. `Err(..)` → a 409
-/// (cycle already running) or a genuine proxy failure; the caller must NOT run
+/// (cycle already running) or a genuine proxy failure; the caller must not run
 /// in-process (that would race the coordinator).
 #[cfg(unix)]
 fn try_proxy_to_daemon(
@@ -175,7 +188,7 @@ pub enum DryOutcome {
 /// Preview the dream cycle and write nothing (AILAB-341).
 ///
 /// Writes the `LESSONS.md` bytes a real cycle would persist to `out` when a
-/// cluster promotes, so the founder can diff composed prose against the raw
+/// cluster promotes, so the operator can diff composed prose against the raw
 /// JSONL without mutating `.agent/`. Stdout carries only those bytes — the
 /// human-facing banner is the caller's, on stderr — so the preview stays
 /// pipe-clean. Under `no_llm` the bytes are reproducible and a subsequent real

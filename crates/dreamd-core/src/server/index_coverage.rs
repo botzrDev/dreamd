@@ -5,7 +5,7 @@
 //! side, the alive `evt_` terms of the `event_id` field on the other, both
 //! keyed by the 26-byte ULID body.
 //!
-//! [`cover`] closes the difference on a writer: it adds log ids the index does
+//! `cover` closes the difference on a writer: it adds log ids the index does
 //! not hold, re-adds ids with more than one alive document, and deletes indexed
 //! ids the log does not hold. `TantivyIndexHandle::open` runs it at every open,
 //! and the indexer task runs it on `IndexerMsg::Resync`. Neither a watermark nor
@@ -37,6 +37,8 @@ const MASS_DELETE_FLOOR: usize = 64;
 /// The 26-byte ULID body of an `evt_` id. Both sides of the difference use it.
 pub(crate) type IdKey = [u8; 26];
 
+/// The index side of the difference: what one scan of the `event_id` terms
+/// found.
 #[derive(Debug, Default)]
 pub(crate) struct Indexed {
     /// Alive episodic docs per id.

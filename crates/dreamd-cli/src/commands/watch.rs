@@ -1,4 +1,4 @@
-//! `dreamd watch` — foreground daemon mode (WEG-88 / DR-702).
+//! `dreamd watch` — foreground daemon mode (WEG-88).
 //!
 //! Thin CLI wrapper around [`dreamd_core::server::run_watch`]. One `run` for
 //! every target: the watch command boots a per-project Supervisor against
@@ -16,7 +16,6 @@
 //!   start failure (exit 1), because that token is the listener's only auth.
 //!   It blocks until Ctrl-C.
 //!
-//!
 //! `--bind <ADDR>` / `--insecure` (AILAB-197) configure that TCP listener only.
 //! `--bind` is an IP literal with an optional port, parsed here so that a
 //! hostname is a usage error (exit 2) rather than a DNS lookup. A non-loopback
@@ -25,7 +24,8 @@
 //!
 //! `dreamd watch` is the foreground form of the daemon. OS-level service
 //! registration is `dreamd service install`, which supervises this same
-//! foreground process (systemd `--user` on Linux, a LaunchAgent on macOS).
+//! foreground process (systemd `--user` on Linux, a LaunchAgent on macOS, a
+//! logon scheduled task on Windows).
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -39,7 +39,7 @@ use crate::cli::WatchArgs;
 ///
 /// Blocks until a shutdown signal or a fatal server error. Returns exit code 0
 /// on clean shutdown, 2 for an unparseable `--bind`, otherwise
-/// [`exit_code_for`]'s verdict.
+/// `exit_code_for`'s verdict.
 pub fn run(cwd: &Path, args: &WatchArgs) -> ExitCode {
     let listen = match listen_from_args(args) {
         Ok(listen) => listen,
@@ -176,6 +176,8 @@ mod tests {
         );
     }
 
+    /// A WAL with an unknown format, a bad redo path or invalid JSON gets the
+    /// `doctor --repair` hint; a lock held by another writer does not.
     #[test]
     fn watch_names_doctor_repair_for_an_unreadable_wal() {
         use dreamd_core::wal::WalError;

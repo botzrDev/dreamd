@@ -8,37 +8,32 @@
 //! — nothing in this module resolves `~` on its own, so tests never touch the
 //! real `~/.agent`, `~/.cache`, or npx cache.
 //!
-//! **The stop pass is no longer machine-global (AILAB-584).** It used to shell
-//! out to the manual README recipe's bare `pkill -f 'dreamd mcp'` / `pkill -f
-//! 'dreamd watch'`, which signals *every* matching process on the box
-//! regardless of whose home it serves. The 2026-08-03 clean-box audit caught
-//! that (AILAB-554 F1): a sandboxed `HOME=/tmp/… dreamd update` SIGTERMed the
-//! developer's real Cursor `dreamd mcp`. The pass now enumerates candidates,
-//! keeps the ones that are the `dreamd` binary ([`is_dreamd_binary`]) *and*
-//! whose full argv matches [`STOP_PATTERNS`], **attributes** each to this
-//! invocation's [`StopScope`], and signals only those. When attribution says no
-//! — including when the attribution data is unreadable (another user's
-//! `/proc/<pid>/environ` is EACCES) — the process is left running with a stderr
-//! warning and [`StopReport::spared`] set. Failing to stop a daemon is
-//! recoverable in one command; killing another home's daemon is not.
+//! **The stop pass is scoped to this invocation (AILAB-584).** It enumerates
+//! candidates, keeps the ones that are the `dreamd` binary
+//! (`is_dreamd_binary`) *and* whose full argv matches [`STOP_PATTERNS`],
+//! **attributes** each to this invocation's [`StopScope`], and signals only
+//! those. A bare `pkill -f 'dreamd mcp'` would signal every matching process on
+//! the box, whatever home it serves. When attribution says no — including when
+//! the attribution data is unreadable (another user's `/proc/<pid>/environ` is
+//! EACCES) — the process is left running with a stderr warning and
+//! [`StopReport::spared`] set. Failing to stop a daemon is recoverable in one
+//! command; killing another home's daemon is not.
 //!
-//! Three of those guards came out of the adversarial review of the first cut,
-//! and each has a test below: the argv substring alone made candidates of
-//! shells and `grep`s that merely quote `dreamd watch`; [`attributable`] took
-//! its scope on faith, so an empty or relative `cache_dir` (what
-//! `$HOME/.cache/dreamd-mcp` collapses to under an *empty* `$HOME`) attributed
-//! foreign processes via `Path::starts_with`; and a spared process was reported
-//! to the command modules as "nothing was running".
+//! Three guards keep the pass from widening, and each has a test below: a
+//! process must be the `dreamd` binary, not a shell or `grep` that merely
+//! quotes `dreamd watch`; `attributable` rejects an empty or relative
+//! `cache_dir` (what `$HOME/.cache/dreamd-mcp` collapses to under an *empty*
+//! `$HOME`) instead of trusting it with `Path::starts_with`; and a spared
+//! process is reported as spared, never as "nothing was running".
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Full-argv substrings identifying a dreamd server process. Matched against
-/// the whole command line — the `pkill -f` semantics of the manual recipe,
-/// unchanged by AILAB-584 as the *match rule*. What changed is that the
-/// matched set is then filtered by [`StopScope`] attribution before anything
-/// is signalled. Deliberately two-token patterns: a bare `dreamd` would match
+/// the whole command line — the `pkill -f` semantics of the manual recipe —
+/// and the matched set is then filtered by [`StopScope`] attribution before
+/// anything is signaled. Deliberately two-token patterns: a bare `dreamd` would match
 /// unrelated invocations — including this very process, whose own argv
 /// (`dreamd uninstall` / `dreamd update`) matches neither entry.
 pub const STOP_PATTERNS: [&str; 2] = ["dreamd mcp", "dreamd watch"];
@@ -48,29 +43,28 @@ pub const STOP_PATTERNS: [&str; 2] = ["dreamd mcp", "dreamd watch"];
 pub struct StopReport {
     /// Whether a stop was attempted at all (`false` on non-unix platforms).
     ///
-    /// Stays `true` when the pass ran but signalled nothing — including the
+    /// Stays `true` when the pass ran but signaled nothing — including the
     /// unresolvable-scope case. `update.rs` prints "this command does not stop
     /// them on Windows" on `!attempted`, which would be a false statement
     /// on a unix box that simply had nothing attributable to stop.
     pub attempted: bool,
     /// Whether at least one in-scope `dreamd mcp` / `dreamd watch` process was
-    /// actually signalled. A process that matched [`STOP_PATTERNS`] but was
+    /// actually signaled. A process that matched [`STOP_PATTERNS`] but was
     /// *not* attributable to this [`StopScope`] does not count — it is still
     /// running, so claiming otherwise would misreport the restart contract.
     pub matched: bool,
     /// Whether at least one candidate was **left running** — refused because it
     /// was not attributable to this [`StopScope`] (the normal case), or
-    /// signalled unsuccessfully. Either way it is still up, and every one is
+    /// signaled unsuccessfully. Either way it is still up, and every one is
     /// named on stderr with its own reason.
     ///
     /// Without this field `attempted && !matched` is ambiguous between "nothing
-    /// was running" and "something was running and we did not stop it", and
-    /// both command modules printed the former on exactly the scenario
-    /// AILAB-584 exists for: stdout claiming "no local `dreamd mcp` /
-    /// `dreamd watch` processes were running" directly above a stderr warning
-    /// naming the pid that is still running. `matched` and `spared` are
-    /// independent — a pass can stop this home's `watch` and spare another
-    /// home's `mcp` in the same sweep.
+    /// was running" and "something was running and was not stopped", and the
+    /// command modules would print "no local `dreamd mcp` / `dreamd watch`
+    /// processes were running" directly above a stderr warning naming a pid
+    /// that is still running. `matched` and `spared` are independent — a pass
+    /// can stop this home's `watch` and spare another home's `mcp` in the same
+    /// sweep.
     pub spared: bool,
 }
 
@@ -79,15 +73,14 @@ pub struct StopReport {
 /// fake so the suite never signals a real process (a live `dreamd watch` on a
 /// dev machine must survive `cargo test`).
 ///
-/// This alias deliberately did **not** grow a scope parameter in AILAB-584.
-/// Capturing the scope in the production closure keeps `update.rs`,
-/// `uninstall.rs`, and the fake stoppers in `tests/update_cmd.rs` /
-/// `tests/uninstall_cmd.rs` untouched by the scoping fix — the seam stays
-/// "give me somewhere to write warnings, tell me what happened".
+/// The alias takes no scope parameter: the production closure captures the
+/// scope, so `update.rs`, `uninstall.rs`, and the fake stoppers in
+/// `tests/update_cmd.rs` / `tests/uninstall_cmd.rs` share one seam — "here is
+/// somewhere to write warnings; report what happened".
 pub type Stopper<'a> = &'a mut dyn FnMut(&mut dyn Write) -> StopReport;
 
 /// The locations that make a running `dreamd mcp` / `dreamd watch` process
-/// *ours* for this invocation (AILAB-584).
+/// belong to this invocation (AILAB-584).
 ///
 /// Resolved by `cli.rs` from the same `$HOME` the rest of the command already
 /// uses, and injected — this module never reads the environment itself, so a
@@ -96,16 +89,15 @@ pub type Stopper<'a> = &'a mut dyn FnMut(&mut dyn Write) -> StopReport;
 /// nothing at all (see [`stop_local_servers`]).
 ///
 /// This is a plain public struct with no constructor, so a field can also be
-/// `Some` and *useless* — an empty or relative path. [`attributable`] rejects
+/// `Some` and *useless* — an empty or relative path. `attributable` rejects
 /// those itself rather than trusting the caller; see its doc comment.
 ///
-/// **No `socket` field, by decision.** The ticket says "`/proc/<pid>/environ`
-/// `HOME=` matches, **and/or** open socket" — one attribution signal is
-/// enough, and `home` already subsumes the socket case: a daemon started with
-/// a custom `$DREAMD_SOCK` still inherits this `$HOME`, so the HOME rule
-/// catches it, while a daemon under a *different* `$HOME` is precisely what we
-/// must not signal. Adding a socket field would mean walking `/proc/<pid>/fd`
-/// for no additional coverage.
+/// **There is no `socket` field.** One attribution signal is enough, and
+/// `home` already covers the socket case: a daemon started with a custom
+/// `$DREAMD_SOCK` still inherits this `$HOME`, so the HOME rule catches it,
+/// while a daemon under a *different* `$HOME` is precisely what must not be
+/// signaled. A socket field would mean walking `/proc/<pid>/fd` for no
+/// additional coverage.
 pub struct StopScope<'a> {
     /// This invocation's `$HOME`. A candidate matches when its own `HOME=`
     /// environment entry resolves to the same directory.
@@ -145,14 +137,14 @@ struct Candidate {
 /// that belong to `scope`.
 ///
 /// Enumerates the process table, keeps entries that are the `dreamd` binary
-/// ([`is_dreamd_binary`]) with a full argv matching [`STOP_PATTERNS`], and
-/// signals only those [`attributable`] to `scope`. Anything else that matched
+/// (`is_dreamd_binary`) with a full argv matching [`STOP_PATTERNS`], and
+/// signals only those `attributable` to `scope`. Anything else that matched
 /// is left running with a stderr warning naming the pid — see
-/// the module header for why "don't kill when unsure" is the ratified rule.
+/// the module header for why "don't kill when unsure" is the rule.
 /// The current process is skipped explicitly, and its own argv
 /// (`dreamd uninstall` / `dreamd update`) matches no pattern anyway. Nothing
 /// to stop is success (idempotent); a missing or failing `kill` degrades to a
-/// stderr warning, never an error — the same posture the old `pkill` path had.
+/// stderr warning, never an error.
 #[cfg(unix)]
 pub fn stop_local_servers(scope: &StopScope<'_>, err: &mut dyn Write) -> StopReport {
     let mut kill: fn(u32) -> std::io::Result<()> = signal_term;
@@ -177,9 +169,10 @@ pub fn stop_local_servers(scope: &StopScope<'_>, err: &mut dyn Write) -> StopRep
 
 /// The whole scoped stop pass, with both of its side-effecting edges injected:
 /// `proc_root` (the process table to scan) and `kill` (how a pid is
-/// signalled). [`stop_local_servers`] passes [`PROC_ROOT`] and
+/// signaled). [`stop_local_servers`] passes [`PROC_ROOT`] and
 /// [`signal_term`]; tests pass a synthetic proc tree and a recorder closure,
-/// so the AILAB-554 regression is covered without signalling anything real.
+/// so the cross-home case (AILAB-554) is covered without signaling anything
+/// real.
 #[cfg(unix)]
 fn stop_scoped(
     proc_root: &Path,
@@ -194,8 +187,8 @@ fn stop_scoped(
     };
 
     // Neither rule can fire, so every matching process would have to be taken
-    // on faith — which is exactly the machine-global behaviour AILAB-584
-    // removed. Say so up front, then fall through to the ordinary loop:
+    // on faith, which would make the stop machine-global again. Say so up
+    // front, then fall through to the ordinary loop:
     // `attributable` rejects every candidate anyway, so each one is spared *by
     // name* and `report.spared` stays honest. Returning early instead would
     // hand `update.rs` an `attempted && !matched && !spared` report, which it
@@ -217,11 +210,8 @@ fn stop_scoped(
             report.spared = true;
             // Describes *this invocation's* scope and nothing about the spared
             // process beyond its pid and which pattern it matched. Printing the
-            // foreign process's `HOME=` or executable path (as this warning did
-            // before AILAB-584 phase 3) both mislabelled the values — the
-            // format string said "this $HOME" and passed the *other* home — and
-            // handed every user on a shared box a partial inventory of every
-            // other user's dreamd servers.
+            // foreign process's `HOME=` or executable path would hand every
+            // user on a shared box an inventory of other users' dreamd servers.
             let _ = writeln!(
                 err,
                 "dreamd: warning — left `{label}` pid {pid} running: not attributable to \
@@ -258,12 +248,10 @@ fn stop_scoped(
 /// Render one half of *this invocation's* [`StopScope`] for a warning line, so
 /// a `$HOME`-less environment reads as a stated fact rather than a blank.
 ///
-/// "unresolved" and not "unreadable": the value being described is our own
-/// resolution of `$HOME` / `~/.cache/dreamd-mcp`, never anything read out of
-/// another process. The pre-phase-3 wording rendered `this $HOME (unreadable)`
-/// from a *candidate's* unreadable `/proc/<pid>/environ`, which read as "your
-/// HOME is unreadable" — a statement about the user's own box that was never
-/// true.
+/// "unresolved" and not "unreadable": the value being described is this
+/// invocation's own resolution of `$HOME` / `~/.cache/dreamd-mcp`, never
+/// anything read out of another process, so the word must not suggest the
+/// user's own home is unreadable.
 #[cfg(unix)]
 fn describe_scope(path: Option<&Path>) -> String {
     match path {
@@ -274,7 +262,7 @@ fn describe_scope(path: Option<&Path>) -> String {
 
 /// `true` iff a process's full argv (arguments joined by spaces) contains one
 /// of the [`STOP_PATTERNS`] — the same rule the manual `pkill -f` recipe
-/// applies, now used to pick *candidates* rather than to pick kill targets.
+/// applies, used here to pick *candidates* rather than kill targets.
 #[cfg(unix)]
 fn argv_matches(joined_argv: &str) -> bool {
     matched_pattern(joined_argv).is_some()
@@ -292,7 +280,7 @@ fn matched_pattern(joined_argv: &str) -> Option<&'static str> {
 }
 
 /// `true` iff a matched process belongs to `scope` and may therefore be
-/// signalled. Pure: all three inputs are already-read facts, so the decision
+/// signaled. Pure: all three inputs are already-read facts, so the decision
 /// is unit-testable without a process table.
 ///
 /// Either rule is sufficient:
@@ -303,8 +291,8 @@ fn matched_pattern(joined_argv: &str) -> Option<&'static str> {
 ///   also covers a daemon on a custom `$DREAMD_SOCK` and a cargo-installed
 ///   `dreamd watch` whose exe is nowhere near the shim cache.
 ///
-/// Neither holding — including "we could not read the process's exe or
-/// environ" — is a deliberate `false`. See the module header.
+/// Neither holding — including "the process's exe or environ could not be
+/// read" — is a deliberate `false`. See the module header.
 ///
 /// **A degenerate scope field is rejected here, not just at the caller.**
 /// [`StopScope`] is a plain public struct anyone can build, and both rules go
@@ -315,9 +303,8 @@ fn matched_pattern(joined_argv: &str) -> Option<&'static str> {
 ///   `$HOME/.cache/dreamd-mcp` collapses to when `$HOME` is set but empty) is
 ///   canonicalized by [`path_starts_with`] against *this process's* cwd, so a
 ///   foreign process whose exe happens to sit under `$PWD/.cache/dreamd-mcp`
-///   attributes. That is the AILAB-584 cross-home kill re-opened by a blank
-///   environment variable, and it was reproduced under `env HOME= dreamd
-///   update` before this guard existed.
+///   attributes — a cross-home kill opened by a blank environment variable
+///   (`env HOME= dreamd update`).
 ///
 /// `cli.rs` already filters an empty `$HOME` to `None` at the one place it
 /// reads the environment (`home_dir`), so on the production path these
@@ -355,7 +342,7 @@ fn attributable(exe: Option<&Path>, proc_home: Option<&Path>, scope: &StopScope<
 /// opened on a file whose name contains the phrase, and the interactive shell
 /// that ran `dreamd watch; dreamd update` (its own cmdline carries the whole
 /// line). Every one of those is attributable — same `$HOME`, same user — so
-/// attribution cannot save them; before AILAB-584 phase 3 they were signalled.
+/// attribution cannot exclude them; this check does.
 ///
 /// The rule is the **file name** of the resolved `exe`, or the file name of
 /// `argv[0]`. Either is enough, which is what makes this incapable of sparing a
@@ -364,12 +351,12 @@ fn attributable(exe: Option<&Path>, proc_home: Option<&Path>, scope: &StopScope<
 ///   basename is `dreamd`, whatever tree it was installed into;
 /// - `setup::spawn_watch` spawns `Command::new(std::env::current_exe()?)` with
 ///   `.arg("watch")`, so `argv[0]` is the absolute path of the dreamd binary
-///   and its basename is `dreamd` too — verified by reading `spawn_watch`;
+///   and its basename is `dreamd` too;
 /// - a binary replaced in place (the `dreamd update` path) has `/proc/<pid>/exe`
 ///   reading `…/dreamd (deleted)`, and `argv[0]` still carries the plain name.
 ///
-/// A process the exe of which we cannot read *and* whose `argv[0]` is not
-/// `dreamd` could never have been signalled anyway: with `/proc/<pid>/exe`
+/// A process whose exe cannot be read *and* whose `argv[0]` is not
+/// `dreamd` could never have been signaled anyway: with `/proc/<pid>/exe`
 /// unreadable the cache rule cannot fire, and `/proc/<pid>/environ` is
 /// unreadable under the same EACCES, so the home rule cannot either.
 #[cfg(unix)]
@@ -458,7 +445,7 @@ fn collect_candidates(proc_root: &Path, scope: &StopScope<'_>) -> Vec<Candidate>
 ///
 /// Skips this process (a `dreamd update` must never signal itself), any entry
 /// whose `cmdline` is unreadable or empty — kernel threads have an empty
-/// `cmdline`, and a command line we cannot read cannot be matched — and
+/// `cmdline`, and an unreadable command line cannot be matched — and
 /// anything that is not the `dreamd` binary ([`is_dreamd_binary`]), which is
 /// what keeps a shell or a `grep` that merely quotes `dreamd watch` out of the
 /// candidate set. Sorted by pid so warning output is deterministic.
@@ -489,7 +476,7 @@ fn collect_candidates_in(proc_root: &Path) -> Vec<Candidate> {
             continue;
         }
         // `read_link` returns the recorded target even if it no longer exists
-        // (an upgraded-in-place binary), which is what we want.
+        // (an upgraded-in-place binary), which is the path attribution needs.
         let exe = std::fs::read_link(dir.join("exe")).ok();
         if !is_dreamd_binary(exe.as_deref(), args.first().map(String::as_str)) {
             continue;
@@ -528,7 +515,7 @@ fn read_nul_separated(path: &Path) -> Option<Vec<String>> {
 /// `ps -Eww -ax -o pid=,args=` call.
 ///
 /// `-E` appends the process environment to the args column, so a single string
-/// per line carries both the argv we match on and the `HOME=` we attribute on;
+/// per line carries both the argv to match on and the `HOME=` to attribute on;
 /// `-ww` disables truncation so a long MCP command line survives. When `ps -E`
 /// is not permitted for a process the environment simply is not there, so
 /// attribution fails and the process is skipped with a warning — the correct
@@ -588,8 +575,8 @@ fn collect_candidates_via_ps(scope: &StopScope<'_>) -> Vec<Candidate> {
 /// Matches the scope's home *literally* and requires a space (or the end of
 /// the string) on both sides, rather than parsing the value up to the next
 /// space — that way a home containing a space still attributes correctly.
-/// `None` means "this line does not prove the process runs under our `$HOME`",
-/// which fails attribution rather than assuming.
+/// `None` means "this line does not prove the process runs under this
+/// invocation's `$HOME`", which fails attribution rather than assuming.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn ps_scope_home(joined: &str, scope: &StopScope<'_>) -> Option<PathBuf> {
     let home = scope.home?;
@@ -636,7 +623,7 @@ pub enum SocketRemoval {
 /// Unlinking then
 /// leaves it alive on an orphaned inode: it keeps working, but every client
 /// resolves a path that no longer exists, so MCP silently falls back to the
-/// in-process Phase 1 backend and cross-harness recall stops with no error.
+/// in-process `Backend::Local` and cross-harness recall stops with no error.
 /// Refusing is the same rule `dreamd archive` and `dreamd doctor --repair`
 /// already apply before touching a live daemon's state.
 ///
@@ -645,12 +632,12 @@ pub enum SocketRemoval {
 /// actionable warning instead of a false "no daemon socket" line.
 ///
 /// The probe is not instantaneous: it waits out a daemon that is merely
-/// *stopping*. See [`STOP_GRACE`].
+/// *stopping*. See `STOP_GRACE`.
 pub fn remove_socket(socket: &Path) -> SocketRemoval {
     remove_socket_within(socket, STOP_GRACE)
 }
 
-/// How long a signalled daemon gets to finish unwinding before the socket is
+/// How long a signaled daemon gets to finish unwinding before the socket is
 /// called live.
 ///
 /// Without this window the guard misfires on the *common* upgrade path.
@@ -661,9 +648,8 @@ pub fn remove_socket(socket: &Path) -> SocketRemoval {
 /// listener therefore stays bound and answering for the whole drain, while
 /// `remove_socket` runs microseconds after the signal lands. Probing once
 /// would report a daemon that is already shutting down as live, and
-/// `dreamd update` with a running `watch` — the path the 2026-08-03 clean-box
-/// audit exercised as R6 — would print a "still live" warning telling the user
-/// to stop a daemon that is mid-exit.
+/// `dreamd update` with a running `watch` would print a "still live" warning
+/// telling the user to stop a daemon that is mid-exit.
 ///
 /// Matched to the commit cadence because that drain is the slow step. A daemon
 /// that is still answering after this window is genuinely not going away
@@ -713,8 +699,9 @@ fn socket_is_live(socket: &Path) -> bool {
     dreamd_core::server::is_daemon_socket_live(socket)
 }
 
-/// Non-unix: there is no UDS daemon in v0.1, so there is nothing live to
-/// protect. Matches the `cfg(not(unix))` stance in `status` and `setup`.
+/// Non-unix: the daemon listens on loopback TCP, not a socket file, and
+/// `cli.rs` passes `socket: None` to uninstall and update there, so no caller
+/// reaches this probe.
 #[cfg(not(unix))]
 fn socket_is_live(_socket: &Path) -> bool {
     false
@@ -744,7 +731,7 @@ pub fn clear_dir_tree(dir: &Path) -> std::io::Result<bool> {
 }
 
 /// Scoped npx-cache clear: delete only entries that
-/// [`entry_is_dreamd_mcp_npx_install`] recognises as dreamd-mcp installs —
+/// `entry_is_dreamd_mcp_npx_install` recognizes as dreamd-mcp installs —
 /// the same scoping as the README manual recipe. Never wipes unrelated
 /// packages; the blanket wipe is gated behind `dreamd uninstall --all-npx`
 /// (see `commands::uninstall`). A missing cache root is `Ok` with nothing
@@ -772,7 +759,7 @@ pub fn clear_scoped_npx(npx_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 /// `true` iff the npx cache entry at `entry` is a dreamd-mcp install.
 ///
-/// npm writes `~/.npm/_npx/<hash>/package.json` with NO top-level `name` —
+/// npm writes `~/.npm/_npx/<hash>/package.json` with no top-level `name` —
 /// the requested package is recorded as a dependencies key, e.g.
 /// `{"dependencies":{"dreamd-mcp":"^0.1.0-rc.6"}}`. An entry matches when
 /// any of:
@@ -850,13 +837,13 @@ mod tests {
             cache_dir: Some(cache),
         };
 
-        // HOME rule alone (cargo-installed binary, our home).
+        // HOME rule alone (cargo-installed binary, this home).
         assert!(attributable(
             Some(Path::new("/home/ours/.cargo/bin/dreamd")),
             Some(ours),
             &scope
         ));
-        // Cache rule alone (our shim's binary, running under another home).
+        // Cache rule alone (this home's shim binary, running under another home).
         assert!(attributable(
             Some(Path::new("/home/ours/.cache/dreamd-mcp/0.1.0/dreamd")),
             Some(Path::new("/home/theirs")),
@@ -884,9 +871,9 @@ mod tests {
 
     /// An **empty** `cache_dir` must attribute nothing. `Path::starts_with("")`
     /// is `true` for every path, so without the guard in [`attributable`] a
-    /// `StopScope { cache_dir: Some("") }` would authorise a signal to every
-    /// matching process on the box — the machine-global behaviour AILAB-584
-    /// removed, reachable again through one blank environment variable.
+    /// `StopScope { cache_dir: Some("") }` would authorize a signal to every
+    /// matching process on the box, reachable through one blank environment
+    /// variable.
     /// Deliberately redundant with `cli.rs`'s `home_dir()` filter: this is the
     /// last checkpoint before a SIGTERM.
     #[cfg(unix)]
@@ -912,8 +899,8 @@ mod tests {
     /// exact shape `$HOME/.cache/dreamd-mcp` collapses to when `HOME` is set but
     /// empty (`.cache/dreamd-mcp`), and [`path_starts_with`] canonicalizes it
     /// against *this process's* cwd — so a foreign process whose executable
-    /// happens to live under `$PWD/.cache/dreamd-mcp` would attribute. The
-    /// reviewer reproduced that with `env HOME= dreamd update`.
+    /// happens to live under `$PWD/.cache/dreamd-mcp` would attribute (for
+    /// example under `env HOME= dreamd update`).
     #[cfg(unix)]
     #[test]
     fn a_relative_cache_dir_attributes_nothing() {
@@ -945,7 +932,7 @@ mod tests {
     /// An empty `home` must attribute nothing: a process with no readable
     /// `HOME=` yields `None` and is already refused, but a process that
     /// genuinely reports `HOME=` (empty) would otherwise compare equal to an
-    /// empty scope home and be signalled.
+    /// empty scope home and be signaled.
     #[cfg(unix)]
     #[test]
     fn an_empty_home_attributes_nothing() {
@@ -1035,7 +1022,7 @@ mod tests {
 
     /// Drive a whole scoped stop pass against a synthetic proc tree with the
     /// signal recorded instead of sent. Returns the pids that *would* have
-    /// been signalled, the report, and everything written to stderr.
+    /// been signaled, the report, and everything written to stderr.
     #[cfg(target_os = "linux")]
     fn run_stop(proc_root: &Path, scope: &StopScope<'_>) -> (Vec<u32>, StopReport, String) {
         let mut signalled = Vec::new();
@@ -1051,7 +1038,7 @@ mod tests {
     }
 
     /// The ordinary case: a `dreamd watch` running under *this* `$HOME` is
-    /// ours and gets signalled, even though its cargo-installed binary is
+    /// in scope and gets signaled, even though its cargo-installed binary is
     /// nowhere near the shim cache.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1084,7 +1071,7 @@ mod tests {
             "our own home's watch must be stopped"
         );
         assert!(report.attempted);
-        assert!(report.matched, "a signalled process must be reported");
+        assert!(report.matched, "a signaled process must be reported");
         assert!(!report.spared, "nothing was left running");
         assert!(err.is_empty(), "no warning expected, got: {err}");
     }
@@ -1132,9 +1119,8 @@ mod tests {
         );
     }
 
-    /// The AILAB-554 F1 regression, asserted directly: `HOME=/tmp/sandbox
-    /// dreamd update` must not SIGTERM the developer's real Cursor
-    /// `dreamd mcp`. Different `HOME=`, executable under a *different* home's
+    /// The cross-home case (AILAB-554), asserted directly: `HOME=/tmp/sandbox
+    /// dreamd update` must not SIGTERM the user's real Cursor `dreamd mcp`. Different `HOME=`, executable under a *different* home's
     /// cache — neither rule fires, so the process survives and the user is
     /// told which pid was spared.
     #[cfg(target_os = "linux")]
@@ -1166,7 +1152,7 @@ mod tests {
 
         assert!(
             signalled.is_empty(),
-            "a process serving another $HOME must never be signalled"
+            "a process serving another $HOME must never be signaled"
         );
         assert!(report.attempted);
         assert!(
@@ -1185,9 +1171,8 @@ mod tests {
             "the warning must name the pid and why it was spared, in one phrase: {err}"
         );
         // The labels must describe *this* invocation's scope, and the message
-        // must disclose nothing about the other home. Before phase 3 the format
-        // string said "this $HOME (…)" and passed the *foreign* home, so the
-        // sandbox's user read the developer's home path as their own.
+        // must disclose nothing about the other home, or the sandbox's user
+        // would read the other home's path as their own.
         assert!(
             err.contains(&sandbox.display().to_string()),
             "the warning must state this invocation's scope: {err}"
@@ -1234,8 +1219,8 @@ mod tests {
         assert!(err.is_empty(), "no warning expected, got: {err}");
     }
 
-    /// The argv filter runs before attribution: a `dreamd status` under our
-    /// own `$HOME` would pass attribution, so its survival proves the
+    /// The argv filter runs before attribution: a `dreamd status` under the
+    /// scope's own `$HOME` would pass attribution, so its survival proves the
     /// [`STOP_PATTERNS`] gate, not the scope gate.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1280,11 +1265,10 @@ mod tests {
     }
 
     /// A process that merely *mentions* a [`STOP_PATTERNS`] string is not a
-    /// candidate, however attributable it is. Both entries here run under our
-    /// own `$HOME` — so attribution would pass — and both were signalled before
-    /// [`is_dreamd_binary`] existed: the reviewer demonstrated
-    /// `sh -c 'sleep 30 # dreamd watch'` and a `grep` for the phrase being
-    /// SIGTERMed under a sandbox HOME.
+    /// candidate, however attributable it is. Both entries here run under the
+    /// scope's own `$HOME`, so attribution would pass; only
+    /// [`is_dreamd_binary`] keeps `sh -c 'sleep 30 # dreamd watch'` and a
+    /// `grep` for the phrase from being SIGTERMed.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_process_that_is_not_the_dreamd_binary_is_never_a_candidate() {
@@ -1344,7 +1328,7 @@ mod tests {
         assert_eq!(
             signalled,
             vec![3004],
-            "only the dreamd binary may be signalled; got {signalled:?}"
+            "only the dreamd binary may be signaled; got {signalled:?}"
         );
         assert!(report.matched);
         assert!(
@@ -1358,8 +1342,8 @@ mod tests {
     }
 
     /// Unreadable attribution data is a refusal, not a default-allow. Another
-    /// user's `/proc/<pid>/environ` is EACCES, modelled here by omitting the
-    /// file; with the executable outside our cache nothing can vouch for the
+    /// user's `/proc/<pid>/environ` is EACCES, modeled here by omitting the
+    /// file; with the executable outside the scope's cache nothing can vouch for the
     /// process, so it is spared.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1382,7 +1366,7 @@ mod tests {
 
         assert!(
             signalled.is_empty(),
-            "unreadable attribution must never authorise a signal"
+            "unreadable attribution must never authorize a signal"
         );
         assert!(!report.matched);
         assert!(
@@ -1390,10 +1374,9 @@ mod tests {
             "a candidate left running must be reported as spared, not as nothing-was-running"
         );
         // Anchored to one substring so pid and reason cannot come from
-        // different lines. The pre-phase-3 message also rendered the
-        // candidate's unreadable `environ` as `this $HOME (unreadable)`, which
-        // read as a claim about the *user's own* home; the wording no longer
-        // says anything about the spared process beyond its pid.
+        // different lines. The warning says nothing about the spared process
+        // beyond its pid, so an unreadable `environ` never reads as a claim
+        // about the *user's own* home.
         assert!(
             err.contains("pid 8008 running: not attributable"),
             "the warning must name the pid and why it was spared, in one phrase: {err}"
@@ -1404,15 +1387,9 @@ mod tests {
         );
     }
 
-    /// With neither scope field resolved every match would have to be taken on
-    /// faith — the machine-global behaviour AILAB-584 removed. Stop nothing,
-    /// warn, and keep `attempted: true`: `update.rs` prints "this command does
-    /// not stop them on Windows" on `!attempted`, which would be a lie on unix.
-    ///
-    /// The candidate is still enumerated and spared *by name*, so `spared` is
-    /// set: returning early with `spared: false` would make `update.rs` print
-    /// "no local `dreamd mcp` / `dreamd watch` processes were running" about a
-    /// process that is still running.
+    /// With neither scope field resolved, stop nothing, warn, keep
+    /// `attempted: true`, and spare the candidate *by name* so `spared` is set.
+    /// [`StopReport`] explains why each flag must read that way.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_unresolvable_scope_stops_nothing_but_still_counts_as_attempted() {

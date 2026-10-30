@@ -1,18 +1,18 @@
 #![cfg(unix)]
 
-//! DR-211 / AILAB-205 — `semantic/LESSONS.md` → Tantivy, end to end.
+//! AILAB-205 — `semantic/LESSONS.md` → Tantivy, end to end.
 //!
-//! `#![cfg(unix)]` because `dreamd_core::server` (and therefore
-//! `TantivyIndexHandle`) is unix-gated in `lib.rs`.
+//! `#![cfg(unix)]` because every case takes the Unix writer lock before it
+//! opens the index.
 //!
 //! Every case drives the real seam: `TantivyIndexHandle::open` runs the
 //! semantic pass as part of its rebuild, and `index_semantic_lessons` re-runs it
 //! on the live indexer task the way the dream cycle does. Pure-helper coverage
-//! (prefix counting, the `lsn_` identity shape, the pass outcome) lives in
+//! (the `lsn_` identity shape, the pass outcome) lives in
 //! `server::tantivy_handle`'s unit tests.
 //!
-//! Test names carry their `§3 step 5` case number so the spec-to-suite mapping
-//! is readable straight off the `cargo test` output.
+//! Each test name carries the number of the `// Case n` comment above it, so a
+//! failure in the `cargo test` output maps straight back to its case.
 //!
 //! Three cases are regression guards and must fail against the naive designs:
 //!   * [`case_04_semantic_pass_preserves_every_episodic_event_in_the_cluster`]
@@ -126,7 +126,8 @@ fn query(handle: &TantivyIndexHandle, q: &str, layer: Option<Layer>) -> Vec<Reca
         .collect()
 }
 
-// Case 1 — the fact-6 guard.
+// Case 1 — a lesson inherits its exemplar's pain and importance, so it ranks
+// with a non-zero score instead of scoring 0.
 
 #[tokio::test]
 async fn case_01_lesson_is_recalled_as_semantic_with_a_non_zero_score() {
@@ -386,7 +387,9 @@ async fn case_06_second_cycle_replaces_the_previous_lesson_set() {
     handle.shutdown().await.expect("shutdown");
 }
 
-// Case 7 — crash recovery. This is what the commit gate in `open` exists for.
+// Case 7 — reopen after an index wipe. The watermark file lives outside the
+// index dir and survives the wipe, but `open` does not trust it: the coverage
+// pass re-indexes the log and the semantic pass re-indexes LESSONS.md.
 
 #[tokio::test]
 async fn case_07_reopen_after_index_wipe_recovers_lessons_with_a_current_watermark() {
@@ -417,8 +420,8 @@ async fn case_07_reopen_after_index_wipe_recovers_lessons_with_a_current_waterma
     std::fs::remove_dir_all(&index_dir).expect("wipe index dir");
     assert!(
         root.dreamd_dir().join("index_progress.json").exists(),
-        "the watermark lives outside the index dir and survives the wipe — \
-         so the replay has zero episodic events to index"
+        "the watermark lives outside the index dir and survives the wipe; \
+         the coverage pass at reopen ignores it"
     );
 
     let handle = open(&root);
@@ -426,8 +429,8 @@ async fn case_07_reopen_after_index_wipe_recovers_lessons_with_a_current_waterma
     assert_eq!(
         results.len(),
         1,
-        "reopen must index LESSONS.md even though the episodic replay was \
-         empty: {results:?}"
+        "reopen must index LESSONS.md as well as the re-indexed log: \
+         {results:?}"
     );
     assert!(results[0].score > 0.0);
 
@@ -534,8 +537,9 @@ async fn case_09_lesson_recency_is_consolidation_time_not_exemplar_age() {
 }
 
 // Case 10 — an exemplar missing from the live episodic log is skipped, never
-// indexed at score 0. Rev 3 cut the snapshot fallback, so this is the whole
-// answer for the narrow paths where an exemplar can still vanish.
+// indexed at score 0. There is no snapshot fallback: a cited exemplar is
+// pinned and never decays, so skipping covers the narrow paths where an
+// exemplar can still vanish.
 
 #[tokio::test]
 async fn case_10_lesson_without_an_exemplar_is_skipped_not_indexed() {
@@ -625,7 +629,7 @@ async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
     );
 
     // Cycle 2 — same corpus, clock advanced past the 30-day window, so the
-    // events fall out of BOTH recurrence windows and nothing promotes. Driven
+    // events fall out of both recurrence windows and nothing promotes. Driven
     // by time, not by deleting events: retirement must follow from recurrence
     // stopping, which is what actually happens in a real store.
     let later = NOW_SEC + WINDOW_30_DAYS_SEC + 1;

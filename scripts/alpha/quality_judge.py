@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""LLM-judge quality report for dreamd recall (report-only, NON-gating).
+"""LLM-judge quality report for dreamd recall (report-only, non-gating).
 
 The golden gate (quality-suite.sh) proves the salience formula is honored
 end-to-end — but only on constructed inputs where the "right" order is
 formula-derivable. This complements it: it seeds a small, realistic
 engineering-lessons corpus, issues natural-language queries a developer would
-actually type (deliberately NOT lexical matches for the stored text), and asks
+actually type (deliberately not lexical matches for the stored text), and asks
 an LLM to judge whether the top recalled lesson actually answers each query.
 It prints a per-query relevance report and a mean score.
 
@@ -15,7 +15,9 @@ report-only: it always exits 0 and is never a CI gate.
 Auth (first match wins):
   - ANTHROPIC_API_KEY   -> x-api-key
   - ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer + anthropic-beta: oauth-2025-04-20
-If neither is set, it prints a skip notice and exits 0 (so it never blocks CI).
+  - an `ant auth login` profile: `ant auth print-credentials --access-token`
+    mints a short-lived bearer token (needs the `ant` CLI on PATH)
+If none of these works, it prints a skip notice and exits 0 (so it never blocks CI).
 
 Model: DREAMD_JUDGE_MODEL (default claude-opus-4-8).
 

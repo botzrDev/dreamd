@@ -71,10 +71,10 @@ pub(crate) async fn get_recall(
 
     // Resolve the reader for this project: the pinned primary handle when this
     // is the daemon's booted project (so recall sees the coordinator's live
-    // appends — WEG-264 Defect 2), else the index of the project's
-    // lazily-opened runtime (`AppState::runtimes`). RecallReader is Clone
-    // (Arc-backed); we clone it so the `runtimes` mutex is never held across
-    // the Tantivy search.
+    // appends, WEG-264), else the index of the project's lazily-opened
+    // runtime (`AppState::runtimes`). RecallReader is Clone (Arc-backed);
+    // cloning it means the `runtimes` mutex is never held across the Tantivy
+    // search.
     let reader =
         match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {
             Ok(r) => r,
@@ -82,8 +82,8 @@ pub(crate) async fn get_recall(
         };
 
     // Same recall body as the in-process MCP store (BZR-173) when `exclude` is
-    // absent; only the reader differs. Content-Type matches what `axum::Json`
-    // set before.
+    // absent; only the reader differs. The body is already serialized JSON,
+    // so the `application/json` Content-Type is set by hand.
     let exclusion = RecallExclusion {
         ids: params.exclude.clone(),
         cluster_prefixes: Vec::new(),

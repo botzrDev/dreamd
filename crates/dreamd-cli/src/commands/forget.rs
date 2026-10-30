@@ -27,6 +27,7 @@ use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 use dreamd_protocol::EventId;
 
+/// Why a `dreamd forget` run failed.
 #[derive(Debug)]
 pub enum ForgetCliError {
     /// No `.agent/` store found walking up from `cwd`.
@@ -198,8 +199,9 @@ fn write_receipt(
     Ok(())
 }
 
-/// Send the coordinator's post-forget index messages to an existing index.
-/// An absent index directory is left absent.
+/// Prune the forgotten event from an existing index and re-index the lesson
+/// layer through a `TantivyIndexHandle` opened under the writer lock. An
+/// absent index directory is left absent.
 fn refresh_index(
     root: &AgentRoot,
     lock: &WriterLock,
@@ -238,7 +240,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    // 2026-07-03Z; event timestamps match so nothing is aged.
+    // 2025-07-03Z; event timestamps match so nothing is aged.
     const NOW_SEC: i64 = 1_751_500_800;
 
     fn evt_id(suffix: char) -> String {

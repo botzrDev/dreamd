@@ -2,7 +2,7 @@
 //! the per-user service that supervises the daemon: a Linux systemd **user**
 //! unit (AILAB-190), a macOS **LaunchAgent** (AILAB-169), or a Windows Task
 //! Scheduler **logon task** (AILAB-203). One module, one backend picked at
-//! runtime by [`detect_backend`].
+//! runtime by `detect_backend`.
 //!
 //! Linux: `install` writes `~/.config/systemd/user/dreamd.service` and runs
 //! `systemctl --user daemon-reload` + `enable --now`; `start` runs
@@ -29,13 +29,10 @@
 //! `dreamd watch` the unit and the plist supervise, `WorkingDirectory` is the
 //! install-time [`AgentRoot`], and `RestartOnFailure` (`PT1M`, 3) stands in
 //! for `Restart=on-failure` / `KeepAlive.SuccessfulExit=false`. `install`
-//! never issues a `/Run`: `dreamd watch` on Windows still prints the
-//! AILAB-174 refusal and exits 2 until AILAB-192 lands the localhost TCP
-//! transport, so starting the task at install time would only spawn a process
-//! designed to die — a logon trigger that first fires usefully *after* 192 is
-//! the entire point. Nothing on this backend detaches a process, tracks a PID
-//! of its own, or keeps a liveness ping; that was the pre-`watch`
-//! architecture (AILAB-210).
+//! registers the logon-triggered task and never issues a `/Run`, so the task
+//! first runs at the user's next logon, or right away with
+//! `dreamd service start`. Nothing on this backend detaches a process, tracks
+//! a PID of its own, or keeps a liveness ping.
 //!
 //! `install` is also where the Windows bearer token is minted: 32
 //! cryptographically random bytes, hex-encoded into `DaemonHome::auth_json()`
@@ -43,44 +40,46 @@
 //! `icacls <path> /inheritance:r /grant:r <sid>:F` — full control rather than
 //! read, because `install --force` has to be able to rewrite what it wrote,
 //! and inheritance stripped because that is what removes the inherited
-//! `Users` ACE. AILAB-192 is the consumer; rotating the token at writer
-//! start-up is 192's job, so here it turns over only on a reinstall. The
-//! token is never printed and never logged — only its path is. Both Windows
-//! files skip [`write_service_file`], because `dreamd_core::io::write_atomic`
-//! is `ErrorKind::Unsupported` on Windows and implementing it is not this
-//! ticket.
+//! `Users` ACE. `dreamd watch` on Windows authenticates every request against
+//! this file (AILAB-192) and never rotates it, so the token turns over only
+//! when `service install --force` rewrites it. The token is never printed and
+//! never logged — only its path is. Both Windows files are written by
+//! `write_plain_file`, not `write_service_file`; its docs say why.
 //!
 //! `restart` is **bounce-only**: it never rewrites the unit or the plist, so
 //! the `ExecStart` / `ProgramArguments` path stays the one captured at
 //! `service install`. Bouncing is enough after an in-place `cargo install` to
 //! the same path; a binary that *moved* (an npx cache bump) still needs
-//! `dreamd service install` (`--force` on macOS) first. It is also not
+//! `dreamd service install` (`--force` on macOS and Windows) first. It is also not
 //! `dreamd update --restart`, which stops local `mcp` / `watch` processes —
 //! the supervised one included, since the unit sets no `Environment=HOME=` and
 //! so shares the invoking user's — and never brings the unit back up.
 //!
 //! `status` (AILAB-178) is the supervisor's own view of that service —
 //! running / stopped / failed / not-installed, PID, active-since — plus the
-//! last [`STATUS_LOG_TAIL_LINES`] lines of `~/.agent/dreamd.log`. On Linux it
+//! last `STATUS_LOG_TAIL_LINES` lines of `~/.agent/dreamd.log`. On Linux it
 //! reads `systemctl --user show dreamd.service` as a `Key=Value` dump (never
-//! the human-oriented `status` verb, which is pager-, colour- and
+//! the human-oriented `status` verb, which is pager-, color- and
 //! locale-bound); on macOS `launchctl print gui/<uid>/dev.dreamd.dreamd`; on
 //! Windows `schtasks /Query … /FO LIST /V`, the `Key: Value` form for the
 //! same reason.
-//! Daemon-level UDS liveness stays `dreamd status` (WEG-103); the two verbs
+//! Daemon-level liveness stays `dreamd status` (WEG-103); the two verbs
 //! answer different questions and are deliberately separate.
 //!
 //! `uninstall` (AILAB-202) is the inverse of `install`, and **only** of
 //! `install`: it tears down the OS service entry — Linux `disable --now`, the
 //! unit file unlinked in-process, then `daemon-reload`; macOS a best-effort
-//! `bootout gui/<uid>/<label>` and the plist unlinked. Unlike `start`, it is
-//! idempotent: a unit or plist that is already gone is not a failure, and on
+//! `bootout gui/<uid>/<label>` and the plist unlinked; Windows a best-effort
+//! `schtasks /Delete /TN <name> /F` and the task XML unlinked. Unlike `start`,
+//! it is idempotent: a unit, plist or task XML that is already gone is not a
+//! failure, and on
 //! Linux an absent unit file means `systemctl` is never spawned at all. By
 //! default it deletes no data whatsoever and says so, reporting the daemon
 //! home and the per-project stores on `preserved:` lines.
 //!
 //! `--purge` widens that to exactly one directory: the daemon home
-//! `~/.agent/` — the registry, the socket and `dreamd.log`. It never walks or
+//! `~/.agent/` and everything in it (the registry, the socket, `dreamd.log`,
+//! and where present `server.json`, `auth.json` and `models/`). It never walks or
 //! deletes a per-project `<repo>/.agent/` store (that wipe is still the manual
 //! "Full fresh store" in `docs/troubleshooting.md`) and never touches
 //! `~/.config/dreamd/`. Because it is destructive it borrows the
@@ -144,8 +143,8 @@
 //! — systemd's documented "booted with systemd" check — and never spawns
 //! `systemctl`; macOS is picked by `cfg!(target_os = "macos")` and Windows by
 //! `cfg!(windows)`, neither of them probed. Every process runner is injected
-//! — [`Systemctl`] / [`Launchctl`] / [`Schtasks`] / [`Icacls`] for the verbs
-//! that only need an exit status, the stdout-returning [`Query`] for the one
+//! — `Systemctl` / `Launchctl` / `Schtasks` / `Icacls` for the verbs
+//! that only need an exit status, the stdout-returning `Query` for the one
 //! that reads a report — so unit tests pass a recording closure and can never
 //! spawn any of the three supervisors; that is how Linux CI exercises the
 //! macOS and the Windows path alike. The uid for the `gui/<uid>` domain and
@@ -176,13 +175,13 @@ pub(crate) const LAUNCHD_LABEL: &str = "dev.dreamd.dreamd";
 pub(crate) const SCHTASKS_TASK_NAME: &str = "dev.dreamd.dreamd";
 
 /// Number of trailing `~/.agent/dreamd.log` lines `service status` echoes
-/// (Linear AILAB-178). `dreamd status` keeps its own 5 (`status::LOG_TAIL_LINES`).
+/// (AILAB-178). `dreamd status` keeps its own 5 (`status::LOG_TAIL_LINES`).
 pub(crate) const STATUS_LOG_TAIL_LINES: usize = 10;
 
 /// How `install` / `start` / `restart` / `uninstall` reach systemd. Production
 /// passes [`systemctl_user`]; tests pass a recording closure, so no unit test
-/// can ever spawn `systemctl` (this dev box has a live user manager; GHA
-/// runners mostly do not).
+/// can ever spawn `systemctl` (a developer machine often has a live user
+/// manager; GHA runners mostly do not).
 type Systemctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
 /// How `install` / `start` / `restart` / `uninstall` reach launchd. Same shape
@@ -201,14 +200,15 @@ type Schtasks<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 /// How `install` locks `~/.agent/auth.json` down to a single SID, in the same
 /// injection shape again: production passes [`icacls`], tests a recording
 /// closure, so no unit test rewrites a real ACL. Shelling out to the OS's own
-/// tool is what keeps this crate FFI-free and free of `windows-sys` (NFR-2)
-/// — the same trade [`current_uid`] makes with `id -u`.
+/// tool is what keeps this crate FFI-free and free of `windows-sys` (the
+/// binary-size budget) — the same trade [`current_uid`] makes with `id -u`.
 type Icacls<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
 /// How `status` reads the supervisor: the same injection shape as
 /// [`Systemctl`] / [`Launchctl`], but the runner yields the captured stdout of
 /// a successful call. Production passes [`systemctl_user_query`] /
-/// [`launchctl_query`]; tests pass a closure answering with a fixture, so no
+/// [`launchctl_query`] / [`schtasks_query`]; tests pass a closure answering
+/// with a fixture, so no
 /// unit test can ever query a live supervisor.
 type Query<'a> = &'a mut dyn FnMut(&[&str]) -> Result<String, ServiceError>;
 
@@ -288,6 +288,9 @@ pub(crate) struct ServiceReport {
     pub(crate) active_since: Option<String>,
 }
 
+/// Why a `dreamd service` verb failed. `cli::service_exit` maps the usage
+/// refusals (`NoSystemd`, `NoProjectRoot`, `PlistExists`, `TaskExists`,
+/// `NotATty`, `Declined`) to exit 2 and every other variant to exit 1.
 #[derive(Debug)]
 pub enum ServiceError {
     /// No supported backend: neither macOS nor Windows, and no systemd --user
@@ -596,12 +599,9 @@ pub(crate) fn render_plist(exe: &Path, project_root: &Path) -> String {
 /// daemon has no business asking for elevation. `RestartOnFailure` (`PT1M`,
 /// three attempts) is this backend's `Restart=on-failure` /
 /// `KeepAlive.SuccessfulExit=false`. There is no `StandardOutput` /
-/// `StandardError` node for the reason the plist has no `StandardOutPath`
-/// (AILAB-184: the supervised `watch` owns `~/.agent/dreamd.log` through the
-/// tracing file layer, which truncates on open, so a second writer aimed at
-/// the same file would clobber it), and no `EnvironmentVariables` for the
-/// reason the unit has no `Environment=` line (AILAB-584: an inherited empty
-/// `HOME` makes every derived path relative).
+/// `StandardError` node and no `EnvironmentVariables` node, for the reasons
+/// the module docs give for the plist's `StandardOutPath` (AILAB-184) and the
+/// unit's `Environment=` line (AILAB-584).
 pub(crate) fn render_task_xml(exe: &Path, project_root: &Path) -> String {
     let exe = xml_escape(&exe.display().to_string());
     let project_root = xml_escape(&project_root.display().to_string());
@@ -712,10 +712,10 @@ pub(crate) fn write_plist(
 /// can read or rewrite it. Returns the path written.
 ///
 /// The token is never printed and never logged; only the path is, and only by
-/// the caller. AILAB-192 is the consumer (localhost TCP + a bearer header);
-/// rotating the token at writer start-up is 192's job too, so on this ticket
-/// it turns over exactly when `service install` runs — which `--force` makes
-/// a deliberate act rather than an accidental one.
+/// the caller. `dreamd watch` on Windows checks every request's bearer header
+/// against it (AILAB-192) and never rotates it, so the token turns over only
+/// when `service install` runs — which `--force` makes a deliberate act rather
+/// than an accidental one.
 ///
 /// The path comes from [`DaemonHome::auth_json`] rather than a local join, so
 /// the daemon-home layout stays stated in one place. `home.join(".agent")` is
@@ -742,14 +742,14 @@ fn write_auth_token(home: &Path, sid: &str, icacls: Icacls<'_>) -> Result<PathBu
     let mut token = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         // Hand-rolled lowercase hex rather than a `hex` crate: 64 characters
-        // are not worth a dependency (NFR-2). Writing into a `String` cannot
+        // are not worth a dependency (binary-size budget). Writing into a `String` cannot
         // fail — `fmt::Write` returns a `Result` only because the trait is
         // shared with formatters that can.
         let _ = write!(&mut token, "{byte:02x}");
     }
     // Hand-built, compact, single trailing newline — the body is a locked
-    // wire format AILAB-192 parses, so it is not left to a serializer's
-    // whitespace defaults.
+    // wire format `dreamd watch` parses (AILAB-192), so it is not left to a
+    // serializer's whitespace defaults.
     write_plain_file(&path, format!("{{\"token\":\"{token}\"}}\n").as_bytes())?;
     icacls(&[
         &path.display().to_string(),
@@ -763,10 +763,10 @@ fn write_auth_token(home: &Path, sid: &str, icacls: Icacls<'_>) -> Result<PathBu
 /// The installing user's SID for the `auth.json` ACL, read from
 /// `whoami /user` stdout — the Windows analogue of [`current_uid`]'s `id -u`,
 /// and chosen for the same reason: spawning the OS's own utility keeps the
-/// CLI crate free of FFI and of `windows-sys` (NFR-2). The cost is one extra
+/// CLI crate free of FFI and of `windows-sys` (binary-size budget). The cost is one extra
 /// process per Windows `service install`, which is a one-shot anyway.
 ///
-/// `whoami /user` prints a localised header block and then a
+/// `whoami /user` prints a localized header block and then a
 /// `DOMAIN\user  S-1-5-21-…` row, so the parse is "the first
 /// whitespace-separated token beginning `S-1-`" rather than a column index:
 /// the header wording and the column widths both move, the SID prefix does
@@ -809,11 +809,11 @@ fn current_exe_canonical() -> Result<PathBuf, ServiceError> {
 
 /// Full install: pick the backend, then run its install path.
 ///
-/// Linux: probe passed → [`run_install_with`], and `force` is ignored (the
-/// unit is silently overwritten, exactly as AILAB-190 shipped). macOS:
-/// [`run_launchd_install_with`] with the uid from `id -u`. Windows:
-/// [`run_schtasks_install_with`], where `force` is the overwrite gate it is
-/// on macOS. No backend → [`ServiceError::NoSystemd`], nothing written.
+/// Linux: probe passed → `run_install_with`, and `force` is ignored (the
+/// unit is silently overwritten). macOS: `run_launchd_install_with` with the
+/// uid from `id -u`. Windows: `run_schtasks_install_with`, where `force` is
+/// the overwrite gate it is on macOS. No backend →
+/// [`ServiceError::NoSystemd`], nothing written.
 ///
 /// `current_sid` is passed **unapplied** — a resolver, not a value — for the
 /// same reason `current_uid()?` sits inside the launchd arm: evaluated as a
@@ -967,17 +967,11 @@ pub(crate) fn run_launchd_start_with(
 }
 
 /// macOS `dreamd service restart` (AILAB-185) with the uid and the `launchctl`
-/// runner injected, the twin of the `start` helper above — and issuing the
-/// **byte-identical** `kickstart -k gui/<uid>/<label>` argv, because `-k`
-/// already kills the running instance before relaunching it, so start's argv
-/// *is* the bounce; only the printed verb differs, which is why this is its own
-/// helper and never delegates to the `start` one (whose stdout would say
-/// `started`). Nothing is rewritten: the plist's `ProgramArguments` stays the
-/// path `service install` captured. A label that was never bootstrapped is a
-/// [`ServiceError::Launchctl`] (exit 1)
-/// — deliberately the same failure `start` gives, not a distinct
-/// `NotInstalled`. Tests pass a recording or panicking runner, so they never
-/// reach a real `launchctl`, and the Darwin path runs on Linux CI.
+/// runner injected. It issues the **byte-identical** `kickstart -k
+/// gui/<uid>/<label>` argv `start` does (the module docs explain why that is
+/// already the bounce) and is its own helper only so stdout says `restarted`.
+/// A label that was never bootstrapped is a [`ServiceError::Launchctl`]
+/// (exit 1), deliberately the same failure `start` gives.
 pub(crate) fn run_launchd_restart_with(
     uid: u32,
     launchctl: Launchctl<'_>,
@@ -999,16 +993,16 @@ pub(crate) fn run_launchd_restart_with(
 /// is off, [`ServiceError::TaskExists`] (exit 2) with nothing rewritten and
 /// both runners unspawned. That third gate carries one more promise than the
 /// Darwin one: an existing `auth.json` is left exactly as it was, so a bare
-/// reinstall can never silently invalidate a token AILAB-192 already handed
-/// out. Only past all three gates is the XML written, the token minted and
-/// the task registered.
+/// reinstall can never silently invalidate the token a running daemon and its
+/// clients are using. Only past all three gates is the XML written, the token
+/// minted and the task registered.
 ///
 /// `/F` rides along only under `force`, and it is the *only* difference in
 /// the registration argv: `schtasks /Create` refuses an existing task name
 /// without it, so the flag is the same confirmation `--force` already is for
-/// the plist. There is deliberately never a `/Run` here — see the module docs
-/// — because `dreamd watch` on Windows still exits 2 until AILAB-192, and the
-/// logon trigger is what starts it once that lands. On a `schtasks` failure
+/// the plist. There is deliberately never a `/Run` here: the registered task
+/// first runs at the user's next logon, or right away with
+/// `dreamd service start`. On a `schtasks` failure
 /// the XML and the token stay on disk, exactly as the unit stays on disk when
 /// `systemctl` fails.
 pub(crate) fn run_schtasks_install_with(
@@ -1050,12 +1044,12 @@ pub(crate) fn run_schtasks_install_with(
 /// failure `start` gives on the other two backends, not a distinct
 /// `NotInstalled`.
 ///
-/// What this surfaces is **schtasks'** exit, not the supervised process's.
-/// Until AILAB-192 a perfectly successful start still leaves `service status`
-/// at `stopped`, because `dreamd watch` on Windows exits 2 the moment it
-/// runs. That is expected, and this verb deliberately makes no attempt to
-/// detect it: special-casing the exit code of a process the scheduler owns
-/// would be inventing supervision the OS already does.
+/// What this surfaces is **schtasks'** exit, not the supervised process's: a
+/// successful `/Run` means the scheduler launched the task, and a `watch`
+/// that then exits (no project root, no `auth.json`) shows up as `stopped`
+/// in `service status`. This verb deliberately makes no attempt to detect
+/// that: special-casing the exit code of a process the scheduler owns would
+/// be inventing supervision the OS already does.
 pub(crate) fn run_schtasks_start_with(schtasks: Schtasks<'_>) -> Result<(), ServiceError> {
     schtasks(&["/Run", "/TN", SCHTASKS_TASK_NAME])?;
     println!("started {SCHTASKS_TASK_NAME} (schtasks /Run)");
@@ -1069,16 +1063,15 @@ pub(crate) fn run_schtasks_start_with(schtasks: Schtasks<'_>) -> Result<(), Serv
 ///
 /// The `/End` is best-effort and issued unconditionally, its result discarded
 /// for exactly the reason the `bootout` in [`run_launchd_uninstall_with`] is:
-/// ending a task that is not running exits non-zero, and on this backend that
-/// is the *common* case — until AILAB-192 the supervised `watch` exits 2
-/// immediately, so the task is nearly always idle. The `/Run` is the call
+/// ending a task that is not running exits non-zero, which is the normal
+/// answer after a fresh install, a stop or a crash. The `/Run` is the call
 /// that must succeed, and a missing task fails there, exactly as it does in
 /// `start`.
 ///
 /// Bounce-only, like the other two backends: the task XML is never rewritten,
 /// so `Command` / `WorkingDirectory` stay whatever `service install`
-/// captured, and the `auth.json` token is not rotated — rotation is
-/// `install --force`, and at writer start-up it is AILAB-192.
+/// captured, and the `auth.json` token is not rotated — only
+/// `install --force` rotates it.
 pub(crate) fn run_schtasks_restart_with(schtasks: Schtasks<'_>) -> Result<(), ServiceError> {
     let _ = schtasks(&["/End", "/TN", SCHTASKS_TASK_NAME]);
     schtasks(&["/Run", "/TN", SCHTASKS_TASK_NAME])?;
@@ -1121,9 +1114,9 @@ pub(crate) fn run_restart_with(
 }
 
 /// `dreamd service uninstall` (AILAB-202): pick the backend, then tear down
-/// its service entry. Linux → [`run_uninstall_with`], macOS →
-/// [`run_launchd_uninstall_with`] with the uid from `id -u`, Windows →
-/// [`run_schtasks_uninstall_with`]. No backend →
+/// its service entry. Linux → `run_uninstall_with`, macOS →
+/// `run_launchd_uninstall_with` with the uid from `id -u`, Windows →
+/// `run_schtasks_uninstall_with`. No backend →
 /// [`ServiceError::NoSystemd`], nothing removed and nothing prompted: a host
 /// with no supervisor has no unit to take away.
 ///
@@ -1358,8 +1351,10 @@ fn finish_uninstall(
 /// `--purge`: delete the daemon home and nothing else.
 ///
 /// The one `remove_dir_all` in this module, and it is reached only through
-/// [`confirm_purge`]. `daemon_home` is `$HOME/.agent` — the registry, the
-/// socket and `dreamd.log` — never a project root: nothing here discovers an
+/// [`confirm_purge`]. `daemon_home` is `$HOME/.agent` (the registry, the
+/// socket, `dreamd.log`, and where present `server.json`, `auth.json` and
+/// `models/`), never
+/// a project root: nothing here discovers an
 /// [`AgentRoot`] or joins `.agent` onto a cwd, so a per-project
 /// `<repo>/.agent/` store cannot be reached from this path. An already-absent
 /// directory is success, which keeps `--purge` idempotent alongside the
@@ -1424,18 +1419,11 @@ pub fn run_status(home: &Path, log_tail: &[String]) -> Result<(), ServiceError> 
 /// Same as [`run_status`] with the backend pick, the uid resolver, and all
 /// three query runners injected. `resolve_uid` is only ever called on the
 /// launchd arm: passing `current_uid()?` as a call argument would spawn `id`
-/// on Linux too, and ahead of the no-backend refusal — the AILAB-169 shape
-/// this deliberately avoids. Tests pass fixtures and panicking runners and
-/// never spawn anything.
+/// on Linux too, and ahead of the no-backend refusal. Tests pass fixtures and
+/// panicking runners and never spawn anything.
 ///
-/// The third runner is why this signature grew a parameter rather than the
-/// Windows arm being answered somewhere outside it. This function must stay
-/// exhaustive over [`ServiceBackend`], and the two ways to avoid the extra
-/// argument both cost the same thing: an arm that panics, or an arm reachable
-/// only from production [`run_status`], is a Windows path that no test on
-/// Linux ever executes. Every other backend here is covered on Linux CI
-/// *because* its runner is injected; schtasks gets the identical treatment,
-/// and the existing callers pay one `&mut never_query`.
+/// All three query runners are parameters so that every backend arm,
+/// Windows included, runs under a test on Linux CI.
 pub(crate) fn run_status_with(
     backend: Option<ServiceBackend>,
     home: &Path,
@@ -1454,7 +1442,7 @@ pub(crate) fn run_status_with(
 
 /// Linux: `systemctl --user show dreamd.service --no-pager -p …`, a stable
 /// `Key=Value` dump — never the human-oriented `status` verb (paged,
-/// coloured, localised). systemd exits 0 for an unknown unit and answers
+/// colored, localized). systemd exits 0 for an unknown unit and answers
 /// `LoadState=not-found`, so a runner `Err` here is a genuine failure and
 /// propagates. `SubState` is part of the locked argv but is not rendered.
 pub(crate) fn query_systemd_status(query: Query<'_>) -> Result<ServiceReport, ServiceError> {
@@ -1625,7 +1613,7 @@ pub(crate) fn parse_schtasks_query(stdout: &str) -> ServiceState {
     }
 }
 
-/// Render the report the way the spec locks it (byte-tested): four
+/// Render the report in its fixed, byte-tested layout: four
 /// `key: value` lines, then the log tail two-space-indented under a
 /// `recent log (last N lines):` header — or the single line
 /// `recent log: (none)`, the same wording as `dreamd status`. `pid` and
@@ -1661,8 +1649,9 @@ pub(crate) fn render_report(report: &ServiceReport, log_tail: &[String]) -> Stri
 /// [`ServiceError::Spawn`]; a non-zero exit is [`ServiceError::Systemctl`]
 /// carrying the subcommand words and systemd's stderr. Both `systemctl`
 /// runners go through here — [`systemctl_user`] discards stdout,
-/// [`systemctl_user_query`] returns it — so this is one of the three places
-/// in the module that spawn a process ([`launchctl_output`], [`current_uid`]).
+/// [`systemctl_user_query`] returns it. The module's other process spawns are
+/// [`launchctl_output`], [`schtasks_output`], [`icacls_output`],
+/// [`current_uid`] and [`current_sid`].
 fn systemctl_user_output(args: &[&str]) -> Result<std::process::Output, ServiceError> {
     let output = std::process::Command::new("systemctl")
         .arg("--user")
@@ -1682,7 +1671,8 @@ fn systemctl_user_output(args: &[&str]) -> Result<std::process::Output, ServiceE
     })
 }
 
-/// The [`Systemctl`] runner `install` / `start` use: stdout is discarded.
+/// The [`Systemctl`] runner `install` / `start` / `restart` / `uninstall` use:
+/// stdout is discarded.
 fn systemctl_user(args: &[&str]) -> Result<(), ServiceError> {
     systemctl_user_output(args)?;
     Ok(())
@@ -1718,7 +1708,8 @@ fn launchctl_output(args: &[&str]) -> Result<std::process::Output, ServiceError>
     })
 }
 
-/// The [`Launchctl`] runner `install` / `start` use: stdout is discarded.
+/// The [`Launchctl`] runner `install` / `start` / `restart` / `uninstall` use:
+/// stdout is discarded.
 fn launchctl(args: &[&str]) -> Result<(), ServiceError> {
     launchctl_output(args)?;
     Ok(())
@@ -1800,7 +1791,7 @@ fn icacls(args: &[&str]) -> Result<(), ServiceError> {
 
 /// The current uid for launchd's `gui/<uid>` domain, read from `id -u`
 /// stdout. Spawning a POSIX utility keeps the CLI crate free of FFI and of
-/// any new dependency (NFR-2); the cost is one extra process per `service`
+/// any new dependency (binary-size budget); the cost is one extra process per `service`
 /// verb on macOS, which is a one-shot anyway.
 fn current_uid() -> Result<u32, ServiceError> {
     let output = std::process::Command::new("id")
@@ -1828,14 +1819,15 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // No test here can spawn `systemctl` or `launchctl`: every call into
-    // `run_*_with` passes either a panicking runner (paths that must refuse
-    // first) or a recording closure (paths that must reach the supervisor).
-    // This host may well have a live user manager, GHA macos-latest has a
-    // live launchd, and a test must never enable a real unit or bootstrap a
-    // real LaunchAgent under the developer's HOME. The uid is injected (501)
-    // so `id -u` is never spawned either, and every launchd test runs on
-    // Linux — none is gated on the macOS target. `uninstall`'s confirmation
+    // No test here can spawn `systemctl`, `launchctl`, `schtasks` or
+    // `icacls`: every call into `run_*_with` passes either a panicking runner
+    // (paths that must refuse first) or a recording closure (paths that must
+    // reach the supervisor). This host may well have a live user manager, GHA
+    // macos-latest has a live launchd, and a test must never enable a real
+    // unit, bootstrap a real LaunchAgent or register a real task under the
+    // developer's HOME. The uid and the SID are injected (501, a fake SID) so
+    // `id -u` and `whoami` are never spawned either, and every launchd and
+    // schtasks test runs on Linux — none is gated on its target OS. `uninstall`'s confirmation
     // is injected on the same principle (AILAB-202): the tty probe and the
     // line read are closures, so no test blocks on real stdin or depends on
     // whether the harness gave the runner a terminal.
@@ -1901,8 +1893,8 @@ WantedBy=default.target
             unit.lines().any(|l| l == "WorkingDirectory=/home/u/proj"),
             "WorkingDirectory must be the exact project root"
         );
-        // The literals below are assembled so the forbidden strings never
-        // appear verbatim in this source file (anti-pattern greps).
+        // The literals below are assembled with `concat!` so a text search of
+        // this file for a forbidden string finds only real uses.
         assert!(
             !unit.contains(concat!("Type=", "forking")),
             "systemd supervises the foreground daemon; never the forking type"
@@ -2270,9 +2262,9 @@ WantedBy=default.target
         );
     }
 
-    // ---- macOS LaunchAgent path (AILAB-169) ---------------------------------
+    // ── macOS LaunchAgent path (AILAB-169) ───────────────────────────────────
 
-    /// The plist text the spec locks, for the fake exe and `/Users/u/proj`.
+    /// The exact plist text, for the fake exe and `/Users/u/proj`.
     /// Tab-indented; `\t` escapes keep the tabs visible and safe from editors.
     const EXPECTED_PLIST: &str = "\
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -2350,12 +2342,9 @@ WantedBy=default.target
             .collect();
         assert_eq!(args, [FAKE_EXE, "watch"]);
 
-        // The literals below are assembled so the forbidden keys never appear
-        // verbatim in this source file (anti-pattern greps). The redirection
-        // keys would put a second writer on ~/.agent/dreamd.log; the process
-        // group key would detach the daemon from launchd's supervision; the
-        // environment dict is the plist form of the HOME injection AILAB-584
-        // banned from the unit.
+        // The literals below are assembled with `concat!` so a text search of
+        // this file for a forbidden key finds only real uses. The module docs
+        // say why each key is forbidden.
         for forbidden in [
             concat!("StandardOut", "Path"),
             concat!("StandardError", "Path"),
@@ -2688,7 +2677,7 @@ WantedBy=default.target
         );
     }
 
-    // ---- `service status` (AILAB-178) ---------------------------------------
+    // ── `service status` (AILAB-178) ─────────────────────────────────────────
     //
     // Same rule as above: no test here can spawn `systemctl`, `launchctl`, or
     // `id`. Every supervisor query is a recording closure answering with a
@@ -3047,7 +3036,7 @@ recent log (last 10 lines):
         );
     }
 
-    // ---- uninstall (AILAB-202) ----------------------------------------------
+    // ── uninstall (AILAB-202) ────────────────────────────────────────────────
 
     /// A [`Confirm`] that must never be consulted: without `--purge` there is
     /// nothing destructive to confirm, and with `--yes` the flag *is* the
@@ -3405,7 +3394,7 @@ recent log (last 10 lines):
         assert!(project.path().join(".agent").is_dir());
     }
 
-    /// The founder lock, in one assertion: `--purge --yes` deletes the daemon
+    /// The `--purge` scope rule, in one assertion: `--purge --yes` deletes the daemon
     /// home and **only** the daemon home. The sibling project store — a real
     /// `.agent/` directory in its own tree, exactly what a user's repo has —
     /// is still there afterwards, and the report says so on the line that
@@ -3489,7 +3478,7 @@ recent log (last 10 lines):
         );
     }
 
-    // ---- Windows Task Scheduler path (AILAB-203) ----------------------------
+    // ── Windows Task Scheduler path (AILAB-203) ──────────────────────────────
     //
     // Same rule as every section above, and for the same reason: no test here
     // may spawn `schtasks`, `icacls` or `whoami`. Both process runners are
@@ -3525,7 +3514,7 @@ recent log (last 10 lines):
         panic!("icacls must not be reached, got {args:?}")
     }
 
-    /// The task definition the spec locks, for the fake exe and
+    /// The exact task definition, for the fake exe and
     /// `/home/u/proj`. Tab-indented like [`EXPECTED_PLIST`]; `\t` escapes keep
     /// the tabs visible and safe from editors. The paths are POSIX only
     /// because the fixture reuses [`FAKE_EXE`] — the renderer does no path
@@ -3600,14 +3589,9 @@ recent log (last 10 lines):
             "a memory daemon never asks for elevation: {xml}"
         );
 
-        // The literals below are assembled so the forbidden keys never appear
-        // verbatim in this source file (anti-pattern greps). The redirection
-        // nodes would put a second writer on ~/.agent/dreamd.log, whose
-        // tracing file layer truncates on open (AILAB-184); the environment
-        // node is the task form of the HOME injection AILAB-584 banned from
-        // the unit; the elevated run level has no business on a per-user
-        // memory daemon; and a boot trigger would fire outside the interactive
-        // session that owns %USERPROFILE% and therefore ~/.agent.
+        // The literals below are assembled with `concat!` so a text search of
+        // this file for a forbidden node finds only real uses. The docs on
+        // `render_task_xml` say why each node is forbidden.
         for forbidden in [
             concat!("Standard", "Output"),
             concat!("Standard", "Error"),
@@ -3679,7 +3663,7 @@ recent log (last 10 lines):
     }
 
     /// Pull the token out of an `auth.json` body, asserting the wire format
-    /// AILAB-192 will parse: one compact object, exactly one field, and 64
+    /// `dreamd watch` parses (AILAB-192): one compact object, exactly one field, and 64
     /// **lowercase** hex characters (32 random bytes). Returns the token so a
     /// caller can compare two mints.
     fn auth_token(body: &str) -> String {
@@ -3783,7 +3767,7 @@ recent log (last 10 lines):
         );
         assert!(
             !flat.iter().any(|word| word == "/Run"),
-            "install must never start the task: `watch` still exits 2 (AILAB-192): {flat:?}"
+            "install must never start the task; the logon trigger or `service start` does: {flat:?}"
         );
         assert!(
             schtasks_calls
@@ -3898,8 +3882,8 @@ recent log (last 10 lines):
 
     /// The Darwin `--force` gate, one promise wider. An existing definition
     /// without `--force` is exit 2 with nothing rewritten — and `auth.json`
-    /// is part of "nothing": a bare reinstall must never silently invalidate a
-    /// token AILAB-192 already handed out.
+    /// is part of "nothing": a bare reinstall must never silently invalidate
+    /// the token a running daemon and its clients are using.
     #[cfg(unix)]
     #[test]
     fn schtasks_install_refuses_when_task_xml_exists_without_force() {
@@ -4007,9 +3991,8 @@ recent log (last 10 lines):
     }
 
     /// `schtasks /Run /TN <name>` and nothing else. What this surfaces is the
-    /// scheduler's exit, never the supervised process's — until AILAB-192 a
-    /// perfectly successful `/Run` still leaves `status` at `stopped`, which
-    /// is why nothing here asserts that `watch` stays up.
+    /// scheduler's exit, never the supervised process's, which is why nothing
+    /// here asserts that `watch` stays up.
     #[test]
     fn schtasks_start_runs_the_task() {
         let mut calls: Vec<Vec<String>> = Vec::new();
@@ -4064,9 +4047,9 @@ recent log (last 10 lines):
 
     /// The `/End` is best-effort, exactly as the Darwin `bootout` under
     /// `--force` is (`launchd_install_with_force_ignores_bootout_failure`):
-    /// ending a task that is not running exits non-zero, and on this backend
-    /// that is the *common* case until AILAB-192 lands. The `/Run` is the call
-    /// that must succeed, and the verb still does.
+    /// ending a task that is not running exits non-zero, which is the normal
+    /// answer for an idle task. The `/Run` is the call that must succeed, and
+    /// the verb still does.
     #[cfg(unix)]
     #[test]
     fn schtasks_restart_ignores_end_failure() {
@@ -4228,7 +4211,7 @@ recent log (last 10 lines):
         );
     }
 
-    // ---- `service status` on schtasks (AILAB-203) ---------------------------
+    // ── `service status` on schtasks (AILAB-203) ─────────────────────────────
 
     /// The exact argv the report verb hands its `Query` runner on Windows.
     /// `/FO LIST` pins the `Key: Value` block — never the default table, whose
@@ -4247,8 +4230,8 @@ Status:                               Running
 Logon Mode:                           Interactive only
 ";
 
-    /// The same dump for a registered task that is idle — the common answer
-    /// until AILAB-192, because `watch` exits 2 the moment the trigger fires.
+    /// The same dump for a registered task that is idle: installed and not
+    /// yet started, stopped, or its `watch` exited.
     const QUERY_READY: &str = "\
 TaskName:                             \\dev.dreamd.dreamd
 Next Run Time:                        At log on
@@ -4262,7 +4245,7 @@ Next Run Time:                        Disabled
 Status:                               Disabled
 ";
 
-    /// A dump with no `Status:` line at all — a truncated or localised view.
+    /// A dump with no `Status:` line at all — a truncated or localized view.
     /// Unknown is stopped, never running.
     const QUERY_NO_STATUS: &str = "\
 TaskName:                             \\dev.dreamd.dreamd
@@ -4429,7 +4412,7 @@ Next Run Time:                        At log on
         assert_schtasks_report(&report, ServiceState::Running);
     }
 
-    // ---- refusal and failure copy (AILAB-203) -------------------------------
+    // ── refusal and failure copy (AILAB-203) ─────────────────────────────────
 
     /// The no-backend refusal is reached on Linux without a user manager too —
     /// containers, most CI runners — so its copy must keep pointing at

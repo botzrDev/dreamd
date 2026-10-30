@@ -1,10 +1,10 @@
-//! `dreamd migrate` framework (WEG-133 / DR-108) — episodic schema migration registry.
+//! `dreamd migrate` framework (WEG-133) — episodic schema migration registry.
 //!
-//! v0.1 ships a **stub**: exactly one registered transform, the identity
+//! The registry is a **stub**: exactly one registered transform, the identity
 //! migration for the current episodic record schema
 //! ([`dreamd_protocol::RECORD_SCHEMA_VERSION`], `1.0.0`), which is a no-op
-//! success. The trait + registry exist so v0.1.1 can register real durable
-//! transforms without reshaping the CLI.
+//! success. The trait + registry exist so a schema change can register a real
+//! durable transform without reshaping the CLI.
 //!
 //! `--from` / `--to` name the **episodic record** schema
 //! ([`dreamd_protocol::RECORD_SCHEMA_VERSION`]) — three independent version
@@ -26,8 +26,8 @@ use crate::layout::AgentRoot;
 
 /// Failure returned by [`Migration::apply`].
 ///
-/// The v0.1 identity migration never constructs one (its `apply` is a no-op);
-/// the variant gives real v0.1.1 transforms a home to `?`-propagate durable I/O
+/// The identity migration never constructs one (its `apply` is a no-op); the
+/// variant gives a future real transform a home to `?`-propagate durable I/O
 /// failures through.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {
@@ -49,14 +49,14 @@ pub trait Migration {
     fn to_version(&self) -> &str;
     /// Apply the durable transform.
     ///
-    /// The v0.1 identity migration is a no-op (`Ok(())`) that reads and writes
-    /// nothing. Real v0.1.1 transforms rewrite `AGENT_LEARNINGS.jsonl` here (the
+    /// The identity migration is a no-op (`Ok(())`) that reads and writes
+    /// nothing. A real transform would rewrite `AGENT_LEARNINGS.jsonl` here (the
     /// CLI has already taken the `.bak` copies before calling this).
     fn apply(&self, agent_root: &AgentRoot) -> Result<(), MigrateError>;
 }
 
 /// A no-op migration whose `from` and `to` are the same version — the only
-/// transform registered in v0.1 (`1.0.0` → `1.0.0`).
+/// registered transform (`1.0.0` → `1.0.0`).
 pub struct IdentityMigration {
     version: &'static str,
 }
@@ -90,10 +90,11 @@ pub struct MigrationRegistry {
 }
 
 impl MigrationRegistry {
-    /// The v0.1 registry: exactly one transform, the identity migration for the
-    /// current episodic record schema
-    /// ([`dreamd_protocol::RECORD_SCHEMA_VERSION`]). Any other `(from, to)` pair
-    /// is unregistered and must be rejected by the CLI.
+    /// The shipped registry: exactly one transform, the identity migration for
+    /// the current episodic record schema
+    /// ([`dreamd_protocol::RECORD_SCHEMA_VERSION`]). The name is the release
+    /// that introduced it. Any other `(from, to)` pair is unregistered and must
+    /// be rejected by the CLI.
     pub fn v0_1() -> Self {
         Self {
             migrations: vec![Box::new(IdentityMigration::new(
@@ -118,7 +119,7 @@ mod tests {
     #[test]
     fn v0_1_registers_identity_for_current_record_schema() {
         // The one registered path is the current episodic record schema, which
-        // is 1.0.0 today. Assert against both the literal and the constant so
+        // is currently 1.0.0. Assert against both the literal and the constant so
         // the tie is locked if the constant ever drifts.
         assert_eq!(dreamd_protocol::RECORD_SCHEMA_VERSION, "1.0.0");
         let reg = MigrationRegistry::v0_1();
@@ -143,7 +144,7 @@ mod tests {
         let reg = MigrationRegistry::v0_1();
         // The daemon-state / display token is never a registered pair.
         assert!(reg.find("1.0", "1.0").is_none());
-        // Forward transforms are not registered in the v0.1 stub.
+        // Forward transforms are not registered in the stub.
         assert!(reg.find("1.0.0", "1.1.0").is_none());
         assert!(reg.find("1.0.0", "2.0.0").is_none());
         // Reversed / partial pairs miss too.

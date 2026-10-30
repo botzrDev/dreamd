@@ -1,10 +1,11 @@
 //! Dream cycle orchestration — single owner of the full phase graph.
 //!
 //! Phase order (load-bearing):
-//!   1. Consolidation — cluster → lesson body → LESSONS.md → pin/unpin
-//!   2. Decay — archive + JSONL prune
-//!   3. Index — prune decayed docs → re-index the lesson layer
-//!   4. Autobiography — best-effort git commit
+//!   1. Filesystem — one plan covers consolidation (cluster → lesson body →
+//!      `LESSONS.md` → pins) and decay (archive + JSONL prune), committed with
+//!      one redo WAL
+//!   2. Index — prune decayed docs → re-index the lesson layer
+//!   3. Autobiography — best-effort git commit
 //!
 //! A cycle's filesystem phases are three steps (BZR-1241):
 //!   1. [`prepare`] reads the log once and selects the lesson;
@@ -19,7 +20,7 @@
 //! The daemon prepares and commits through the coordinator actor
 //! (`PrepareCycle` / `CommitCycle`) and composes in the request's own task, so
 //! appends keep landing during the model call and the commit includes them.
-//! [`gate_at_commit`] re-checks the composed body against what the commit
+//! `gate_at_commit` re-checks the composed body against what the commit
 //! selects.
 //!
 //! Entry points (`dreamd dream`, `POST /api/v1/dream`) are thin adapters over
@@ -59,16 +60,24 @@ use crate::wal::{self, CycleKind, WalError};
 /// Unified error type for dream-cycle orchestration.
 #[derive(Debug, thiserror::Error)]
 pub enum DreamCycleError {
+    /// Clustering, planning or the lesson phase failed.
     #[error("consolidation: {0}")]
     Consolidation(#[from] LessonPhaseError),
+    /// Beginning, staging or committing the cycle failed.
     #[error("WAL: {0}")]
     Wal(#[from] WalError),
+    /// A provenance ledger error. No path in this module returns it: the
+    /// commit's edge appends report through [`Self::Wal`].
     #[error("provenance: {0}")]
     Provenance(#[from] ProvenanceError),
+    /// Taking or staging the pre-cycle autosnap failed.
     #[error("snapshot: {0}")]
     Snapshot(#[from] SnapshotError),
+    /// Pruning decayed events from, or re-indexing lessons into, the index
+    /// failed.
     #[error("index: {0}")]
     Index(#[from] crate::server::index_map::IndexError),
+    /// `state.json` says a cycle is `in_progress` (HTTP 409).
     #[error("dream cycle already in progress")]
     InProgress,
     /// The coordinator's inbox was full when the cycle was dispatched (HTTP 503).
@@ -139,10 +148,10 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 /// [`prepare`], then [`compose`], then [`commit`], in this task. The model call
 /// runs before the stage opens, so the stage and `in_progress` cover only the
 /// commit. The commit plans every output and stages it in one stage with one
-/// redo WAL, so the full cycle is a single atomic region (ARCH-2). The CLI's
-/// in-process path calls this under the project writer lock; the daemon runs
-/// the same three steps through its coordinator actor instead, which must
-/// reopen its append fd afterward.
+/// redo WAL, so the full cycle is a single atomic region (ARCHITECTURE.md §3).
+/// The CLI's in-process path calls this under the project writer lock; the
+/// daemon runs the same three steps through its coordinator actor instead,
+/// which must reopen its append fd afterward.
 ///
 /// `no_llm` forces the deterministic body even when credentials exist. When it is
 /// `false`, the backend is resolved from the project's [`crate::config::Config`]
@@ -187,9 +196,9 @@ pub async fn run_filesystem_phases(
 /// [`run_filesystem_phases`] with an explicit backend — the seam tests use to
 /// drive the LLM path with a fake and no network.
 ///
-/// `share_personal` is `false` for every pre-AILAB-199 caller; the flag exists
-/// here so a test can drive the consent path against the same fake backend the
-/// rest of the LLM assertions use.
+/// `share_personal` means what it does for [`run_filesystem_phases`]. It is a
+/// parameter here so a test can drive the consent path against the same fake
+/// backend the rest of the LLM assertions use.
 pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -270,7 +279,7 @@ pub fn prepare(agent_root: &AgentRoot, now_sec: i64) -> Result<Prepared, DreamCy
 
 /// The lesson body for `selected`, composed outside any actor. `None`, or
 /// `no_llm`, is the deterministic body. Otherwise `config.toml` is loaded once
-/// (degrading to defaults, as today), the backend is resolved, and
+/// (a broken file degrades to defaults), the backend is resolved, and
 /// `compose_lesson_body` runs with that config's `cost_cap_usd`. Infallible.
 pub async fn compose(
     agent_root: &AgentRoot,
@@ -321,7 +330,7 @@ pub async fn compose(
 /// ([`retention::collect_objects`]). Reads no log.
 ///
 /// `composed_for` is the cluster key `body` was composed for (see
-/// [`gate_at_commit`]).
+/// `gate_at_commit`).
 pub fn commit(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -331,11 +340,12 @@ pub fn commit(
     composed_for: Option<&str>,
     body: LessonBodySource,
 ) -> Result<DecayResult, DreamCycleError> {
-    // ARCH-2: ONE plan holds BOTH filesystem phases' outputs, in ONE stage.
+    // One plan holds both filesystem phases' outputs, in one stage
+    // (ARCHITECTURE.md §3).
     // begin_cycle guards `.agent/` existence (WEG-281), refuses a pending WAL
     // and sets state=in_progress; nothing live changes until commit_cycle
     // writes the redo WAL, applies it and sets state=complete. A read, plan or
-    // stage error short-circuits via `?` BEFORE that commit point, leaving only
+    // stage error short-circuits via `?` before that commit point, leaving only
     // the stage for the next writer to wipe (state=failed) — so no
     // half-finished cycle is ever recorded "complete", and none is ever
     // half-applied.
@@ -425,7 +435,7 @@ pub(crate) fn gate_at_commit(
 /// Ordering inside this function is load-bearing twice over: the personal bytes
 /// are appended *after* `build_lesson_prompt` (so the cluster prompt stays
 /// cluster-only and can never carry them by construction) and *before*
-/// [`llm::estimate_prompt_cost`] (so the AILAB-196 cap prices the string that is
+/// [`llm::estimate_prompt_cost`] (so the cost cap prices the string that is
 /// actually about to be sent, not a shorter one).
 async fn compose_lesson_body<B: LlmBackend>(
     selected: &SelectedLesson,
@@ -511,15 +521,15 @@ async fn compose_lesson_body<B: LlmBackend>(
     }
 }
 
-/// Gate one completion on its citation trailer (AILAB-200 / DR-306).
+/// Gate one completion on its citation trailer (AILAB-200).
 ///
 /// A model that cannot name the cluster events it drew on has not composed a
 /// lesson from them, so an unparseable or hallucinated trailer is treated
 /// exactly like a transport failure: WARN, then the deterministic exemplar copy.
 /// The cycle is still infallible here — this returns a body, never an error.
 fn compose_from_completion(selected: &SelectedLesson, text: &str) -> LessonBodySource {
-    // AILAB-204's empty-body rule runs first, so an empty answer is reported as
-    // an empty answer rather than as a missing trailer.
+    // The empty-body rule (AILAB-204) runs first, so an empty answer is
+    // reported as an empty answer rather than as a missing trailer.
     if text.is_empty() {
         return LessonBodySource::Deterministic;
     }
@@ -532,7 +542,7 @@ fn compose_from_completion(selected: &SelectedLesson, text: &str) -> LessonBodyS
         return LessonBodySource::Deterministic;
     };
 
-    // A trailer with nothing above it is the 204 empty-body case reached through
+    // A trailer with nothing above it is the empty-body case reached through
     // a new door, so it degrades before the citation check like any empty answer
     // — but it is worth a line: silently writing the exemplar copy is otherwise
     // indistinguishable from the model never having been called.
@@ -640,7 +650,7 @@ where
     ensure_not_in_progress(opts.agent_root)?;
     let cycle_date = cycle_date_from_now_sec(opts.now_sec);
 
-    // WEG-63 — capture dirty state BEFORE the cycle runs.
+    // WEG-63 — capture dirty state before the cycle runs.
     let dirty_at_cycle_start = if opts.commit_autobiography {
         autobiography::check_dirty_at_cycle_start(opts.project_root).unwrap_or_default()
     } else {
@@ -674,8 +684,8 @@ where
 /// stale `in_progress` status, rolls a committed cycle's WAL forward and wipes
 /// any staged one.
 ///
-/// ONE current-thread runtime drives the whole cycle. Since AILAB-204 the
-/// filesystem phases are async too: [`run_filesystem_phases`] runs prepare,
+/// One current-thread runtime drives the whole cycle. The filesystem phases
+/// are async (AILAB-204): [`run_filesystem_phases`] runs prepare,
 /// compose and commit in this task, and the compose `await`s the model call
 /// before the stage opens. They share the runtime that already existed for the
 /// index phases — building a second one inside the first would panic at the
@@ -851,7 +861,7 @@ async fn run_index_phases(
             if !decay_result.decayed_ids.is_empty() {
                 prune_decayed_events(&sender, decay_result.decayed_ids.clone()).await?;
             }
-            // DR-211: consolidation rewrote LESSONS.md earlier in this cycle;
+            // Consolidation rewrote LESSONS.md earlier in this cycle;
             // fold the new lesson set into the live index without a restart.
             index_semantic_lessons(agent_root, &sender).await?;
             Ok(())
@@ -874,7 +884,7 @@ async fn run_index_phases(
     }
 }
 
-/// Ask the live indexer to re-index `semantic/LESSONS.md` (DR-211 / AILAB-205).
+/// Ask the live indexer to re-index `semantic/LESSONS.md` (AILAB-205).
 /// Sender-only mirror of [`TantivyIndexHandle::index_semantic_lessons`] for the
 /// daemon path, which holds a channel rather than the handle.
 ///
@@ -954,9 +964,9 @@ mod tests {
         (dir, root)
     }
 
-    /// Deterministic backend for every pre-AILAB-204 assertion: `no_llm = true`
-    /// keeps these tests network-free and byte-identical to the old behavior
-    /// regardless of whether the developer running them has an API key exported.
+    /// Deterministic backend for the tests that do not exercise the model:
+    /// `no_llm = true` keeps them network-free and independent of whether the
+    /// developer running them has an API key exported.
     async fn run_deterministic(root: &AgentRoot) -> DecayResult {
         run_filesystem_phases(
             root,
@@ -1072,8 +1082,8 @@ mod tests {
         assert_eq!(fs::read_dir(&objects).unwrap().count(), 20);
     }
 
-    /// Test 13's store: 20 `snap-*` refs a day old, each naming its own object,
-    /// every object two hours old. Returns `(ref name, object id)` oldest first.
+    /// The retention tests' store: 20 `snap-*` refs a day old, each naming its
+    /// own object, every object two hours old. Returns `(ref name, object id)` oldest first.
     fn seed_old_autosnaps(root: &AgentRoot) -> Vec<(String, String)> {
         fs::create_dir_all(root.semantic_dir()).unwrap();
         let mut seeded = Vec::new();
@@ -1113,7 +1123,7 @@ mod tests {
         refs
     }
 
-    /// BZR-1245 Amendment 3, test 22: a retention plan that fails only warns.
+    /// A retention plan that fails only warns (BZR-1245).
     /// The cycle commits and prunes nothing.
     #[tokio::test]
     async fn cycle_commits_when_retention_planning_fails() {
@@ -1136,8 +1146,7 @@ mod tests {
         }
     }
 
-    /// BZR-1245 Amendment 3, test 23: object collection that fails after the
-    /// commit only warns. The prune still lands, and nothing is removed.
+    /// Object collection that fails after the commit only warns (BZR-1245). The prune still lands, and nothing is removed.
     #[tokio::test]
     async fn cycle_commits_when_object_collection_fails() {
         let (_dir, root) = scaffold_fixture();
@@ -1159,8 +1168,8 @@ mod tests {
         assert!(x.is_dir(), "collection failed closed: X stays");
     }
 
-    /// BZR-1245 Amendment 3, test 24: the cycle collects with the grace, so a
-    /// fresh unnamed object survives and an old one goes.
+    /// The cycle collects with the grace, so a fresh unnamed object survives
+    /// and an old one goes (BZR-1245).
     #[tokio::test]
     async fn cycle_keeps_a_fresh_unnamed_object() {
         let (_dir, root) = scaffold_fixture();
@@ -1410,7 +1419,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
@@ -1487,7 +1496,7 @@ mod tests {
         assert_eq!(
             fake.calls.load(Ordering::SeqCst),
             0,
-            "the cap has to abort BEFORE the request — a refusal logged after the \
+            "the cap has to abort before the request — a refusal logged after the \
              connection opened has already spent what it was meant to save"
         );
     }
@@ -1542,11 +1551,11 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
-        .expect("a hallucinated citation must NEVER fail the cycle");
+        .expect("a hallucinated citation must never fail the cycle");
 
         assert_eq!(
             fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
@@ -1587,7 +1596,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
@@ -1607,7 +1616,7 @@ mod tests {
         let deterministic_bytes = fs::read(root_a.lessons_md()).expect("deterministic LESSONS.md");
 
         let (_dir_b, root_b) = scaffold_fixture();
-        // Prose only — exactly what the pre-AILAB-200 prompt asked for.
+        // Prose only, with no citation trailer.
         let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
         run_filesystem_phases_with_backend(
             &root_b,
@@ -1616,11 +1625,11 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
-        .expect("a missing trailer must NEVER fail the cycle");
+        .expect("a missing trailer must never fail the cycle");
 
         assert_eq!(
             fs::read(root_b.lessons_md()).expect("fallback LESSONS.md"),
@@ -1648,7 +1657,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
@@ -1676,11 +1685,11 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
-        .expect("a failing model must NEVER fail the cycle");
+        .expect("a failing model must never fail the cycle");
         let fallback_bytes = fs::read(root_b.lessons_md()).expect("fallback LESSONS.md");
 
         assert_eq!(
@@ -1709,7 +1718,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             &fake,
             "claude-haiku-4-5",
-            // AILAB-199: no consent — the default for every pre-199 assertion.
+            // No consent to read `.agent/personal/` (AILAB-199).
             false,
         )
         .await
@@ -1973,10 +1982,9 @@ mod tests {
         assert_eq!(store_bytes(&root), before, "a refused cycle writes nothing");
     }
 
-    /// BZR-1240 Amendment 1 item 2: the cycle reads `LESSONS.md` before it
-    /// stages anything, so a path it cannot read fails the cycle before the
-    /// commit point. Before BZR-1240 the rename onto the directory failed
-    /// after it, and every recovery retried it.
+    /// The cycle reads `LESSONS.md` through the stage before the commit point,
+    /// so a path it cannot read fails the cycle with nothing live changed, and
+    /// recovery has no rename onto the directory to retry (BZR-1240).
     #[cfg(unix)]
     #[test]
     fn a_directory_at_lessons_md_fails_the_cycle_before_the_commit_point() {

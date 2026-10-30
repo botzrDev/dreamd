@@ -2,9 +2,13 @@
 //!
 //! The default binary is built without the `vectors` feature: the command
 //! prints one sentence naming that feature, exits 2, and creates nothing.
-//! A `--features vectors` build downloads [`dreamd_core::vectors::MODEL_ID`]
+//! A `--features vectors` build downloads `dreamd_core::vectors::MODEL_ID`
 //! into `~/.agent/models` and loads it once. Recall is unchanged either way
 //! (BM25 × salience); nothing here embeds text or writes an index.
+//!
+//! The command and the `vectors` cargo feature are deprecated and will be
+//! removed in dreamd 2.0 (BZR-1245); `cli.rs` prints the notice from
+//! `commands::deprecation` before dispatch.
 //!
 //! No stdout lock is held across the download: loading the model spins up
 //! ONNX Runtime, which may log through tracing to stderr.
@@ -40,7 +44,7 @@ pub fn run(out: &mut impl Write, err: &mut impl Write) -> ExitCode {
         let _ = writeln!(err, "dreamd: error — {e}");
         return ExitCode::from(1);
     }
-    // fastembed lets a non-empty HF_HOME win over the cache dir we passed.
+    // fastembed lets a non-empty HF_HOME win over the cache dir passed in.
     let cache = match std::env::var_os("HF_HOME") {
         Some(v) if !v.is_empty() => std::path::PathBuf::from(v),
         _ => models,

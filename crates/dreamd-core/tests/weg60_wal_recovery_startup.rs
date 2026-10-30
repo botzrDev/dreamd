@@ -3,9 +3,10 @@
 //! If WAL recovery does not run at daemon boot (it runs when `dreamd watch`
 //! takes the project writer lock), a crashed cycle's WAL is left behind
 //! forever. The fixture is a **legacy** (`intents`) WAL with partial `.tmp`
-//! files, as a pre-1.1.0 binary left it; 1.1.0 still recovers it the old way.
+//! files, as a pre-1.2.0 binary left it; recovery still handles that format
+//! the old way.
 //! This spawns the real `run_watch` via `weg268_watch_helper`, waits for the
-//! socket to bind (recovery completed), and asserts the WAL and temp artefacts
+//! socket to bind (recovery completed), and asserts the WAL and temp artifacts
 //! are gone.
 
 #![cfg(unix)]

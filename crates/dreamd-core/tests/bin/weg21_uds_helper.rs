@@ -1,8 +1,8 @@
 //! Test-only helper binary used by the WEG-21 two-process integration test.
 //!
-//! NOT a shipping binary: `Cargo.toml` flags it `test = false, bench = false,
-//! doc = false`, and it lives under `tests/bin/`. Compiled only when the
-//! dreamd-core test suite is built.
+//! Not a shipping binary: `Cargo.toml` flags it `test = false, bench = false,
+//! doc = false`, it lives under `tests/bin/`, and no release artifact
+//! includes it.
 //!
 //! Modes (selected by argv[1]):
 //!
@@ -18,12 +18,11 @@
 //! The helper runs in the foreground, so the integration test can wait on the
 //! child PID.
 
-// AILAB-174: this helper is Unix-only — it binds a `std::os::unix::net`
-// socket and drives `dreamd_core::server`, which is `#[cfg(unix)]` in lib.rs.
-// `cargo test --workspace` still *builds* every `[[bin]]` target on Windows, so
-// each item is gated individually and `main` has a `not(unix)` twin. A
-// crate-level `#![cfg(unix)]` would strip `main` too — that is `E0601`, not a
-// gate. The Windows daemon port is DR-121 / AILAB-203.
+// AILAB-174: this helper is Unix-only because it binds a `std::os::unix::net`
+// socket. `cargo test --workspace` still *builds* every `[[bin]]` target on
+// Windows, so each item is gated individually and `main` has a `not(unix)`
+// twin. A crate-level `#![cfg(unix)]` would strip `main` too — that is
+// `E0601`, not a gate.
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -258,6 +257,6 @@ fn main() -> ExitCode {
 /// spawns this on Windows.
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
-    eprintln!("weg21_uds_helper: unix-only test helper (DR-121)");
+    eprintln!("weg21_uds_helper: unix-only test helper");
     std::process::ExitCode::from(64)
 }

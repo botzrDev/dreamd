@@ -1,15 +1,16 @@
 //! Shared outbound HTTP transport to the dreamd daemon.
 //!
-//! One per-call-connect implementation used by BOTH the MCP Remote backend
-//! (`mcp::send_remote`) and the dream-cycle CLI proxy (`client::proxy_dream_cycle`).
-//! Owns only the transport + address resolution; each caller keeps its own
-//! request construction and status→outcome mapping. Per-call connect (no pool):
-//! daemon traffic is infrequent (WEG-78-A rationale).
+//! One per-call-connect implementation used by both the MCP daemon-proxy store
+//! (`memory_store::DaemonStore`) and the dream-cycle CLI proxy
+//! (`client::proxy_dream_cycle`). Owns only the transport + address resolution;
+//! each caller keeps its own request construction and status→outcome mapping.
+//! Per-call connect (no pool): daemon traffic is infrequent, so a pool would
+//! hold idle connections for nothing (WEG-78-A).
 //!
-//! Compiled on every target as of AILAB-192, because the daemon's address is not
+//! Compiled on every target (AILAB-192), because the daemon's address is not
 //! the same shape on every target: Unix speaks HTTP over `~/.agent/dreamd.sock`
-//! and authenticates by peer UID, while Windows has no `SO_PEERCRED` and will
-//! speak the same HTTP over loopback TCP with an `Authorization: Bearer` token.
+//! and authenticates by peer UID, while Windows has no `SO_PEERCRED` and speaks
+//! the same HTTP over loopback TCP with an `Authorization: Bearer` token.
 //! The UDS half below therefore keeps its own `#[cfg(unix)]` gates —
 //! [`DaemonTransportError`] is the one piece both transports share, so it is the
 //! error type of both halves.
@@ -34,8 +35,8 @@
 //! header: [`AuthToken`] has a hand-written [`Debug`] that redacts, and no
 //! error type here carries the bytes.
 
-// Every import below is now reached from the cfg-free loopback-TCP half as well
-// as the `#[cfg(unix)]` UDS half, so none of them may be gated (AILAB-192):
+// Every import below is reached from the cfg-free loopback-TCP half as well as
+// the `#[cfg(unix)]` UDS half, so none of them may be gated:
 //
 // - `Path` is the argument type of `read_auth_token`, `read_server_json` and
 //   `tcp_daemon_is_live`; `PathBuf` is `AuthTokenError::Missing`'s payload and
@@ -61,18 +62,22 @@ use crate::layout::DaemonHome;
 /// each caller reproduce its existing message + the dream proxy distinguish
 /// "no live daemon" (`Unreachable`) from real failures.
 ///
-/// Deliberately transport-agnostic (AILAB-192): "connect", "handshake", "send"
-/// and "read body" are the same four stages over a socket or over TCP, and a
-/// caller's mapping to an exit code or an MCP error should not have to care
-/// which one it got.
+/// Deliberately transport-agnostic: "connect", "handshake", "send" and "read
+/// body" are the same four stages over a socket or over TCP, and a caller's
+/// mapping to an exit code or an MCP error should not have to care which one
+/// it got.
 #[derive(Debug)]
 pub enum DaemonTransportError {
     /// Connect failed with `NotFound`/`ConnectionRefused` — no daemon is
     /// listening. The dream proxy maps this to `NotReachable` (run in-process).
     Unreachable,
+    /// Any other connect failure; carries the OS error message.
     Connect(String),
+    /// The HTTP/1 handshake on a fresh connection failed.
     Handshake(String),
+    /// Sending the request failed, or the request could not be built.
     Send(String),
+    /// Reading the response body failed.
     ReadBody(String),
 }
 
@@ -138,7 +143,7 @@ pub async fn send_one(
         Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
     };
     // TokioIo wrap is required: a raw UnixStream does not implement hyper's IO
-    // trait (WEG-72-B drift entry).
+    // trait.
     let io = TokioIo::new(stream);
     let (mut sender, conn) = http1::handshake(io)
         .await
@@ -160,22 +165,19 @@ pub async fn send_one(
     Ok((status, body))
 }
 
-// ---------------------------------------------------------------------------
-// AILAB-192 — loopback TCP transport: bearer token, endpoint, client.
+// ── Loopback TCP transport: bearer token, endpoint, client (AILAB-192) ──────
 //
 // Everything below is deliberately cfg-free even though only Windows serves
-// over loopback TCP today. `#[cfg(not(unix))]` bodies never compile under a
-// Linux `cargo check`, so a typo in one stays invisible until a Windows CI run
-// (drift catalog: `cfg(not(unix))` dead code is invisible to unix checks), and
-// Windows cannot be compiled on the machines this is developed on. Keeping the
-// token parsing, the loopback guard and the client cfg-free means every one of
-// them is type-checked AND unit-tested by the Linux gate that guards main.
-// ---------------------------------------------------------------------------
+// over loopback TCP. `#[cfg(not(unix))]` bodies never compile under a Linux
+// `cargo check`, so a typo in one stays invisible until a Windows CI run.
+// Keeping the token parsing, the loopback guard and the client cfg-free means
+// every one of them is type-checked and unit-tested by the Linux gate that
+// guards main.
 
 /// Lowercase hex alphabet for [`AuthToken::as_hex`].
 ///
-/// A 16-byte table rather than the `hex` crate: AILAB-192 is explicitly a
-/// no-new-dependency ticket (NFR-2 caps the stripped binary at 20 MB), and hex
+/// A 16-byte table rather than the `hex` crate: the transport adds no
+/// dependency (every crate counts against the release size gate), and hex
 /// encoding a fixed 32-byte secret is two table lookups per byte.
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
@@ -239,7 +241,7 @@ impl AuthToken {
     /// searching the token one byte at a time off response latency.
     ///
     /// Written by hand rather than by pulling a constant-time-comparison crate:
-    /// AILAB-192 takes no new dependency, and a 32-byte fold is small enough to
+    /// the transport adds no dependency, and a 32-byte fold is small enough to
     /// review in place. Do not "simplify" this to `self.0 == presented` — array
     /// `PartialEq` is a `memcmp`, which short-circuits on the first differing
     /// byte.
@@ -461,16 +463,16 @@ pub fn resolve_daemon_tcp() -> Result<DaemonEndpoint, DaemonTransportError> {
 
 /// Whether something is accepting TCP connections at `endpoint`.
 ///
-/// **Synchronous on purpose.** `commands::status::daemon_liveness` and
-/// `commands::archive::daemon_liveness` are sync fns with no runtime in scope,
-/// and the UDS probe they call on Unix (`is_daemon_socket_live`) is sync too.
-/// Making this `async` would force a `Runtime::new()` into two CLI paths whose
-/// only question is "is a daemon up", so this uses
+/// **Synchronous on purpose.** The CLI's `daemon_liveness` helpers (in the
+/// `status`, `archive` and `forget` commands) are sync fns with no runtime in
+/// scope, and the UDS probe they call on Unix (`is_daemon_socket_live`) is
+/// sync too. Making this `async` would force a `Runtime::new()` into CLI paths
+/// whose only question is "is a daemon up", so this uses
 /// [`std::net::TcpStream::connect_timeout`] and the caller keeps its shape.
 ///
 /// A successful connect is the whole test: it proves a listener is bound and
-/// its backlog accepted us. No HTTP request is sent, so this needs no token
-/// and cannot be confused by a 401.
+/// its backlog accepted the connection. No HTTP request is sent, so this needs
+/// no token and cannot be confused by a 401.
 pub fn tcp_endpoint_is_live(endpoint: &DaemonEndpoint) -> bool {
     std::net::TcpStream::connect_timeout(&endpoint.socket_addr(), TCP_LIVENESS_TIMEOUT).is_ok()
 }
@@ -548,7 +550,7 @@ pub async fn send_one_tcp(
         Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
     };
     // TokioIo wrap is required: a raw TcpStream does not implement hyper's IO
-    // trait, same as the UDS half (WEG-72-B drift entry).
+    // trait, same as the UDS half.
     let io = TokioIo::new(stream);
     let (mut sender, conn) = http1::handshake(io)
         .await
@@ -576,10 +578,7 @@ pub async fn send_one_tcp(
 // All four tests exercise the UDS half — two resolve `$DREAMD_SOCK` into a
 // socket path, two drive `send_one` over a real `UnixListener`. Gating the module
 // rather than each test is what keeps `use super::*` from becoming an unused glob
-// import off Unix (which rustc reports under `unused_imports`), and it preserves
-// exactly today's behaviour: `daemon_client` was `#[cfg(unix)]` in `lib.rs` before
-// AILAB-192, so none of these ever compiled off-target. Linux is unix, so the
-// Linux count is unchanged.
+// import off Unix (which rustc reports under `unused_imports`).
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -670,15 +669,15 @@ mod tests {
     }
 }
 
-// A SECOND test module, on purpose. `mod tests` above is `#[cfg(all(test, unix))]`
+// A second test module, on purpose. `mod tests` above is `#[cfg(all(test, unix))]`
 // because every one of its cases needs a `UnixListener` or `$DREAMD_SOCK`, and
 // gating the module (rather than each fn) is what keeps its `use super::*` from
-// being an unused glob import off Unix. These cases are the opposite: the whole
-// point of AILAB-192 keeping the TCP half cfg-free is that it is type-checked
-// AND executed on Linux, where the gate that guards main runs — a Windows-only
-// test would prove nothing here, and folding these into `mod tests` would gate
-// them to unix and lose the coverage on the target that actually ships the TCP
-// path. Hence `#[cfg(test)]` with no `unix`, and a distinct name.
+// being an unused glob import off Unix. These cases are the opposite: the point
+// of keeping the TCP half cfg-free is that it is type-checked and executed on
+// Linux, where the gate that guards main runs — a Windows-only test would prove
+// nothing here, and folding these into `mod tests` would gate them to unix and
+// lose the coverage on the target that actually ships the TCP path. Hence
+// `#[cfg(test)]` with no `unix`, and a distinct name.
 #[cfg(test)]
 mod tcp_tests {
     use super::*;
@@ -711,7 +710,7 @@ mod tcp_tests {
         path
     }
 
-    // -- decode_hex32 ------------------------------------------------------
+    // ── decode_hex32 ──────────────────────────────────────────────────────
 
     #[test]
     fn decode_hex32_accepts_64_lowercase_digits() {
@@ -750,7 +749,7 @@ mod tcp_tests {
         assert_eq!(decode_hex32(""), None);
     }
 
-    // -- AuthToken ---------------------------------------------------------
+    // ── AuthToken ─────────────────────────────────────────────────────────
 
     #[test]
     fn as_hex_round_trips_through_decode_hex32() {
@@ -802,7 +801,7 @@ mod tcp_tests {
         );
     }
 
-    // -- read_auth_token ---------------------------------------------------
+    // ── read_auth_token ───────────────────────────────────────────────────
 
     #[test]
     fn read_auth_token_reads_the_ailab_203_wire_format() {
@@ -823,7 +822,8 @@ mod tcp_tests {
         let err = read_auth_token(&path).expect_err("absent file");
         assert!(matches!(err, AuthTokenError::Missing(ref p) if *p == path));
         // The watch's exit-1 copy and the operator's next step both hang off
-        // this string; AILAB-203 owns minting, the daemon never writes it.
+        // this string; `dreamd service install` mints the token, the daemon
+        // never writes it.
         assert!(
             err.to_string().contains("dreamd service install"),
             "message must point at the install verb, got: {err}"
@@ -848,7 +848,7 @@ mod tcp_tests {
         assert!(!err.to_string().contains("abcd"));
     }
 
-    // -- read_server_json --------------------------------------------------
+    // ── read_server_json ──────────────────────────────────────────────────
 
     #[test]
     fn read_server_json_reads_a_loopback_endpoint() {
@@ -910,8 +910,8 @@ mod tcp_tests {
     #[test]
     fn read_server_json_refuses_the_unspecified_host() {
         // The wildcard bind address, spelled via `Ipv4Addr::UNSPECIFIED` rather
-        // than as a literal: spec §5 greps added lines for that literal, since
-        // this ticket must not bind or dial anything but loopback.
+        // than as a literal, so a grep for that literal finds only real binds
+        // (this client must never bind or dial anything but loopback).
         let dir = tempfile::tempdir().expect("tempdir");
         let wildcard = Ipv4Addr::UNSPECIFIED;
         let path = write_fixture(
@@ -958,7 +958,7 @@ mod tcp_tests {
         );
     }
 
-    // -- liveness probes ---------------------------------------------------
+    // ── liveness probes ───────────────────────────────────────────────────
 
     #[test]
     fn tcp_endpoint_is_live_is_false_on_a_closed_port() {
@@ -1020,7 +1020,7 @@ mod tcp_tests {
         assert!(!tcp_daemon_is_live(&path));
     }
 
-    // -- send_one_tcp ------------------------------------------------------
+    // ── send_one_tcp ──────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn send_one_tcp_closed_port_is_unreachable() {

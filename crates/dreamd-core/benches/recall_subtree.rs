@@ -47,7 +47,7 @@ fn rank(i: usize) -> usize {
 fn build_corpus(n: usize) -> (tantivy::Index, SchemaFields) {
     let (schema, fields) = build_schema();
     let index = tantivy::Index::create_in_ram(schema);
-    // 50 MB heap — matches the WEG-42 production writer budget.
+    // 50 MB heap — matches the production writer budget (`WRITER_HEAP_BYTES`).
     let mut writer: IndexWriter<TantivyDocument> = index.writer(50_000_000).unwrap();
 
     for i in 0..n {

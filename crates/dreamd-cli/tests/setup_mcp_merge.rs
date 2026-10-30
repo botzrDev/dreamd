@@ -4,8 +4,8 @@
 //! covered in one pass. Every run gets a temp project (`.git` sentinel) plus a
 //! separate temp `HOME`, so neither the real home nor the real repo is touched.
 //!
-//! The conflict taxonomy under test is ratified in AILAB-548 §3: an existing
-//! `mcpServers.dreamd` block is compatible iff `command == "npx"` AND some
+//! The conflict taxonomy under test (AILAB-548): an existing
+//! `mcpServers.dreamd` block is compatible iff `command == "npx"` and some
 //! `args` element is exactly `dreamd-mcp`.
 
 use std::path::Path;
@@ -87,6 +87,8 @@ fn assert_exit(out: &Output, code: i32) {
     );
 }
 
+/// `--harness claude` creates `.mcp.json` with the floating npx block and
+/// leaves the cursor config alone.
 #[test]
 fn claude_harness_creates_mcp_json_with_floating_block() {
     let (project, home) = project_and_home();
@@ -114,6 +116,7 @@ fn claude_harness_creates_mcp_json_with_floating_block() {
     );
 }
 
+/// A fresh `.mcp.json` is 2-space pretty JSON with a trailing newline.
 #[test]
 fn written_json_is_two_space_pretty_with_trailing_newline() {
     let (project, home) = project_and_home();
@@ -128,10 +131,12 @@ fn written_json_is_two_space_pretty_with_trailing_newline() {
     assert_eq!(
         read(project.path(), ".mcp.json"),
         CLEAN_MCP_JSON,
-        "AILAB-548 §6B: 2-space pretty + trailing newline"
+        "a fresh config must be 2-space pretty JSON with a trailing newline"
     );
 }
 
+/// `--harness both` writes `.mcp.json` and `.cursor/mcp.json`, creating
+/// `.cursor/` as needed.
 #[test]
 fn both_harness_writes_claude_and_cursor_targets() {
     let (project, home) = project_and_home();
@@ -147,6 +152,7 @@ fn both_harness_writes_claude_and_cursor_targets() {
     );
 }
 
+/// A merge adds the dreamd entry and keeps other servers and top-level keys.
 #[test]
 fn unrelated_server_is_preserved_on_merge() {
     let (project, home) = project_and_home();
@@ -177,6 +183,7 @@ fn unrelated_server_is_preserved_on_merge() {
     );
 }
 
+/// A config with no `mcpServers` key gains one that holds the dreamd entry.
 #[test]
 fn file_without_mcp_servers_key_gains_one() {
     let (project, home) = project_and_home();
@@ -194,6 +201,8 @@ fn file_without_mcp_servers_key_gains_one() {
     assert_eq!(doc["unrelated"], serde_json::json!(true));
 }
 
+/// A hard-pinned `dreamd-mcp@<version>` entry is a conflict: exit 1, the
+/// file unchanged, and stderr names the file and the `--force` remedy.
 #[test]
 fn hard_pinned_entry_conflicts_without_force() {
     let (project, home) = project_and_home();
@@ -227,6 +236,8 @@ fn hard_pinned_entry_conflicts_without_force() {
     );
 }
 
+/// `--force` replaces a conflicting dreamd entry with the floating block and
+/// keeps the other servers.
 #[test]
 fn force_replaces_pinned_entry_and_keeps_siblings() {
     let (project, home) = project_and_home();
@@ -256,6 +267,8 @@ fn force_replaces_pinned_entry_and_keeps_siblings() {
     );
 }
 
+/// A dreamd entry whose command is not `npx` conflicts until `--force`
+/// replaces it.
 #[test]
 fn non_npx_command_conflicts_then_force_replaces() {
     let (project, home) = project_and_home();
@@ -287,6 +300,8 @@ fn non_npx_command_conflicts_then_force_replaces() {
     );
 }
 
+/// A compatible entry with extra args (`--project-root`) counts as already
+/// wired and stays byte-identical.
 #[test]
 fn existing_floating_block_with_project_root_is_a_noop() {
     let (project, home) = project_and_home();
@@ -313,6 +328,7 @@ fn existing_floating_block_with_project_root_is_a_noop() {
     );
 }
 
+/// An entry that matches the floating block exactly is not reformatted.
 #[test]
 fn existing_exact_floating_block_is_already_wired() {
     let (project, home) = project_and_home();
@@ -335,6 +351,8 @@ fn existing_exact_floating_block_is_already_wired() {
     assert!(stdout_of(&out).contains("already wired"));
 }
 
+/// With `--harness both`, a conflict in one target leaves the other target's
+/// existing file unchanged.
 #[test]
 fn both_harness_conflict_leaves_the_sibling_untouched() {
     let (project, home) = project_and_home();
@@ -353,7 +371,7 @@ fn both_harness_conflict_leaves_the_sibling_untouched() {
     assert_eq!(
         read(project.path(), ".mcp.json"),
         clean_sibling,
-        "AILAB-548 §6A: a conflict on either target writes NEITHER"
+        "a conflict on either target must leave both files unwritten"
     );
     let stderr = stderr_of(&out);
     assert!(
@@ -362,6 +380,8 @@ fn both_harness_conflict_leaves_the_sibling_untouched() {
     );
 }
 
+/// With `--harness both`, a conflict in one target does not create the
+/// other target when it is missing.
 #[test]
 fn both_harness_conflict_does_not_create_the_missing_sibling() {
     let (project, home) = project_and_home();
@@ -376,10 +396,12 @@ fn both_harness_conflict_does_not_create_the_missing_sibling() {
     assert_exit(&out, 1);
     assert!(
         !project.path().join(".mcp.json").exists(),
-        "AILAB-548 §6A: the clean target must not be created when the other conflicts"
+        "the clean target must not be created when the other conflicts"
     );
 }
 
+/// Unparseable JSON exits 1 and is never overwritten, with or without
+/// `--force`.
 #[test]
 fn malformed_json_refuses_and_force_does_not_help() {
     let (project, home) = project_and_home();
@@ -412,10 +434,11 @@ fn malformed_json_refuses_and_force_does_not_help() {
     assert_eq!(
         read(project.path(), ".mcp.json"),
         broken,
-        "AILAB-548 §6C: --force does not override a parse failure"
+        "--force must not override a parse failure"
     );
 }
 
+/// `--dry-run` reports a conflict on stdout, exits 0 and writes nothing.
 #[test]
 fn dry_run_reports_conflict_and_writes_nothing() {
     let (project, home) = project_and_home();
@@ -441,6 +464,8 @@ fn dry_run_reports_conflict_and_writes_nothing() {
     );
 }
 
+/// `--dry-run` on a fresh project prints the JSON it would write and creates
+/// no file.
 #[test]
 fn dry_run_prints_the_json_it_would_write() {
     let (project, home) = project_and_home();
@@ -467,6 +492,7 @@ fn dry_run_prints_the_json_it_would_write() {
     );
 }
 
+/// `--no-write-mcp` writes no MCP config for either harness.
 #[test]
 fn no_write_mcp_skips_every_target() {
     let (project, home) = project_and_home();
@@ -482,6 +508,7 @@ fn no_write_mcp_skips_every_target() {
     assert!(!project.path().join(".cursor/mcp.json").exists());
 }
 
+/// A second run after wiring changes nothing and reports `already wired`.
 #[test]
 fn rerun_after_wiring_is_a_noop() {
     let (project, home) = project_and_home();
@@ -501,6 +528,7 @@ fn rerun_after_wiring_is_a_noop() {
     assert!(stdout_of(&second).contains("already wired"));
 }
 
+/// `--force` on an already-wired file leaves it byte-identical.
 #[test]
 fn force_on_an_already_wired_file_is_a_byte_identical_noop() {
     let (project, home) = project_and_home();
@@ -519,13 +547,13 @@ fn force_on_an_already_wired_file_is_a_byte_identical_noop() {
     assert_eq!(
         read(project.path(), ".mcp.json"),
         existing,
-        "AILAB-548 §5: --force is a no-op when there is nothing to force — the \
-         AlreadyWired short-circuit must not reformat a file it had no reason to touch"
+        "--force must be a no-op when there is nothing to force: the \
+         AlreadyWired short-circuit must not reformat the file"
     );
     assert!(stdout_of(&out).contains("already wired"));
 }
 
-/// Deliberate resolution of the one place two AILAB-548 clauses collide:
+/// Deliberate resolution of the one place two setup rules collide:
 /// "--dry-run always exits 0" vs "malformed config always exits 1". Malformed
 /// wins — a dry run cannot produce a plan for a file it cannot parse, so there
 /// is nothing to report and exit 0 would imply a clean run. Do not "fix" this
@@ -555,6 +583,8 @@ fn dry_run_on_malformed_json_still_exits_one() {
     );
 }
 
+/// `--harness cursor` writes only the project's `.cursor/mcp.json`: not the
+/// claude config and not the global `~/.cursor/mcp.json`.
 #[test]
 fn cursor_harness_alone_writes_only_the_cursor_target() {
     let (project, home) = project_and_home();
@@ -577,10 +607,11 @@ fn cursor_harness_alone_writes_only_the_cursor_target() {
     );
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
-        "AILAB-548 §2: the global ~/.cursor/mcp.json is out of scope — setup only writes inside the project"
+        "setup must write only inside the project, never the global ~/.cursor/mcp.json"
     );
 }
 
+/// `--force` on a project with no config creates the clean `.mcp.json`.
 #[test]
 fn force_on_a_clean_project_is_a_plain_success() {
     let (project, home) = project_and_home();

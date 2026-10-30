@@ -11,9 +11,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Dep-discipline policy: protocol owns the parse/validate boundary only.
-# Deps stay locked to serde + chrono. ULID minting lives in dreamd-core.
-# See ARCHITECTURE.md drift catalog entry "dreamd-protocol deps stay locked".
+# Protocol owns the parse/validate boundary only, so its runtime deps stay
+# serde + chrono. ULID minting lives in dreamd-core, and a new runtime dep here
+# would reach every consumer of these types.
 serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -21,8 +21,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # serde_json is dev-only: protocol defines the shape, not the codec.
 # Production serialization happens in dreamd-core's coordinator.
 serde_json = "1"
-# proptest is test-only (JSONL round-trip property suite, WEG-159). It does NOT
-# relax the runtime dep-discipline policy above: runtime deps stay serde+chrono.
+# proptest is test-only (JSONL round-trip property suite, WEG-159). It does not
+# relax the runtime dep policy above: runtime deps stay serde + chrono.
 # Pinned to major 1; its `rand 0.9` chain already resolves in Cargo.lock, so it
 # adds no parallel-major.
 proptest = "1"

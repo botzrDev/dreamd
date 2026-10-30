@@ -13,15 +13,11 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::salience::report::{build_report, ReportError, SalienceReport};
+use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader};
 use tantivy::{Index, ReloadPolicy};
 
-/// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
-///
-/// Mirrors `dreamd_core::server::tantivy_handle::INDEX_DIR_NAME`, which is
-/// `pub(crate)` and so not importable here.
-const INDEX_DIR_NAME: &str = "index";
-
+/// Why a `dreamd salience-drift` run failed.
 #[derive(Debug)]
 pub enum SalienceError {
     /// No `.agent/` store found walking up from `cwd`.

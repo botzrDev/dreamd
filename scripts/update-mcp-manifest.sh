@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate packages/dreamd-mcp/manifest.json sha256 entries from release tarballs.
 #
-# The shim verifies the *extracted dreamd binary* (not the .tar.gz). Each
-# tarball must contain a single `dreamd` (or `dreamd.exe`) at its root, matching
-# .github/workflows/release.yml packaging.
+# The shim verifies the *extracted dreamd binary* (not the .tar.gz). Each of the
+# three Unix tarballs in PLATFORMS must contain a single `dreamd` at its root,
+# matching .github/workflows/release.yml packaging.
 #
 # Usage:
 #   scripts/update-mcp-manifest.sh <version> <dist-dir>

@@ -7,10 +7,13 @@ use crate::redaction::redact;
 /// Validation failures surfaced identically by HTTP and MCP learn ingress.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LearnValidationError {
+    /// `skill_action` failed [`SkillAction::parse`]; carries the parse error.
     #[error("{0}")]
     InvalidSkillAction(String),
+    /// `pain` is outside `0.0..=10.0`.
     #[error("pain must be in 0.0..=10.0")]
     PainOutOfRange,
+    /// `importance` is outside `0.0..=10.0`.
     #[error("importance must be in 0.0..=10.0")]
     ImportanceOutOfRange,
 }
@@ -43,7 +46,8 @@ impl LearnIngress {
         }
     }
 
-    /// MCP may omit pain (caller applies default later); reject only when present and invalid.
+    /// MCP may omit pain ([`Self::placeholder_learning`] then uses `5.0`);
+    /// reject only when present and invalid.
     pub fn validate_optional_pain(pain: Option<f64>) -> Result<(), LearnValidationError> {
         if let Some(pain) = pain {
             if !(0.0..=10.0).contains(&pain) {
@@ -53,7 +57,8 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// MCP may omit importance (caller applies default later); reject only when present and invalid.
+    /// MCP may omit importance ([`Self::placeholder_learning`] then uses
+    /// `5.0`); reject only when present and invalid.
     pub fn validate_optional_importance(
         importance: Option<f64>,
     ) -> Result<(), LearnValidationError> {
@@ -65,7 +70,7 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// Validate, normalise, and redact an inbound HTTP [`AgentLearning`].
+    /// Validate, normalize, and redact an inbound HTTP [`AgentLearning`].
     pub fn prepare_agent_learning(
         learning: &mut AgentLearning,
         redaction_enabled: bool,
@@ -78,7 +83,8 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// Build an [`AgentLearning`] from MCP append params (optional scores default later).
+    /// Build an [`AgentLearning`] from MCP append params; omitted scores become
+    /// `5.0` (see [`Self::placeholder_learning`]).
     ///
     /// The placeholder `id` is overwritten by the coordinator on persist.
     pub fn build_agent_learning(

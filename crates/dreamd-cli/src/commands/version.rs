@@ -1,6 +1,6 @@
-//! `dreamd version` — structured version output (DR-707 / WEG-18).
+//! `dreamd version` — structured version output (WEG-18).
 //!
-//! Locked output formats are byte-exact contracts; WEG-20 (DR-803) snapshots
+//! Locked output formats are byte-exact contracts; WEG-20 snapshots
 //! `VERSION_SHORT` and `render_long()` directly. Metadata is baked at compile
 //! time via `vergen-gitcl`; tarball builds without `.git/` fall back to
 //! `"unknown"` via `option_env!`.
@@ -45,6 +45,8 @@ const SHA_FULL: &str = or_unknown(match option_env!("VERGEN_GIT_SHA") {
     None => "unknown",
 });
 
+/// The first seven characters of the build's git commit, or `"unknown"` for a
+/// build without `.git/`.
 pub const SHA: &str = str_index!(SHA_FULL, ..7);
 
 const BUILD_DATE: &str = or_unknown(match option_env!("VERGEN_BUILD_DATE") {
@@ -57,14 +59,17 @@ const TARGET: &str = or_unknown(match option_env!("VERGEN_CARGO_TARGET_TRIPLE") 
     None => "unknown",
 });
 
-const SCHEMA: &str = "1.0";
+/// The daemon state schema (`state.json`, the WAL), not the episodic record
+/// schema `"1.0.0"`.
+const SCHEMA: &str = dreamd_core::daemon_state::STATE_SCHEMA_VERSION;
 
-// BZR-181: whether this binary was built with `--features vectors`.
+// Whether this binary was built with `--features vectors` (BZR-181).
 #[cfg(feature = "vectors")]
 const VECTORS: &str = "on";
 #[cfg(not(feature = "vectors"))]
 const VECTORS: &str = "off";
 
+/// One-line version, as printed by `dreamd --version`.
 pub const VERSION_SHORT: &str = concatcp!(
     "dreamd ",
     VERSION,
@@ -81,12 +86,14 @@ pub const VERSION_SHORT: &str = concatcp!(
     ")",
 );
 
+/// Multi-line version block printed by `dreamd version`.
 pub fn render_long() -> String {
     format!(
         "dreamd {VERSION}\n  commit:  {SHA}\n  built:   {BUILD_DATE}\n  target:  {TARGET}\n  schema:  {SCHEMA}\n  vectors: {VECTORS}\n"
     )
 }
 
+/// `dreamd version` entry point: write [`render_long`] to `out`.
 pub fn run(out: &mut impl Write) -> io::Result<()> {
     out.write_all(render_long().as_bytes())
 }

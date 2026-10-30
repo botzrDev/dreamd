@@ -3,14 +3,14 @@
 #
 # Spawns the real `dreamd watch` daemon in a throwaway workspace, waits for its
 # UDS to appear, lets allocations settle, then samples the daemon's resident
-# memory. See WEG-53 / DR-808 (Linux gate) and AILAB-176 (macOS).
+# memory. See WEG-53 (Linux gate) and AILAB-176 (macOS).
 #
 # Linux (gating): metric is VmRSS from /proc/<daemon_pid>/status; the script
 #   fails (exit 1) if it exceeds LIMIT_MB, default 30 MB.
 # macOS / Darwin (informational): metric is `ps -o rss=` (KiB) of the daemon
 #   child, sampled after the same socket-readiness + settle path. It is printed
-#   and the script exits 0. It is never compared to LIMIT_MB — no macOS limit
-#   is chosen on this ticket (threshold is a later founder decision).
+#   and the script exits 0. It is never compared to LIMIT_MB: macOS has no
+#   limit yet.
 #
 # Usage:
 #   scripts/idle-rss.sh                 # Linux: gate at 30 MB; macOS: report
@@ -56,8 +56,8 @@ rm -f "$SOCK"
 
 cd "$WORKDIR"
 
-# `dreamd init` requires a project-root sentinel in/above cwd (init.rs
-# ROOT_SENTINELS: .git, Cargo.toml, package.json, pyproject.toml) and exits
+# `dreamd init` requires a project-root sentinel in/above cwd
+# (`ROOT_SENTINELS` in crates/dreamd-core/src/layout.rs) and exits
 # NoProjectRoot otherwise. A bare mktemp dir has none, so create the lightest
 # one — an empty Cargo.toml (existence-checked, never parsed by init or watch).
 # This also pins init's root resolution to WORKDIR instead of letting it walk
@@ -67,10 +67,10 @@ cd "$WORKDIR"
 # The daemon refuses to start without an initialized workspace
 # (AgentRoot::discover -> WatchError::NoProjectRoot). init is non-interactive;
 # it scaffolds .agent/ (which `dreamd watch` then discovers). Suppress its
-# stdout so only the measured MB lands on our stdout.
+# stdout so only the measured MB lands on this script's stdout.
 "$BIN" init >/dev/null
 
-# CRITICAL: start the daemon directly — NOT inside a ( ... ) & subshell. A
+# Start the daemon directly, not inside a ( ... ) & subshell. A
 # subshell wrapper makes $! the subshell PID, so /proc/$!/status (Linux) or
 # ps -p $! (macOS) would measure the wrong process. Redirect the daemon's
 # stdout to stderr: this script's stdout is captured by the CI step
@@ -121,7 +121,7 @@ if [[ "$OS" == "Darwin" ]]; then
     exit 0
 fi
 
-# Linux arm (gating). Measure VmRSS of the DAEMON child (KiB) — NOT /proc/self,
+# Linux arm (gating). Measure VmRSS of the daemon child (KiB) — not /proc/self,
 # that is this shell. The 50 MB WRITER_HEAP_BYTES tantivy arena inflates VmSize,
 # not VmRSS, until written; gating on VmRSS is what makes 30 MB achievable.
 RSS_KIB="$(awk '/^VmRSS:/{print $2}' "/proc/$DAEMON_PID/status")"

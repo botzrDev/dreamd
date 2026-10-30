@@ -4,9 +4,8 @@
 //! writer-spawning `TantivyIndexHandle` open constructor) / `dreamd_core::recall`
 //! sequence from [`crate::commands::recall::run`] and reuses its
 //! [`crate::commands::recall::RecallError`], [`crate::commands::recall::truncate_content`],
-//! and [`crate::commands::recall::explain_factors`] — this module never edits
-//! `commands/recall.rs` or `dreamd_core::salience`, and never re-derives the
-//! DR-204 arithmetic.
+//! and [`crate::commands::recall::explain_factors`], so the salience arithmetic
+//! has one implementation.
 //!
 //! The rendered shape is a different table than `dreamd recall`: `id`,
 //! `timestamp`, `skill_action`, `content`, `bm25`, `salience`, `total`, `layer`
@@ -17,30 +16,25 @@
 use std::io::Write;
 use std::path::Path;
 
+use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
 use tantivy::{Index, ReloadPolicy};
 
 use crate::commands::recall::{explain_factors, truncate_content, RecallError};
 
-/// Directory name of the per-project Tantivy index under `.agent/.dreamd/`.
-///
-/// Mirrors `dreamd_core::server::tantivy_handle::INDEX_DIR_NAME`, which is
-/// `pub(crate)` and so not importable here — same duplication as
-/// `commands::recall` and `commands::score`.
-const INDEX_DIR_NAME: &str = "index";
-
 /// Max width of the rendered `content` cell, in characters. Blame's cap (80) is
 /// wider than recall's (60) — this is a separate table with its own column set.
 const CONTENT_WIDTH: usize = 80;
 
-/// Header row of the blame table. Column order is locked by the AC (BZR-193):
+/// Header row of the blame table. The column order is a fixed output contract
+/// (BZR-193):
 /// `id, timestamp, skill_action, content, bm25, salience, total, layer`.
 const HEADER_LINE: &str =
     "| id | timestamp | skill_action | content | bm25 | salience | total | layer |";
 /// GitHub-flavored-markdown separator row (eight columns).
 const SEPARATOR_LINE: &str = "| --- | --- | --- | --- | --- | --- | --- | --- |";
 
-/// Render the markdown blame table (and, when `explain`, the per-hit DR-204
+/// Render the markdown blame table (and, when `explain`, the per-hit salience
 /// factor blocks) for `results`. Pure and deterministic given `now_sec`.
 ///
 /// The header + separator always print (even for zero hits) so the columns
@@ -72,7 +66,7 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
 
     if explain {
         out.push('\n');
-        out.push_str("explain (DR-204 salience factors):\n");
+        out.push_str("explain (salience factors):\n");
         for (i, r) in results.iter().enumerate() {
             let rank = i + 1;
             let f = explain_factors(r, now_sec);
@@ -233,7 +227,7 @@ mod tests {
     const DAY: i64 = 86_400;
 
     /// Build a synthetic `RecallResult` with `salience`/`score` set consistently
-    /// with the DR-204 formula (same helper shape as `commands::recall`'s
+    /// with the salience formula (same helper shape as `commands::recall`'s
     /// test-only `result()`), so `--explain` / `--json` products can be checked
     /// against the stored fields without a live index.
     fn result(
@@ -268,7 +262,7 @@ mod tests {
         let header = out.lines().next().expect("at least a header line");
         assert_eq!(
             header, "| id | timestamp | skill_action | content | bm25 | salience | total | layer |",
-            "column order/labels must match the BZR-193 AC exactly"
+            "the blame table must have these eight columns, in this order"
         );
     }
 
