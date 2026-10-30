@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dreamd_core::autobiography::AutobiographySkip;
 use dreamd_core::config::{load_config, Config, DreamCycleMode};
@@ -254,6 +254,8 @@ pub fn run(
     if flags.provenance {
         all_ok &= check_provenance(agent_root, out)?;
     }
+
+    all_ok &= check_dream_cycle_wal(agent_root, flags.repair, out)?;
 
     if flags.repair {
         all_ok &= run_repair(agent_root, socket, out, err)?;
@@ -689,6 +691,57 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
     Ok(faults == 0)
 }
 
+/// Read the dream-cycle WAL without taking the project writer lock.
+///
+/// A lock acquire would run recovery and this line would never print. With
+/// `--repair`, an unreadable WAL does not by itself fail the run: repair
+/// quarantines it, and a repair that then fails still fails the run.
+fn check_dream_cycle_wal(
+    agent_root: &AgentRoot,
+    repair: bool,
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    use dreamd_core::wal::{classify, WalError};
+
+    let path = agent_root.wal_path();
+    let shown = path.display();
+    match classify(agent_root) {
+        Ok(_) => {
+            writeln!(out, "dream_cycle_wal: ok")?;
+            Ok(true)
+        }
+        Err(WalError::UnknownFormat(format)) => {
+            writeln!(
+                out,
+                "dream_cycle_wal: unknown format \"{format}\"  [ERROR: {shown}; run `dreamd doctor --repair`]"
+            )?;
+            Ok(repair)
+        }
+        Err(WalError::BadRedoPath(bad)) => {
+            writeln!(
+                out,
+                "dream_cycle_wal: bad path \"{bad}\"  [ERROR: {shown}; run `dreamd doctor --repair`]"
+            )?;
+            Ok(repair)
+        }
+        Err(WalError::Json(_)) => {
+            writeln!(
+                out,
+                "dream_cycle_wal: not valid JSON  [ERROR: {shown}; run `dreamd doctor --repair`]"
+            )?;
+            Ok(repair)
+        }
+        Err(WalError::Io(err)) => {
+            writeln!(out, "dream_cycle_wal: unreadable ({err})  [ERROR: {shown}]")?;
+            Ok(false)
+        }
+        Err(err) => {
+            writeln!(out, "dream_cycle_wal: unreadable ({err})  [ERROR: {shown}]")?;
+            Ok(false)
+        }
+    }
+}
+
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
 /// (which repair only ever reads). On Windows the wipe is also how a segment
@@ -843,8 +896,18 @@ fn run_repair(
         let _guard = rt.enter();
         TantivyIndexHandle::open(agent_root, &lock, DEFAULT_COMMIT_CADENCE)
     };
+    let mut invariants: Option<(
+        PathBuf,
+        Result<Vec<dreamd_core::invariants::Violation>, String>,
+    )> = None;
     match reopened {
         Ok(handle) => {
+            if let Some(sidecar) = lock.quarantined_wal() {
+                let checked =
+                    dreamd_core::invariants::check_store(agent_root, Some(handle.reader()))
+                        .map_err(|e| e.to_string());
+                invariants = Some((sidecar.to_path_buf(), checked));
+            }
             // Drain and join the indexer task before returning. Dropping the
             // handle instead leaves that task holding the `IndexWriter`, and
             // tearing the runtime down around a live writer never completes —
@@ -864,7 +927,67 @@ fn run_repair(
     // The rebuild arm above always records an action on success, so `actions`
     // is never empty here.
     writeln!(out, "repair: {}", actions.join("; "))?;
-    Ok(true)
+    let Some((sidecar, checked)) = invariants else {
+        return Ok(true);
+    };
+    writeln!(out, "quarantined dream-cycle WAL to {}", sidecar.display())?;
+    match checked {
+        Ok(violations) if violations.is_empty() => {
+            writeln!(out, "store invariants: ok")?;
+            Ok(true)
+        }
+        Ok(violations) => {
+            let listed = violations
+                .iter()
+                .map(violation_plain)
+                .collect::<Vec<_>>()
+                .join("; ");
+            writeln!(
+                out,
+                "store invariants: {} violation(s): {listed}. A WAL corrupted after its commit \
+                 point can leave a half-applied cycle. The quarantined WAL is {}.",
+                violations.len(),
+                sidecar.display()
+            )?;
+            Ok(false)
+        }
+        Err(reason) => {
+            writeln!(
+                err,
+                "dreamd: error — store invariants could not be checked ({reason}); the \
+                 quarantined WAL is {}",
+                sidecar.display()
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+fn violation_plain(violation: &dreamd_core::invariants::Violation) -> String {
+    use dreamd_core::invariants::Violation;
+    match violation {
+        Violation::DuplicateEventId { id, count } => {
+            format!("duplicate event id {id} appears {count} times")
+        }
+        Violation::MissingFromIndex { id } => format!("event {id} is missing from the index"),
+        Violation::NotInLog { id } => format!("index document {id} is not in the log"),
+        Violation::DuplicateIndexDoc { id, count } => {
+            format!("index document {id} appears {count} times")
+        }
+        Violation::MissingLessonDoc { id } => format!("lesson document {id} is missing"),
+        Violation::StaleLessonDoc { id } => format!("lesson document {id} is stale"),
+        Violation::StuckInProgress => "state.json says in_progress and there is no WAL".to_string(),
+        Violation::UnpinnedCitation { id } => format!("citation {id} is not pinned"),
+        Violation::LessonsUnreadable { reason } => format!("LESSONS.md is unreadable ({reason})"),
+        Violation::RecurrenceMismatch {
+            id,
+            skill_action,
+            index,
+            log,
+        } => format!(
+            "recurrence for {id} ({skill_action}) is {index} in the index and {log} in the log"
+        ),
+    }
 }
 
 fn format_elapsed(secs: i64) -> String {
@@ -1920,5 +2043,213 @@ mod tests {
         // The pre-repair orphaned_uds check already WARNed, so the run still
         // reports exit-1 semantics even though the repair itself succeeded.
         assert!(!ok);
+    }
+
+    fn corrupt_sidecars(root: &AgentRoot) -> Vec<std::path::PathBuf> {
+        fs::read_dir(root.dreamd_dir())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name()?.to_string_lossy();
+                name.starts_with("dream_in_progress.wal.corrupt-")
+                    .then_some(path)
+            })
+            .collect()
+    }
+
+    fn plant_wal(root: &AgentRoot, body: &str) {
+        fs::create_dir_all(root.stage_dir().join("dream-1")).unwrap();
+        fs::write(root.wal_path(), body).unwrap();
+    }
+
+    fn assert_quarantined(root: &AgentRoot, body: &str) -> std::path::PathBuf {
+        assert!(!root.wal_path().exists(), "the WAL path must be gone");
+        assert!(!root.stage_dir().exists(), "the stage dir must be wiped");
+        let sidecars = corrupt_sidecars(root);
+        assert_eq!(sidecars.len(), 1, "exactly one sidecar: {sidecars:?}");
+        assert_eq!(fs::read(&sidecars[0]).unwrap(), body.as_bytes());
+        let state = dreamd_core::daemon_state::read_daemon_state(root).unwrap();
+        assert_eq!(state.last_dream_cycle_status, "failed");
+        sidecars.into_iter().next().unwrap()
+    }
+
+    fn assert_next_cycle_runs(root: &AgentRoot) {
+        use dreamd_core::dream_cycle::{cycle_date_from_now_sec, run_filesystem_phases};
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let lock = WriterLock::acquire(root, WriterKind::Dream).expect("next writer");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_filesystem_phases(
+            root,
+            lock.ledger(),
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            true,
+            false,
+        ))
+        .expect("the next cycle runs");
+        assert!(!root.wal_path().exists(), "a finished cycle leaves no WAL");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_quarantines_unknown_format_wal_and_the_next_cycle_runs() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("wal-unknown");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        let body = r#"{"intent":"faked"}"#;
+        plant_wal(&root, body);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(!ok, "an unreadable WAL fails doctor");
+        let path = root.wal_path().display().to_string();
+        assert!(
+            output.contains(&format!(
+                "dream_cycle_wal: unknown format \"none\"  [ERROR: {path}; run `dreamd doctor --repair`]"
+            )),
+            "{output}"
+        );
+        assert_eq!(fs::read_to_string(root.wal_path()).unwrap(), body);
+        assert!(root.stage_dir().join("dream-1").is_dir());
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(ok, "repair succeeds; stderr: {err}; stdout: {output}");
+        assert!(
+            output.contains("quarantined dream-cycle WAL to"),
+            "{output}"
+        );
+        assert!(output.contains("store invariants: ok"), "{output}");
+        assert_quarantined(&root, body);
+        assert_next_cycle_runs(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_quarantines_bad_redo_path_and_the_next_cycle_runs() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("wal-bad-path");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        let live = root.project_root().join("live.md");
+        fs::write(&live, b"live\n").unwrap();
+        let body = format!(
+            r#"{{"schema_version":"1.0","format":"redo/1","renames":[{{"from":".dreamd/stage/dream-1/0-LESSONS.md","to":"{}"}}],"unlinks":[],"edges":[]}}"#,
+            live.display()
+        );
+        plant_wal(&root, &body);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(!ok);
+        assert!(
+            output.contains(&format!("dream_cycle_wal: bad path \"{}\"", live.display())),
+            "{output}"
+        );
+        assert!(output.contains("run `dreamd doctor --repair`"), "{output}");
+        assert_eq!(fs::read(&live).unwrap(), b"live\n");
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(ok, "repair succeeds; stderr: {err}; stdout: {output}");
+        assert_eq!(fs::read(&live).unwrap(), b"live\n");
+        assert_quarantined(&root, &body);
+        assert_next_cycle_runs(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_quarantines_truncated_wal_and_the_next_cycle_runs() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("wal-truncated");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        let body = r#"{"format":"redo/1""#;
+        plant_wal(&root, body);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert!(!ok);
+        assert!(
+            output.contains("dream_cycle_wal: not valid JSON  [ERROR:"),
+            "{output}"
+        );
+        assert!(output.contains("run `dreamd doctor --repair`"), "{output}");
+        assert!(
+            !output.contains("EOF"),
+            "serde's message stays off the line: {output}"
+        );
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(ok, "repair succeeds; stderr: {err}; stdout: {output}");
+        assert_quarantined(&root, body);
+        assert_next_cycle_runs(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_refuses_unreadable_wal_while_watch_holds_the_lock() {
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("wal-held");
+        seed_events(&root, &[learning('A', "rust::x", RECORD_SCHEMA_VERSION)]);
+        let body = r#"{"intent":"faked"}"#;
+        // Watch itself refuses this WAL, so the holder has to be taken first.
+        // The file is planted while that holder is alive: repair then sees a
+        // busy lock and must not move it.
+        let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        plant_wal(&root, body);
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, _output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(!ok);
+        assert!(err.contains("project writer lock is held"), "{err}");
+        assert_eq!(fs::read_to_string(root.wal_path()).unwrap(), body);
+        assert!(corrupt_sidecars(&root).is_empty());
+    }
+
+    /// A log that already disagrees with itself stays that way after the WAL
+    /// is moved aside. The report names the violation and the sidecar.
+    #[cfg(unix)]
+    #[test]
+    fn repair_reports_store_violations_against_the_quarantined_wal() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("wal-violations");
+        let record = learning('A', "rust::x", RECORD_SCHEMA_VERSION);
+        let line = serde_json::to_string(&record).unwrap();
+        fs::write(root.episodic_jsonl(), format!("{line}\n{line}\n")).unwrap();
+        let body = r#"{"intent":"faked"}"#;
+        plant_wal(&root, body);
+
+        let flags = DoctorFlags {
+            repair: true,
+            ..Default::default()
+        };
+        let (ok, output, err) = run_with(&cfg, &root, None, None, flags);
+        assert!(!ok, "violations fail the run; stderr: {err}");
+        let sidecar = assert_quarantined(&root, body);
+        assert!(
+            output.contains(&format!(
+                "store invariants: 1 violation(s): duplicate event id {} appears 2 times. \
+                 A WAL corrupted after its commit point can leave a half-applied cycle. \
+                 The quarantined WAL is {}.",
+                record.id,
+                sidecar.display()
+            )),
+            "{output}"
+        );
     }
 }

@@ -407,6 +407,44 @@ fn crash_sweep_promoting_cycle() {
     sweep(Scenario::Promoting);
 }
 
+/// An unreadable WAL is not a commit point. Repair moves it aside and leaves
+/// the pre-cycle image.
+#[test]
+fn repair_of_an_uncommitted_wal_leaves_the_pre_cycle_image() {
+    let (root, _g) = seed(Scenario::Promoting);
+    let pre = image(&root);
+    let episodic = fs::read(root.episodic_jsonl()).unwrap();
+    let staged = root.stage_dir().join("dream-1");
+    fs::create_dir_all(&staged).unwrap();
+    fs::write(staged.join("sentinel"), b"must-not-land\n").unwrap();
+    let body = br#"{"intent":"faked"}"#;
+    fs::write(root.wal_path(), body).unwrap();
+
+    {
+        let lock = WriterLock::acquire(&root, WriterKind::Repair).unwrap();
+        assert!(lock.quarantined_wal().is_some());
+    }
+
+    assert_eq!(image(&root), pre);
+    assert_eq!(status(&root), "failed");
+    assert!(!root.stage_dir().exists());
+    assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), episodic);
+    let sidecars: Vec<_> = fs::read_dir(root.dreamd_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("dream_in_progress.wal.corrupt-"))
+        })
+        .collect();
+    assert_eq!(sidecars.len(), 1, "{sidecars:?}");
+    assert_eq!(fs::read(&sidecars[0]).unwrap(), body);
+
+    let _watch = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+    assert_eq!(image(&root), pre);
+}
+
 /// BZR-1245: the ref unlink is staged, so a crash leaves all 20 seeded refs
 /// or the pruned set, never a store without the cycle's own ref.
 #[test]

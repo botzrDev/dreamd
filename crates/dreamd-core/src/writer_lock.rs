@@ -139,6 +139,8 @@ struct Inner {
     agent_dir: PathBuf,
     kind: WriterKind,
     ledger: Ledger,
+    /// Set when this acquire quarantined an unreadable WAL. Repair only.
+    quarantined: Option<PathBuf>,
 }
 
 impl Drop for Inner {
@@ -159,6 +161,12 @@ impl WriterLock {
     /// pre- or post-cycle state: reset a stale `in_progress` status when no WAL
     /// exists, then WAL recovery, which rolls a committed cycle forward and
     /// wipes any staged one.
+    ///
+    /// [`WriterKind::Repair`] is the one caller that, on
+    /// [`WalError::UnknownFormat`], [`WalError::BadRedoPath`] or
+    /// [`WalError::Json`], keeps the lock and quarantines the WAL instead of
+    /// returning the error. Every other kind still refuses. [`WalError::Io`]
+    /// and [`WalError::Provenance`] refuse for repair too.
     ///
     /// Creates `.agent/.dreamd/` and the lockfile when they are absent, but
     /// never `.agent/` itself. Never creates, truncates or deletes the Tantivy
@@ -196,7 +204,15 @@ impl WriterLock {
                  reset the status to failed"
             );
         }
-        wal::recover_on_startup(root, &ledger)?;
+        let quarantined = match wal::recover_on_startup(root, &ledger) {
+            Ok(_) => None,
+            Err(err) if kind == WriterKind::Repair && wal::is_unreadable_wal(&err) => {
+                let sidecar = wal::quarantine_unreadable(root)?;
+                wal::recover_on_startup(root, &ledger)?;
+                sidecar
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -204,6 +220,7 @@ impl WriterLock {
                 agent_dir: canonical_or_raw(&agent_dir),
                 kind,
                 ledger,
+                quarantined,
             }),
         })
     }
@@ -221,6 +238,11 @@ impl WriterLock {
     /// The project's provenance appender. Every clone of this token shares it.
     pub fn ledger(&self) -> &Ledger {
         &self.inner.ledger
+    }
+
+    /// The sidecar this acquire moved an unreadable WAL to, if it did.
+    pub fn quarantined_wal(&self) -> Option<&Path> {
+        self.inner.quarantined.as_deref()
     }
 }
 

@@ -391,6 +391,106 @@ fn wipe_stage(agent_root: &AgentRoot) -> io::Result<()> {
     Ok(())
 }
 
+/// What [`classify`] found. It has not been applied.
+#[derive(Debug)]
+pub enum WalClass {
+    /// No `dream_in_progress.wal`.
+    Absent,
+    /// `redo/1` that passed [`validate`].
+    Redo(RedoWal),
+    /// A legacy `intents` body.
+    Legacy(DreamWal),
+}
+
+/// Read the WAL and classify it. Does not rename, wipe, or write `state.json`.
+///
+/// [`recover_if_needed`] applies a [`WalClass::Redo`] or [`WalClass::Legacy`].
+/// [`UnknownFormat`](WalError::UnknownFormat), [`BadRedoPath`](WalError::BadRedoPath)
+/// and [`Json`](WalError::Json) return here, before any of that.
+pub fn classify(agent_root: &AgentRoot) -> Result<WalClass, WalError> {
+    let wal_path = agent_root.wal_path();
+    if !wal_path.exists() {
+        return Ok(WalClass::Absent);
+    }
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&wal_path)?)?;
+    match value.get("format") {
+        Some(format) if format == REDO_FORMAT => {
+            let redo: RedoWal = serde_json::from_value(value)?;
+            validate(&redo)?;
+            Ok(WalClass::Redo(redo))
+        }
+        Some(format) => Err(WalError::UnknownFormat(
+            format
+                .as_str()
+                .map_or_else(|| format.to_string(), str::to_owned),
+        )),
+        None if value.get("intents").is_some() => {
+            let wal: DreamWal = serde_json::from_value(value)?;
+            Ok(WalClass::Legacy(wal))
+        }
+        None => Err(WalError::UnknownFormat("none".to_string())),
+    }
+}
+
+/// `true` for the three errors [`WriterLock`](crate::writer_lock::WriterLock)
+/// may quarantine, and only when the caller is a repair.
+pub(crate) fn is_unreadable_wal(err: &WalError) -> bool {
+    matches!(
+        err,
+        WalError::UnknownFormat(_) | WalError::BadRedoPath(_) | WalError::Json(_)
+    )
+}
+
+/// Move an unreadable WAL aside. The caller holds the project writer lock.
+///
+/// Re-reads the file. A body [`classify`] accepts, or a file that is already
+/// gone, is left in place and returns `Ok(None)`. [`Io`](WalError::Io) and
+/// [`Provenance`](WalError::Provenance) are returned as-is: a `redo/1` that
+/// failed during apply may already have renamed.
+///
+/// Otherwise `rename`s the file to `dream_in_progress.wal.corrupt-YYYY-MM-DD`
+/// (UTC, `-2`, `-3`, … when that name exists), wipes `.dreamd/stage/`, and
+/// sets `last_dream_cycle_status` to `failed`. The bytes are not parsed. The
+/// WAL path is not removed except by that rename. A rename failure wipes
+/// nothing and writes no status.
+pub fn quarantine_unreadable(agent_root: &AgentRoot) -> Result<Option<PathBuf>, WalError> {
+    let wal_path = agent_root.wal_path();
+    if !wal_path.exists() {
+        return Ok(None);
+    }
+    match classify(agent_root) {
+        Err(err) if is_unreadable_wal(&err) => {}
+        Err(err) => return Err(err),
+        Ok(_) => return Ok(None),
+    }
+    let dest = sidecar_path(&wal_path)?;
+    fs::rename(&wal_path, &dest)?;
+    wipe_stage(agent_root)?;
+    update_daemon_state(agent_root, |s| {
+        s.last_dream_cycle_status = "failed".to_string()
+    })?;
+    Ok(Some(dest))
+}
+
+/// `dream_in_progress.wal.corrupt-YYYY-MM-DD`, then `-2`, `-3`, … Never an
+/// existing path.
+fn sidecar_path(wal_path: &Path) -> io::Result<PathBuf> {
+    let date = Utc::now().format("%Y-%m-%d");
+    let first = wal_path.with_file_name(format!("dream_in_progress.wal.corrupt-{date}"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate =
+            wal_path.with_file_name(format!("dream_in_progress.wal.corrupt-{date}-{n}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        n = n.saturating_add(1);
+    }
+}
+
 /// Bring the store to a pre- or post-cycle state.
 ///
 /// - No WAL: remove a WAL temp left by a crash inside the WAL's own write,
@@ -405,36 +505,26 @@ pub fn recover_if_needed(
     ledger: &Ledger,
 ) -> Result<RecoveryOutcome, WalError> {
     let wal_path = agent_root.wal_path();
-    if !wal_path.exists() {
-        match fs::remove_file(wal_path.with_extension("tmp")) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+    match classify(agent_root)? {
+        WalClass::Absent => {
+            match fs::remove_file(wal_path.with_extension("tmp")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            wipe_stage(agent_root)?;
+            Ok(RecoveryOutcome::Clean)
         }
-        wipe_stage(agent_root)?;
-        return Ok(RecoveryOutcome::Clean);
-    }
-
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&wal_path)?)?;
-    match value.get("format") {
-        Some(format) if format == REDO_FORMAT => {
-            let redo: RedoWal = serde_json::from_value(value)?;
+        WalClass::Redo(redo) => {
             let (renamed, unlinked) = roll_forward(agent_root, &redo, ledger, None)?;
             wipe_stage(agent_root)?;
             Ok(RecoveryOutcome::RolledForward { renamed, unlinked })
         }
-        Some(format) => Err(WalError::UnknownFormat(
-            format
-                .as_str()
-                .map_or_else(|| format.to_string(), str::to_owned),
-        )),
-        None if value.get("intents").is_some() => {
-            let wal: DreamWal = serde_json::from_value(value)?;
+        WalClass::Legacy(wal) => {
             let outcome = recover_legacy(agent_root, &wal)?;
             wipe_stage(agent_root)?;
             Ok(outcome)
         }
-        None => Err(WalError::UnknownFormat("none".to_string())),
     }
 }
 
@@ -1089,5 +1179,62 @@ mod tests {
             "begin_cycle must preserve the prior cycle's completion timestamp",
         );
         assert_eq!(state.last_dream_cycle_status, "in_progress");
+    }
+
+    fn corrupt_sidecars(root: &AgentRoot) -> Vec<PathBuf> {
+        fs::read_dir(root.dreamd_dir())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name()?.to_string_lossy();
+                name.starts_with("dream_in_progress.wal.corrupt-")
+                    .then_some(path)
+            })
+            .collect()
+    }
+
+    /// A `redo/1` body repair can apply is rolled forward. Repair does not
+    /// quarantine it.
+    #[test]
+    fn repair_rolls_a_valid_redo_wal_forward() {
+        use crate::writer_lock::{WriterKind, WriterLock};
+
+        let (root, _g) = setup_root("repair-valid-redo");
+        let redo = RedoWal {
+            schema_version: STATE_SCHEMA_VERSION.to_string(),
+            format: REDO_FORMAT.to_string(),
+            renames: vec![],
+            unlinks: vec![],
+            edges: vec![],
+        };
+        fs::write(root.wal_path(), serde_json::to_string(&redo).unwrap()).unwrap();
+
+        let lock = WriterLock::acquire(&root, WriterKind::Repair).unwrap();
+
+        assert!(lock.quarantined_wal().is_none());
+        assert!(!root.wal_path().exists());
+        assert_eq!(status(&root), "complete");
+        assert!(corrupt_sidecars(&root).is_empty());
+    }
+
+    /// A legacy `intents` WAL is still the pre-1.1.0 recovery, including a
+    /// `Commit` that finishes as `complete`. Repair does not quarantine it.
+    #[test]
+    fn repair_recovers_a_legacy_intents_wal() {
+        use crate::writer_lock::{WriterKind, WriterLock};
+
+        let (root, _g) = setup_root("repair-legacy-intents");
+        let wal = DreamWal {
+            schema_version: STATE_SCHEMA_VERSION.to_string(),
+            intents: vec![WalIntent::Commit],
+        };
+        fs::write(root.wal_path(), serde_json::to_string(&wal).unwrap()).unwrap();
+
+        let lock = WriterLock::acquire(&root, WriterKind::Repair).unwrap();
+
+        assert!(lock.quarantined_wal().is_none());
+        assert!(!root.wal_path().exists());
+        assert_eq!(status(&root), "complete");
+        assert!(corrupt_sidecars(&root).is_empty());
     }
 }
