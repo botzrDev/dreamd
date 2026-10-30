@@ -7,30 +7,63 @@
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
-**The plain files in your repo are the memory. dreamd is the local server that reads and writes them.**
+**Agent memory you can audit. When a memory goes bad, trace it to its source, see what it fed, and remove it.**
 
-Drop a `.agent/` folder in the project. Claude Code, Cursor, Cline, and other MCP-aware harnesses share it. What one agent learns, the next already knows. You can `cat`, `grep`, and `git diff` every byte. Durable appends go through MCP / the daemon so the writer stays single-writer.
-
-This is not "another memory product." It is a storage-model wedge: the filesystem is the source of truth, and the MCP tools (`search_nodes` / `append_node`) are a thin interface over those files.
-
-**Open core:** Apache-2.0 core today, self-hosted only. Premium features may ship later. Do not read this as free-forever for everything.
+dreamd is local-first, long-term memory for AI agents. Every memory is a line in a file in your repo, every lesson your agents learn cites the events it came from, and each dream cycle commits its lessons to git. When an agent acts on something wrong, you can find the memory that caused it, see which lessons it fed, and take it out, with a receipt.
 
 ```bash
 npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
-npx -y dreamd-mcp         # MCP server (stdio) — what the harness spawns
+npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 ```
 
-> First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
+Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
 
 ---
 
-## The moment it earns its name
+## Why auditable memory
 
-![Claude Code saves a lesson to dreamd; OpenCode, in a fresh session, finds it with search_nodes](docs/assets/demo.gif)
+Memory is the layer of an agent stack you usually can't see into. A prompt can be read and a model can be swapped, but when memory goes wrong there is rarely a way to tell what the agent believed, where that belief came from, or what else it touched.
 
-Recorded live, sped up 1.5x: Claude Code writes the lesson, OpenCode reads it back through the same `.agent/` folder. Tape: [docs/assets/demo.tape](docs/assets/demo.tape).
+That matters more now that memory is an attack surface. The OWASP Top 10 for Agentic Applications lists **memory and context poisoning (ASI06)**: an attacker, a bad tool result or a plain mistake plants a "fact" that the agent keeps acting on in later sessions. The defenses OWASP points to start with knowing the source of every memory and being able to remove one cleanly ([OWASP agentic top 10](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026)).
 
-No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
+dreamd is built for that response:
+
+| You need to | dreamd gives you |
+|---|---|
+| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
+| Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
+| Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
+| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state that names it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
+| Review what agents learned | `.agent/` is committed with your code, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
+| Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
+
+**What dreamd does not do.** It does not detect or block poisoned writes, and it does not filter injected lesson content ([SECURITY.md](./SECURITY.md)). `source_harness` is asserted by the caller, not verified. The provenance ledger and the forget receipt are unsigned, and there are no trust labels yet. dreamd makes bad memory traceable and removable; it does not make it impossible. See [Roadmap](#roadmap) for what comes next.
+
+---
+
+## The audit loop in four commands
+
+Say an agent keeps repeating advice you know is wrong.
+
+```bash
+# 1. Find the memories behind it
+npx -y dreamd-mcp blame "deploy without tests" --explain
+
+# 2. Check the lesson it came from and what that lesson cites
+cat .agent/semantic/LESSONS.md
+npx -y dreamd-mcp doctor --provenance
+
+# 3. Preview, then remove the bad event (stop `dreamd watch` first; forget refuses while it runs)
+npx -y dreamd-mcp forget evt_... --dry-run
+npx -y dreamd-mcp forget evt_... --proof forget-receipt.json
+
+# 4. Review the change like code
+git diff .agent/
+```
+
+After a `forget`, `doctor --provenance` reports the removed event's old ledger edges as orphans and exits 1. That is expected: the ledger is append-only, so it keeps the record that the event once existed.
+
+To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit with the daemon stopped, then run `dreamd doctor --repair` to rebuild the recall index.
 
 ---
 
@@ -39,13 +72,13 @@ No re-explaining. No re-pasting. Same `.agent/` folder, every harness.
 ### npm (recommended)
 
 ```bash
-npx -y dreamd-mcp setup   # scaffold .agent/ + write the harness MCP config
-npx -y dreamd-mcp         # MCP server (stdio) — your harness spawns this
+npx -y dreamd-mcp setup   # scaffold .agent/ and write the harness MCP config
+npx -y dreamd-mcp         # MCP server (stdio): your harness spawns this
 ```
 
-stdio stays the default transport. `dreamd mcp --bind 127.0.0.1:<port>` is the opt-in Streamable HTTP server at `/mcp`. It is unauthenticated, and it is only in source builds with `--features mcp-http` — see [docs/mcp-transports.md](./docs/mcp-transports.md).
+stdio is the default transport. `dreamd mcp --bind 127.0.0.1:<port>` is an opt-in Streamable HTTP server at `/mcp`. It is unauthenticated, and it is only in source builds with `--features mcp-http`. See [docs/mcp-transports.md](./docs/mcp-transports.md).
 
-Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyproject.toml`).
+dreamd needs a project root sentinel (`.git/`, `Cargo.toml`, `package.json` or `pyproject.toml`).
 
 `setup` prompts when it has a TTY. In scripts and non-interactive shells, pass `--yes --harness claude|cursor|both` (`--harness none` or `--no-write-mcp` scaffolds without touching any MCP config).
 
@@ -61,30 +94,43 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 
 ---
 
-## Quick start (< 30 seconds)
+## Quick start (under a minute)
 
-If `~/your-project` is a brand-new folder, run `git init` first (or make sure it contains one of the supported root sentinels).
+If `~/your-project` is a brand-new folder, run `git init` first.
 
 ```bash
 cd ~/your-project
 npx -y dreamd-mcp setup
 
-# Optional: shared daemon (recommended when several agents write)
+# Optional: shared daemon, recommended when several agents write
 npx -y dreamd-mcp watch
 ```
 
-Reload your harness. `setup` already wired the dreamd MCP server, so the harness spawns `npx -y dreamd-mcp` itself — no config to copy by hand.
+Reload your harness. `setup` already wired the dreamd MCP server, so the harness spawns `npx -y dreamd-mcp` itself.
 
-Ask the agent to search memory for something you just learned. It calls `search_nodes` and recalls prior context.
+Ask the agent to search memory for something it learned earlier. It calls `search_nodes` and recalls prior context, with the source harness on every hit.
 
 ```bash
 cat .agent/episodic/AGENT_LEARNINGS.jsonl
+npx -y dreamd-mcp dream --dry   # preview the lesson the next cycle would write
 npx -y dreamd-mcp doctor
 ```
 
-The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` if you want the `dreamd` binary. The shim forwards only some subcommands (`npx -y dreamd-mcp --help` lists them); `recall`, `score`, `status`, `archive`, and `migrate` need the `dreamd` binary.
+The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` for the `dreamd` binary. The shim forwards a subset of commands (`npx -y dreamd-mcp --help` lists them); `recall`, `score`, `status`, `archive` and `migrate` need the `dreamd` binary.
 
 Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md) · [Cline](./adapters/cline/README.md)
+
+![Claude Code saves a lesson to dreamd; OpenCode, in a fresh session, finds it with search_nodes](docs/assets/demo.gif)
+
+Recorded live, sped up 1.5x: Claude Code writes the lesson, OpenCode reads it back through the same `.agent/` folder. Tape: [docs/assets/demo.tape](docs/assets/demo.tape).
+
+---
+
+## How agents learn
+
+Agents write episodes (what happened, how painful it was, how important) through MCP `append_node`. The **dream cycle** clusters episodes by `skill_action` and promotes a recurring pattern into a lesson in `LESSONS.md`. With an API key it composes the lesson with an LLM under a $0.10 per-cycle spend cap; without one it writes a deterministic lesson and makes no network call. Either way the lesson cites the events it came from, and every output is staged and committed through one redo WAL, so a crash leaves the store as it was or rolls the cycle forward.
+
+Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Recall is deliberately lexical; vector recall is not shipped ([docs/vectors.md](./docs/vectors.md)). Formula: [docs/salience.md](./docs/salience.md).
 
 ---
 
@@ -93,69 +139,111 @@ Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters
 | Location | Contents | Commit? |
 |---|---|---|
 | `<project>/.agent/` | Episodic JSONL, semantic lessons, personal prefs | **Yes** (this is the shared memory) |
-| `<project>/.agent/.dreamd/` | Local index, daemon state, config template, memory branches, provenance ledger | No (gitignored by `init`) |
+| `<project>/.agent/.dreamd/` | Local index, daemon state, config template, provenance ledger | No (gitignored by `init`) |
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
-`npx -y dreamd-mcp setup` (or `dreamd setup` after a cargo install) scaffolds the store by calling `init`, then writes the harness MCP config. `init` is the scaffold primitive and still works on its own when you want the store without touching any MCP config. Both are idempotent. To uninstall from a machine — stop local servers, remove the socket, unregister the current project, clear caches — run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). Advanced, registry-only: `npx -y dreamd-mcp init --uninstall-project` unregisters the current project and touches nothing else. `dreamd init` puts that registry entry back and does not rewrite the store.
+`setup` scaffolds the store by calling `init`, then writes the harness MCP config. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
 
 ---
 
-## Inspecting and editing memory
+## All inspection commands
 
-The MCP surface is two tools. Everything else is CLI, run against the same files. These need the `dreamd` binary unless noted; `dreamd <cmd> --help` is the reference for flags.
+The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is CLI over the same files. `dreamd <cmd> --help` is the reference for flags.
 
 | Command | What it does |
 |---|---|
-| `dreamd recall <query>` | Ranked search as a markdown table. `--explain` prints the salience factors per hit; `--without <id>` / `--without-cluster <prefix>` drop hits before top-k (1.0.0). |
-| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, bm25, salience, total, layer. `--json` for one compact array. New in 1.0.0; forwarded by the npm shim. |
-| `dreamd score` | Top memories by salience alone, no query. |
-| `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from exactly seven days earlier. New in 1.0.0; forwarded by the npm shim. See [docs/observability.md](./docs/observability.md). |
-| `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing. |
-| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Name snapshots of the memory files, switch between them, diff two, and binary-search the automatic `snap-*` snapshots. New in 1.0.0; forwarded by the npm shim. Deprecated in 1.1.0 and removed in 2.0: `.agent/` is plain files, so use git. `checkout` and `bisect` refuse while `dreamd watch` holds the live log: on Linux and macOS while the socket file exists (including a stale socket), on Windows while a loopback connect to `server.json` succeeds. See [docs/branching-guide.md](./docs/branching-guide.md). |
-| `dreamd forget <event-id>` | Remove one episodic event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` JSON file (a receipt, not a signed proof). Refuses while the daemon is running. New in 1.0.0; forwarded by the npm shim. |
-| `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges, and corrupt lines. Read-only. New in 1.0.0. See [docs/provenance.md](./docs/provenance.md). |
+| `dreamd recall <query>` | Ranked search as a markdown table. `--explain` prints the salience factors per hit; `--without <id>` / `--without-cluster <prefix>` drop hits before top-k, so you can see the answer without a suspect memory |
+| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, bm25, salience, total, layer. `--json` for one compact array |
+| `dreamd score` | Top memories by salience alone, no query |
+| `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from seven days earlier. See [docs/observability.md](./docs/observability.md) |
+| `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
+| `dreamd forget <event-id>` | Remove one episodic event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
+| `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges and corrupt lines. Read-only. See [docs/provenance.md](./docs/provenance.md) |
+| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.1.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
 
 ---
 
 ## Architecture (one paragraph)
 
-Agents talk to dreamd over MCP (`search_nodes`, `append_node`). On Linux and macOS the MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. On Windows it proxies to loopback `dreamd watch` and exits 2 when that daemon is down; there is no in-process server. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index. Recall ranks hits with a query-time salience formula (BM25 × age decay × pain × importance × recurrence). Each hit carries `source_harness` and `skill_action`, so recall is attributable across harnesses. The dream cycle consolidates episodic learnings into `LESSONS.md` under WAL protection.
-
-Recall is deliberately lexical (BM25 + salience), including the `LESSONS.md` document layer indexed alongside episodic events. That is a scope choice, not a scoreboard claim. Vector / embedding recall is not shipped: the optional `vectors` cargo feature (off by default, not in release binaries) only downloads a model, and nothing ranks with it ([docs/vectors.md](./docs/vectors.md)).
-
-Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md)
-
----
-
-## FAQ
-
-**Is this the first / only cross-harness memory?** No. Other projects exist (including large ones). dreamd owns the storage-model wedge: plain files you already version-control, not a category claim.
-
-**Do I need Rust?** No for the recommended path. `npx -y dreamd-mcp` downloads a prebuilt binary. Rust is only required if you build from source.
-
-**Where does memory live?** In `<project>/.agent/`. The daemon and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL / Markdown by hand; durable appends should go through the daemon / MCP so the writer stays single-writer.
-
-**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. To uninstall dreamd itself, run `dreamd uninstall` — details: [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md#uninstall--reset). That stops running processes and clears caches; removing the per-user *service* entry (the systemd unit, the LaunchAgent, or the Windows Task Scheduler logon task) is the separate `dreamd service uninstall`, whose optional `--purge` deletes the daemon home `~/.agent/` and never a per-project `.agent/` store ([docs/install.md](./docs/install.md)).
-
-**Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle, and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. The npm shim downloads prebuilt binaries for Linux x86_64 and macOS (x86_64 / arm64) only, so native Windows means a `cargo` build or a release asset. Details: [docs/windows.md](./docs/windows.md).
-
-**Is everything free forever?** Apache-2.0 core is open. Premium may come later. Self-hosted only (no hosted SaaS).
-
-More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
+Agents talk to dreamd over MCP. On Linux and macOS the MCP server proxies to a single-writer daemon (`dreamd watch`) over HTTP on a Unix domain socket, or runs in-process when no daemon is present. On Windows it proxies to loopback `dreamd watch` and exits 2 when that daemon is down. One writer lock covers every process that writes a project. The coordinator appends to `AGENT_LEARNINGS.jsonl` and feeds a Tantivy BM25 index; recall ranks hits with the salience formula, and each hit carries `source_harness` and `skill_action`. Details: [ARCHITECTURE.md](./ARCHITECTURE.md) · [SPEC.md](./SPEC.md) · [docs/http-api.md](./docs/http-api.md). Warm recall latency (local Criterion benches) is in [PERF.md](./PERF.md).
 
 ---
 
 ## Roadmap
 
-| When | What |
+Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
+
+- **Trust labels.** A label on every memory saying where it came from and how far to trust it, joined along provenance edges, so a lesson from an untrusted source can't drive a privileged action. Needs its own spec first.
+- **Signed provenance.** Signed forget receipts and membership proofs, as specified in [docs/provenance.md](./docs/provenance.md).
+- **Proof of learning.** Publish the WasTrue benchmark results (does memory update a fact that later changed?) and measure whether learned lessons actually improve task success over time.
+- **Vector recall.** Hybrid lexical and vector scoring, as derived state over the natural-language record.
+- **Robots and edge devices.** dreamd is one local binary with no cloud dependency, which is the shape an offline robot needs. No robot integration ships today.
+
+### Release history
+
+| Version | What |
 |---|---|
-| **v0.1.0** (2026-08-05) | BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm `dreamd-mcp` |
-| **v0.1.1** (2026-09-14) | LLM dream cycle, `LESSONS.md` semantic layer (still BM25 × salience, not embeddings), Windows watch+learn, `dreamd service` on Linux / macOS / Windows |
-| **v1.0.0** (2026-10-02) | Stable release of the tree since v0.1.1: `dreamd memory` branches / diff / bisect, provenance ledger + `doctor --provenance`, `dreamd forget`, `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations on HTTP recall. Recall is still BM25 × salience |
-| **v1.0.1** (2026-10-21) | Patch: dependency security fixes (`rustls`, `rustls-webpki`, `webpki-roots`, `quinn-proto`) and printed strings that match the 1.0.0 tree. No recall change |
-| **v1.2.0** (2026-10-29) | Windows dream cycle and Tantivy index. Directory flush is the Unix call order and is not a power-loss proof. Deprecates `dreamd memory` branch commands, `vectors enable`, and `dream --auto` (removed in 2.0). No 1.1.0 tag. Recall is still BM25 × salience |
-| **Next** | vector recall, WasTrue benchmark publish |
+| **v1.2.0** (2026-10-29) | Windows dream cycle and Tantivy index; audit fixes (writer lock, atomic dream cycle, faithful log rewrites, index coverage); deprecates `dreamd memory` branch commands, `vectors enable` and `dream --auto` for removal in 2.0. No 1.1.0 tag |
+| **v1.0.1** (2026-10-21) | Dependency security fixes |
+| **v1.0.0** (2026-10-02) | Provenance ledger and `doctor --provenance`, `dreamd forget`, `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations on HTTP recall |
+| **v0.1.1** (2026-09-14) | LLM dream cycle, `LESSONS.md` semantic layer, Windows watch and learn, `dreamd service` |
+| **v0.1.0** (2026-08-05) | BM25 lexical recall, Linux and macOS, deterministic dream cycle, npm `dreamd-mcp` |
+
+Full notes: [CHANGELOG.md](./CHANGELOG.md).
+
+---
+
+## FAQ
+
+**Other tools store memory as files too. What's different?** Files are the substrate, not the feature. dreamd adds the trace: lessons that cite their source events, a provenance ledger you can check, `blame` for any recall, and `forget` that removes an event together with the lesson state built from it.
+
+**Does dreamd stop memory poisoning?** No. It makes a poisoned memory findable and removable, and it keeps a record. It does not screen what agents write. See [SECURITY.md](./SECURITY.md).
+
+**Do I need Rust?** No. `npx -y dreamd-mcp` downloads a prebuilt binary for Linux x86_64 and macOS. Rust is only needed to build from source (and for native Windows).
+
+**Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand; durable appends should go through the daemon or MCP so there is one writer.
+
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` stops processes and clears caches; `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store ([docs/install.md](./docs/install.md)).
+
+**Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt npm binary for Windows. Details: [docs/windows.md](./docs/windows.md).
+
+**Is everything free forever?** The Apache-2.0 core is open, and a single repo stays free. Premium, self-hosted features may come later. There is no hosted SaaS.
+
+More: [docs/troubleshooting.md](./docs/troubleshooting.md).
+
+---
+
+## Status
+
+**v1.2.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+
+| Layer | Status |
+|---|---|
+| `SPEC.md` v0.1 | Shipped |
+| Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | Shipped |
+| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped on npm |
+| Provenance ledger, `forget`, `blame` | Shipped (unsigned) |
+| Trust labels, signed proofs | Not shipped |
+| CI / cross-platform matrix | Lint, test, build, binary-size gate, DCO (Windows jobs are informational) |
+
+### Benchmarks
+
+**WasTrue** tests whether a memory system updates a fact that later changes. The harness here is a scaffold and no results table is published yet ([scripts/benchmark/README.md](./scripts/benchmark/README.md)).
+
+**Coding recall oracle.** `python3 scripts/benchmark/coding_oracle.py` printed `dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36`: after one `dreamd dream --no-llm`, k=32 recall packed to the same token budget found all 12 episodes that context stuffing missed. It is a small in-repo check, not a general benchmark.
+
+---
+
+## Platforms
+
+Linux, macOS and Windows. Windows serves over loopback TCP. See [docs/windows.md](./docs/windows.md).
+
+---
+
+## Where dreamd fits
+
+dreamd is one of three sibling repositories that make one product, **dreamOS**: *the first computer you can hand your keys to*. It acts on your behalf, it is structurally incapable of doing what you did not allow, and it can prove what it did. The kernel under it is **momo**; the sandbox beside it is `aegis`. momo's charter (RFC-009, amended by RFC-011, accepted 2026-09-26) records dreamd as the Linux-hosted proof of one of the product's pillars: memory as plain files a person owns, with provenance. The same amendment names the rule the provenance ledger grows toward: *every effect can be traced to the data that caused it, and no datum can cause an effect above its own trust label*. Nothing shipped implements a trust label yet. The momo repository is private until the kernel's first public release, and dreamOS is not announced or marketed before its v1; this paragraph is a pointer, not a launch.
 
 ---
 
@@ -163,62 +251,18 @@ More troubleshooting: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 | Doc | What |
 |---|---|
-| [GUIDE.md](./GUIDE.md) | 20-minute tutorial walkthrough |
+| [GUIDE.md](./GUIDE.md) | 20-minute walkthrough, including inspect and undo |
 | [docs/README.md](./docs/README.md) | Full documentation index |
+| [docs/provenance.md](./docs/provenance.md) | Provenance ledger format and what `doctor --provenance` checks |
+| [docs/observability.md](./docs/observability.md) | Recall citations, `blame`, counterfactual recall and salience drift |
+| [SECURITY.md](./SECURITY.md) | Threat model, including the lesson-injection surface |
 | [docs/http-api.md](./docs/http-api.md) | REST API (Unix socket / Windows loopback TCP) |
 | [docs/configuration.md](./docs/configuration.md) | TOML config and env vars |
 | [docs/troubleshooting.md](./docs/troubleshooting.md) | Common failures |
-| [docs/glossary.md](./docs/glossary.md) | Domain terms |
 | [SPEC.md](./SPEC.md) | On-disk contract |
 | [docs/salience.md](./docs/salience.md) | Salience formula deep-dive |
-| [docs/branching-guide.md](./docs/branching-guide.md) | Memory branches: branch, checkout, diff, bisect (deprecated; removed in 2.0) |
-| [docs/provenance.md](./docs/provenance.md) | Provenance ledger format and what `doctor --provenance` checks |
-| [docs/observability.md](./docs/observability.md) | Recall citations (`explain=1`) and salience drift |
-| [docs/spec/](./docs/spec/README.md) | Two-page `.agent/` digest of that contract |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Engineering decisions |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup and RFC process |
-| [SECURITY.md](./SECURITY.md) | Threat model |
-| [docs/marketing.md](./docs/marketing.md) | Product story and positioning |
-
-Warm recall latency numbers (local Criterion benches) live in [PERF.md](./PERF.md) if you want them. They are not the product pitch. To re-run the bench yourself, see [docs/benchmarks.md](./docs/benchmarks.md).
-
----
-
-## Status
-
-**v1.2.0** is this tree ([CHANGELOG.md](./CHANGELOG.md)). The last published GitHub tag and npm package are `v1.0.1` until the human tag and publish in [RELEASING.md](./RELEASING.md). There is no 1.1.0 tag. Commands marked "new in 1.0.0" above need 1.0.0 or later. CLI commands: `setup`, `init`, `watch`, `mcp`, `dream`, `doctor`, `status`, `service`, `recall`, `blame`, `score`, `salience-drift`, `memory`, `forget`, `archive`, `migrate`, `reset workspace`, `vectors`, `uninstall`, `update`, `version` (`dreamd --help` is the full list; on the npm path use `npx -y dreamd-mcp <cmd>` — the shim forwards a subset, see [packages/dreamd-mcp/README.md](./packages/dreamd-mcp/README.md)). `vectors enable` exits 2 on the default build and does not change recall. Linux, macOS, and Windows (watch, learn, dream cycle, and the Tantivy index over loopback TCP). If you upgrade a cargo-installed binary in place (`cargo install --path crates/dreamd-cli`) and run the daemon under the per-user service, bounce it afterwards with `dreamd service restart` so the supervisor picks up the new binary ([docs/install.md](./docs/install.md)).
-
-| Layer | Status |
-|---|---|
-| `SPEC.md` v0.1 | Shipped |
-| Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | Shipped |
-| MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped on npm |
-| CI / cross-platform matrix | Lint, test, build, binary-size gate, DCO (Windows jobs are informational) |
-| Conformance | Reference-impl alpha suites (`scripts/alpha/`); no formal certification |
-
----
-
-## WasTrue benchmark
-
-A separate eval of whether memory systems update a fact that later changes. The harness in this repository is a scaffold, and a results table is not published here. Publishing that table is listed under Next above. Methodology for the scaffold: [scripts/benchmark/README.md](./scripts/benchmark/README.md).
-
-## Coding recall oracle
-
-Tokens are whitespace-separated words. Each chunk is packed whole, stopping before the next chunk would exceed the budget. Stuffing keeps the newest distractors. Dreamd is one `dreamd dream --no-llm`, then `k=32` recall packed to the same budget.
-
-`python3 scripts/benchmark/coding_oracle.py` printed dreamd_only=12 both=0 stuffing_only=0 neither=0 n=12 budget_tokens=36.
-
----
-
-## Platforms
-
-Linux, macOS, and Windows. Windows serves over loopback TCP. See [docs/windows.md](./docs/windows.md).
-
----
-
-## Where dreamd fits
-
-dreamd is one of three sibling repositories that make one product: **dreamOS**, *the first computer you can hand your keys to* — it acts on your behalf, it is structurally incapable of doing what you did not allow, and it can prove what it did. The kernel under it is **momo**; the sandbox beside it is `aegis`. momo's charter (its RFC-009, amended by RFC-011, accepted 2026-09-26) records dreamd as the **Linux-hosted proof** of one of the product's pillars: memory as plain files a person owns, with provenance — in the product's words, *the Memory*. The same amendment names the rule the provenance ledger grows toward — *every effect can be traced to the data that caused it, and no datum can cause an effect above its own trust label* — as a design with its own spec first. Nothing shipped implements a trust label: `source_harness` is asserted by the caller, the provenance ledger ([`docs/provenance.md`](docs/provenance.md)) records derivation, not trust — it is unsigned and nothing gates on it — and [`SECURITY.md`](SECURITY.md) says plainly that injected lessons are not filtered. The momo repository is private until the kernel's first public release, and the product is not announced, previewed or marketed before its v1; this paragraph is a pointer, not a launch.
 
 ---
 
