@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+
+- **tantivy 0.26.1 → 0.27.0, tokio 1.52.3 → 1.54.1, and libz-sys 1.1.28 → 1.1.31.** Columnar blocks stay zstd-compressed, now through `zstd` 0.14.3, `zstd-safe` 8.2.0 and `zstd-sys` 2.1.2. That clears RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403, RUSTSEC-2026-0386 and RUSTSEC-2026-0418. An index written by 0.26.1 (schema `index/1.3`) opens in place.
+
 ## [1.2.0] - 2026-10-29
 
 There is no 1.1.0 tag. This release ships the deprecations prepared for that version together with the Windows dream cycle and Tantivy index. Recall is still BM25 × salience.
