@@ -104,6 +104,7 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | [../RELEASING.md](../RELEASING.md) | Maintainers | Release procedure — version surfaces, tag, draft release, manifest PR, human-only npm and MCP Registry publish |
 | [../PERF.md](../PERF.md) | Contributors | Last recorded binary size, idle RSS and recall latency against the CI limits |
 | [benchmarks.md](./benchmarks.md) | Contributors | How to re-run the in-RAM recall latency bench |
+| [evals/external-benchmarks.md](./evals/external-benchmarks.md) | Contributors | External memory benchmarks: shortlist, protocol decisions, running log and result tables (LongMemEval first) |
 | [../STORY_IDS.md](../STORY_IDS.md) | Contributors | `DR-` / `WEG-` / `AILAB-` / `BZR-` story ID legend |
 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Contributors | Community standards |
 
@@ -116,6 +117,7 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | [../packages/dreamd-mcp/test/README.md](../packages/dreamd-mcp/test/README.md) | Contributors | `node --test` suites for the npx shim |
 | [../scripts/alpha/README.md](../scripts/alpha/README.md) | Contributors | Alpha suites — cross-harness append → recall smoke test, quality and install-funnel suites |
 | [../scripts/benchmark/README.md](../scripts/benchmark/README.md) | Contributors | WasTrue benchmark scaffold (a separate eval, not the recall latency bench) |
+| [../scripts/benchmark/longmemeval/README.md](../scripts/benchmark/longmemeval/README.md) | Contributors | LongMemEval retrieval harness: dreamd against the paper's BM25 rows, same corpus and metrics |
 
 ## Historical records
 

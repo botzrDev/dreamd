@@ -405,7 +405,20 @@ Locked 2026-10-24:
 
     Spec: `assignments/BZR-1244.v2.md`. Amendment 1 fixed two comments; Amendment 2 covers resuming after the mid-ticket commit.
 15. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
-16. **BZR-1238** — 1.1.0 release prep: CHANGELOG, version bump, end-to-end smoke, no `BZR-12…` ignores left. Tag and publish stay human steps.
+16. **BZR-1238** — 1.1.0 release prep. Closed 2026-10-30 as superseded by BZR-1304: 1.1.0 and 1.2.0 shipped (v1.2.0 tag 2026-10-29) without this ticket being worked as written.
+
+**Milestone 1.2.1 patch** (filed 2026-10-30 from the 2026-10-29 black-box torture session of v1.2.0; report at `~/dreamd-hell/v12-torture-20261029/REPORT.md`, verified on `2ab0270`). Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The tester withdrew findings 14 and 9 after their own re-runs (client-side capture artifact; "registration" attempts were the finding-2 no-op).
+
+18. **BZR-1297** — tantivy 0.27 to clear the three waived zstd RustSec advisories. Chain root (decided 2026-10-30). Scope stays inside dreamd-core's index open / rebuild paths; no WAL, stage, lock or coordinator changes. Timeboxed: if 0.27 breaks the indexer actor or lockfile semantics, defer it to the next patch milestone and note the waivers on BZR-1304. Re-run the torture probe matrix after it lands.
+19. **BZR-1298** — operator recovery path for an unreadable dream-cycle WAL. The BZR-1239 fail-closed refusal stays; doctor reports it and a repair arm quarantines the WAL, wipes the stage and sets `failed` under the writer lock. `watch` names the doctor command. Today every writer refuses forever and systemd loops.
+20. **BZR-1299** — `dreamd init` (and `setup`) register an already-scaffolded project with no registry entry. Today the `.agent/` guard returns "already initialized — nothing to do", so `init --uninstall-project` and registry loss are only recoverable by deleting the store or hand-editing `registry.toml`.
+21. **BZR-1300** — `dreamd uninstall` gets the `service uninstall --purge` confirmation idiom (`y` on a TTY, `--yes`, exit 2 otherwise). It currently stops daemons, unregisters and wipes both caches with no gate.
+22. **BZR-1301** — `memory_store.rs` `map_remote_status_error` labels every 400 "invalid X-Agent-Root"; return the daemon's `error` string. Guard the recall query length so hyper's "uri too long" never reaches an MCP caller.
+23. **BZR-1302** — doctor WARNING lines for hand-edit anomalies: out-of-range scores, duplicate ids, future timestamps, unparseable `registry.toml`. Report only; readers keep clamping (BZR-1237) and upserting (BZR-1236).
+24. **BZR-1303** — CLI markdown tables escape C0 control characters; `recall` currently leaks a stored NUL to stdout.
+25. **BZR-1304** — 1.2.1 release prep (hitl). Tag and publish stay human.
+
+Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
 
 **Milestone 2.0 removal**
 
