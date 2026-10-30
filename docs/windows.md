@@ -34,10 +34,9 @@ the cycle re-reads it and writes the deterministic lesson.
 by locking `registry.toml.lock` with `std::fs::File::lock` and replacing
 `registry.toml` through a temporary file and `rename`. That writer is not
 `io::write_atomic`, the file is not chmod `0600`, and a successful registration
-does not flush the parent directory. A second `dreamd init`,
-when `.agent/` already exists, still leaves the store as-is and does not
-register the project. Learn answers `404` (`agent root not registered`) until
-the root is in the registry.
+does not flush the parent directory. A second `dreamd init`, when `.agent/` already exists, leaves the store as-is.
+If the root is missing from the registry, that init registers it. Learn answers
+`404` (`agent root not registered`) until the root is in the registry.
 
 Native Windows was out of scope for v0.1. v0.1.1 added compile, `dreamd service
 install` (logon task + `auth.json`), and `dreamd watch` over loopback TCP with

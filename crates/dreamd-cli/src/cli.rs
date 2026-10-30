@@ -140,7 +140,7 @@ pub enum Command {
     /// Stop a live `dreamd watch` first; the command refuses while the daemon
     /// is running.
     Forget(ForgetArgs),
-    /// Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged and is not registered.
+    /// Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged. If it is missing from the registry, init registers it.
     ///
     /// Requires a project-root sentinel in cwd or an ancestor.
     Init(InitArgs),
@@ -236,7 +236,7 @@ pub struct InitArgs {
     #[arg(long)]
     pub quiet: bool,
     /// Remove this project's entry from ~/.agent/registry.toml and exit.
-    /// Does not delete the project's .agent/ store.
+    /// Does not delete the project's .agent/ store. Run `dreamd init` again to put the entry back.
     #[arg(long)]
     pub uninstall_project: bool,
 }
