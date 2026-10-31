@@ -366,6 +366,7 @@ pub fn render_plan(plan: &UninstallPlan) -> String {
 /// written first (even when `quiet`), then [`PROMPT`], then `read_line`.
 /// `--yes` does not call `read_line`. The plan is written for `--yes` only
 /// when `quiet` is false. After `y`, `Y`, or `--yes`, [`run`] is the body.
+#[allow(clippy::too_many_arguments)] // CLI entry: request, stops, flags, prompt, stopper, out, err
 pub fn run_gated(
     req: &UninstallRequest<'_>,
     stops: &[PlannedStop],
