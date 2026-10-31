@@ -1990,4 +1990,60 @@ mod tests {
             .expect_err("in-process rejects it too");
         assert_eq!(err.message, in_process.message);
     }
+
+    /// BZR-1301 test 24 (Amendment 1 item 9): in-process, a query the parser
+    /// rejects is `-32602` too, with the text daemon mode gives for the same
+    /// query.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_in_process_parser_rejection_is_invalid_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, false).await;
+        let daemon = MemoryMcpServer::with_remote(sock_path, canonical_str);
+
+        let other = tempfile::tempdir().expect("tempdir");
+        let in_process = MemoryMcpServer::with_agent_root(setup_agent_root(other.path()));
+
+        async fn search(server: &MemoryMcpServer, query: &str) -> Result<CallToolResult, McpError> {
+            server
+                .search_nodes(Parameters(SearchNodesParams {
+                    query: query.to_string(),
+                    k: Some(3),
+                }))
+                .await
+        }
+
+        for query in ["\"unbalanced", "rust::tokio"] {
+            let local = search(&in_process, query)
+                .await
+                .expect_err("in-process rejects the query");
+            assert_eq!(
+                local.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "{query}"
+            );
+            assert_eq!(
+                serde_json::to_value(&local).expect("serialize")["code"],
+                -32602,
+                "{query}"
+            );
+            assert!(
+                local.message.starts_with("recall failed: "),
+                "{query}: {}",
+                local.message
+            );
+
+            let remote = search(&daemon, query)
+                .await
+                .expect_err("daemon rejects the query");
+            assert_eq!(remote.code, local.code, "{query}");
+            assert_eq!(remote.message, local.message, "{query}");
+        }
+    }
 }
