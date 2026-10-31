@@ -355,6 +355,18 @@ pub fn render_plan(plan: &UninstallPlan) -> String {
     out
 }
 
+/// How [`run_gated`] gets its answer: `--yes`, whether stdin is a terminal,
+/// and the line reader. One argument, so [`run_gated`] stays within clippy's
+/// argument limit.
+pub struct Confirmation<'a> {
+    /// `--yes`: no prompt, and `read_line` is not called.
+    pub yes: bool,
+    /// Whether stdin is a terminal.
+    pub is_tty: bool,
+    /// Reads the answer after the plan and [`PROMPT`].
+    pub read_line: &'a mut dyn FnMut() -> Result<String, ConfirmError>,
+}
+
 /// Confirm, then [`run`].
 ///
 /// `stops` is the process list from [`lifecycle_cleanup::attributable_targets`]
@@ -369,13 +381,16 @@ pub fn render_plan(plan: &UninstallPlan) -> String {
 pub fn run_gated(
     req: &UninstallRequest<'_>,
     stops: &[PlannedStop],
-    yes: bool,
-    is_tty: bool,
-    read_line: &mut dyn FnMut() -> Result<String, ConfirmError>,
+    confirmation: Confirmation<'_>,
     stop: Stopper<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), GatedError> {
+    let Confirmation {
+        yes,
+        is_tty,
+        read_line,
+    } = confirmation;
     let plan = match plan_with_stops(req, stops) {
         Ok(plan) => plan,
         Err(error) => return Err(report(err, &error)),
