@@ -65,8 +65,8 @@ const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryStoreError {
     /// The tool arguments are wrong: a bad `skill_action`, a score outside
-    /// `0.0..=10.0`, a learning or query over its size limit, or any other
-    /// `400` the daemon explains. MCP `-32602`.
+    /// `0.0..=10.0`, a learning or query over its size limit, a query the
+    /// parser rejects, or any other `400` the daemon explains. MCP `-32602`.
     #[error("{0}")]
     InvalidParams(String),
     /// An unregistered project, a rejected content type, or an index that
@@ -224,8 +224,14 @@ impl InProcessStore {
             handle.reader().clone()
         };
         let now_sec = chrono::Utc::now().timestamp();
-        recall_to_json(&reader, query, k, now_sec)
-            .map_err(|e| MemoryStoreError::invalid(format!("recall failed: {e}")))
+        recall_to_json(&reader, query, k, now_sec).map_err(|e| match e {
+            // tantivy turns every query-parser error into `InvalidArgument`:
+            // the caller's to fix, as `get_recall`'s 400 says in daemon mode.
+            e @ tantivy::TantivyError::InvalidArgument(_) => {
+                MemoryStoreError::params(format!("recall failed: {e}"))
+            }
+            e => MemoryStoreError::invalid(format!("recall failed: {e}")),
+        })
     }
 }
 

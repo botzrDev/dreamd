@@ -1514,7 +1514,6 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **How to apply:**
   - Before citing what a library "does today", find the code path the dreamd error actually takes.
   - `docs/http-api.md` "MCP tool errors" is the table; a new message gets a row there.
-  - One mismatch is left as is: in-process, a query the parser rejects is still `-32600` (`recall failed: …`), where daemon mode gives `-32602` with the same text. BZR-1301's D1 changed only the daemon.
 - **Cross-refs:** `a-proxy-checks-what-it-converts-before-it-converts`, `linear-search-nodes-layer-filter-does-not-exist`
 
 ### derived-serde-struct-accepts-a-json-array
