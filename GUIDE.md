@@ -12,7 +12,7 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
-This guide describes dreamd 1.0.0. That is the published npm package (`latest` and `next`). If `npx -y dreamd-mcp --version` prints an older version, section 8's commands are not in that package. A few commands are never forwarded by the npm shim and always need the `dreamd` binary: `status`, `recall`, `score`, `archive`, `migrate`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
+This guide describes dreamd 1.2.0. That is the published npm package (`latest` and `next`). If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. A few commands are not forwarded by the 1.2.0 npm shim and need the `dreamd` binary: `status`, `recall`, `score`, `archive`, `migrate`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
 
 ```bash
 # npm (no Rust required)
@@ -112,7 +112,7 @@ Each result includes `score`, `bm25`, `salience`, `source` (`episodic` for a raw
 
 > **Timing:** A learning appended seconds ago may not appear until the next index commit (5 s cadence). An empty `{"results": []}` right after an append is normal; wait a few seconds and retry.
 
-On 1.0.0, add `&explain=1` to get a `citations` array beside `results` (id, score components, layer, age, pain, importance, recurrence per hit) — see [docs/observability.md](./docs/observability.md). With a cargo-installed binary, `dreamd recall "axum unwrap" --explain` prints the same ranking as a table with the factor breakdown.
+On 1.0.0 and later, add `&explain=1` to get a `citations` array beside `results` (id, score components, layer, age, pain, importance, recurrence per hit). See [docs/observability.md](./docs/observability.md). With a cargo-installed binary, `dreamd recall "axum unwrap" --explain` prints the same ranking as a table with the factor breakdown.
 
 ---
 
@@ -236,7 +236,7 @@ ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 
 ## 8. Inspect and undo
 
-These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the 1.0.0 npm shim; `recall` and `score` need the cargo-installed `dreamd`.
+These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the npm shim (1.0.0 and later); in 1.2.0, `recall` and `score` still need the cargo-installed `dreamd`.
 
 See why a query ranked the way it did:
 
