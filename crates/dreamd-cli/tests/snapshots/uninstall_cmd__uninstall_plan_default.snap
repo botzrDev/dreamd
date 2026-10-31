@@ -1,0 +1,13 @@
+---
+source: crates/dreamd-cli/tests/uninstall_cmd.rs
+expression: text
+---
+will stop:
+  dreamd watch pid 42
+  dreamd mcp pid 43
+will remove registry block:
+[[projects]]
+root = "<project>"
+will delete:
+  <cache>/dreamd-mcp
+  <npx>/aaa111

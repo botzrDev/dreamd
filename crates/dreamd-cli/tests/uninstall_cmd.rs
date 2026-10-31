@@ -10,7 +10,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use dreamd::commands::confirm::ConfirmError;
-use dreamd::commands::lifecycle_cleanup::{StopReport, StopScope};
+use dreamd::commands::lifecycle_cleanup::{PlannedStop, StopReport, StopScope};
 use dreamd::commands::version::VERSION_SHORT;
 use dreamd::commands::{init, uninstall, update};
 
@@ -581,9 +581,11 @@ fn uninstall_without_yes_on_non_tty_mutates_nothing() {
         let result = uninstall::run_gated(
             &req,
             &empty_stops(),
-            false,
-            false,
-            &mut read_line,
+            uninstall::Confirmation {
+                yes: false,
+                is_tty: false,
+                read_line: &mut read_line,
+            },
             &mut stop,
             &mut out,
             &mut err,
@@ -629,9 +631,11 @@ fn uninstall_yes_runs_without_prompting() {
     uninstall::run_gated(
         &req,
         &empty_stops(),
-        true,
-        false,
-        &mut read_line,
+        uninstall::Confirmation {
+            yes: true,
+            is_tty: false,
+            read_line: &mut read_line,
+        },
         &mut no_op_stop,
         &mut out,
         &mut err,
@@ -646,6 +650,57 @@ fn uninstall_yes_runs_without_prompting() {
     let stdout = String::from_utf8(out.into_inner()).unwrap();
     assert!(stdout.contains("will delete:"));
     assert!(stdout.contains("there is no `dreamd reset --all`"));
+}
+
+/// `--yes -q` does not prompt and prints no plan, even on a tty with a
+/// non-empty process list, and still runs the cleanup.
+#[test]
+fn uninstall_yes_quiet_prints_no_plan_and_does_not_prompt() {
+    let f = fixture();
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+    let registry = f.daemon_home.path().join("registry.toml");
+    let mut req = uninstall_req(&f, &socket, &cache_tree, false, false);
+    req.quiet = true;
+    let mut read_line = || panic!("--yes must not read a line");
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    uninstall::run_gated(
+        &req,
+        &planned_stops(),
+        uninstall::Confirmation {
+            yes: true,
+            is_tty: true,
+            read_line: &mut read_line,
+        },
+        &mut no_op_stop,
+        &mut out,
+        &mut err,
+    )
+    .unwrap();
+
+    let stdout = String::from_utf8(out.into_inner()).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "--yes -q stdout must be empty: {stdout:?}"
+    );
+    let stderr = String::from_utf8(err.into_inner()).unwrap();
+    for marker in [
+        "will stop:",
+        "will remove registry block:",
+        "will delete:",
+        "dreamd watch pid 42",
+        uninstall::PROMPT,
+    ] {
+        assert!(!stderr.contains(marker), "{marker:?} on stderr: {stderr:?}");
+    }
+
+    assert!(!socket.exists());
+    assert!(!cache_tree.exists());
+    assert!(!f.npx_ours().exists());
+    assert!(f.npx_other().exists());
+    let raw = std::fs::read_to_string(&registry).unwrap();
+    assert!(!raw.contains("root ="), "registry cleared; got: {raw:?}");
 }
 
 /// A tty that answers `n` prints the plan and leaves the store alone. `Y` proceeds.
@@ -672,9 +727,11 @@ fn uninstall_declined_on_tty_mutates_nothing_and_y_proceeds() {
     let result = uninstall::run_gated(
         &req,
         &empty_stops(),
-        false,
-        true,
-        &mut read_line,
+        uninstall::Confirmation {
+            yes: false,
+            is_tty: true,
+            read_line: &mut read_line,
+        },
         &mut stop,
         &mut out,
         &mut err,
@@ -703,9 +760,11 @@ fn uninstall_declined_on_tty_mutates_nothing_and_y_proceeds() {
     uninstall::run_gated(
         &req,
         &empty_stops(),
-        false,
-        true,
-        &mut read_line,
+        uninstall::Confirmation {
+            yes: false,
+            is_tty: true,
+            read_line: &mut read_line,
+        },
         &mut no_op_stop,
         &mut out,
         &mut err,
@@ -715,7 +774,73 @@ fn uninstall_declined_on_tty_mutates_nothing_and_y_proceeds() {
     assert!(!f.npx_ours().exists());
 }
 
-/// Plan text for the four cache-flag combinations, and one registry block.
+/// Two planned stops, so a plan's `will stop:` section is never `(none)`.
+fn planned_stops() -> Vec<PlannedStop> {
+    vec![
+        PlannedStop {
+            pid: 42,
+            label: "dreamd watch",
+        },
+        PlannedStop {
+            pid: 43,
+            label: "dreamd mcp",
+        },
+    ]
+}
+
+/// The plan exactly as a tty user sees it. `run_gated` is answered `n`, so
+/// stdout holds the plan and nothing else, and nothing is stopped or changed.
+/// The fixture's temp paths become `<project>`, `<cache>`, and `<npx>`.
+fn plan_on_tty(f: &Fixture, req: &uninstall::UninstallRequest<'_>) -> String {
+    let mut stop = |_: &mut dyn std::io::Write| -> StopReport {
+        panic!("a declined plan must not stop anything")
+    };
+    let mut read_line = || Ok("n\n".to_string());
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    let result = uninstall::run_gated(
+        req,
+        &planned_stops(),
+        uninstall::Confirmation {
+            yes: false,
+            is_tty: true,
+            read_line: &mut read_line,
+        },
+        &mut stop,
+        &mut out,
+        &mut err,
+    );
+    assert!(
+        matches!(result, Err(uninstall::GatedError::Declined)),
+        "{result:?}"
+    );
+    let mut text = String::from_utf8(out.into_inner()).unwrap();
+    for (dir, name) in [
+        (f.project.path(), "<project>"),
+        (f.cache.path(), "<cache>"),
+        (f.npx.path(), "<npx>"),
+    ] {
+        if let Ok(canonical) = dir.canonicalize() {
+            text = text.replace(&canonical.display().to_string(), name);
+        }
+        text = text.replace(&dir.display().to_string(), name);
+    }
+    text
+}
+
+/// insta ignores a trailing-newline difference, so the shape is asserted
+/// here: every line ends with `\n`, there is no blank line, and the text ends
+/// with exactly one newline.
+fn assert_plan_shape(name: &str, text: &str) {
+    assert!(
+        text.ends_with('\n'),
+        "{name}: no trailing newline: {text:?}"
+    );
+    assert!(!text.contains("\n\n"), "{name}: blank line: {text:?}");
+}
+
+/// The plan for the four cache-flag combinations, as full snapshots with a
+/// non-empty process list. Only this project's registry block is listed.
 #[test]
 fn uninstall_plan_respects_cache_flags_and_one_registry_block() {
     let f = fixture();
@@ -724,59 +849,33 @@ fn uninstall_plan_respects_cache_flags_and_one_registry_block() {
     let registry = f.daemon_home.path().join("registry.toml");
     let mut raw = std::fs::read_to_string(&registry).unwrap();
     raw.push_str("[[projects]]\nroot = \"/other/project\"\n");
-    std::fs::write(&registry, raw).unwrap();
+    std::fs::write(&registry, &raw).unwrap();
+
+    for (name, keep_caches, all_npx) in [
+        ("uninstall_plan_default", false, false),
+        ("uninstall_plan_all_npx", false, true),
+        ("uninstall_plan_keep_caches", true, false),
+        ("uninstall_plan_keep_caches_all_npx", true, true),
+    ] {
+        let req = uninstall_req(&f, &socket, &cache_tree, keep_caches, all_npx);
+        let text = plan_on_tty(&f, &req);
+        assert_plan_shape(name, &text);
+        assert!(!text.contains("/other/project"), "{name}: {text}");
+        insta::assert_snapshot!(name, text);
+    }
+
+    // Each declined run left the fixture as it was, so all four plans were
+    // taken against the same store.
+    assert_eq!(std::fs::read_to_string(&registry).unwrap(), raw);
+    assert!(socket.exists());
+    assert!(cache_tree.exists());
+    assert!(f.npx_ours().exists());
+    assert!(f.npx_other().exists());
 
     let scope = StopScope {
         home: Some(f.daemon_home.path()),
         cache_dir: Some(&cache_tree),
     };
-
-    let default = uninstall_req(&f, &socket, &cache_tree, false, false);
-    let text = uninstall::render_plan(&uninstall::build_plan(&default, &scope).unwrap());
-    assert!(text.contains("will stop:\n  (none)\n"), "{text}");
-    assert!(text.contains("[[projects]]\nroot = \""), "{text}");
-    assert!(!text.contains("/other/project"), "{text}");
-    assert!(
-        text.contains(&format!("  {}\n", cache_tree.display())),
-        "{text}"
-    );
-    assert!(
-        text.contains(&format!("  {}\n", f.npx_ours().display())),
-        "{text}"
-    );
-    assert!(
-        !text.contains(&format!("  {}\n", f.npx_other().display())),
-        "{text}"
-    );
-
-    let all = uninstall_req(&f, &socket, &cache_tree, false, true);
-    let text = uninstall::render_plan(&uninstall::build_plan(&all, &scope).unwrap());
-    assert!(
-        text.contains(&format!("  {}\n", cache_tree.display())),
-        "{text}"
-    );
-    assert!(
-        text.contains(&format!("  {}\n", f.npx.path().display())),
-        "{text}"
-    );
-    assert!(
-        !text.contains(&format!("  {}\n", f.npx_ours().display())),
-        "{text}"
-    );
-
-    for all_npx in [false, true] {
-        let kept = uninstall_req(&f, &socket, &cache_tree, true, all_npx);
-        let text = uninstall::render_plan(&uninstall::build_plan(&kept, &scope).unwrap());
-        assert!(
-            text.contains("will delete:\n  (none) --keep-caches\n"),
-            "all_npx={all_npx}: {text}"
-        );
-        assert!(
-            !text.contains(&cache_tree.display().to_string()),
-            "all_npx={all_npx}: {text}"
-        );
-    }
-
     let outside = tempfile::tempdir().unwrap();
     let mut req = uninstall_req(&f, &socket, &cache_tree, false, false);
     req.cwd = outside.path();
