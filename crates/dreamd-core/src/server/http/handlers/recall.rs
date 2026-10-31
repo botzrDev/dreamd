@@ -4,7 +4,7 @@ use axum::extract::{Extension, RawQuery, State};
 use axum::response::IntoResponse;
 
 use crate::collector::RecallExclusion;
-use crate::ingress::RecallIngress;
+use crate::ingress::{query_too_long_message, RecallIngress, MAX_RECALL_QUERY_BYTES};
 use crate::recurrence::RecallReader;
 use crate::registry::ProjectEntry;
 
@@ -54,9 +54,13 @@ fn recall_to_json_excluding(
 /// * `exclude` (optional, repeatable) — drop this `event_id` before top-k
 ///   (BZR-194). Citations cover the filtered hits. No cluster parameter.
 ///
-/// # Response (`200`)
-/// `{"results":[{"score","bm25","salience","source","content","metadata":{…}}]}`,
-/// plus `"citations":[…]` when `explain=1`.
+/// # Responses
+/// * `200` — `{"results":[{"score","bm25","salience","source","content","metadata":{…}}]}`,
+///   plus `"citations":[…]` when `explain=1`
+/// * `400` — `q` missing, `k` not an unsigned integer, or a `q` the query
+///   parser rejects (`recall failed: …`, BZR-1301)
+/// * `414` — `q` over [`MAX_RECALL_QUERY_BYTES`] once decoded (BZR-1301)
+/// * `500` — the index could not be opened or searched
 pub(crate) async fn get_recall(
     State(state): State<AppState>,
     Extension(entry): Extension<ProjectEntry>,
@@ -66,6 +70,15 @@ pub(crate) async fn get_recall(
         Ok(p) => p,
         Err(e) => return error_400(&format!("Failed to deserialize query string: {e}")),
     };
+    // The shared limit (BZR-1301). `params.q` is decoded, so this counts the
+    // same bytes the daemon client counts before it sends.
+    if params.q.len() > MAX_RECALL_QUERY_BYTES {
+        return (
+            axum::http::StatusCode::URI_TOO_LONG,
+            axum::Json(serde_json::json!({ "error": query_too_long_message() })),
+        )
+            .into_response();
+    }
     let k = params.k_or_default();
     let now_sec = chrono::Utc::now().timestamp();
 
@@ -107,6 +120,11 @@ pub(crate) async fn get_recall(
             json,
         )
             .into_response(),
+        // tantivy turns every query-parser error into `InvalidArgument`: the
+        // caller's mistake, so a 400 the MCP client forwards (BZR-1301 D1).
+        Err(e @ tantivy::TantivyError::InvalidArgument(_)) => {
+            error_400(&format!("recall failed: {e}"))
+        }
         Err(e) => error_500(&format!("recall failed: {e}")),
     }
 }

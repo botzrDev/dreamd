@@ -196,7 +196,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 
 | Param | Required | Default | Description |
 |---|---|---|---|
-| `q` | Yes | — | Search query string. Parsed by Tantivy's query parser, so `"`, `(`, `:` and `AND`/`OR` are query syntax; a query it cannot parse — `rust::error` is one, because of the `:` — is a `500` (see below). Send plain words |
+| `q` | Yes | — | Search query string. Parsed by Tantivy's query parser, so `"`, `(`, `:` and `AND`/`OR` are query syntax; a query it cannot parse — `rust::error` is one, because of the `:` — is a `400` (see below). Send plain words. At most 16384 bytes once decoded; a longer `q` is a `414` |
 | `k` | No | `5` (`DEFAULT_RECALL_K`) | Maximum results to return. Unsigned integer |
 | `explain` | No | omitted | Exact value `1` adds a `citations` array (see below). Any other value, including absent, omits it. HTTP-only — MCP `search_nodes` has no equivalent parameter. |
 | `exclude` | No | none | Repeatable (`exclude=evt_a&exclude=evt_b`). Drops the document with that exact `event_id` before the top-`k` cut, so up to `k` of the remaining hits come back. Nothing is deleted. There is no cluster parameter. HTTP-only. See [`docs/observability.md`](observability.md#counterfactual-recall---without--exclude-bzr-194). |
@@ -276,12 +276,13 @@ BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + r
 
 | Status | When |
 |---|---|
-| `400 Bad Request` | Missing `q`, or a `k` that is not an unsigned integer; missing `X-Agent-Root` |
+| `400 Bad Request` | Missing `q`, or a `k` that is not an unsigned integer; missing `X-Agent-Root`; or a `q` the query parser rejects (for example an unbalanced `"` or `(`), which answers `{"error":"recall failed: …"}` |
 | `403 Forbidden` | UID mismatch |
 | `404 Not Found` | Unregistered project |
-| `500 Internal Server Error` | Index open or search failure. This includes a `q` the query parser rejects (for example an unbalanced `"` or `(`), which answers `{"error":"recall failed: …"}` |
+| `414 URI Too Long` | `q` is over 16384 bytes once decoded: `{"error":"query exceeds 16384 bytes; pass a shorter query"}`. A request target over 65,534 bytes is refused by hyper before routing, with an empty body |
+| `500 Internal Server Error` | Index open or search failure |
 
-All of these use the `{"error":"…"}` envelope. An empty index, an empty `q`, or a query with no match returns `200` with `{"results":[]}` (plus `"citations":[]` under `explain=1`).
+All of these use the `{"error":"…"}` envelope, except hyper's 414, which has an empty body. An empty index, an empty `q`, or a query with no match returns `200` with `{"results":[]}` (plus `"citations":[]` under `explain=1`).
 
 #### curl example
 
@@ -550,13 +551,38 @@ Error responses produced by dreamd's middleware and handlers use a JSON object:
 { "error": "human-readable message" }
 ```
 
-Three kinds of response come from the framework (axum) instead and do **not** use that envelope:
+Four kinds of response come from the framework (axum or hyper) instead and do **not** use that envelope:
 
 | Status | Body | When |
 |---|---|---|
 | `400` / `415` / `422` | `text/plain` message | `POST /api/v1/learn` body rejected by the JSON extractor: unparseable JSON (`400`), `Content-Type` not `application/json` (`415`), missing or mistyped field (`422`) |
 | `404 Not Found` | empty | A path that is not one of the routes on this page. The middleware runs first, so such a request without a valid `X-Agent-Root` gets that header's `400` / `404` JSON error instead |
 | `405 Method Not Allowed` | empty, with an `Allow` header | A known path with the wrong method (e.g. `GET /api/v1/migrate`) |
+| `414 URI Too Long` | empty | A request target over 65,534 bytes. hyper refuses it before any middleware or route runs |
+
+---
+
+## MCP tool errors
+
+`dreamd mcp` returns a rejected `search_nodes` or `append_node` call as a JSON-RPC error with one of these `message` strings. *Daemon mode* is `dreamd mcp` while `dreamd watch` is running: the MCP server forwards each call to this API. *In-process* is `dreamd mcp` with no daemon. A row applies to both unless it says otherwise.
+
+| Code | `message` | Cause |
+|---|---|---|
+| `-32602` | `failed to deserialize parameters: …` | An argument is missing or has the wrong type. rmcp rejects the call before dreamd sees it |
+| `-32602` | `invalid skill_action: segment contains characters outside [a-z0-9_]` | A `::` segment of `append_node`'s `skill_action` has a character other than a lowercase letter, a digit or `_`. The other reasons after `invalid skill_action: ` are `empty after normalization`, `exceeds 256 bytes` and `empty segment (stray ':' or leading/trailing '::')` |
+| `-32602` | `pain must be in 0.0..=10.0` | `pain` is outside 0–10 |
+| `-32602` | `importance must be in 0.0..=10.0` | `importance` is outside 0–10 |
+| `-32602` | `learning exceeds 4096 bytes as a JSONL line; shorten content` | The record, serialized as one JSONL line, is over 4096 bytes |
+| `-32602` | `query exceeds 16384 bytes; pass a shorter query` | `search_nodes`' `query` is over 16384 bytes |
+| `-32602` | `recall failed: …` | Daemon mode only: the query parser rejected `query` (an unbalanced `"` or `(`, or a `skill_action` pasted as the query) |
+| `-32602` | the daemon's `error` string, or `daemon rejected the request (HTTP 400)` | Daemon mode only: any other `400` from the daemon |
+| `-32600` | `project not registered with daemon; run dreamd init` | Daemon mode only: the project root is not in `~/.agent/registry.toml` |
+| `-32600` | `recall failed: …` | In-process only: the query parser rejected `query`, with the same text as daemon mode, or the search failed |
+| `-32600` | `index open failed: …` | In-process only: the index could not be opened |
+| `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
+| `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
+| `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |
+| `-32603` | `coordinator unavailable: no agent root found` | In-process only: `append_node` with no `.agent/` store at or above the working directory. Run `dreamd init` |
 
 ---
 
