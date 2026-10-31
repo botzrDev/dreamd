@@ -115,8 +115,10 @@ impl LearnIngress {
     /// `schema_version` on durable write.
     ///
     /// Performs no validation or redaction. [`Self::build_agent_learning`]
-    /// validates first; the daemon proxy (`memory_store::build_learn_request`)
-    /// forwards raw fields because the daemon's own ingress re-checks them.
+    /// validates first. The daemon proxy (`memory_store::build_learn_request`)
+    /// checks `pain` and `importance` itself, because the `f32` cast below
+    /// loses the caller's value, and forwards `skill_action` and `content` raw
+    /// for the daemon's own ingress to check (BZR-1301).
     pub fn placeholder_learning(
         content: &str,
         source_harness: &str,

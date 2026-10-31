@@ -36,8 +36,10 @@ use http_body_util::Full;
 use tokio::sync::mpsc;
 
 use crate::config::load_config;
-use crate::coordinator::MemoryCoordinatorMsg;
-use crate::ingress::{LearnIngress, LearnResponse, RecallIngress};
+use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg, MAX_LEARNING_LINE_BYTES};
+use crate::ingress::{
+    query_too_long_message, LearnIngress, LearnResponse, RecallIngress, MAX_RECALL_QUERY_BYTES,
+};
 use crate::recurrence::RecallReader;
 use crate::AgentRoot;
 
@@ -55,20 +57,32 @@ const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
 
 /// Errors a [`MemoryStore`] call can return.
 ///
-/// Two kinds, mirroring the two MCP error codes the tool methods surface: a
-/// caller mistake (`InvalidRequest`) and everything else (`Internal`). The
-/// `Display` is the message alone, so the MCP error carries it unchanged.
+/// Three kinds, one per MCP error code the tool methods surface (BZR-1301):
+/// arguments the caller can fix (`InvalidParams`, `-32602`), a request the
+/// project's state refuses (`InvalidRequest`, `-32600`), and everything else
+/// (`Internal`, `-32603`). The `Display` is the message alone, so the MCP
+/// error carries it unchanged.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryStoreError {
-    /// Bad input, an unregistered project, or an index that cannot be opened.
+    /// The tool arguments are wrong: a bad `skill_action`, a score outside
+    /// `0.0..=10.0`, a learning or query over its size limit, or any other
+    /// `400` the daemon explains. MCP `-32602`.
+    #[error("{0}")]
+    InvalidParams(String),
+    /// An unregistered project, a rejected content type, or an index that
+    /// cannot be opened or searched. MCP `-32600`.
     #[error("{0}")]
     InvalidRequest(String),
-    /// Coordinator, transport, or daemon failure.
+    /// Coordinator, transport, or daemon failure. MCP `-32603`.
     #[error("{0}")]
     Internal(String),
 }
 
 impl MemoryStoreError {
+    fn params(msg: impl Into<String>) -> Self {
+        Self::InvalidParams(msg.into())
+    }
+
     fn invalid(msg: impl Into<String>) -> Self {
         Self::InvalidRequest(msg.into())
     }
@@ -218,6 +232,11 @@ impl InProcessStore {
 #[async_trait::async_trait]
 impl MemoryStore for InProcessStore {
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError> {
+        // The same limit the daemon and its client apply (BZR-1301), so one
+        // query gets one answer in both modes.
+        if query.len() > MAX_RECALL_QUERY_BYTES {
+            return Err(MemoryStoreError::params(query_too_long_message()));
+        }
         let Some(root) = &self.agent_root else {
             return Ok(EMPTY_RESULTS.to_string());
         };
@@ -251,7 +270,7 @@ impl MemoryStore for InProcessStore {
             req.importance,
             config.redaction,
         )
-        .map_err(|e| MemoryStoreError::invalid(e.to_string()))?;
+        .map_err(|e| MemoryStoreError::params(e.to_string()))?;
         learning.pinned = req.pinned;
 
         // `send().await`, never `Supervisor::try_send`: the in-process path
@@ -269,7 +288,12 @@ impl MemoryStore for InProcessStore {
         let outcome = resp_rx
             .await
             .map_err(|_| MemoryStoreError::internal("coordinator dropped"))?
-            .map_err(|e| MemoryStoreError::internal(e.to_string()))?;
+            .map_err(|e| match e {
+                CoordinatorError::PayloadTooLarge { .. } => {
+                    MemoryStoreError::params(learning_too_large_message())
+                }
+                other => MemoryStoreError::internal(other.to_string()),
+            })?;
 
         Ok(LearnResponse::from_append_outcome(&outcome))
     }
@@ -383,11 +407,18 @@ fn percent_encode_query(value: &str) -> String {
 /// Build `GET /api/v1/recall?q=<url-encoded>&k=<k>` with the `X-Agent-Root`
 /// header. Pure (no socket, no async) so it can be unit-tested directly, and
 /// cfg-free so the UDS and loopback-TCP transports send byte-identical requests.
+///
+/// A query over [`MAX_RECALL_QUERY_BYTES`] is refused before anything is
+/// built, with the daemon's `414` message (BZR-1301). Below that limit the
+/// encoded URI always fits the `http` crate's 65,534 bytes.
 pub(crate) fn build_recall_request(
     query: &str,
     k: u32,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
+    if query.len() > MAX_RECALL_QUERY_BYTES {
+        return Err(MemoryStoreError::params(query_too_long_message()));
+    }
     let uri = format!("/api/v1/recall?q={}&k={k}", percent_encode_query(query));
     hyper::Request::builder()
         .method(hyper::Method::GET)
@@ -404,14 +435,21 @@ pub(crate) fn build_recall_request(
 /// constructor the in-process path uses, so `schema_version` is
 /// `RECORD_SCHEMA_VERSION` and the `EventId` is the shared placeholder.
 ///
-/// The daemon mints the real `id` and `timestamp`, and re-runs every
-/// `LearnIngress` check (skill_action, score range, redaction) on arrival, so
-/// the raw skill_action and content are forwarded as given. Pure: unit-tested
-/// directly, and cfg-free — see [`build_recall_request`].
+/// `pain` and `importance` are checked here first, with the shared
+/// `LearnIngress` validators, because the placeholder stores them as `f32`:
+/// the cast would turn `1e40` into infinity, which serializes as `null`, and
+/// round `10.0000001` to `10.0` (BZR-1301). The daemon mints the real `id`
+/// and `timestamp`, and re-runs every `LearnIngress` check (skill_action,
+/// score range, redaction) on arrival, so the raw skill_action and content
+/// are forwarded as given. Pure: unit-tested directly, and cfg-free — see
+/// [`build_recall_request`].
 pub(crate) fn build_learn_request(
     req: &AppendRequest,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
+    LearnIngress::validate_optional_pain(req.pain)
+        .and_then(|()| LearnIngress::validate_optional_importance(req.importance))
+        .map_err(|e| MemoryStoreError::params(e.to_string()))?;
     let mut learning = LearnIngress::placeholder_learning(
         &req.content,
         &req.source_harness,
@@ -437,24 +475,58 @@ pub(crate) fn build_learn_request(
         .map_err(|e| MemoryStoreError::internal(format!("build learn request failed: {e}")))
 }
 
+/// Label for a `400` whose body is not the daemon's `{"error": …}` envelope.
+const DAEMON_REJECTED_400: &str = "daemon rejected the request (HTTP 400)";
+
+/// The `404` message. The daemon's only `404` on these routes is a registry
+/// miss.
+const NOT_REGISTERED: &str = "project not registered with daemon; run dreamd init";
+
+/// The one message for a learning over the JSONL line cap, in both modes
+/// (BZR-1301): the daemon client's `413` arm and the in-process store's
+/// `PayloadTooLarge`.
+pub(crate) fn learning_too_large_message() -> String {
+    format!("learning exceeds {MAX_LEARNING_LINE_BYTES} bytes as a JSONL line; shorten content")
+}
+
+/// The daemon's own message: `Some` only when `body` is a JSON object whose
+/// `error` member is a string that is not blank. The string is returned as
+/// is. Parsed through `Value` because a derived struct would also accept a
+/// JSON array.
+fn daemon_error_message(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let msg = value.get("error")?.as_str()?;
+    (!msg.trim().is_empty()).then(|| msg.to_owned())
+}
+
 /// Map a non-success daemon HTTP status to a [`MemoryStoreError`]. Never
 /// panics. Cfg-free: one status table for both transports, so a Windows
-/// client and a Unix client explain the same 404 the same way.
+/// client and a Unix client explain the same 404 the same way (BZR-1301).
 ///
-/// 400, 404, 413 and 415 are caller errors (`InvalidRequest`); every other
-/// status is `Internal` and quotes the body. Every 400 is labeled
-/// "invalid X-Agent-Root", even when the daemon's body names a different
-/// problem; the body follows the label.
+/// | Status | `message` | Kind |
+/// |---|---|---|
+/// | 400 | the daemon's `error` string, or [`DAEMON_REJECTED_400`] for any other body | `InvalidParams` |
+/// | 404 | [`NOT_REGISTERED`] | `InvalidRequest` |
+/// | 413 | [`learning_too_large_message`] | `InvalidParams` |
+/// | 414 | [`query_too_long_message`] | `InvalidParams` |
+/// | 415 | `content-type rejected (defensive)` | `InvalidRequest` |
+/// | other | `daemon error {status}: {body}` | `Internal` |
+///
+/// 413 comes only from learn and 414 only from recall, and hyper's own `414`
+/// has an empty body, so both ignore the body.
 fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
-    let body_str = String::from_utf8_lossy(body);
     match status.as_u16() {
-        400 => MemoryStoreError::invalid(format!("invalid X-Agent-Root: {body_str}")),
-        404 => MemoryStoreError::invalid(format!(
-            "project not registered with daemon — run dreamd init: {body_str}"
-        )),
-        413 => MemoryStoreError::invalid("learning exceeds size limit"),
+        400 => MemoryStoreError::params(
+            daemon_error_message(body).unwrap_or_else(|| DAEMON_REJECTED_400.to_owned()),
+        ),
+        404 => MemoryStoreError::invalid(NOT_REGISTERED),
+        413 => MemoryStoreError::params(learning_too_large_message()),
+        414 => MemoryStoreError::params(query_too_long_message()),
         415 => MemoryStoreError::invalid("content-type rejected (defensive)"),
-        _ => MemoryStoreError::internal(format!("daemon error {status}: {body_str}")),
+        _ => MemoryStoreError::internal(format!(
+            "daemon error {status}: {}",
+            String::from_utf8_lossy(body)
+        )),
     }
 }
 
@@ -567,5 +639,231 @@ mod tests {
         assert_eq!(resp.timestamp, "2026-09-24T00:00:00+00:00");
         assert!(!resp.deduplicated);
         assert_eq!(*stub.seen_append.lock().unwrap(), Some(req));
+    }
+
+    // ── BZR-1301: daemon status map and the client's checks ─────────────────
+
+    fn status(code: u16) -> hyper::StatusCode {
+        hyper::StatusCode::from_u16(code).expect("valid status")
+    }
+
+    fn map(code: u16, body: &[u8]) -> MemoryStoreError {
+        map_remote_status_error(status(code), &Bytes::copy_from_slice(body))
+    }
+
+    /// Test 1: a 400 carries the daemon's own `error` string, unchanged.
+    #[test]
+    fn status_400_forwards_the_daemon_error_string() {
+        assert_eq!(
+            map(
+                400,
+                br#"{"error":"invalid skill_action: segment contains characters outside [a-z0-9_]"}"#
+            ),
+            MemoryStoreError::InvalidParams(
+                "invalid skill_action: segment contains characters outside [a-z0-9_]".to_string()
+            )
+        );
+        assert_eq!(
+            map(400, br#"{"error":" padded "}"#),
+            MemoryStoreError::InvalidParams(" padded ".to_string()),
+            "the string is returned as is, not trimmed"
+        );
+    }
+
+    /// Test 2: the score and header 400s are forwarded the same way.
+    #[test]
+    fn status_400_forwards_score_and_header_strings() {
+        for msg in [
+            "pain must be in 0.0..=10.0",
+            "missing or non-UTF-8 X-Agent-Root header",
+        ] {
+            let body = serde_json::json!({ "error": msg }).to_string();
+            assert_eq!(
+                map(400, body.as_bytes()),
+                MemoryStoreError::InvalidParams(msg.to_string())
+            );
+        }
+    }
+
+    /// Test 3: any other 400 body gets the generic label, which never names
+    /// the header.
+    #[test]
+    fn status_400_other_bodies_get_the_generic_label() {
+        let bodies: [&[u8]; 8] = [
+            b"",
+            b"not json",
+            br#"{"error":5}"#,
+            br#"{"error":""}"#,
+            br#"{"error":"   "}"#,
+            br#"["error"]"#,
+            br#"{"message":"x"}"#,
+            b"Failed to parse the request body as JSON: expected value at line 1 column 1",
+        ];
+        for body in bodies {
+            let err = map(400, body);
+            assert_eq!(
+                err,
+                MemoryStoreError::InvalidParams(
+                    "daemon rejected the request (HTTP 400)".to_string()
+                ),
+                "body {:?}",
+                String::from_utf8_lossy(body)
+            );
+            assert!(!err.to_string().contains("X-Agent-Root"));
+        }
+    }
+
+    /// Test 4: a 404 keeps the `dreamd init` hint and drops the raw body.
+    #[test]
+    fn status_404_keeps_the_init_hint() {
+        for body in [br#"{"error":"agent root not registered"}"#.as_slice(), b""] {
+            assert_eq!(
+                map(404, body),
+                MemoryStoreError::InvalidRequest(
+                    "project not registered with daemon; run dreamd init".to_string()
+                )
+            );
+        }
+    }
+
+    /// Test 5: a 413, from the coordinator or from axum's body limit, is one
+    /// fixed message. The only test that spells the line cap.
+    #[test]
+    fn status_413_is_the_learning_too_large_message() {
+        for body in [
+            br#"{"error":"payload too large"}"#.as_slice(),
+            b"Failed to buffer the request body: length limit exceeded",
+        ] {
+            assert_eq!(
+                map(413, body),
+                MemoryStoreError::InvalidParams(learning_too_large_message())
+            );
+        }
+        assert_eq!(
+            learning_too_large_message(),
+            "learning exceeds 4096 bytes as a JSONL line; shorten content"
+        );
+    }
+
+    /// Test 6: a 414, with hyper's empty body or the daemon's JSON, is the
+    /// shared query message.
+    #[test]
+    fn status_414_is_the_query_too_long_message() {
+        let daemon_body = serde_json::json!({ "error": query_too_long_message() }).to_string();
+        for body in [b"".as_slice(), daemon_body.as_bytes()] {
+            assert_eq!(
+                map(414, body),
+                MemoryStoreError::InvalidParams(query_too_long_message())
+            );
+        }
+    }
+
+    /// Test 7: the arms this ticket does not change.
+    #[test]
+    fn unchanged_arms_keep_their_kind() {
+        assert_eq!(
+            map(415, b""),
+            MemoryStoreError::InvalidRequest("content-type rejected (defensive)".to_string())
+        );
+        for code in [401, 403, 422, 500, 503] {
+            assert!(
+                matches!(map(code, b"x"), MemoryStoreError::Internal(_)),
+                "{code} must stay Internal"
+            );
+        }
+        assert_eq!(
+            map(500, br#"{"error":"recall failed: x"}"#),
+            MemoryStoreError::Internal(
+                r#"daemon error 500 Internal Server Error: {"error":"recall failed: x"}"#
+                    .to_string()
+            )
+        );
+    }
+
+    /// Test 8: a query at the limit builds, and its URI fits the `http`
+    /// crate's 65,534 bytes even when every byte is percent-encoded.
+    #[test]
+    fn build_recall_request_at_the_limit() {
+        let ascii = "a".repeat(MAX_RECALL_QUERY_BYTES);
+        let encoded = "é".repeat(MAX_RECALL_QUERY_BYTES / 2);
+        assert_eq!(encoded.len(), MAX_RECALL_QUERY_BYTES);
+        for query in [ascii, encoded] {
+            let req = build_recall_request(&query, u32::MAX, "/home/u/project")
+                .expect("a query at the limit builds");
+            assert!(req.uri().to_string().len() <= 65_534);
+        }
+    }
+
+    /// Test 9: a query over the limit is refused before anything is built,
+    /// and never with the `http` crate's "uri too long".
+    #[test]
+    fn build_recall_request_over_the_limit() {
+        let over_chars = "é".repeat(MAX_RECALL_QUERY_BYTES / 2 + 1);
+        assert_eq!(over_chars.len(), MAX_RECALL_QUERY_BYTES + 2);
+        for query in [
+            "a".repeat(MAX_RECALL_QUERY_BYTES + 1),
+            over_chars,
+            "word ".repeat(20_480),
+        ] {
+            let err = build_recall_request(&query, 5, "/home/u/project")
+                .expect_err("a query over the limit is refused");
+            assert_eq!(
+                err,
+                MemoryStoreError::InvalidParams(query_too_long_message())
+            );
+            assert!(!err.to_string().to_lowercase().contains("uri too long"));
+        }
+
+        // A builder failure that is not the caller's input stays Internal.
+        match build_recall_request("q", 5, "/tmp/a\nb") {
+            Err(MemoryStoreError::Internal(m)) => {
+                assert!(m.starts_with("build recall request failed: "), "{m}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    fn learn(skill_action: &str, pain: Option<f64>, importance: Option<f64>) -> AppendRequest {
+        AppendRequest {
+            content: "c".to_string(),
+            source_harness: "test".to_string(),
+            skill_action: skill_action.to_string(),
+            pain,
+            importance,
+            client_dedup_key: None,
+            pinned: false,
+        }
+    }
+
+    /// Test 10: scores are checked before the `f32` cast; skill_action is
+    /// still forwarded raw for the daemon to check.
+    #[tokio::test]
+    async fn build_learn_request_checks_scores_before_the_cast() {
+        use http_body_util::BodyExt;
+
+        for pain in [1e9, 1e40, -0.5, 10.000_000_1] {
+            assert_eq!(
+                build_learn_request(&learn("rust::x", Some(pain), None), "/r")
+                    .expect_err("pain out of range"),
+                MemoryStoreError::InvalidParams("pain must be in 0.0..=10.0".to_string()),
+                "pain {pain}"
+            );
+        }
+        for importance in [11.0, f64::INFINITY] {
+            assert_eq!(
+                build_learn_request(&learn("rust::x", None, Some(importance)), "/r")
+                    .expect_err("importance out of range"),
+                MemoryStoreError::InvalidParams("importance must be in 0.0..=10.0".to_string()),
+                "importance {importance}"
+            );
+        }
+        build_learn_request(&learn("rust::x", Some(10.0), Some(0.0)), "/r").expect("in range");
+        build_learn_request(&learn("rust::x", None, Some(0.0)), "/r").expect("pain omitted");
+
+        let req = build_learn_request(&learn("BAD::UPPER.dots", None, None), "/r")
+            .expect("skill_action is the daemon's to check");
+        let body = req.into_body().collect().await.expect("body").to_bytes();
+        let sent: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(sent["skill_action"], "BAD::UPPER.dots");
     }
 }

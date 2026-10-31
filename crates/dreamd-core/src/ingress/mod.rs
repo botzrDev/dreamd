@@ -11,6 +11,6 @@ pub mod wire;
 pub use learn::{LearnIngress, LearnValidationError};
 pub use recall::RecallIngress;
 pub use wire::{
-    CitationJson, LearnResponse, RecallMeta, RecallParams, RecallResponse, RecallResultJson,
-    DEFAULT_RECALL_K,
+    query_too_long_message, CitationJson, LearnResponse, RecallMeta, RecallParams, RecallResponse,
+    RecallResultJson, DEFAULT_RECALL_K, MAX_RECALL_QUERY_BYTES,
 };

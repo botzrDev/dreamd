@@ -195,11 +195,14 @@ pub struct AppendNodeParams {
 // MCP server struct
 
 /// MCP error for a [`MemoryStoreError`]. Kind and message are carried over
-/// as they are: `InvalidRequest` becomes `invalid_request` and `Internal`
-/// becomes `internal_error`, each with the store's message.
+/// as they are: `InvalidParams` becomes `invalid_params` (`-32602`),
+/// `InvalidRequest` becomes `invalid_request` (`-32600`), and `Internal`
+/// becomes `internal_error` (`-32603`), each with the store's message
+/// (BZR-1301).
 impl From<MemoryStoreError> for McpError {
     fn from(e: MemoryStoreError) -> Self {
         match e {
+            MemoryStoreError::InvalidParams(msg) => McpError::invalid_params(msg, None),
             MemoryStoreError::InvalidRequest(msg) => McpError::invalid_request(msg, None),
             MemoryStoreError::Internal(msg) => McpError::internal_error(msg, None),
         }
@@ -1317,7 +1320,8 @@ mod tests {
 
     /// WEG-275: the in-process store's ingress rejects a dotted/slashed
     /// `skill_action` (`[a-z0-9_]` segments only) and an out-of-range score via
-    /// `invalid_request` — both validated before the coordinator is touched.
+    /// `invalid_params` — both validated before the coordinator is touched.
+    /// BZR-1301 test 13: the code is `-32602` and the text is the daemon's.
     #[cfg(unix)]
     #[tokio::test]
     async fn append_node_rejects_invalid_skill_action_and_score() {
@@ -1336,13 +1340,18 @@ mod tests {
             .append_node(Parameters(AppendNodeParams {
                 content: "c".to_string(),
                 source_harness: "test".to_string(),
-                skill_action: "rust.tokio".to_string(),
+                skill_action: "BAD::UPPER.dots".to_string(),
                 pain: None,
                 importance: None,
                 client_dedup_key: None,
             }))
-            .await;
-        assert!(dotted.is_err(), "dotted skill_action must be rejected");
+            .await
+            .expect_err("dotted skill_action must be rejected");
+        assert_eq!(dotted.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            dotted.message,
+            "invalid skill_action: segment contains characters outside [a-z0-9_]"
+        );
 
         // Out-of-range pain — rejected before the unwrap_or default.
         let bad_pain = server
@@ -1354,8 +1363,91 @@ mod tests {
                 importance: None,
                 client_dedup_key: None,
             }))
-            .await;
-        assert!(bad_pain.is_err(), "out-of-range pain must be rejected");
+            .await
+            .expect_err("out-of-range pain must be rejected");
+        assert_eq!(bad_pain.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(bad_pain.message, "pain must be in 0.0..=10.0");
+    }
+
+    /// BZR-1301 test 14: an in-process learning over the line cap is the
+    /// caller's to fix (`-32602`), with the daemon client's 413 message.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_node_oversize_content_is_invalid_params_in_process() {
+        use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let lock = writer_lock(&root);
+        let supervisor = Supervisor::start(&root, &lock, COORDINATOR_CHANNEL_CAPACITY, None)
+            .expect("start supervisor");
+        let server = MemoryMcpServer::with_coordinator(root.clone(), supervisor.sender());
+
+        let err = server
+            .append_node(Parameters(AppendNodeParams {
+                content: "x".repeat(5 * 1024),
+                source_harness: "test".to_string(),
+                skill_action: "rust::tokio".to_string(),
+                pain: None,
+                importance: None,
+                client_dedup_key: None,
+            }))
+            .await
+            .expect_err("a learning over the line cap must be rejected");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            err.message,
+            crate::memory_store::learning_too_large_message()
+        );
+        let log = std::fs::read_to_string(root.episodic_jsonl()).unwrap_or_default();
+        assert_eq!(log.lines().filter(|l| !l.trim().is_empty()).count(), 0);
+    }
+
+    /// BZR-1301 test 12: one JSON-RPC code per store error kind, as it goes
+    /// on the wire.
+    #[test]
+    fn memory_store_error_kinds_map_to_their_json_rpc_codes() {
+        for (err, code) in [
+            (MemoryStoreError::InvalidParams("x".to_string()), -32602),
+            (MemoryStoreError::InvalidRequest("x".to_string()), -32600),
+            (MemoryStoreError::Internal("x".to_string()), -32603),
+        ] {
+            let mcp = McpError::from(err);
+            let wire = serde_json::to_value(&mcp).expect("serialize error");
+            assert_eq!(wire["code"], code);
+            assert_eq!(wire["message"], "x");
+        }
+    }
+
+    /// BZR-1301 test 23 (D2): in-process `search_nodes` applies the same
+    /// query limit as the daemon.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_in_process_refuses_a_query_over_the_limit() {
+        use crate::ingress::{query_too_long_message, MAX_RECALL_QUERY_BYTES};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = MemoryMcpServer::with_agent_root(setup_agent_root(dir.path()));
+
+        let err = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "word ".repeat(20_480),
+                k: Some(3),
+            }))
+            .await
+            .expect_err("a query over the limit must be refused");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(err.message, query_too_long_message());
+
+        server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "a".repeat(MAX_RECALL_QUERY_BYTES),
+                k: Some(3),
+            }))
+            .await
+            .expect("a query at the limit is searched");
     }
 
     // ── Daemon store over HTTP-over-UDS (WEG-259) ────────────────────────────
@@ -1624,7 +1716,9 @@ mod tests {
     }
 
     /// Integration: the daemon store forwards a dotted `skill_action` to the daemon;
-    /// daemon validation must reject it and nothing is persisted.
+    /// daemon validation must reject it and nothing is persisted. BZR-1301
+    /// test 15: the caller gets the daemon's own text, the same as in-process,
+    /// as `-32602`.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_rejects_invalid_skill_action_via_daemon() {
@@ -1645,7 +1739,7 @@ mod tests {
             .append_node(Parameters(AppendNodeParams {
                 content: "must not land".to_string(),
                 source_harness: "test-harness".to_string(),
-                skill_action: "rust.tokio".to_string(),
+                skill_action: "BAD::UPPER.dots".to_string(),
                 pain: None,
                 importance: None,
                 client_dedup_key: None,
@@ -1655,9 +1749,22 @@ mod tests {
 
         assert_eq!(
             err.code,
-            rmcp::model::ErrorCode::INVALID_REQUEST,
-            "daemon 400 must map to invalid_request; got: {err:?}"
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "daemon 400 must map to invalid_params; got: {err:?}"
         );
+        assert_eq!(
+            serde_json::to_value(&err).expect("serialize")["code"],
+            -32602
+        );
+        let in_process = crate::ingress::LearnIngress::validate_skill_action("BAD::UPPER.dots")
+            .expect_err("invalid")
+            .to_string();
+        assert_eq!(err.message, in_process);
+        assert_eq!(
+            err.message,
+            "invalid skill_action: segment contains characters outside [a-z0-9_]"
+        );
+        assert!(!err.message.contains("X-Agent-Root"));
 
         let content = std::fs::read_to_string(root.episodic_jsonl()).unwrap_or_default();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1668,8 +1775,10 @@ mod tests {
         );
     }
 
-    /// Integration: the daemon store forwards out-of-range `pain` to the daemon;
-    /// daemon validation must reject it and nothing is persisted.
+    /// Integration: the daemon store checks `pain` before it sends, with the
+    /// same validator the in-process store and the daemon use, because the
+    /// `f32` cast would turn `1e40` into `null` (BZR-1301 test 16). Nothing is
+    /// persisted.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_rejects_out_of_range_pain_via_daemon() {
@@ -1686,23 +1795,26 @@ mod tests {
         spawn_test_daemon(&root, registry_path, &sock_path, true).await;
 
         let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
-        let err = server
-            .append_node(Parameters(AppendNodeParams {
-                content: "must not land".to_string(),
-                source_harness: "test-harness".to_string(),
-                skill_action: "rust::tokio".to_string(),
-                pain: Some(1e9),
-                importance: None,
-                client_dedup_key: None,
-            }))
-            .await
-            .expect_err("out-of-range pain must be rejected by daemon");
+        for pain in [1e9, 1e40] {
+            let err = server
+                .append_node(Parameters(AppendNodeParams {
+                    content: "must not land".to_string(),
+                    source_harness: "test-harness".to_string(),
+                    skill_action: "rust::tokio".to_string(),
+                    pain: Some(pain),
+                    importance: None,
+                    client_dedup_key: None,
+                }))
+                .await
+                .expect_err("out-of-range pain must be rejected");
 
-        assert_eq!(
-            err.code,
-            rmcp::model::ErrorCode::INVALID_REQUEST,
-            "daemon 400 must map to invalid_request; got: {err:?}"
-        );
+            assert_eq!(
+                err.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "pain {pain} must map to invalid_params; got: {err:?}"
+            );
+            assert_eq!(err.message, "pain must be in 0.0..=10.0");
+        }
 
         let content = std::fs::read_to_string(root.episodic_jsonl()).unwrap_or_default();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1717,8 +1829,8 @@ mod tests {
     /// daemon (`build_learn_request` skips redaction on purpose); the daemon
     /// **must** redo the redaction the in-process path performs, so the secret
     /// never reaches disk. This is the redaction half of "the daemon redoes
-    /// what `build_learn_request` skips"; `skill_action` and score range are
-    /// the sibling rejection tests above.
+    /// what `build_learn_request` skips"; `skill_action` is the sibling
+    /// rejection test above. Scores are checked before sending (BZR-1301).
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_redacts_content_via_daemon() {
@@ -1791,10 +1903,91 @@ mod tests {
             rmcp::model::ErrorCode::INVALID_REQUEST,
             "404 must map to invalid_request; got: {err:?}"
         );
+        assert_eq!(
+            err.message,
+            "project not registered with daemon; run dreamd init"
+        );
+    }
+
+    /// BZR-1301 test 17: a query over the limit is refused before any
+    /// request is built, as `-32602`, never as the `http` crate's
+    /// "uri too long". The second server has no daemon behind it, which
+    /// shows the check runs before any connect.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_search_nodes_refuses_a_query_over_the_limit() {
+        use crate::ingress::query_too_long_message;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, false).await;
+
+        let live = MemoryMcpServer::with_remote(sock_path, canonical_str.clone());
+        let none = MemoryMcpServer::with_remote(canonical.join("no-daemon.sock"), canonical_str);
+        for server in [live, none] {
+            let err = server
+                .search_nodes(Parameters(SearchNodesParams {
+                    query: "word ".repeat(20_480),
+                    k: Some(3),
+                }))
+                .await
+                .expect_err("a query over the limit must be refused");
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(
+                serde_json::to_value(&err).expect("serialize")["code"],
+                -32602
+            );
+            assert_eq!(err.message, query_too_long_message());
+        }
+    }
+
+    /// BZR-1301 test 22 (D1): a query the parser rejects is the caller's
+    /// mistake in daemon mode too: the daemon answers 400 and the caller gets
+    /// `-32602` with the same text the in-process store gives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remote_search_nodes_parser_rejection_is_invalid_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        let registry_path = canonical.join("registry.toml");
+        let sock_path = canonical.join("daemon.sock");
+        write_registry(&registry_path, &canonical_str);
+        spawn_test_daemon(&root, registry_path, &sock_path, false).await;
+
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+        let err = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "rust::tokio".to_string(),
+                k: Some(3),
+            }))
+            .await
+            .expect_err("a skill_action pasted as the query is rejected");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            serde_json::to_value(&err).expect("serialize")["code"],
+            -32602
+        );
         assert!(
-            err.message.contains("not registered"),
-            "message must mention the project is not registered; got: {}",
+            err.message.starts_with("recall failed: "),
+            "{}",
             err.message
         );
+
+        let other = tempfile::tempdir().expect("tempdir");
+        let in_process = MemoryMcpServer::with_agent_root(setup_agent_root(other.path()))
+            .search_nodes(Parameters(SearchNodesParams {
+                query: "rust::tokio".to_string(),
+                k: Some(3),
+            }))
+            .await
+            .expect_err("in-process rejects it too");
+        assert_eq!(err.message, in_process.message);
     }
 }

@@ -1082,6 +1082,115 @@ async fn recall_returns_200_for_registered_root() {
     );
 }
 
+/// `GET /api/v1/recall?{query}` against an initialized, registered project.
+async fn recall_with_query(query: &str) -> axum::response::Response {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+    std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
+    let router = build_router(make_test_state(registry_path));
+
+    let req = with_peer_uid(
+        Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/recall?{query}"))
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    router.into_service().oneshot(req).await.unwrap()
+}
+
+/// BZR-1301 test 19: the daemon answers 414 above the shared limit, counted
+/// on the decoded `q`, with the shared message as a JSON error.
+#[tokio::test]
+async fn recall_refuses_a_query_over_the_shared_limit() {
+    use crate::ingress::{query_too_long_message, MAX_RECALL_QUERY_BYTES};
+
+    let resp = recall_with_query(&format!("q={}", "a".repeat(MAX_RECALL_QUERY_BYTES + 1))).await;
+    assert_eq!(resp.status(), StatusCode::URI_TOO_LONG);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({ "error": query_too_long_message() })
+    );
+
+    let resp = recall_with_query(&format!("q={}", "a".repeat(MAX_RECALL_QUERY_BYTES))).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a query at the limit is searched"
+    );
+
+    // MAX_RECALL_QUERY_BYTES decoded, three times that on the wire.
+    let encoded = "%C3%A9".repeat(MAX_RECALL_QUERY_BYTES / 2);
+    let resp = recall_with_query(&format!("q={encoded}")).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the limit counts decoded bytes, not the encoded URI"
+    );
+}
+
+/// BZR-1301 test 21 (D1): a query the parser rejects is a 400 with a JSON
+/// error, not a 500.
+#[tokio::test]
+async fn recall_parser_rejection_is_400() {
+    for query in ["q=rust%3A%3Atokio", "q=%22unbalanced"] {
+        let resp = recall_with_query(query).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{query}");
+        let json = body_json(resp).await;
+        let error = json["error"].as_str().expect("JSON error string");
+        assert!(error.starts_with("recall failed: "), "{query}: {error}");
+    }
+}
+
+/// BZR-1301 test 20: above 65,534 URI bytes hyper refuses the request
+/// before routing, with an empty-bodied 414. Unchanged by this ticket; the
+/// client's 414 arm relies on it.
+#[cfg(unix)]
+#[tokio::test]
+async fn hyper_refuses_a_request_target_over_its_uri_limit() {
+    use crate::server::uds_server::{bind_api_socket, serve_uds};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("uri.sock");
+    let router = build_router(make_test_state(dir.path().join("registry.toml")));
+    let listener = bind_api_socket(&sock_path).expect("bind");
+    tokio::spawn(async move {
+        serve_uds(listener, router).await.ok();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut stream = tokio::net::UnixStream::connect(&sock_path)
+        .await
+        .expect("connect");
+    let request = format!(
+        "GET /api/v1/recall?q={} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        "a".repeat(70_000)
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 414"), "got: {response}");
+    let (_, body) = response.split_once("\r\n\r\n").expect("head and body");
+    assert!(body.is_empty(), "hyper's 414 has no body; got: {body:?}");
+}
+
 // ── WEG-72: SO_PEERCRED middleware tests ─────────────────────────────────────
 
 #[cfg(unix)]
