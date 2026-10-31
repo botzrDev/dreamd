@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "nested_subcommand_help(\"memory\", \"branch\")"
 ---
-Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot <NAME>, and make it current.
+Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot `<NAME>`, and make it current.
 
 Fails if the branch already exists. Prints the object id.
 
@@ -10,7 +10,7 @@ Usage: branch <NAME>
 
 Arguments:
   <NAME>
-          Branch name: [a-z0-9][a-z0-9._-]{0,63}, no `..`
+          Branch name: `[a-z0-9][a-z0-9._-]{0,63}`, no `..`
 
 Options:
   -h, --help

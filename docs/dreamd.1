@@ -17,7 +17,7 @@ Print help
 .SH SUBCOMMANDS
 .TP
 dreamd\-archive(1)
-Maintain the on\-disk memory log. Today: unpin entries with \-\-force\-unpin
+Maintain the on\-disk memory log; its one operation is unpinning entries (\-\-force\-unpin)
 .TP
 dreamd\-blame(1)
 Show which stored memories drove a query\*(Aqs recall ranking
@@ -32,10 +32,10 @@ dreamd\-forget(1)
 Remove one episodic event and the lesson state that names it
 .TP
 dreamd\-init(1)
-Scaffold a new per\-project .agent/ store and register it. An existing .agent/ is left unchanged. If it is missing from the registry, init registers it
+Scaffold a new per\-project .agent/ store and register it
 .TP
 dreamd\-mcp(1)
-Start the MCP server (bridges to daemon if running, otherwise in\-process)
+Start the MCP server, bridged to the running daemon or, on Unix, in\-process when none is running
 .TP
 dreamd\-memory(1)
 Deprecated, removed in 2.0. Name memory snapshots as branches and check them out
@@ -44,22 +44,22 @@ dreamd\-migrate(1)
 Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no\-op
 .TP
 dreamd\-recall(1)
-Search stored memories by query, ranked by relevance and importance (markdown table)
+Search stored memories by query, ranked by BM25 × salience (markdown table)
 .TP
 dreamd\-score(1)
-List the top\-N stored memories by importance, without a search query
+List the top\-N stored memories by salience, without a search query
 .TP
 dreamd\-salience\-drift(1)
 Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago
 .TP
 dreamd\-reset(1)
-Reset scratch state. Today only `workspace` is supported
+Reset scratch state; `workspace` is the only target
 .TP
 dreamd\-service(1)
 Manage the per\-user service that runs `dreamd watch` (Linux systemd \-\-user unit / macOS LaunchAgent / Windows scheduled task)
 .TP
 dreamd\-setup(1)
-Front door: scaffold .agent/ (via init) and print the harness wiring next steps
+Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps
 .TP
 dreamd\-status(1)
 Print daemon liveness, resolved project, last dream cycle, and recent log
@@ -68,10 +68,10 @@ dreamd\-uninstall(1)
 Stop local dreamd servers, unregister this project, and clear caches
 .TP
 dreamd\-update(1)
-Clear the native binary cache so `npx \-y dreamd\-mcp` fetches latest
+Stop local dreamd servers and clear the native binary cache so `npx \-y dreamd\-mcp` fetches the latest release
 .TP
 dreamd\-watch(1)
-Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+Run the daemon in the foreground until it gets SIGINT or SIGTERM
 .TP
 dreamd\-vectors(1)
 Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged

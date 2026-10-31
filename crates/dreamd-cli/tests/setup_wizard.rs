@@ -1,5 +1,5 @@
-//! Integration tests for the `dreamd setup` TTY gate (AILAB-551 Phase 1) and
-//! the success card (Phase 2).
+//! Integration tests for the `dreamd setup` TTY gate and the success card
+//! (AILAB-551).
 //!
 //! Integration tests run with a non-TTY stdin, which is exactly the shape this
 //! suite needs: the wizard must refuse to prompt into a pipe, and `--yes` must
@@ -8,7 +8,7 @@
 //! `setup_cmd.rs`.
 //!
 //! The prompt copy itself is unit-tested in `commands::setup` (injected reader
-//! and writer); here we only assert the gate and the "no prompt ever ran"
+//! and writer); this suite only asserts the gate and the "no prompt ever ran"
 //! contract. Note prompts are written to **stderr**, so any sweep for prompt
 //! text has to cover both streams.
 //!
@@ -124,7 +124,7 @@ fn non_tty_without_yes_exits_two() {
 /// otherwise exit 2, no prompt is rendered on either stream, and the flags —
 /// not the bytes waiting in the pipe — decide the run.
 ///
-/// Deliberately NOT named "never reads stdin". That claim cannot fail here: the
+/// Deliberately not named "never reads stdin". That claim cannot fail here: the
 /// child's stdin is a pipe, so the non-TTY gate refuses before any prompt with
 /// or without `--yes`, and a test proving it would need a pty. The
 /// no-`read_line`-under-`--yes` property is verified by inspection of
@@ -133,7 +133,7 @@ fn non_tty_without_yes_exits_two() {
 fn yes_bypasses_the_tty_gate_and_ignores_piped_answers() {
     let (project, home) = project_and_home();
 
-    // A payload that WOULD be consumed by the harness + watch prompts.
+    // A payload that the harness + watch prompts would consume.
     let out = run_setup_with_stdin(
         project.path(),
         home.path(),
@@ -357,7 +357,7 @@ fn doctor_warnings_do_not_change_exit_code() {
         &["--yes", "--harness", "claude"],
     );
 
-    // The ratified behaviour: advisory only. A warning must not become an exit
+    // The ratified behavior: advisory only. A warning must not become an exit
     // code.
     assert_ok(&out);
     let stdout = stdout_of(&out);

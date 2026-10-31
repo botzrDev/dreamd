@@ -446,7 +446,7 @@ fn repair_of_an_uncommitted_wal_leaves_the_pre_cycle_image() {
 }
 
 /// BZR-1245: the ref unlink is staged, so a crash leaves all 20 seeded refs
-/// or the pruned set, never a store without the cycle's own ref.
+/// or the pruned set with the cycle's own ref, never a pruned set without it.
 #[test]
 fn crash_sweep_promoting_cycle_prunes_a_snap_ref() {
     sweep(Scenario::Pruning);

@@ -1,16 +1,17 @@
 //! `dreamd mcp` — start the MCP server process (WEG-77).
 //!
-//! Thin CLI wrapper around [`dreamd_core::mcp::run_mcp_server`]. Builds a
-//! single-threaded Tokio runtime (the MCP bridge is I/O-bound; multi-thread
-//! would be overkill and the CLI crate already owns the `rt-multi-thread`
-//! feature flag for the daemon path).
+//! Thin CLI wrapper around [`dreamd_core::mcp::run_mcp_server`]. Builds Tokio's
+//! multi-thread runtime (`Runtime::new()`). Nothing on this path needs it for
+//! correctness (no `block_in_place`), but the in-process backend's coordinator
+//! and indexer tasks run blocking file appends and Tantivy commits inline, and
+//! worker threads keep that work off the thread serving the transport.
 //!
 //! The transport is stdio unless `--bind <ADDR>` is given (AILAB-206), in which
 //! case core serves Streamable HTTP at `http://<ADDR>/mcp` — if this binary was
 //! built with the non-default `mcp-http` cargo feature. Without it (the release
-//! build, kept under NFR-2) `--bind` parses and is refused, exit 2, naming the
-//! feature. `--bind` is parsed
-//! by `watch`'s own [`parse_bind`], so both commands accept exactly the same IP
+//! build, kept under the size gate, `MAX_BYTES` in ci.yml) `--bind` parses and
+//! is refused, exit 2, naming the feature. `--bind` is parsed
+//! by `watch`'s own `parse_bind`, so both commands accept exactly the same IP
 //! literals and neither resolves a hostname (junk exits 2). The bind policy is
 //! core's `bind_listen`, also shared with `watch`: a non-loopback address
 //! without `--insecure` exits 1. `--insecure` without `--bind` exits 2 — unlike
@@ -85,9 +86,9 @@ pub(crate) fn listen_from_args(args: &McpArgs) -> Result<Option<WatchListen>, St
 ///
 /// [`McpRunError::Unsupported`] is a usage refusal — off Unix it means no
 /// reachable daemon to proxy to, and `dreamd mcp` deliberately does not boot an
-/// in-process store it could not durably write (AILAB-174) — so it exits **2**.
-/// `dreamd watch` no longer refuses on that platform at all (AILAB-192: it
-/// binds loopback TCP), so this code is `mcp`'s own, not a shared one.
+/// in-process store there, because `dreamd watch` is the writer (AILAB-174) —
+/// so it exits **2**. `dreamd watch` itself runs on that platform (AILAB-192:
+/// it binds loopback TCP), so this code is `mcp`'s own, not a shared one.
 /// [`McpRunError::HttpTransportNotBuilt`] — `--bind` on a build without the
 /// `mcp-http` feature — is a usage refusal too: exit 2.
 /// Everything else is a runtime failure: 1 — including [`McpRunError::Bind`], a

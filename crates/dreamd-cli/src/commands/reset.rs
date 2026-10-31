@@ -1,8 +1,7 @@
-//! `dreamd reset workspace` — clear `working/WORKSPACE.md` (DR-113 / WEG-15).
+//! `dreamd reset workspace` — clear `working/WORKSPACE.md` (WEG-15).
 //!
-//! Reframed from the original `POST /api/v1/session/end`: no harness actually
-//! invoked that route. This is now a manual scratchpad-clear users run at
-//! session boundaries; real session-model lifecycle ships in v0.2.
+//! A manual scratchpad clear users run at session boundaries. There is no
+//! session-end route: no harness called one, and dreamd has no session model.
 //!
 //! Resolution walks ancestors of `cwd` for `.agent/` via
 //! [`AgentRoot::discover`] (post-init resolver, distinct from the project-root
@@ -16,11 +15,18 @@ use std::path::Path;
 use dreamd_core::io::write_atomic;
 use dreamd_core::{AgentRoot, LayoutError, DEFAULT_WORKSPACE_MD};
 
+use super::confirm::{self, ConfirmError};
+
+/// Why a `dreamd reset workspace` run did not clear the workspace.
 #[derive(Debug)]
 pub enum ResetError {
+    /// No `.agent/` store found walking up from `cwd`.
     NotFound,
+    /// No `--yes`, and stdin is not a terminal to confirm on.
     NotATty,
+    /// The user answered something other than `y` at the prompt.
     Declined,
+    /// Failure reading the prompt answer or writing the workspace file.
     Io(std::io::Error),
 }
 
@@ -34,7 +40,7 @@ impl std::fmt::Display for ResetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => write!(f, "no .agent/ directory found"),
-            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
+            Self::NotATty => std::fmt::Display::fmt(&ConfirmError::NotATty, f),
             Self::Declined => write!(f, "reset declined"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -66,21 +72,31 @@ pub fn run_workspace(
     };
 
     let target = root.workspace_md();
-
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            writeln!(err, "error: stdin is not a tty; pass --yes to confirm")?;
+    let prompt = format!("Reset WORKSPACE.md at {}? [y/N] ", target.display());
+    let decision = {
+        let mut read = |prompt: &str| -> Result<Option<String>, ConfirmError> {
+            if !std::io::stdin().is_terminal() {
+                return Ok(None);
+            }
+            write!(err, "{prompt}")?;
+            err.flush()?;
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line)?;
+            Ok(Some(line))
+        };
+        confirm::confirm_destructive(yes, &prompt, &mut read)
+    };
+    match decision {
+        Ok(()) => {}
+        Err(ConfirmError::NotATty) => {
+            writeln!(err, "error: {}", ConfirmError::NotATty)?;
             return Err(ResetError::NotATty);
         }
-        write!(err, "Reset WORKSPACE.md at {}? [y/N] ", target.display())?;
-        err.flush()?;
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        let answer = line.trim();
-        if !(answer == "y" || answer == "Y") {
+        Err(ConfirmError::Declined) => {
             writeln!(err, "aborted")?;
             return Err(ResetError::Declined);
         }
+        Err(ConfirmError::Io(source)) => return Err(ResetError::Io(source)),
     }
 
     write_atomic(&target, DEFAULT_WORKSPACE_MD.as_bytes())?;
@@ -101,7 +117,7 @@ mod tests {
         );
         assert_eq!(
             ResetError::NotATty.to_string(),
-            "stdin is not a tty; pass --yes to confirm"
+            ConfirmError::NotATty.to_string()
         );
         assert_eq!(ResetError::Declined.to_string(), "reset declined");
         let io = ResetError::from(std::io::Error::other("disk full"));

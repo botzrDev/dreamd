@@ -49,7 +49,6 @@ if __name__ == "__main__":
     args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
     result = call_tool(tool, args)
 
-    # Print structured output
     if "result" in result:
         txt = result["result"]["content"][0]["text"]
         parsed = json.loads(txt)

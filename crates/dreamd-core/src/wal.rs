@@ -1,4 +1,4 @@
-//! Dream cycle write-ahead log (DR-303 / WEG-60; redo format since BZR-1239).
+//! Dream cycle write-ahead log (WEG-60; redo format, BZR-1239).
 //!
 //! Guarantees `.agent/` is never left in a half-promoted state after a
 //! mid-cycle crash. A cycle stages every output under
@@ -11,14 +11,17 @@
 //! ([`crate::plan`]); nothing derives them from the files the commit puts live.
 //!
 //! When a writer takes the project lock, [`recover_if_needed`] rolls a redo WAL
-//! forward through the same code ([`roll_forward`]), keeps the old meaning of a
+//! forward through the same code (`roll_forward`), keeps the old meaning of a
 //! legacy `intents` WAL ([`DreamWal`]), refuses any other WAL, and wipes every
-//! stage directory.
+//! stage directory. A `dreamd doctor --repair` writer moves an unreadable WAL
+//! aside instead ([`quarantine_unreadable`]).
 //!
 //! The redo WAL covers the JSONL, `LESSONS.md`, the recurrence sidecar, the
-//! decay archive and the autosnap ref. Tantivy index mutations are NOT
-//! WAL-protected — see [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index
-//! freshness contract).
+//! decay archive, the autosnap ref and the unlinks of the old autosnap refs
+//! that [`crate::retention`] prunes. The autosnap object itself is written
+//! directly, outside the WAL. Tantivy index mutations are not WAL-protected —
+//! see [`ARCHITECTURE.md`](../../ARCHITECTURE.md) §4 (index freshness
+//! contract).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -57,7 +60,7 @@ pub struct RedoWal {
     pub format: String,
     pub renames: Vec<RedoRename>,
     pub unlinks: Vec<String>,
-    /// The plan's ledger edges, in order. [`roll_forward`] appends them after
+    /// The plan's ledger edges, in order. `roll_forward` appends them after
     /// the renames, at commit and again at recovery. Required: a `redo/1` WAL
     /// without the key fails closed.
     pub edges: Vec<RedoEdge>,
@@ -100,7 +103,7 @@ impl fmt::Display for CycleKind {
     }
 }
 
-/// One step of a **legacy** (pre-1.1.0) intents WAL. Nothing writes these any
+/// One step of a **legacy** (pre-1.2.0) intents WAL. Nothing writes these any
 /// more; [`recover_if_needed`] still reads them from a WAL an older binary left.
 ///
 /// Without [`WalIntent::Commit`] — the legacy commit marker — recovery deletes
@@ -116,7 +119,7 @@ pub enum WalIntent {
     Commit,
 }
 
-/// A **legacy** (pre-1.1.0) WAL: an ordered list of [`WalIntent`]s. Read only
+/// A **legacy** (pre-1.2.0) WAL: an ordered list of [`WalIntent`]s. Read only
 /// by recovery. [`commit_cycle`] writes a [`RedoWal`] instead.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DreamWal {
@@ -140,12 +143,17 @@ pub enum RecoveryOutcome {
     CommittedButUnclean,
 }
 
+/// Errors from beginning, committing, classifying or recovering a cycle.
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {
+    /// A file operation on the WAL, the stage or a live path failed.
     #[error("WAL I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// The WAL or `state.json` is not valid JSON, or does not have the shape
+    /// its `format` names.
     #[error("WAL parse: {0}")]
     Json(#[from] serde_json::Error),
+    /// The project root has no `.agent/` directory; a cycle never creates one.
     #[error("no .agent/ store at {0} — refusing to scaffold a phantom store; run `dreamd init`")]
     NoAgentStore(PathBuf),
     /// A cycle started while a WAL is still on disk.
@@ -161,6 +169,7 @@ pub enum WalError {
     /// side of `.dreamd/stage/`.
     #[error("dream-cycle WAL names a path outside the store: {0:?}; refusing to touch the store")]
     BadRedoPath(String),
+    /// Appending the WAL's edges to the provenance ledger failed.
     #[error("WAL provenance: {0}")]
     Provenance(#[from] ProvenanceError),
 }
@@ -184,7 +193,7 @@ pub fn begin_cycle(
     kind: CycleKind,
     now_sec: i64,
 ) -> Result<Stage, WalError> {
-    // WEG-281 — never conjure a store. Under an EXISTING `.agent/` this may
+    // WEG-281 — never conjure a store. Under an existing `.agent/` this may
     // create `.dreamd/`; if `.agent/` is absent the caller resolved the wrong
     // root (or skipped discovery). Last line of defense behind the cli.rs
     // discover gate.
@@ -196,9 +205,8 @@ pub fn begin_cycle(
         return Err(WalError::Pending(wal_path));
     }
     // Status-only patch, deliberately (AILAB-167): a cycle that is starting has
-    // no completion timestamp, and the previous cycle's `last_dream_cycle_at`
-    // must survive. The pre-AILAB-167 from-scratch writer wrote JSON `null`
-    // here and wiped it on every begin.
+    // not committed, so the previous cycle's `last_dream_cycle_at` must
+    // survive.
     update_daemon_state(agent_root, |s| {
         s.last_dream_cycle_status = "in_progress".to_string()
     })?;
@@ -206,7 +214,7 @@ pub fn begin_cycle(
 }
 
 /// Commit `stage`: fsync it, write the redo WAL (the commit point), apply it
-/// with [`roll_forward`], then remove the stage directory.
+/// with `roll_forward`, then remove the stage directory.
 ///
 /// `ledger` is the project writer lock's appender; the WAL's provenance edges
 /// are appended after the renames. `now_sec` stamps `last_dream_cycle_at`.
@@ -396,7 +404,8 @@ fn wipe_stage(agent_root: &AgentRoot) -> io::Result<()> {
 pub enum WalClass {
     /// No `dream_in_progress.wal`.
     Absent,
-    /// `redo/1` that passed [`validate`].
+    /// `redo/1` whose paths passed validation: none absolute or climbing, every
+    /// `from` staged, no `to` or unlink inside the stage.
     Redo(RedoWal),
     /// A legacy `intents` body.
     Legacy(DreamWal),
@@ -432,8 +441,11 @@ pub fn classify(agent_root: &AgentRoot) -> Result<WalClass, WalError> {
     }
 }
 
-/// `true` for the three errors [`WriterLock`](crate::writer_lock::WriterLock)
-/// may quarantine, and only when the caller is a repair.
+/// `true` for the three errors that mean the WAL cannot be read:
+/// [`WalError::UnknownFormat`], [`WalError::BadRedoPath`] and
+/// [`WalError::Json`]. [`WriterLock::acquire`](crate::writer_lock::WriterLock::acquire)
+/// quarantines the WAL on these only for a
+/// [`WriterKind::Repair`](crate::writer_lock::WriterKind::Repair) writer.
 pub(crate) fn is_unreadable_wal(err: &WalError) -> bool {
     matches!(
         err,
@@ -450,8 +462,9 @@ pub(crate) fn is_unreadable_wal(err: &WalError) -> bool {
 ///
 /// Otherwise `rename`s the file to `dream_in_progress.wal.corrupt-YYYY-MM-DD`
 /// (UTC, `-2`, `-3`, … when that name exists), wipes `.dreamd/stage/`, and
-/// sets `last_dream_cycle_status` to `failed`. The bytes are not parsed. The
-/// WAL path is not removed except by that rename. A rename failure wipes
+/// sets `last_dream_cycle_status` to `failed`. The file keeps its bytes; it
+/// is renamed, not rewritten. The WAL path is not removed except by that
+/// rename. A rename failure wipes
 /// nothing and writes no status.
 pub fn quarantine_unreadable(agent_root: &AgentRoot) -> Result<Option<PathBuf>, WalError> {
     let wal_path = agent_root.wal_path();
@@ -495,11 +508,12 @@ fn sidecar_path(wal_path: &Path) -> io::Result<PathBuf> {
 ///
 /// - No WAL: remove a WAL temp left by a crash inside the WAL's own write,
 ///   wipe `.dreamd/stage/`, return [`RecoveryOutcome::Clean`].
-/// - A `redo/1` WAL: [`roll_forward`] it, wipe the stage root, return
+/// - A `redo/1` WAL: `roll_forward` it, wipe the stage root, return
 ///   [`RecoveryOutcome::RolledForward`].
-/// - A legacy WAL (`intents`, no `format`): the pre-1.1.0 recovery, then wipe
+/// - A legacy WAL (`intents`, no `format`): the pre-1.2.0 recovery, then wipe
 ///   the stage root.
-/// - Anything else: [`WalError::UnknownFormat`], touching nothing.
+/// - Anything [`classify`] refuses: [`WalError::UnknownFormat`],
+///   [`WalError::BadRedoPath`] or [`WalError::Json`], touching nothing.
 pub fn recover_if_needed(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -528,7 +542,7 @@ pub fn recover_if_needed(
     }
 }
 
-/// The pre-1.1.0 recovery of an intents WAL, unchanged.
+/// The pre-1.2.0 recovery of an intents WAL.
 fn recover_legacy(agent_root: &AgentRoot, wal: &DreamWal) -> Result<RecoveryOutcome, WalError> {
     let wal_path = agent_root.wal_path();
     let committed = wal.intents.contains(&WalIntent::Commit);
@@ -600,20 +614,24 @@ pub fn recover_on_startup(
 
 /// Read `last_dream_cycle_status` from `state.json`.
 ///
-/// Returns `"idle"` if the file is absent or the key is missing — the same two
-/// defaults the hand-rolled `serde_json::Value` walk this replaced produced, now
-/// inherited from [`DaemonState`](crate::daemon_state::DaemonState)`::default`
-/// and its container-level `#[serde(default)]` (AILAB-164 over AILAB-167).
+/// Returns `"idle"` if the file is absent or the key is missing, through
+/// [`DaemonState`](crate::daemon_state::DaemonState)`::default` and its
+/// container-level `#[serde(default)]`.
 pub fn read_last_cycle_status(agent_root: &AgentRoot) -> Result<String, WalError> {
     Ok(read_daemon_state(agent_root)?.last_dream_cycle_status)
 }
 
 /// Read `last_dream_cycle_at` from `state.json`.
 ///
+/// The value is the clock of the last cycle that committed, as RFC 3339: the
+/// `now_sec` the cycle planned against, which [`commit_cycle`] stamps when the
+/// commit lands. Despite this function's name, [`begin_cycle`] does not write
+/// it, a failed cycle leaves it unchanged, and so does a roll-forward at
+/// recovery.
+///
 /// Returns `None` if the file is absent, the key is missing, or the value is
 /// JSON null. Reads through the same typed state as
-/// [`read_last_cycle_status`]; the writer stays
-/// [`update_daemon_state`](crate::daemon_state::update_daemon_state).
+/// [`read_last_cycle_status`]; the writer is [`update_daemon_state`].
 pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, WalError> {
     Ok(read_daemon_state(agent_root)?.last_dream_cycle_at)
 }
@@ -829,7 +847,7 @@ mod tests {
         assert!(!root.wal_path().exists());
     }
 
-    /// Fact 8: a reader built on the legacy struct fails closed on the new WAL.
+    /// A reader built on the legacy struct fails closed on the new WAL.
     #[test]
     fn legacy_reader_rejects_a_redo_wal() {
         let (root, _g) = setup_root("legacy-reader");
@@ -905,8 +923,8 @@ mod tests {
         assert_eq!(fs::read(&jsonl).unwrap(), b"live log\n");
     }
 
-    /// A hand-written legacy WAL plus temp: an older binary left it, and 1.1.0
-    /// recovers it the old way.
+    /// A hand-written legacy WAL plus temp: an older binary left it, and this
+    /// binary recovers it the old way.
     #[test]
     fn recover_keeps_the_legacy_meaning_of_an_intents_wal() {
         let legacy = |root: &AgentRoot, intents: Vec<WalIntent>| {
@@ -1096,8 +1114,8 @@ mod tests {
     #[test]
     fn begin_cycle_refuses_missing_agent_store() {
         // A bare tmpdir with no `.agent/` — begin_cycle must error rather than
-        // scaffold a phantom store. Do NOT use `setup_root` (it pre-creates
-        // `.dreamd/`); we need the un-set-up dir.
+        // scaffold a phantom store. Do not use `setup_root`: it pre-creates
+        // `.dreamd/`, and this test needs the un-set-up dir.
         let dir = unique_tmpdir("no-agent-store");
         fs::create_dir_all(&dir).unwrap();
         let _g = DirGuard(dir.clone());
@@ -1137,8 +1155,9 @@ mod tests {
         assert_eq!(state.last_dream_cycle_status, "in_progress");
     }
 
-    /// AILAB-167 AC: a full cycle is begin **and** commit; both edges wrote
-    /// state.json from scratch before the typed RMW writer landed.
+    /// A full cycle is begin **and** commit, and both patch `state.json`
+    /// through the typed read-modify-write writer, so neither drops
+    /// `last_autobiography_skip` (AILAB-167).
     #[test]
     fn skip_marker_survives_begin_and_commit() {
         let (root, _g) = setup_root("skip-survives-commit");
@@ -1217,7 +1236,7 @@ mod tests {
         assert!(corrupt_sidecars(&root).is_empty());
     }
 
-    /// A legacy `intents` WAL is still the pre-1.1.0 recovery, including a
+    /// A legacy `intents` WAL is still the pre-1.2.0 recovery, including a
     /// `Commit` that finishes as `complete`. Repair does not quarantine it.
     #[test]
     fn repair_recovers_a_legacy_intents_wal() {

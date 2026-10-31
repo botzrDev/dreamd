@@ -16,7 +16,7 @@ env:
 
 jobs:
   episodic-proptest:
-    name: Episodic JSONL scan proptest (WEG-132)
+    name: Property tests (episodic scan, salience, protocol round-trip)
     runs-on: ubuntu-latest
     permissions:
       contents: read

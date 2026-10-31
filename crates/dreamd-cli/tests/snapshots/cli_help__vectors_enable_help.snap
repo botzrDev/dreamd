@@ -1,0 +1,13 @@
+---
+source: crates/dreamd-cli/tests/cli_help.rs
+expression: "nested_subcommand_help(\"vectors\", \"enable\")"
+---
+Deprecated, removed in 2.0. Download BAAI/bge-small-en-v1.5 into ~/.agent/models.
+
+Works only in a binary built with `--features vectors`. The default binary was built without it: this prints that and exits 2, and creates no directory. When `HF_HOME` is set, the download goes there instead.
+
+Usage: enable
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

@@ -8,7 +8,7 @@ Usage: doctor [OPTIONS]
 
 Options:
       --repair
-          Rebuild Tantivy from JSONL; unlink orphaned UDS. Wipes the whole derived index cache dir, including any .tantivy-*.lock inside it, and never targets lock files on their own. Does not modify AGENT_LEARNINGS.jsonl
+          Rebuild the search index from the episodic log, unlink an orphaned daemon socket, and move aside a dream-cycle WAL that cannot be parsed. Wipes the whole derived index directory, including any .tantivy-*.lock inside it, and never targets lock files on their own. Does not modify AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the project
 
       --cluster-health
           Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift

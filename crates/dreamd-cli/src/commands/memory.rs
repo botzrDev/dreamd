@@ -2,6 +2,10 @@
 //! `dreamd memory bisect start|good|bad|run` — search the `snap-*` timeline (BZR-153).
 //! `dreamd memory diff <from> <to>` — compare two snapshot objects (BZR-156).
 //!
+//! Every `memory` subcommand is deprecated and will be removed in dreamd 2.0
+//! (BZR-1245): `.agent/` is plain files, so git branches, diffs and bisects it.
+//! `cli.rs` prints the notice from `commands::deprecation` before dispatch.
+//!
 //! Thin wrappers over [`dreamd_core::snapshot`]: the format is
 //! `docs/branching.md` (`branches/1.0`). Refs live in
 //! `.agent/.dreamd/branches/refs/<name>` and the pointer is `branches/HEAD`.
@@ -28,6 +32,7 @@ use dreamd_core::snapshot::{self, SnapshotError};
 use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 
+/// Why a `dreamd memory` subcommand failed.
 #[derive(Debug)]
 pub enum MemoryError {
     /// No `.agent/` store found walking up from `cwd`.

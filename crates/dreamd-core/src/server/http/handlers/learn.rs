@@ -16,7 +16,7 @@ use super::super::types::LearnResponse;
 
 /// Wire body for `POST /api/v1/learn`.
 ///
-/// Deliberately NOT the domain [`AgentLearning`]: `id`, `schema_version`, and
+/// Deliberately not the domain [`AgentLearning`]: `id`, `schema_version`, and
 /// `timestamp` are daemon-owned (minted and stamped in `coordinator.rs` on every
 /// durable write), but `AgentLearning` is also the *disk* record, where `id` is
 /// authoritative and must keep parsing strictly (`episodic.rs`). One
@@ -24,10 +24,9 @@ use super::super::types::LearnResponse;
 /// rather than the protocol struct gaining a `skip_deserializing` that would
 /// weaken the disk read. AILAB-175.
 ///
-/// No `deny_unknown_fields`: a client that still sends `id` (every shipped doc
-/// example did until this change) must be **ignored, not rejected** — that is
-/// the acceptance criterion, and serde's default ignore-unknown gives it for
-/// free.
+/// No `deny_unknown_fields`: a client that still sends `id` (older doc
+/// examples did) has it **ignored, not rejected**, and serde's default
+/// ignore-unknown gives that for free.
 ///
 /// [`AgentLearning`]: dreamd_protocol::AgentLearning
 #[derive(serde::Deserialize)]
@@ -41,7 +40,7 @@ pub(crate) struct AppendLearningRequest {
     /// `AgentLearning::pinned`. Client-settable and preserved (see below).
     #[serde(default)]
     pub pinned: bool,
-    /// Clustering key; validated and normalised at ingress.
+    /// Clustering key; validated and normalized at ingress.
     pub skill_action: String,
     /// Provenance tag, e.g. `"cursor"`, `"claude-code"`.
     pub source_harness: String,
@@ -81,7 +80,7 @@ pub(crate) async fn post_learn(
         .map(|s| s.to_owned());
 
     // Map the wire body onto the domain type through the same shared seam the
-    // MCP path uses: validate, normalise, redact, and stamp the placeholder id.
+    // MCP path uses: validate, normalize, redact, and stamp the placeholder id.
     // Sole skill_action gate (ARCHITECTURE.md §9); coordinator does not re-check.
     // `Some(..)` (never `None`) preserves the HTTP contract — the optional
     // validators apply the same 0.0..=10.0 check, and MCP's `unwrap_or(5.0)`

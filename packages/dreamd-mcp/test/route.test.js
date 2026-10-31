@@ -1,7 +1,9 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { resolveDreamdArgs, topLevelFlag } = require('../bin/dreamd-mcp.js');
+const fs = require('node:fs');
+const path = require('node:path');
+const { DREAMD_SUBCOMMANDS, resolveDreamdArgs, topLevelFlag } = require('../bin/dreamd-mcp.js');
 
 test('bare invocation -> dreamd mcp (IDE MCP server)', () => {
   assert.deepStrictEqual(resolveDreamdArgs([]), ['mcp']);
@@ -60,8 +62,8 @@ test('service -> dreamd service (AILAB-169/AILAB-185: install/start/restart not 
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'restart']), ['service', 'restart']);
 });
 // AILAB-202: the nested `service uninstall` rides the `service` token that is
-// already in DREAMD_SUBCOMMANDS — no new top-level token (`uninstall` is
-// AILAB-226's own verb and is listed separately).
+// already in DREAMD_SUBCOMMANDS — no new top-level token (`uninstall` is the
+// separate top-level `dreamd uninstall` verb, listed on its own).
 test('service uninstall -> dreamd service uninstall (AILAB-202: not routed to mcp)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['service', 'uninstall']), ['service', 'uninstall']);
   assert.deepStrictEqual(
@@ -95,6 +97,28 @@ test('forget -> dreamd forget (BZR-151: not routed to mcp)', () => {
 });
 test('vectors -> dreamd vectors (BZR-181: not routed to mcp)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['vectors', 'enable']), ['vectors', 'enable']);
+});
+for (const cmd of ['archive', 'migrate', 'recall', 'score', 'status']) {
+  test(`${cmd} -> dreamd ${cmd} (not routed to mcp)`, () => {
+    assert.deepStrictEqual(resolveDreamdArgs([cmd, '--help']), [cmd, '--help']);
+  });
+}
+// The routing set must name every variant of the clap `Command` enum, or
+// `npx dreamd-mcp <cmd>` silently becomes `dreamd mcp <cmd>`. Skipped when the
+// Rust source is absent (a packed tarball ships only bin/).
+test('DREAMD_SUBCOMMANDS matches the clap Command enum', (t) => {
+  const cli = path.join(__dirname, '..', '..', '..', 'crates', 'dreamd-cli', 'src', 'cli.rs');
+  if (!fs.existsSync(cli)) {
+    t.skip('crates/dreamd-cli/src/cli.rs not found');
+    return;
+  }
+  const body = fs.readFileSync(cli, 'utf8').match(/^pub enum Command \{([\s\S]*?)^\}/m);
+  assert.ok(body, 'pub enum Command not found in cli.rs');
+  const variants = [...body[1].matchAll(/^    ([A-Z][A-Za-z]*)\b/gm)].map((m) =>
+    m[1].replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase(),
+  );
+  assert.ok(variants.length > 0, 'no Command variants parsed');
+  assert.deepStrictEqual([...DREAMD_SUBCOMMANDS].sort(), [...new Set(variants)].sort());
 });
 test('unknown first token defaults to mcp (unchanged behavior)', () => {
   assert.deepStrictEqual(resolveDreamdArgs(['bogus']), ['mcp', 'bogus']);

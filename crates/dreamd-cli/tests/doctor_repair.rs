@@ -21,8 +21,10 @@ fn dreamd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_dreamd")
 }
 
-/// Scaffold the five init-created subdirs plus a one-record episodic log with
-/// a matching index watermark, so every default check reads healthy.
+/// Scaffold the five init-created subdirs, a one-record episodic log, and the
+/// `index_progress.json` watermark an indexed store carries. Doctor's freshness
+/// check compares the log with the committed index rather than the watermark,
+/// and every default check reads healthy.
 fn seed_store(root: &Path) {
     for sub in ["working", "episodic", "semantic", "personal", ".dreamd"] {
         std::fs::create_dir_all(root.join(".agent").join(sub)).unwrap();
@@ -51,7 +53,7 @@ fn seed_store(root: &Path) {
 /// one-record fixture finishes in well under a second; 30s is pure headroom for
 /// a cold CI runner. Exceeding it means the child wedged (AILAB-575: the repair
 /// path once deadlocked forever against the process-wide stderr lock), and the
-/// test must FAIL loudly rather than inherit CI's 6h job ceiling.
+/// test must fail loudly rather than inherit CI's 6h job ceiling.
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Poll interval while waiting on the child. Short enough that a passing run

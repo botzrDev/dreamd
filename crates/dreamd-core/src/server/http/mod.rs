@@ -1,28 +1,28 @@
 //! Axum 0.8 HTTP server — router, state, and request handlers.
 //!
-//! Submodule layout:
-//!   * [`state`] — `AppState`, WEG-272 multi-project routing, lock ordering
-//!   * [`router`] — route mounting, middleware, error responses
-//!   * [`types`] — re-exports wire shapes from [`crate::ingress`]
-//!   * [`handlers`] — `learn`, `recall`, `dream`, `preferences` handlers
+//! Submodule layout (the submodules are private; their public items are
+//! re-exported below):
+//!   * `state` — [`AppState`], WEG-272 multi-project routing, lock ordering
+//!   * `router` — route mounting, middleware, error responses
+//!   * `types` — re-exports wire shapes from [`crate::ingress`]
+//!   * `handlers` — the `learn`, `recall`, `dream`, `preferences`, `health`,
+//!     `migrate` and `salience` handlers
 //!
 //! Per-request tracing (peer UID, request id, status, latency) is mounted by
-//! [`router::build_router`] as of AILAB-189 — see `http_make_span` there.
-//! Out of scope here: TCP binding (WEG-73).
-//! Recall already goes through `TantivyIndexHandle::reader` (WEG-69).
+//! [`build_router`] (AILAB-189) — see `http_make_span` there.
+//! The transport lives outside this module: `uds_server::serve_uds` on Unix
+//! and `watch::serve_tcp` off Unix serve the same router.
+//! Recall reads through `TantivyIndexHandle::reader` (WEG-69).
 
 mod handlers;
 mod router;
 mod state;
 mod types;
 
-// AILAB-192: `tests.rs` is Unix-shaped from top to bottom — `nix::unistd::Uid`
-// for every `daemon_uid`, `PermissionsExt` on the socket mode assertions, live
-// `serve_uds` round trips, and the `PeerUid` extension itself. Gating it to
-// `all(test, unix)` preserves exactly today's behaviour: the whole `server`
-// module was `#[cfg(unix)]` before this ticket, so these tests never compiled
-// off-target anyway. Linux still runs every one of them, which is where the
-// AILAB-192 proofs live.
+// `tests.rs` is Unix-only throughout: `nix::unistd::Uid` for every
+// `daemon_uid` (`nix` is a Unix-only dependency), `PermissionsExt` on the
+// socket mode assertions, live `serve_uds` round trips, and the `PeerUid`
+// extension itself.
 #[cfg(all(test, unix))]
 mod tests;
 

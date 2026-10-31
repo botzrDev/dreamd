@@ -1,4 +1,4 @@
-//! WEG-48 / DR-208 — Criterion benchmarks: P50/P99 recall latency at n=1k/10k/100k.
+//! WEG-48 — Criterion benchmarks: P50/P99 recall latency at n=1k/10k/100k.
 //!
 //! Corpus is built in RAM via `Index::create_in_ram()` so these benchmarks
 //! run without disk I/O and are fully hermetic. The same `build_schema()` /
@@ -18,7 +18,7 @@ const NOW_SEC: i64 = 1_748_000_000;
 fn build_corpus(n: usize) -> (tantivy::Index, SchemaFields) {
     let (schema, fields) = build_schema();
     let index = tantivy::Index::create_in_ram(schema);
-    // 50 MB heap — matches the WEG-42 production writer budget.
+    // 50 MB heap — matches the production writer budget (`WRITER_HEAP_BYTES`).
     let mut writer: IndexWriter<TantivyDocument> = index.writer(50_000_000).unwrap();
 
     for i in 0..n {

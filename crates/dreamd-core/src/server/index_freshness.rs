@@ -1,5 +1,4 @@
-//! Index freshness (WEG-42 / DR-202), split out of `tantivy_handle` by
-//! BZR-170.
+//! Index freshness (WEG-42, BZR-170).
 //!
 //! Owns the commit watermark (`index_progress.json`) and two ways to compare
 //! the index with the log:
@@ -20,43 +19,46 @@ use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::server::index_map::IndexError;
 
-/// Relative filename for the indexer's commit watermark, joined under the
-/// project's `.dreamd/` directory. WEG-42 owns reads and writes; `dreamd
-/// doctor --repair` (AILAB-223) clears it when wiping the rebuildable cache.
+/// Filename of the indexer's commit watermark, under the project's
+/// `.agent/.dreamd/` directory (`AgentRoot::dreamd_dir`). The persist step
+/// writes it; `dreamd doctor --repair` (AILAB-223) deletes it along with the
+/// rest of the rebuildable cache.
 pub const INDEX_PROGRESS_FILENAME: &str = "index_progress.json";
 
-/// v0.1 index-vs-JSONL contract surface (WEG-42 / DR-202).
+/// How far the index lags the episodic log: the body of `GET /api/v1/health`
+/// (WEG-42).
 ///
-/// Compares the JSONL tail against `index_progress.json`. `stale == true` when
-/// the episodic log has committed events the index watermark has not caught up
-/// to yet — including the normal ≤[`DEFAULT_COMMIT_CADENCE`](crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE) window after a
-/// live append, a full indexer channel, or a crash between JSONL `sync_data`
-/// and the next Tantivy commit. A full channel still reads as `stale` — the
-/// event is durable in the JSONL and not yet committed, which is exactly what
-/// this compares. What changed is that it no longer *persists*: because the
-/// coordinator awaits its `send`, the message is queued rather than dropped, so
-/// the staleness clears as the indexer drains the backlog instead of surviving
-/// until a restart. JSONL durability is WAL-backed; index freshness is
-/// best-effort and heals when the indexer commits the backlog (or, after a
-/// crash, on the next [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open) coverage pass).
+/// [`assess_index_freshness`] fills it from disk, comparing the JSONL against
+/// `index_progress.json`. It reads `stale` when the log has events the
+/// watermark has not caught up to yet: the normal ≤[`DEFAULT_COMMIT_CADENCE`](crate::server::tantivy_handle::DEFAULT_COMMIT_CADENCE)
+/// window after a live append, a backlog in the indexer channel, or a crash
+/// between JSONL `sync_data` and the next Tantivy commit. The coordinator
+/// awaits its `send`, so a backlog is queued rather than dropped, and the
+/// staleness clears as the indexer drains it. An append is durable once
+/// `sync_data` returns; index freshness is best effort and heals when the
+/// indexer commits the backlog (or, after a crash, at the next
+/// [`TantivyIndexHandle::open`](crate::server::tantivy_handle::TantivyIndexHandle::open) coverage pass).
 ///
 /// The watermark is the largest committed id, so an event merged in below it
 /// does not show here. `dreamd doctor` reports the full set difference through
 /// [`assess_index_coverage`](crate::server::index_coverage::assess_index_coverage).
 ///
 /// [`live_index_freshness`] fills the same shape from a running daemon's
-/// marks (BZR-1243).
+/// marks (BZR-1243). The field docs give both sources.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IndexFreshness {
-    /// `true` when `jsonl_tail_id` is strictly greater than `last_indexed_id`
-    /// (lexicographic `EventId` order), or when JSONL has events but the
-    /// watermark is absent.
+    /// `true` when `unindexed_count > 0`.
     pub stale: bool,
-    /// `id` of the last well-formed JSONL record, if any.
+    /// On disk, the `id` of the last well-formed JSONL record. From the marks,
+    /// [`AppendMark::tail_id`]: the largest id in the log as the daemon last
+    /// read or wrote it.
     pub jsonl_tail_id: Option<String>,
-    /// `last_indexed_id` from `index_progress.json`, if present.
+    /// The largest committed id: `index_progress.json` on disk,
+    /// [`CommitMark::last_indexed_id`] from the marks.
     pub last_indexed_id: Option<String>,
-    /// Count of JSONL events strictly after the watermark (0 when fresh).
+    /// On disk, the JSONL events whose id sorts after the watermark. From the
+    /// marks, the appends this daemon made that the index has not committed.
+    /// 0 when fresh.
     pub unindexed_count: usize,
 }
 
@@ -125,7 +127,7 @@ pub fn assess_index_freshness(agent_root: &AgentRoot) -> Result<IndexFreshness, 
 }
 
 /// Watermark recording the largest daemon-assigned `EventId` the index has
-/// committed. Lives at `<agent_root>/.dreamd/index_progress.json`. Read at
+/// committed. Lives at `<agent_root>/.agent/.dreamd/index_progress.json`. Read at
 /// open; written by the persist step after a commit and its ledger edges,
 /// never before, and only when it changes. Nothing decides what to index from
 /// it: the coverage pass compares ids.

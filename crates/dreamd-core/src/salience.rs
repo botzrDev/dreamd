@@ -1,12 +1,13 @@
-//! DR-204 / WEG-44 — query-time salience scoring.
+//! Query-time salience scoring (WEG-44).
 //!
-//! Pure function consumed by the DR-203 tantivy collector, the DR-703
-//! `--explain` formatter, the DR-313 dream-cycle deterministic ranker, and
-//! the DR-309 decay-threshold check. Storing the score is intentionally
+//! Pure function consumed by the recall collector (`crate::collector`), the
+//! `--explain` formatter, the dream cycle's deterministic ranker
+//! (`crate::consolidation`), and the decay-threshold check
+//! (`decay::should_decay`). Storing the score is intentionally
 //! avoided (ARCHITECTURE.md decision #2): `age_days` drifts every day, which would
 //! force a nightly re-index. Recomputing on every hit keeps the index static.
 //!
-//! Formula is locked verbatim by ARCHITECTURE.md decision #2 and PRD FR-4.2 — do
+//! Formula is locked verbatim by ARCHITECTURE.md decision #2 — do
 //! not refactor the arithmetic shape (e.g., do not factor out `/ 10.0`) so
 //! that `--explain` output reads the same as the spec.
 //!
@@ -24,16 +25,17 @@
 //! Monotonicity properties over the valid input ranges are enforced by the
 //! WEG-47 proptest suite (`tests/salience_proptest.rs`).
 
-/// BZR-195 — salience distribution report and daily snapshot.
+/// Salience distribution report and daily snapshot (BZR-195).
 ///
-/// Declared here rather than in `lib.rs` (BZR-160 owns that file).
+/// The file is `salience_report.rs`; the module is declared here, as
+/// `salience::report`.
 #[path = "salience_report.rs"]
 pub mod report;
 
 /// Phase-specific recurrence input for query-time salience.
 ///
 /// Each variant documents what "recurrence" means for that consumer. Callers
-/// MUST use the constructor matching their phase — do not pass raw `u64` values
+/// must use the constructor matching their phase — do not pass raw `u64` values
 /// into [`salience_with_context`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecurrenceContext {
@@ -121,10 +123,8 @@ pub fn clamp_score(score: f64) -> f64 {
 /// `now` and `ts` are unix epoch seconds. A `ts` after `now` counts as age 0
 /// ([`age_secs`]), and `pain` and `importance` are clamped to `0.0..=10.0`
 /// ([`clamp_score`]), so the result lies in `[0, 1 + ln(1 + recurrence)]` for
-/// every input.
-/// `recurrence` is `u64` per the protocol type; it is cast to `f64` before
-/// `ln` so a recurrence of 0 evaluates to `ln(1.0) == 0.0` (no panic, no
-/// `NaN`).
+/// every input. `recurrence` is cast to `f64` before `ln` so a recurrence of 0
+/// evaluates to `ln(1.0) == 0.0` (no panic, no `NaN`).
 pub fn salience(now: i64, ts: i64, pain: f64, importance: f64, recurrence: u64) -> f64 {
     let age_days = age_days(now, ts);
     let pain = clamp_score(pain);
@@ -251,7 +251,7 @@ mod tests {
     }
 
     /// Same numeric recurrence must yield identical scores across recall and
-    /// dream-cycle policies — ranking stays predictable when the index is fresh.
+    /// dream-cycle policies — ranking stays predictable when the counts agree.
     #[test]
     fn recall_and_dream_cycle_agree_when_recurrence_matches() {
         let ts = NOW - DAY;
@@ -289,8 +289,8 @@ mod tests {
         );
     }
 
-    /// Cross-phase ranking on a fixed corpus: when index fastfields match live
-    /// cluster sizes, recall and dream-cycle order events identically.
+    /// Cross-phase ranking on a fixed corpus: when recall's subtree counts match
+    /// live cluster sizes, recall and dream-cycle order events identically.
     #[test]
     fn cross_phase_ranking_consistent_when_staleness_absent() {
         // Three events, same cluster size (3), distinct pain for tie-breaking.

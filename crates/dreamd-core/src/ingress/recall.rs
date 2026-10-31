@@ -16,7 +16,7 @@ impl RecallIngress {
         }
     }
 
-    /// Serialise recall results to the canonical JSON string (HTTP + MCP local).
+    /// Serialize recall results to the canonical JSON string (HTTP + MCP local).
     ///
     /// No `citations` key — callers that need the factor breakdown use
     /// [`Self::to_json_with_citations`] instead.
@@ -25,7 +25,7 @@ impl RecallIngress {
         serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"results":[]}"#.to_string())
     }
 
-    /// Serialise recall results with a `citations` array added alongside
+    /// Serialize recall results with a `citations` array added alongside
     /// `results`, in the same order. `now_sec` is the same clock reading used
     /// to run the recall query.
     ///

@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "nested_subcommand_help(\"memory\", \"delete\")"
 ---
-Deprecated, removed in 2.0. Delete branch <NAME>. A later dream cycle removes the object if no ref names it.
+Deprecated, removed in 2.0. Delete branch `<NAME>`. A later dream cycle removes the object if no ref names it.
 
 Refuses to delete the current branch.
 

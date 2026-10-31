@@ -29,18 +29,23 @@ const LESSONS_PATH: &str = "semantic/LESSONS.md";
 const RECURRENCE_PATH: &str = "semantic/recurrence_counts.json";
 const PREFERENCES_PATH: &str = "personal/PREFERENCES.md";
 
+/// Why a memory diff could not compare two objects.
 #[derive(Debug, thiserror::Error)]
 pub enum DiffError {
+    /// An object id is not 64 lowercase hex characters.
     #[error("object id {0:?} is not 64 lowercase hex characters")]
     InvalidId(String),
+    /// No object directory exists for the id.
     #[error("object {0} not found")]
     MissingObject(String),
+    /// Reading a file inside an object failed.
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
+    /// An object's episodic log could not be read.
     #[error("{path}: {source}")]
     Episodic {
         path: PathBuf,

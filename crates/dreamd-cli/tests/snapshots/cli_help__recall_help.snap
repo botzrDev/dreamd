@@ -2,22 +2,22 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"recall\")"
 ---
-Search stored memories by query, ranked by relevance and importance (markdown table)
+Search stored memories by query, ranked by BM25 × salience (markdown table)
 
 Usage: recall [OPTIONS] <QUERY>
 
 Arguments:
   <QUERY>
-          Free-text query (BM25 over episodic content)
+          Free-text query, matched with BM25 against stored events and lessons
 
 Options:
   -k, --k <K>
-          Max results (default 10 — CLI demo default; HTTP/MCP stay at 5)
+          Max results. HTTP and MCP recall default to 5
           
           [default: 10]
 
       --explain
-          Print per-hit salience factor breakdown (DR-204)
+          Print each hit's salience factor breakdown
 
       --without <WITHOUT>
           Drop these event ids before top-k. Repeatable. Does not modify the index

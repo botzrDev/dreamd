@@ -20,8 +20,11 @@
 //! from a file inside another complete object with the same `sha256`, and falls
 //! back to writing the bytes when the link fails.
 //!
-//! Writes use plain `std::fs::write` + `std::fs::rename`, so this module also
-//! runs on Windows, where the crate's atomic-write helper is unsupported.
+//! Writes use plain `std::fs::write` + `std::fs::rename` with no fsync, not
+//! `crate::io::write_atomic`. An object is built under `<id>.partial/` and
+//! renamed into place whole; a ref or `HEAD` is written to a dot-prefixed
+//! sibling and renamed over the target. A dream cycle's autosnap ref is the
+//! exception: it is staged, and the cycle's redo WAL renames it in.
 
 use std::collections::HashMap;
 use std::fs;

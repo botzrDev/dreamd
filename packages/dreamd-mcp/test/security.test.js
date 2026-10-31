@@ -7,7 +7,7 @@ const {
   isSafeTarEntry,
 } = require('../bin/dreamd-mcp.js');
 
-// --- Redirect host allowlist ---
+// ── Redirect host allowlist ─────────────────────────────────────────────────
 test('accepts github.com and its real release-asset host', () => {
   assert.ok(isAllowedRedirectHost('github.com'));
   assert.ok(isAllowedRedirectHost('release-assets.githubusercontent.com')); // observed 2026-06-24
@@ -34,7 +34,7 @@ test('validateRedirect rejects a missing Location', () => {
   assert.throws(() => validateRedirect(undefined, 'https://github.com/a'), /no Location/);
 });
 
-// --- Tar entry safety ---
+// ── Tar entry safety ────────────────────────────────────────────────────────
 test('isSafeTarEntry accepts the expected binary name', () => {
   assert.ok(isSafeTarEntry('dreamd'));
   assert.ok(isSafeTarEntry('dreamd.exe'));
@@ -46,7 +46,7 @@ test('isSafeTarEntry rejects traversal and absolute paths', () => {
   assert.ok(!isSafeTarEntry('foo/../../bar'));
 });
 
-// --- Cache-hit verify-before-exec (regression) ---
+// ── Cache-hit verify-before-exec (regression) ───────────────────────────────
 const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const fs = require('node:fs');

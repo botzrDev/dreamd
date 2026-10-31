@@ -2,8 +2,10 @@
 //!
 //! Bakes compile-time metadata (git SHA, build date, target triple) into env
 //! vars via `vergen-gitcl` so `commands::version` can assemble version strings
-//! as `const` values. See the drift catalog entry "vergen-gitcl
-//! `fail_on_error(false)` emits sentinels" in ARCHITECTURE.md.
+//! as `const` values. An instruction vergen cannot resolve (a tarball build
+//! with no `.git/`) emits the literal `VERGEN_IDEMPOTENT_OUTPUT` instead of
+//! failing the build; `or_unknown` in `commands/version.rs` turns that into
+//! "unknown".
 
 use vergen_gitcl::{BuildBuilder, CargoBuilder, Emitter, GitclBuilder, RustcBuilder};
 

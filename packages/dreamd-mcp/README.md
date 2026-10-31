@@ -41,11 +41,12 @@ No Rust installation required; the shim needs Node 18 or later and `tar` on `PAT
 `npx -y dreamd-mcp` with no arguments starts the MCP server over stdio. When the first argument is one of the commands below, the whole argument list is forwarded to the native `dreamd` binary unchanged:
 
 ```text
-blame, doctor, dream, forget, init, mcp, memory, reset, salience-drift,
-service, setup, uninstall, update, vectors, version, watch
+archive, blame, doctor, dream, forget, init, mcp, memory, migrate, recall,
+reset, salience-drift, score, service, setup, status, uninstall, update,
+vectors, version, watch
 ```
 
-Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --project-root /abs/path` works). That also means the native commands missing from the list — `status`, `recall`, `score`, `archive`, `migrate` — are **not** reachable through the shim; they need a `dreamd` binary on `PATH` (`cargo install --path crates/dreamd-cli` from a source checkout). A leading `--help` / `-h` or `--version` / `-V` is answered by the shim itself; `npx -y dreamd-mcp version` prints the native binary's build info.
+That is every `dreamd` subcommand. Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --project-root /abs/path` works). A leading `--help` / `-h` or `--version` / `-V` is answered by the shim itself; `npx -y dreamd-mcp version` prints the native binary's build info.
 
 Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor)
 
@@ -109,23 +110,29 @@ is therefore a no-op. There is no `dreamd reset --all` — use `dreamd uninstall
 ### Uninstall
 
 ```sh
-npx -y dreamd-mcp uninstall     # or, with a native binary: dreamd uninstall
+npx -y dreamd-mcp uninstall          # prompts for y when stdin is a tty
+npx -y dreamd-mcp uninstall --yes    # no prompt; the form to use in a script
 ```
 
 One command: stops local `dreamd mcp` / `dreamd watch` processes, removes the
 daemon socket, unregisters the current project from the registry (skipped with a
 benign note when run outside a project root), and clears the native binary cache
 (`~/.cache/dreamd-mcp`) plus the dreamd-mcp-scoped entries under `~/.npm/_npx`.
+On a tty it prints that plan and waits for `y`. `--yes` skips the wait. Without
+a tty and without `--yes` it exits 2 and changes nothing.
 Safe to run twice — a second run succeeds with nothing left to do.
 
 | Flag | Effect |
 |---|---|
+| `--yes` | Skip the confirmation prompt. Required when stdin is not a tty. `--quiet` does not imply it. |
 | `--keep-caches` | Skip the cache clears |
 | `--all-npx` | Loud: wipe the **entire** `~/.npm/_npx` (every npx-cached package, not just dreamd). Prints a warning before deleting. |
 | `--quiet` / `-q` | Suppress non-essential output |
 
 Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, and every
-project's `.agent/` memory store. To wipe a project's store entirely, see
+project's `.agent/` memory store.
+The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
+To wipe a project's store entirely, see
 [Full fresh store](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
 in the troubleshooting guide — delete `.agent/` and re-run `npx -y dreamd-mcp init`. That is
 destructive; back up first if the store has value.

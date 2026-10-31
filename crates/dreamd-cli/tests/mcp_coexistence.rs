@@ -1,12 +1,12 @@
-//! DR-507 / AILAB-221: dreamd MCP and Anthropic's reference memory server
+//! AILAB-221: dreamd MCP and Anthropic's reference memory server
 //! coexist without colliding on sockets or corrupting each other's stores.
 //!
 //! Spawns both over stdio, completes the MCP handshake on each, asserts the
 //! intentional `search_nodes` name collision is reachable on separate channels,
 //! and verifies each write lands only in its own store.
 //!
-//! Skips cleanly when `npx` is absent (CI cargo job has no node). Set
-//! `DREAMD_COEXIST_REQUIRE=1` to turn absence into a hard failure.
+//! Skips cleanly when `npx` is not on `PATH`. Set `DREAMD_COEXIST_REQUIRE=1`
+//! to turn its absence into a hard failure.
 
 #![cfg(unix)]
 
@@ -297,7 +297,7 @@ fn dreamd_and_ref_memory_server_coexist() {
         "JSONL must contain probe learning; got:\n{jsonl_body}"
     );
 
-    // dreamd read — well-formed only; do NOT assert hits (index commit lags)
+    // dreamd read — well-formed only; do not assert hits (index commit lags)
     dreamd.send(
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_nodes","arguments":{"query":"coexistence","k":3}}}"#,
     );

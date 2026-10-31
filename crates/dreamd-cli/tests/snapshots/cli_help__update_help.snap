@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"update\")"
 ---
-Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
+Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release
 
 Usage: update [OPTIONS]
 
@@ -14,7 +14,7 @@ Options:
           Suppress non-essential output (errors still print to stderr)
 
       --restart
-          Explicitly stop local `dreamd mcp` / `dreamd watch` (already the default; nothing is relaunched for you)
+          Say that local `dreamd mcp` / `dreamd watch` are stopped; update stops them either way and relaunches nothing. `dreamd service restart` brings a supervised daemon back
 
   -h, --help
           Print help

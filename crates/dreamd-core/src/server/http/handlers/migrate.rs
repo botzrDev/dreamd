@@ -1,4 +1,4 @@
-//! `POST /api/v1/migrate` — reserved stub (BZR-187 / DR-405).
+//! `POST /api/v1/migrate` — reserved stub (BZR-187).
 
 use axum::response::IntoResponse;
 

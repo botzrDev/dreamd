@@ -1,15 +1,17 @@
-//! Writer-process server (WEG-21 / DR-118).
+//! The daemon's server side: transport, HTTP router, supervisor and the
+//! per-project maps (WEG-21).
 //!
-//! Owns the per-user UDS lifecycle. The first process to bind
-//! `~/.agent/dreamd.sock` becomes the writer-process; subsequent starts
-//! detect the existing socket and connect as clients. Designed so the
-//! `npx dreamd-mcp` install funnel stays one-line — no separately-installed
-//! daemon, no background install step.
+//! Only a process that holds a project's writer lock
+//! (`writer_lock::WriterLock`) starts that project's coordinator. `dreamd
+//! watch` binds the per-user `~/.agent/dreamd.sock` and exits when a live
+//! daemon already answers on it. `dreamd mcp` proxies to that daemon when one
+//! is live and serves in process otherwise, so the `npx dreamd-mcp` install
+//! stays one line: no separately installed daemon, no background install step.
 //!
-//! Crate placement decision (2026-05-14): UDS binding, the HTTP surface and
-//! the supervisor lifecycle live in `dreamd-core` behind `pub mod server`. No
-//! `dreamd-server` crate yet. Re-evaluation trigger is compile pressure or a
-//! second Rust binary consumer (see `docs/architecture.md`).
+//! Crate placement: UDS binding, the HTTP surface and the supervisor live in
+//! `dreamd-core` behind `pub mod server`, not in a separate `dreamd-server`
+//! crate. Revisit that when compile time grows or a second Rust binary needs
+//! them (see `docs/architecture.md`).
 //!
 //! Target scope (AILAB-192): this module compiles everywhere. The router,
 //! `AppState`, the supervisor and the project maps are transport-agnostic, so
@@ -43,7 +45,8 @@
 //!     waits SIGINT/SIGTERM; off Unix [`bind_listen`] takes `127.0.0.1:0` (or
 //!     the `--bind` address; non-loopback only with `--insecure`, AILAB-197),
 //!     the port is published in `~/.agent/server.json`, [`serve_tcp`] serves the
-//!     same router behind the AILAB-203 bearer token, and the wait is `ctrl_c`
+//!     same router behind the `~/.agent/auth.json` bearer token (AILAB-203),
+//!     and the wait is `ctrl_c`
 //!     alone. That arm opens the Tantivy index and pins it, the same hand-off
 //!     as the Unix arm. `io::write_atomic` runs on Windows; the directory flush
 //!     is not a power-loss proof. A mapped segment file stays in the index
@@ -91,15 +94,12 @@ pub use tantivy_handle::{
 // instead, not a portable version of these.
 #[cfg(unix)]
 pub use uds::{is_daemon_socket_live, try_connect_existing, UdsBindError};
-// Cfg-free as of AILAB-192, in step with `watch.rs` dropping its file-level
-// `#![cfg(unix)]`: `dreamd watch` is now a real command on every target, so the
-// CLI imports one `run_watch` and one `WatchError` and does no cfg of its own.
-// The transport split lives inside the module, not in this re-export.
+// Cfg-free: `dreamd watch` runs on every target, so the CLI imports one
+// `run_watch` and one `WatchError` and needs no cfg of its own. The transport
+// split lives inside the module, not in this re-export.
 pub use watch::{run_watch, WatchError, WatchListen};
-// The loopback-TCP transport primitives, exported for the same reason the UDS
-// bind helpers above are: they are the pair a caller needs to stand the API up
-// on a listener it owns. Cfg-free — both are compiled and
-// tested on Linux even though only the off-Unix `run_watch` arm ships them
-// (AILAB-192), because a `#[cfg(not(unix))]` body no check on this machine can
-// reach is how the last round of Windows drift got in.
+// The loopback-TCP transport primitives: what a caller needs to stand the API
+// up on a listener it owns. Cfg-free: only the off-Unix `run_watch` arm uses
+// them, but Linux compiles and tests them too, so a Windows-only body cannot
+// drift where no local check reaches it (AILAB-192).
 pub use watch::{bind_listen, bind_loopback, serve_tcp};

@@ -1,15 +1,15 @@
 //! WEG-268 regression: `dreamd watch` must unlink its UDS socket on SIGTERM,
 //! not just SIGINT.
 //!
-//! A service manager (systemd/launchd) stops a daemon with SIGTERM. Before this
-//! fix, `run_watch` armed only `ctrl_c()` (SIGINT); a SIGTERM killed the process
-//! without running the socket-cleanup path, leaving a stale
+//! A service manager (systemd/launchd) stops a daemon with SIGTERM, so
+//! `run_watch` arms SIGTERM as well as `ctrl_c()` (SIGINT); with SIGINT alone,
+//! a SIGTERM killed the process before the socket cleanup and left a stale
 //! `~/.agent/dreamd.sock`. This spawns the real `run_watch` in a subprocess (the
 //! `weg268_watch_helper` bin), waits for the socket to appear, delivers SIGTERM,
 //! and asserts the socket file is gone after a clean exit.
 //!
 //! Subprocess wiring is required: SIGTERM to the test process itself would kill
-//! the runner, so the daemon must live in a child whose PID we can signal.
+//! the runner, so the daemon must live in a child whose PID the test can signal.
 
 #![cfg(unix)]
 
@@ -26,8 +26,8 @@ fn helper_bin() -> PathBuf {
 
 #[test]
 fn sigterm_unlinks_the_socket() {
-    // Isolated HOME → run_watch binds $HOME/.agent/dreamd.sock (dirs::home_dir
-    // reads $HOME on Linux). Keeping the socket directly under a short
+    // Isolated HOME → run_watch binds $HOME/.agent/dreamd.sock (`layout::home_dir`
+    // reads $HOME). Keeping the socket directly under a short
     // tempfile::tempdir() avoids the macOS sun_path overflow that bites long
     // $TMPDIR prefixes (see weg21_writer_process.rs).
     let home = tempfile::tempdir().expect("home tempdir");

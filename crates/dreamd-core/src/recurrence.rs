@@ -467,7 +467,7 @@ mod tests {
             learning(&event_id(1), "rust::eh::unwrap"),
             learning(&event_id(2), "rust::eh::expect"),
             // Sibling with a shared textual prefix but a different segment —
-            // must NOT count.
+            // must not count.
             learning(&event_id(3), "rust::ehlers"),
             learning(&event_id(4), "python::pytest"),
         ];

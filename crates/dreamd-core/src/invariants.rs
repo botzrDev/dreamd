@@ -69,12 +69,17 @@ impl Violation {
     }
 }
 
+/// Why [`check_store`] could not finish. A store it can read but that breaks
+/// an invariant is a [`Violation`], not an error.
 #[derive(Debug, thiserror::Error)]
 pub enum InvariantError {
+    /// The episodic log could not be read.
     #[error(transparent)]
     Episodic(#[from] crate::episodic::EpisodicError),
+    /// `state.json` could not be read or parsed.
     #[error(transparent)]
     State(#[from] crate::daemon_state::DaemonStateError),
+    /// Searching the index failed.
     #[error(transparent)]
     Index(#[from] tantivy::TantivyError),
 }
@@ -82,8 +87,8 @@ pub enum InvariantError {
 /// Check `agent_root` against the invariants of a healthy store.
 ///
 /// Checks run in a fixed order — log, index, semantic layer, recurrence,
-/// state, citations — and each emits its ids sorted, so equal stores give
-/// equal output.
+/// an unreadable `LESSONS.md`, state, citations — and each emits its ids
+/// sorted, so equal stores give equal output.
 ///
 /// The index, semantic and recurrence checks run only when `index` is `Some`.
 /// The caller owns that reader's freshness: it must see a committed, reloaded

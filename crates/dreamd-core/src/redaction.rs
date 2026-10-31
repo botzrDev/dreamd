@@ -1,19 +1,19 @@
 //! PII/secret redaction for agent-written content.
 //!
 //! [`redact`] is the single public entry point. Pass `enabled = false` to
-//! bypass all regex work entirely — the early return is zero-allocation.
+//! bypass all regex work entirely — the early return only copies the input.
 //!
-//! Patterns are compiled once at first use via [`std::sync::LazyLock`] static
-//! statics (stable since Rust 1.80). The set is intentionally narrow: we target
-//! high-confidence literals (AWS key IDs, bearer tokens, sk-/sk-ant- API keys,
-//! and env-var assignments that name common secrets). Heuristic patterns that
-//! generate false positives are out of scope for v0.1.
+//! Patterns are compiled once at first use via [`std::sync::LazyLock`]
+//! statics. The set is intentionally narrow: it targets high-confidence
+//! literals (AWS key IDs, bearer tokens, sk-/sk-ant- API keys, and env-var
+//! assignments that name common secrets). Heuristic patterns that generate
+//! false positives are out of scope.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-// Compiled patterns (LazyLock — once per process).
+// ── Compiled patterns (LazyLock — once per process) ─────────────────────────
 
 /// AWS access key ID — exactly the `AKIA` prefix followed by 16 uppercase
 /// alphanumerics.
@@ -59,8 +59,8 @@ pub fn redact(input: &str, enabled: bool) -> String {
         return input.to_string();
     }
 
-    // Apply each pattern in sequence, counting total replacements.  We run
-    // Anthropic before OpenAI so the longer `sk-ant-` prefix is consumed
+    // Apply each pattern in sequence, counting total replacements. Anthropic
+    // runs before OpenAI so the longer `sk-ant-` prefix is consumed
     // before the shorter `sk-` pattern can fire on the same span.
     let patterns: &[&LazyLock<Regex>] = &[
         &RE_AWS_SECRET_ENV,

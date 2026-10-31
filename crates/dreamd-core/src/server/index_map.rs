@@ -1,12 +1,12 @@
-//! `IndexHandle` trait + `ProjectIndexMap<H>` (WEG-21 skeleton).
+//! `IndexHandle` trait + `ProjectIndexMap<H>` (WEG-21).
 //!
 //! `ProjectIndexMap` is keyed on resolved project root path. It opens a
 //! per-project handle lazily on first request, evicts least-recently-used
 //! entries at a configurable capacity (default 10), and evicts idle entries
 //! whose `last_used()` exceeds a configurable timeout (default 30 min).
 //!
-//! The trait surface is intentionally minimal — exactly the two methods the
-//! AC specifies. Production open/commit/close lives in [`crate::server::tantivy_handle`]
+//! The trait has two methods, `close` and `last_used`: what eviction needs.
+//! Production open/commit/close lives in [`crate::server::tantivy_handle`]
 //! (WEG-42). This module keeps the map + [`TestIndexHandle`] so eviction and
 //! shutdown-drain tests can run without a live Tantivy index.
 
@@ -103,9 +103,9 @@ pub(crate) fn tantivy_io_to_index(e: tantivy::directory::error::OpenDirectoryErr
 
 /// Per-project search-index handle managed by [`ProjectIndexMap`].
 ///
-/// The trait surface is exactly two methods, per the WEG-21 AC. Adding
-/// methods here is a load-bearing decision — bring it back to PM before
-/// extending.
+/// Kept to the two methods eviction needs, so [`TestIndexHandle`] can stand in
+/// for a live Tantivy index. Every method added here is one more thing every
+/// implementor has to provide.
 pub trait IndexHandle: Send + 'static {
     /// Release the handle and any underlying resources. Called by
     /// [`ProjectIndexMap`] on eviction or shutdown. Failures bubble up so the
@@ -130,8 +130,8 @@ impl<H: IndexHandle> ProjectMapResource for H {
     }
 }
 
-/// Lifecycle parameters for a [`ProjectIndexMap`]. Defaults match the WEG-21
-/// founder-decision values (cap 10, idle 30 min).
+/// Lifecycle parameters for a [`ProjectIndexMap`]: the shared
+/// [`ProjectResourceMapConfig`] (cap 10, idle 30 min by default).
 pub type ProjectIndexMapConfig = ProjectResourceMapConfig;
 
 /// Lazy-opened, LRU + idle-evicting map of per-project index handles.
@@ -178,11 +178,16 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
     /// Look up the live handle for `project_root` without opening one.
     ///
     /// A hit is marked most-recently-used, exactly as [`Self::get_or_open`]
-    /// does. A miss returns `None` — and the caller must then open the handle
-    /// with the surrounding `index_map` mutex **released** and publish it via
-    /// [`Self::insert_or_adopt`] (AILAB-186). `TantivyIndexHandle::open` replays
-    /// the whole JSONL, commits, and allocates a 50 MB `IndexWriter`; running
-    /// that under the map lock stalled every other project's requests.
+    /// does. A miss returns `None`, and the caller then opens the handle with
+    /// the map's mutex **released** and publishes it via
+    /// [`Self::insert_or_adopt`] (AILAB-186). [`TantivyIndexHandle::open`] runs
+    /// a coverage pass, commits, and allocates a 50 MB `IndexWriter`; running
+    /// that under the map lock would stall every other project's requests.
+    ///
+    /// Only tests call this today. The daemon's per-project map is
+    /// `AppState::runtimes`, which follows the same split through
+    /// [`ProjectResourceMap::get_mut`] and
+    /// [`ProjectResourceMap::insert_or_adopt`].
     ///
     /// [`TantivyIndexHandle::open`]: crate::server::TantivyIndexHandle::open
     pub fn get_handle(&mut self, project_root: &Path) -> Option<&mut H> {
@@ -214,8 +219,8 @@ impl<H: IndexHandle> ProjectIndexMap<H> {
         self.inner.evict_idle_after(idle_timeout)
     }
 
-    /// Close every open handle. Errors from individual closes are swallowed
-    /// — the supervisor uses this on shutdown and there is no recovery.
+    /// Close every open handle. Errors from individual closes are swallowed:
+    /// `Drop` calls this, and there is no recovery at that point.
     pub fn close_all(&mut self) {
         self.inner.close_all();
     }
@@ -228,8 +233,8 @@ impl<H: IndexHandle> Drop for ProjectIndexMap<H> {
 }
 
 /// Recording `IndexHandle` used in tests. Each instance carries a shared
-/// `EventLog` reference so a test can assert open/close ordering across the
-/// whole map.
+/// [`TestEventLog`] reference so a test can assert open/close ordering across
+/// the whole map.
 pub struct TestIndexHandle {
     project_root: PathBuf,
     last_used: Instant,
@@ -405,12 +410,12 @@ mod tests {
         assert_eq!(log.closes(), 3);
     }
 
-    /// AILAB-186's decisive test: the open must be able to observe that the map
-    /// mutex is free while it runs.
+    /// The open must be able to observe that the map mutex is free while it
+    /// runs (AILAB-186).
     ///
     /// The negative control in the second half is what makes the first half mean
-    /// anything — it drives the *old* `get_or_open` shape through the identical
-    /// probe and shows it sees the mutex held. (`try_lock`, not `lock`: a std
+    /// anything — it drives `get_or_open`, which opens under the guard, through
+    /// the identical probe and shows it sees the mutex held. (`try_lock`, not `lock`: a std
     /// `Mutex` is not reentrant, so `lock` here would deadlock rather than
     /// report.)
     #[test]
@@ -419,14 +424,14 @@ mod tests {
         let map: Arc<Mutex<ProjectIndexMap<TestIndexHandle>>> =
             Arc::new(Mutex::new(ProjectIndexMap::with_defaults()));
 
-        // --- new shape: lookup, release, open, re-lock, publish.
+        // Split shape: lookup, release, open, re-lock, publish.
         let root = Path::new("/p/a");
         {
             let mut guard = map.lock().expect("map mutex");
             assert!(guard.get_handle(root).is_none(), "cold map must miss");
         }
-        // This closure stands in for `TantivyIndexHandle::open` at exactly the
-        // point `with_index_handle` calls it.
+        // This closure stands in for the open between the miss and the publish,
+        // where `AppState::with_runtime` calls `ProjectRuntime::open`.
         let open_probe = |p: &Path| {
             let map_free = map.try_lock().is_ok();
             (TestIndexHandle::open(p, log.clone()), map_free)
@@ -442,7 +447,7 @@ mod tests {
             "the map mutex must be free while the handle is being opened"
         );
 
-        // --- negative control: the same probe under today's `get_or_open`.
+        // Negative control: the same probe under `get_or_open`.
         let mut held_under_get_or_open = None;
         {
             let mut guard = map.lock().expect("map mutex");
@@ -516,7 +521,7 @@ mod tests {
         );
     }
 
-    /// AC #1: a slow open of project A must not block project B. Thread A parks
+    /// A slow open of project A must not block project B. Thread A parks
     /// mid-"open" on a channel with no lock held; B has to get all the way
     /// through its own lookup-open-publish before A is released.
     #[test]
@@ -566,8 +571,8 @@ mod tests {
                 let _ = b_done_tx.send(());
             })
         };
-        // Timed, not a bare `join`: under the old shape B blocks on the map
-        // mutex for as long as A is parked, and this must fail rather than hang.
+        // Timed, not a bare `join`: if the open ran under the map mutex, B would
+        // block for as long as A is parked, and this must fail rather than hang.
         b_done_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("project B blocked behind project A's open");

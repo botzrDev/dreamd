@@ -1,14 +1,13 @@
 #![cfg(unix)]
 
-//! Red tests for the store defects found by the architecture audit.
+//! Regression tests for the store defects found by the 2026-10-24
+//! architecture audit.
 //!
-//! Each test reproduces one defect through today's public API. Each is
-//! ignored until the ticket named in its `ignore` reason lands, and each must
-//! fail under `--ignored` before that fix. The fixing ticket un-ignores its
-//! test; it does not weaken the assertion.
+//! Each test reproduces one defect through the public API and passes because
+//! its fix landed. Do not weaken an assertion to make one pass.
 //!
-//! `#![cfg(unix)]` because these tests use the Unix writer lock and the UDS
-//! daemon. The index opens on Windows too.
+//! `#![cfg(unix)]` because these tests take the Unix writer lock. The index
+//! opens on Windows too.
 
 use std::fs;
 use std::path::Path;

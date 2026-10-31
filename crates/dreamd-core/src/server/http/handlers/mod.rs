@@ -16,9 +16,8 @@ pub(crate) use preferences::get_preferences;
 pub(crate) use recall::get_recall;
 pub(crate) use salience::get_salience;
 
-// Its sole consumer is `http::tests`, which AILAB-192 gated to
-// `all(test, unix)`. The gate has to match: a `cfg(test)`-only re-export with no
-// reader off-target is an `unused_imports` warning, not dead weight the compiler
-// forgives.
+// Its only reader is `http::tests`, which is gated to `all(test, unix)`. The
+// gate has to match: a `cfg(test)`-only re-export with no reader off Unix is an
+// `unused_imports` warning.
 #[cfg(all(test, unix))]
 pub(crate) use preferences::PREFERENCES_SIZE_CAP;

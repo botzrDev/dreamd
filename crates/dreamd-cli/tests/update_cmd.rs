@@ -171,9 +171,9 @@ fn update_reports_when_no_servers_were_running() {
 
 /// A process that matched but was **spared** as not attributable to this
 /// `$HOME` / native cache must never be reported as "nothing was running"
-/// (AILAB-584). That stdout line used to print directly above a stderr warning
-/// naming the pid that was still running — the tool contradicting itself on
-/// exactly the scenario the scoping fix exists for.
+/// (AILAB-584). Printing that stdout line above a stderr warning that names the
+/// still-running pid would contradict itself on exactly the scenario the
+/// scoping exists for.
 #[test]
 fn update_reports_spared_processes_instead_of_claiming_none_were_running() {
     let f = Fixture::new();

@@ -6,7 +6,7 @@
 //! transport loop then ends and the process exits. These tests lock in two
 //! properties:
 //!   1. A normal lifecycle (initialize → initialized → EOF) exits 0 cleanly.
-//!   2. Any disconnect (even before initialize) TERMINATES promptly — no orphan.
+//!   2. Any disconnect (even before initialize) terminates promptly — no orphan.
 //!
 //! If a future rmcp/transport change broke exit-on-EOF, the npx shim's blocking
 //! `execFileSync` would never return and would leave an orphaned server process.
@@ -83,7 +83,7 @@ fn mcp_normal_lifecycle_exits_zero_on_eof() {
 fn mcp_pre_init_disconnect_terminates_promptly() {
     // Abnormal: the client connects and closes stdin before any initialize
     // handshake. rmcp reports "connection closed: initialize request" and the exit
-    // code is allowed to be non-zero — but the process MUST still terminate
+    // code is allowed to be non-zero — but the process must still terminate
     // promptly. That termination is the property that prevents an orphaned server.
     let tmp = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

@@ -25,20 +25,26 @@ pub const BISECT_STATE_FILE: &str = "bisect";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BisectError {
+    /// A snapshot operation (resolving, reading or checking out an object) failed.
     #[error(transparent)]
     Snapshot(#[from] SnapshotError),
+    /// Reading or writing a file under `branches/` failed.
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
+    /// A ref file is malformed.
     #[error("ref {path}: {reason}")]
     BadRef { path: PathBuf, reason: String },
+    /// An endpoint names neither an existing ref nor an object id some ref names.
     #[error("endpoint {0:?} is neither an existing ref nor an object id some ref names")]
     UnknownEndpoint(String),
+    /// The good and bad endpoints resolve to the same ref.
     #[error("good and bad are the same ref {0:?}")]
     SameEndpoint(String),
+    /// The good ref's timestamp is not strictly earlier than the bad ref's.
     #[error(
         "good ref {good:?} ({good_ts}) must be strictly earlier than bad ref {bad:?} ({bad_ts})"
     )]
@@ -48,8 +54,10 @@ pub enum BisectError {
         bad: String,
         bad_ts: String,
     },
+    /// A bisect step ran with no `branches/bisect` state file.
     #[error("no bisect in progress; run `dreamd memory bisect start` first")]
     NotInProgress,
+    /// The `branches/bisect` state file is malformed.
     #[error("bisect state {path}: {reason}")]
     BadState { path: PathBuf, reason: String },
 }

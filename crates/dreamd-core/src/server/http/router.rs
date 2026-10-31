@@ -19,8 +19,8 @@ use super::state::AppState;
 pub struct PeerUid(pub u32);
 
 /// Build the `/api/v1` router with `X-Agent-Root` validation middleware, the
-/// AILAB-189 request-trace stack, and exactly one auth layer as the outermost
-/// one: `peer_uid_middleware` (WEG-72 / DR-407) on Unix, or
+/// request-trace stack (AILAB-189), and exactly one auth layer as the outermost
+/// one: `peer_uid_middleware` (WEG-72) on Unix, or
 /// [`bearer_auth_middleware`] (AILAB-192) everywhere else. The two arms are
 /// mutually exclusive — no target mounts both, and none mounts neither.
 pub fn build_router(state: AppState) -> axum::Router {
@@ -39,8 +39,8 @@ pub fn build_router(state: AppState) -> axum::Router {
             state.clone(),
             agent_root_middleware,
         ))
-        // AILAB-189 — one INFO span per request. In axum the LAST `.layer()` is
-        // the OUTERMOST, so these three read bottom-up:
+        // One INFO span per request (AILAB-189). In axum the last `.layer()` is
+        // the outermost, so these three read bottom-up:
         //
         //   SetRequestId       mints `x-request-id` on the request
         //     PropagateRequestId   copies that header onto the response
@@ -77,7 +77,7 @@ pub fn build_router(state: AppState) -> axum::Router {
     ));
 
     // Off Unix there is no `SO_PEERCRED`, so the loopback-TCP listener's auth is
-    // the AILAB-203 bearer token instead, and it takes the *exact* slot
+    // the bearer token (AILAB-203) instead, and it takes the *exact* slot
     // `peer_uid_middleware` holds above — outermost, so a caller with no
     // credential never reaches `TraceLayer` (same trade: a rejected request
     // earns no `http` span, only this layer's own reason-category `warn!`), and
@@ -105,8 +105,8 @@ pub fn build_router(state: AppState) -> axum::Router {
 ///
 /// Split out of [`http_make_span`] so the extraction rule is unit-testable: a
 /// `Span`'s recorded fields cannot be read back off the handle, so the only
-/// other way to assert them is a capturing `tracing` subscriber, and this
-/// ticket deliberately adds no test-only subscriber dependency.
+/// other way to assert them is a capturing `tracing` subscriber, which would
+/// need a test-only dependency the crate does not have.
 pub(crate) struct RequestTraceFields {
     pub method: axum::http::Method,
     pub path: String,
@@ -204,10 +204,9 @@ fn http_on_response<B>(
     span: &tracing::Span,
 ) {
     span.record("status_code", response.status().as_u16());
-    // f64 milliseconds, NOT `as_millis()`: that truncates, and PERF.md puts the
-    // warm path at P50 0.30 ms / P99 0.34 ms, so an integer field would have
-    // read `latency_ms=0` on essentially every request — an AC field carrying
-    // no information, and nothing in the suite would have caught it.
+    // f64 milliseconds, not `as_millis()`: that truncates, and the warm path
+    // runs well under a millisecond (PERF.md), so an integer field would read
+    // `latency_ms=0` on nearly every request and carry no information.
     span.record("latency_ms", latency.as_secs_f64() * 1000.0);
     tracing::info!(parent: span, "http request");
 }
@@ -217,7 +216,8 @@ fn http_on_response<B>(
 /// The lookup goes through [`AppState::registry`], which parses the file once
 /// per file identity, and runs on `spawn_blocking`, because it stats the file
 /// and resolves the path to its canonical form (BZR-1243). Inserts
-/// [`ProjectEntry`] into request extensions on success.
+/// [`ProjectEntry`](crate::registry::ProjectEntry) into request extensions on
+/// success.
 ///
 /// # Errors
 /// * `400` — header missing or non-UTF-8
@@ -250,7 +250,7 @@ pub async fn agent_root_middleware(
             next.run(req).await
         }
         Ok(Ok(None)) => error_404("agent root not registered"),
-        // A panicked or cancelled lookup is the same failure as a bad read.
+        // A panicked or canceled lookup is the same failure as a bad read.
         Ok(Err(_)) | Err(_) => error_500("registry read failed"),
     }
 }
@@ -315,7 +315,7 @@ fn bearer_credential(raw: &str) -> Option<&str> {
     Some(credential)
 }
 
-/// Enforce the AILAB-203 bearer token from `~/.agent/auth.json` (AILAB-192).
+/// Enforce the bearer token from `~/.agent/auth.json` (AILAB-192, AILAB-203).
 ///
 /// Mounted by [`build_router`] on the non-Unix target **only**, as the
 /// outermost layer, in the same slot Unix gives `peer_uid_middleware` and for
@@ -330,11 +330,9 @@ fn bearer_credential(raw: &str) -> Option<&str> {
 /// path, and that absence is the whole proof that a
 /// `dreamd service install --force` which rotates `auth.json` mid-session
 /// invalidates the old credential on the very next request — the alternative
-/// is a daemon that keeps honouring a token the operator has already revoked
+/// is a daemon that keeps honoring a token the operator has already revoked
 /// until it is restarted. The cost is a synchronous read of a few dozen bytes
-/// from the daemon's own home inside an `async fn`, which is the same trade
-/// `agent_root_middleware` already makes with its synchronous
-/// `resolve_project` registry read one layer in.
+/// from the daemon's own home inside an `async fn`.
 ///
 /// # Errors
 /// * `401` — `Authorization` missing, not visible ASCII, or not
@@ -343,7 +341,7 @@ fn bearer_credential(raw: &str) -> Option<&str> {
 ///   `{"token":"<64 hex>"}`; or the presented credential does not match.
 ///
 /// **401, never 403.** Every branch above returns the same status and the same
-/// [`BEARER_UNAUTHORIZED`] body. `403` is the peer-UID verdict, stays
+/// `BEARER_UNAUTHORIZED` body. `403` is the peer-UID verdict, stays
 /// `#[cfg(unix)]`, and means something this layer can never conclude.
 ///
 /// The `warn!` on each rejection carries a *reason category* and nothing else
@@ -436,6 +434,7 @@ pub async fn bearer_auth_middleware(
     next.run(req).await
 }
 
+/// `403 Forbidden` with an `{"error": msg}` body: the peer-UID verdict.
 #[cfg(unix)]
 pub(crate) fn error_403(msg: &str) -> axum::response::Response {
     (
@@ -445,9 +444,10 @@ pub(crate) fn error_403(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
-/// The bearer verdict (AILAB-192). Unlike [`error_403`] this is **not**
-/// `#[cfg(unix)]`-gated in reverse: `bearer_auth_middleware` is `cfg`-free so
-/// Linux compiles and tests it, so its response helper has to be too.
+/// `401 Unauthorized` with an `{"error": msg}` body: the bearer verdict
+/// (AILAB-192). Not gated to `not(unix)`: `bearer_auth_middleware` is
+/// `cfg`-free so Linux compiles and tests it, so its response helper has to
+/// be too.
 pub(crate) fn error_401(msg: &str) -> axum::response::Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -456,6 +456,7 @@ pub(crate) fn error_401(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// `400 Bad Request` with an `{"error": msg}` body.
 pub(crate) fn error_400(msg: &str) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
@@ -464,6 +465,7 @@ pub(crate) fn error_400(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// `404 Not Found` with an `{"error": msg}` body.
 pub(crate) fn error_404(msg: &str) -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
@@ -472,6 +474,7 @@ pub(crate) fn error_404(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// `500 Internal Server Error` with an `{"error": msg}` body.
 pub(crate) fn error_500(msg: &str) -> axum::response::Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,

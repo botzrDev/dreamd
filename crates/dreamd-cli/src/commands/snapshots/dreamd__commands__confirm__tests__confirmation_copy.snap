@@ -1,0 +1,7 @@
+---
+source: crates/dreamd-cli/src/commands/confirm.rs
+expression: "format!(\"{}\\n{}\\n{io}\", ConfirmError::NotATty, ConfirmError::Declined)"
+---
+stdin is not a tty; pass --yes to confirm
+uninstall declined
+could not read the confirmation from stdin: closed

@@ -1,9 +1,9 @@
-//! `dreamd init` — scaffold the per-project `.agent/` store (DR-105 / WEG-9).
+//! `dreamd init` — scaffold the per-project `.agent/` store (WEG-9).
 //!
-//! Output is byte-locked against `tests/fixtures/init.golden.txt` and
-//! `tests/fixtures/init.rerun.golden.txt`. Any change to stdout text, ordering,
-//! or whitespace must be coordinated with the Clip A beat-sheet
-//! (`context/video/scripts/clip-a/`). Em-dashes are U+2014 (3 bytes).
+//! Output is byte-locked against the `tests/fixtures/init*.golden.txt` files
+//! (`tests/init_golden.rs`). Any change to stdout text, ordering, or
+//! whitespace updates those fixtures in the same commit. Em-dashes are U+2014
+//! (3 bytes).
 
 use std::fs;
 use std::io::{Read, Write};
@@ -26,7 +26,11 @@ const REREGISTER_MSG: &str = "dreamd: registered existing .agent/ in ~/.agent/re
 /// Failure modes for init scaffolding and registry operations.
 #[derive(Debug)]
 pub enum InitError {
+    /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
+    /// or `pyproject.toml`); the message is already on stderr. Exit code 2.
     NoProjectRoot,
+    /// Writing output, scaffolding the store, or reading or writing the
+    /// registry failed. Exit code 1.
     Io(std::io::Error),
 }
 
@@ -103,8 +107,8 @@ pub fn run(
 
     // Stage the entire scaffold inside a tmp directory so that any failure
     // before the rename leaves .agent/ untouched.  Rename is atomic within a
-    // single filesystem, which is the only case we need to handle (project
-    // root and its parent share a mount in all realistic scenarios).
+    // single filesystem, the only case handled here (the staging dir sits in
+    // the project root, next to `.agent/`).
     let tmp_dir = project_root.join(format!(".agent.tmp-{}", std::process::id()));
 
     // Clean up the tmp dir on any error so repeated failed runs don't
@@ -121,8 +125,9 @@ pub fn run(
     // Atomic commit: move the staging tree into the final position.
     fs::rename(&tmp_dir, agent.agent_dir())?;
 
-    // Register this project's `.agent/` root with the daemon home (DR-412).
-    // Side-effect runs regardless of --quiet; only the stdout line is gated.
+    // Register this project's `.agent/` root with the daemon home, so the
+    // daemon can serve it. Runs regardless of --quiet; only the stdout line
+    // is gated.
     register_project(daemon_home, &project_root)?;
 
     // .gitignore is an append-style side-effect that lives outside the rename
@@ -141,7 +146,7 @@ pub fn run(
 
 /// Remove the current project's entry from `~/.agent/registry.toml`.
 ///
-/// Does NOT delete the project's `.agent/` store. Idempotent: returns
+/// Does **not** delete the project's `.agent/` store. Idempotent: returns
 /// `Ok(())` with a benign "nothing to do" message if the project is not
 /// registered or the registry file is absent.
 pub fn uninstall_project(
@@ -168,9 +173,9 @@ pub fn uninstall_project(
     // `daemon_home` just to take the flock — uninstall must not scaffold
     // `~/.agent/` as a locking side effect. Gate on `registry.toml`, not on
     // `daemon_home.exists()`: the latter is a TOCTOU against a concurrent
-    // first `dreamd init` that creates the home between the check and the RMW
-    // (AILAB-161 report-back). A false-negative here (init wins the race) is
-    // fine — the user re-runs uninstall.
+    // first `dreamd init` that creates the home between the check and the
+    // RMW. A false-negative here (init wins the race) is fine — the user
+    // re-runs uninstall.
     //
     // Registry present ⇒ its parent exists, so `update_registry` can take the
     // flock. It re-reads under the lock: a racer that removed the file between
@@ -200,8 +205,8 @@ pub fn uninstall_project(
 /// and writes nothing. The flock and the re-read live in [`update_registry`].
 fn register_project(daemon_home: &DaemonHome, project_root: &Path) -> Result<bool, InitError> {
     // `create_dir_all` stays outside the lock — it is the precondition for
-    // creating the lockfile at all. Silent: no stdout line,
-    // `tests/fixtures/init.golden.txt` is byte-locked.
+    // creating the lockfile at all. Prints nothing: `run` decides which line,
+    // if any, the golden fixtures expect.
     fs::create_dir_all(daemon_home.root())?;
     Ok(update_registry(
         daemon_home,
@@ -244,9 +249,9 @@ fn scaffold_into(tmp: &Path, quiet: bool, out: &mut dyn Write) -> Result<(), Ini
     if !quiet {
         writeln!(out, "initialized .agent/.dreamd/state.json")?;
     }
-    // WEG-14 / DR-112 — silent config template write. No stdout line; the
-    // init.golden.txt byte-lock (651 B) forbids adding a line here (D1).
-    // Idempotency is enforced by the top-level `.agent/` existence guard.
+    // Silent config template write (WEG-14). No stdout line: init.golden.txt
+    // locks init's stdout byte for byte. Idempotency is enforced by the
+    // top-level `.agent/` existence guard.
     fs::write(dreamd_dir.join("config.toml"), CONFIG_TEMPLATE.as_bytes())?;
 
     Ok(())

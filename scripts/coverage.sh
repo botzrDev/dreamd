@@ -21,7 +21,7 @@ OUT_DIR="target/coverage"
 mkdir -p "$OUT_DIR"
 
 # Test-helper bins under tests/bin/ are subprocess fixtures, not product code —
-# exclude from the report. See memory: test-helper-bin-pattern.
+# exclude them from the report.
 IGNORE_RE='tests/bin/'
 
 cargo llvm-cov clean --workspace

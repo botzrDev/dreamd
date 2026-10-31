@@ -96,12 +96,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows `watch` serves loopback TCP + bearer. `write_atomic` runs there.
-    # The dream cycle stays refused until the log has a file identity, and the
-    # Tantivy index stays Unix-only. This matrix job stays continue-on-error:
-    # it already fails the BZR-1232 lock tests, so a probe buried here is
-    # invisible. The required probe is `windows-replace-probe`. Linux and macOS
-    # remain hard gates.
+    # Windows `watch` serves loopback TCP + bearer, and `write_atomic`, the
+    # dream cycle and the Tantivy index all run there (docs/windows.md). This
+    # matrix job stays continue-on-error: it already fails the BZR-1232 lock
+    # tests, so a probe buried here is invisible. The required probe is
+    # `windows-replace-probe`. Linux and macOS remain hard gates.
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
     permissions:
       contents: read
@@ -146,8 +145,7 @@ jobs:
   # ── MCP npx shim tests ───────────────────────────────────────────────────────
   # The dreamd-mcp shim's tests (version↔manifest↔server.json consistency, arg
   # routing, redirect/tar safety) run on plain `node --test` with no dependencies.
-  # These were previously ungated in CI — a version drift that broke the shim
-  # shipped with a red-but-never-run suite. This is that gate.
+  # This job is their CI gate.
   mcp-shim:
     name: MCP shim (node --test)
     runs-on: ubuntu-latest
@@ -202,8 +200,8 @@ jobs:
           if [ "$SIZE_BYTES" -gt "$WARN_BYTES" ]; then
             echo "::warning::Binary size ${SIZE_MB} MB has crossed the 16 MB soft warning threshold (hard limit: 24 MB, NFR-2)"
           fi
-          # NFR-2: must be < 24 MB (raised 15→20 MB on 2026-08-23 for AILAB-204 genai;
-          # 20→24 MB on 2026-10-29 for v1.2.0, whose musl build measured 20.23 MB)
+          # NFR-2: must be < 24 MB. Raised from 20 MB on 2026-10-29, when the
+          # v1.2.0 musl build measured 20.23 MB.
           MAX_BYTES=$((24 * 1024 * 1024))
           if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
             echo "::error::Binary size ${SIZE_MB} MB exceeds the 24 MB limit (NFR-2)"
@@ -377,7 +375,7 @@ jobs:
           fi
           echo "All commits are signed off."
 
-  # ── Binary size reporting — macOS (informational, DR-809) ────────────────────
+  # ── Binary size reporting — macOS (informational) ────────────────────────────
   size-report-macos:
     name: Binary size (macOS, informational)
     runs-on: macos-latest
@@ -447,12 +445,12 @@ jobs:
             echo "Daemon idle \`ps -o rss=\`: **${MB} MB** (no limit; NFR-1 Linux 30 MB gate unchanged)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Binary size reporting — Windows (informational, DR-809) ──────────────────
+  # ── Binary size reporting — Windows (informational) ──────────────────────────
   size-report-windows:
     name: Binary size (Windows, informational)
     runs-on: windows-latest
     needs: lint
-    continue-on-error: true          # Windows daemon deferred (DR-121); informational only
+    continue-on-error: true          # informational only: an unstripped size with no limit
     permissions:
       contents: read
     steps:
@@ -556,13 +554,14 @@ jobs:
   # End-to-end proof of the demo claim "what one agent learns, the next already
   # knows": drives the real MCP stdio protocol (sandboxed HOME, real daemon) so a
   # learning appended as one harness is recalled by an independent process — on
-  # both the daemon path (Phase 2) and the JSONL-replay path (Phase 1). Guards the
-  # live append->index->read wiring that unit tests do NOT cover (WEG-264 was a
-  # silent regression exactly there). Non-gating until it proves out (AC #4).
+  # both the daemon path (Phase 2) and the no-daemon path that indexes from the
+  # JSONL (Phase 1). Guards the live append->index->read wiring that unit tests
+  # do not cover (WEG-264 regressed there silently). Non-gating: it polls a real
+  # daemon, so it stays continue-on-error until it has a record of green runs.
   alpha:
     name: Alpha suite (cross-harness recall)
     needs: lint
-    continue-on-error: true   # non-gating until it proves out (≥3 green) — WEG-509 / AC #4
+    continue-on-error: true   # non-gating: polls a live daemon (WEG-509)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -595,10 +594,10 @@ jobs:
   # ── Install-funnel suite (AILAB-555) ─────────────────────────────────────────
   # End-to-end gate on the install front door: `setup` on a cold project, the
   # floating npx pin it writes, `doctor` on the scaffold, an idempotent re-run,
-  # the `update --dry-run` restart contract, and every row of the ratified
-  # AILAB-548 §3 conflict taxonomy. Unit tests cover the classifier; this covers
-  # the real binary against a real filesystem, which is where a wiring or
-  # exit-code regression actually reaches the user. Gating: unlike `alpha`, it
+  # the `update --dry-run` restart contract, and every row of the conflict
+  # taxonomy `setup` applies to an existing MCP config. Unit tests cover the
+  # classifier; this covers the real binary against a real filesystem, which is
+  # where a wiring or exit-code regression actually reaches the user. Gating: unlike `alpha`, it
   # starts no daemon and does no polling, so there is no flake budget to earn.
   install-funnel:
     name: Install funnel suite
@@ -632,7 +631,7 @@ jobs:
         # "=== RESULT: N passed, N failed ===".
         run: timeout 180 bash scripts/alpha/install-funnel-suite.sh
 
-  # ── Notify on main CI failure (WEG-257 / DR-102G) ────────────────────────────
+  # ── Notify on main CI failure (WEG-257) ──────────────────────────────────────
   notify-failure:
     name: Notify on main CI failure
     needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate, audit, deny]

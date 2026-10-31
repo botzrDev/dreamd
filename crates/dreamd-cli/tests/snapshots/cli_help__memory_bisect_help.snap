@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "nested_subcommand_help(\"memory\", \"bisect\")"
 ---
-Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot (BZR-153).
+Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot.
 
 Searches refs by the timestamp on their second line; there is no parent pointer. Each step checks out a snapshot, so it refuses while `dreamd watch` is running. Prints `<name> <id>`.
 

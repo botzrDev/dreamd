@@ -3,19 +3,21 @@
 //! A dream cycle (or a forget) writes every output it produces into
 //! `.agent/.dreamd/stage/<kind>-<now_sec>/` and fsyncs it there. Nothing live
 //! changes while the cycle stages. [`crate::wal::commit_cycle`] then writes one
-//! redo WAL naming every rename and unlink ([`Stage::redo`]) — the commit point
+//! redo WAL naming every rename and unlink (`Stage::redo`) — the commit point
 //! — and applies it. A crash before the commit point leaves only the stage
 //! directory, which the next writer to take the project lock wipes.
 //!
 //! A cycle plans every output first ([`crate::plan`]) and stages the plan with
 //! [`Stage::apply_plan`], which also carries the plan's ledger edges into the
-//! redo WAL. No phase reads back what another staged: the cycle reads its
-//! inputs through the empty stage, and `apply_plan` reads only the day's
-//! archive (and, for an unlink, whether `LESSONS.md` exists).
+//! redo WAL. No phase reads back an output another staged: the cycle's
+//! inputs (the log, `LESSONS.md`) are paths nothing has staged when it reads
+//! them, so those reads return the live files. Other reads only ask what the
+//! commit will leave: `unlink` checks whether its path will exist, and
+//! `apply_plan` reads the day's archive.
 //!
 //! Test builds also carry the crash hooks the crash sweep drives
-//! ([`crash_point`], `arm_crash`, `crash_fired`). Release builds compile
-//! [`crash_point`] to `Ok(())`.
+//! (`crash_point`, `arm_crash`, `crash_fired`). Release builds compile
+//! `crash_point` to `Ok(())`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -77,10 +79,12 @@ impl Stage {
     /// for a [`put`](Self::put), `None` for an [`unlink`](Self::unlink), and
     /// otherwise the live file (`None` when it is absent).
     ///
-    /// A cycle reads its inputs through the stage before it stages anything,
-    /// so it reads the live files. After that only [`apply_plan`](Self::apply_plan)
-    /// reads through it: the day's archive, and, through `unlink`, whether
-    /// `LESSONS.md` exists.
+    /// A cycle's inputs are paths nothing has staged when it reads them, so
+    /// those reads return the live files. A dream cycle stages its autosnap
+    /// ref and the old refs' unlinks before it reads `LESSONS.md`; each
+    /// `unlink` reads through the stage to skip a ref that is already gone.
+    /// [`apply_plan`](Self::apply_plan) reads the day's archive and, through
+    /// `unlink`, whether `LESSONS.md` exists.
     pub fn read(&self, live: &Path) -> io::Result<Option<Vec<u8>>> {
         if let Some(rel) = self.relative(live) {
             match self.entries.get(&rel) {
@@ -103,7 +107,7 @@ impl Stage {
     ///
     /// `live` must be under `.agent/`, or this is
     /// [`io::ErrorKind::InvalidInput`]. The staged file is fsynced here. The
-    /// directory entry becomes durable at the commit flush ([`crate::io::sync_dir`]).
+    /// directory entry becomes durable at the commit flush (`crate::io::sync_dir`).
     pub fn put(&mut self, live: &Path, bytes: &[u8]) -> io::Result<()> {
         use std::io::Write;
 

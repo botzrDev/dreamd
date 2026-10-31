@@ -1,21 +1,23 @@
-//! `MemoryCoordinator` — the single mutable owner of the episodic JSONL.
+//! `MemoryCoordinator` — the single mutable owner of the episodic JSONL in a
+//! process that holds the project writer lock.
 //!
-//! Per DR-103 / DR-114, all mutations to `AGENT_LEARNINGS.jsonl` flow through
-//! one tokio task. The "Mutex" of DR-103 is the actor itself: `&mut self` on
-//! [`MemoryCoordinator::run`] is the exclusivity guarantee — we do NOT wrap
-//! the file in a `Mutex`, because there is no other handle to it.
+//! Inside that process, every append to `AGENT_LEARNINGS.jsonl` flows through
+//! one tokio task. The actor is the mutex: `&mut self` on
+//! [`MemoryCoordinator::run`] is the exclusivity guarantee, so the file is not
+//! wrapped in a `Mutex`; there is no other handle to it.
 //!
-//! WEG-7 layers the durability protocol on the WEG-16 skeleton:
+//! The durability protocol (WEG-7):
 //!   - daemon-minted `EventId` (ULID, `evt_` + 26 Crockford chars),
-//!   - 4 KiB hard reject for serialized lines (no sidecar in v0.1),
+//!   - a hard reject for serialized lines over [`MAX_LEARNING_LINE_BYTES`],
+//!     with no sidecar,
 //!   - idempotency LRU keyed by (canonical AgentRoot path, client_dedup_key),
-//!   - malformed-tail-skip startup recovery so a torn final line does not
-//!     poison subsequent appends.
+//!   - open-time recovery ([`episodic::recover`]), so a torn final line does
+//!     not poison later appends.
 //!
-//! The file writes are blocking `std::io` calls; that's intentional for v0.1.
-//! The actor model already serializes mutations, so blocking the runtime task
-//! is acceptable until benchmarks demand otherwise. Do NOT swap in `tokio::fs`
-//! or `spawn_blocking` without re-reading `docs/architecture/durability.md`.
+//! The file writes are blocking `std::io` calls on purpose. The actor model
+//! already serializes mutations, so blocking the runtime task is acceptable
+//! until benchmarks demand otherwise. Do not swap in `tokio::fs` or
+//! `spawn_blocking` without re-reading `docs/architecture/durability.md`.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -39,10 +41,8 @@ use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
 use crate::server::index_freshness::AppendMark;
 
-/// Hard cap on a single serialized JSONL line — the on-disk line-format limit
-/// now lives in [`episodic`](crate::episodic). Re-exported so existing callers
-/// (`crate::coordinator::MAX_LEARNING_LINE_BYTES`) and the HTTP 413 mapping keep
-/// resolving unchanged.
+/// Hard cap on one serialized JSONL line, re-exported from [`crate::episodic`],
+/// which owns the line format. The HTTP handler maps a breach to 413.
 pub use crate::episodic::MAX_LEARNING_LINE_BYTES;
 
 const IDEMPOTENCY_CAPACITY: usize = 1024;
@@ -69,8 +69,10 @@ pub struct AppendOutcome {
 /// Errors surfaced by the coordinator back to API handlers.
 #[derive(Debug, thiserror::Error)]
 pub enum CoordinatorError {
+    /// Reading, writing or reopening the episodic log failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// A learning could not be serialized as a JSONL line.
     #[error("Serialize error: {0}")]
     Serialize(#[from] serde_json::Error),
     /// Serialized line exceeds [`MAX_LEARNING_LINE_BYTES`] — caller should
@@ -103,8 +105,9 @@ impl From<EpisodicError> for CoordinatorError {
 
 /// Messages accepted by the coordinator actor.
 ///
-/// `#[non_exhaustive]` keeps the enum forward-compatible: WEG-50 / later
-/// tickets will add `Query`, etc. without breaking downstream `match` arms.
+/// `#[non_exhaustive]` lets a variant be added without breaking downstream
+/// `match` arms. Recall does not go through the coordinator; it reads the
+/// index.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum MemoryCoordinatorMsg {
@@ -163,7 +166,7 @@ pub struct PreparedCycle {
 
 /// A prepared cycle that is still wanted. The coordinator keeps a `Weak` of
 /// the lease: while a ticket is alive a second `PrepareCycle` is refused, and
-/// once it drops (a crashed or cancelled caller) the next one goes ahead.
+/// once it drops (a crashed or canceled caller) the next one goes ahead.
 #[derive(Debug)]
 pub struct CycleTicket {
     id: u64,
@@ -192,11 +195,12 @@ pub struct MemoryCoordinator {
     minter: IdMinter,
     /// Device and inode on Unix, volume serial and file index on Windows, plus
     /// the length of the file `file` writes, as of its last write. Compared
-    /// with the path around every append.
+    /// with the path after every append, before every append on Unix, and
+    /// before a dream cycle reads the log.
     identity: LogIdentity,
     /// The project root this coordinator owns. The dream cycle (consolidation +
     /// decay) runs against this root. Distinct from `agent_root_key`, which is
-    /// canonicalized for idempotency keying — do NOT use the key for the cycle.
+    /// canonicalized for idempotency keying; do not use the key for the cycle.
     agent_root: AgentRoot,
     /// The project writer lock's ledger appender. `None` from `open_at`, which
     /// holds no lock; such a coordinator refuses to run a dream cycle.
@@ -207,11 +211,11 @@ pub struct MemoryCoordinator {
     /// (e.g., in tests against not-yet-created scratch dirs).
     agent_root_key: PathBuf,
     idempotency: LruCache<(PathBuf, String), IdempotencyEntry>,
-    /// WEG-42: optional hand-off to the per-project Tantivy indexer task.
+    /// Optional hand-off to the per-project Tantivy indexer task (WEG-42).
     /// `None` means "no indexer wired, append only" (existing tests). The
     /// hand-off awaits `send`, so a full channel backpressures this actor
-    /// rather than shedding an update; when the channel is closed we log
-    /// `warn!` once and drop the sender.
+    /// rather than shedding an update; a closed channel logs `warn!` once and
+    /// drops the sender.
     indexer_tx: Option<mpsc::Sender<crate::server::tantivy_handle::IndexerMsg>>,
     /// Set when the log changed outside this coordinator; the next append
     /// sends `IndexerMsg::Resync` after its own `Append` (BZR-1236). The send
@@ -230,12 +234,13 @@ pub struct MemoryCoordinator {
 }
 
 impl MemoryCoordinator {
-    /// Open the JSONL at the given path, run malformed-tail-skip recovery,
-    /// and return a coordinator ready to receive on `rx`.
+    /// Open the project's JSONL, run open-time recovery, and return a
+    /// coordinator ready to receive on `rx`.
     ///
-    /// Recovery: any trailing bytes that do not deserialize as a complete
-    /// `AgentLearning` are truncated. The last fully parseable line is the
-    /// recovery point. Subsequent appends start from there.
+    /// Recovery is [`episodic::recover`]: every `\n`-terminated line stays,
+    /// skipped ones included. A final line with no `\n` gets one when it
+    /// parses as a record, and is truncated otherwise. Appends go after the
+    /// last line that remains.
     ///
     /// `ledger` is the project writer lock's appender (`WriterLock::ledger`);
     /// the dream cycle records its edges through it.
@@ -253,6 +258,10 @@ impl MemoryCoordinator {
 
     /// Lower-level constructor used by tests that need to point at a
     /// scratch path independent of the layout module.
+    ///
+    /// It takes no project writer lock and no ledger, so the coordinator it
+    /// returns refuses to run a dream cycle. [`Self::open`] is the production
+    /// constructor.
     pub fn open_at(
         jsonl_path: &Path,
         agent_root: &Path,
@@ -356,7 +365,7 @@ impl MemoryCoordinator {
         mut learning: AgentLearning,
         client_dedup_key: Option<String>,
     ) -> Result<AppendOutcome, CoordinatorError> {
-        // Idempotency lookup BEFORE any write. A hit short-circuits to the
+        // Idempotency lookup before any write. A hit short-circuits to the
         // cached EventId — no second line on disk.
         if let Some(key) = client_dedup_key.as_deref() {
             let full_key = (self.agent_root_key.clone(), key.to_owned());
@@ -371,6 +380,12 @@ impl MemoryCoordinator {
 
         // A `git checkout` or `merge` under a live daemon replaces the log.
         // Write to the file at the path, not the replaced one.
+        //
+        // Unix only: this pre-append stat check (BZR-1233) was written when
+        // only Unix had a `LogIdentity`. The Windows file id (1.2.0) ungated
+        // the rest of this path, Prepare and Commit included, but not this
+        // call. On Windows a replace is found after the write, by
+        // `confirm_landed`, which appends the line again to the new file.
         #[cfg(unix)]
         self.ensure_live_log()?;
 
@@ -379,20 +394,20 @@ impl MemoryCoordinator {
         let event_id = self.minter.next_at(now);
         learning.id = event_id.clone();
 
-        // Server-stamp schema_version on every durable write. Closes the HTTP
-        // client-trust gap (WEG-275): post_learn never re-stamped, so a client
-        // could persist any value. Both ingress paths route through here.
+        // Server-stamp schema_version on every durable write, so no client
+        // can persist its own value (WEG-275). Both ingress paths route
+        // through here.
         learning.schema_version = RECORD_SCHEMA_VERSION.to_string();
 
         // Server-stamp timestamp — same "daemon owns durable fields" rule as `id`.
         let stamped: DateTime<Utc> = now.into();
         learning.timestamp = stamped;
 
-        // skill_action is NOT re-validated here (ARCHITECTURE.md §9): ingress
+        // skill_action is not re-validated here (ARCHITECTURE.md §9): ingress
         // (`LearnIngress`) is the sole gate; on-disk String accepts legacy
         // dotted keys that the dream cycle treats as opaque single segments.
 
-        // Write protocol (WEG-7 AC): serialize → ensure trailing \n → 4 KiB
+        // Write protocol (WEG-7): serialize → ensure trailing \n → size
         // check → write_all → sync_data. Delegated to the single durable-write
         // seam `episodic::append` (WEG-378); `PayloadTooLarge` maps to HTTP 413
         // via `From<EpisodicError>`. LRU insert stays below — only after a
@@ -408,8 +423,8 @@ impl MemoryCoordinator {
             mark.tail_id = Some(event_id.clone());
         }
 
-        // Cache insert ONLY after durable write succeeds. Insert-before
-        // would poison the cache on write failure.
+        // Cache insert only after the durable write succeeds. Inserting
+        // before would poison the cache on write failure.
         if let Some(key) = client_dedup_key {
             let full_key = (self.agent_root_key.clone(), key);
             self.idempotency.put(
@@ -421,18 +436,8 @@ impl MemoryCoordinator {
             );
         }
 
-        // WEG-42 hand-off to the indexer task. The send is AWAITED: a full
-        // channel backpressures this actor rather than shedding the message.
-        // Upstream, in-flight learns queue in the 256-slot coordinator channel
-        // and simply wait — there is no per-request timeout — so a brief park
-        // shows up as latency; only once that inbox is full too does the
-        // `Supervisor`'s separate 100 ms send timeout start returning HTTP 503,
-        // and only on the HTTP ingress (the in-process `dreamd mcp` path sends
-        // on this channel without that timeout, so it waits). A shed append
-        // would stay out of recall until the next coverage pass (the next
-        // open, or a resync), so backpressure is still what keeps live recall
-        // whole. A `Closed` channel is still logged once and the sender
-        // dropped so we stop retrying.
+        // Hand-off to the indexer task (WEG-42). The send is awaited; see
+        // `route_to_indexer` for why, and for the closed-channel rule.
         self.route_to_indexer(&event_id, &learning).await;
         // The log changed outside this coordinator: it may hold ids the index
         // has never seen. Queued behind this append's `Append`.

@@ -5,8 +5,8 @@
 # Covers what the unit tests cannot: the real binary, on a real filesystem,
 # walking the funnel a first-time user walks — `dreamd setup` on a cold project,
 # `dreamd doctor` on what it scaffolded, a second (idempotent) setup, the
-# `dreamd update --dry-run` restart contract, and the full ratified AILAB-548 §3
-# / §6 conflict taxonomy against pre-existing MCP config files.
+# `dreamd update --dry-run` restart contract, and every row of the setup
+# conflict taxonomy (AILAB-548) against pre-existing MCP config files.
 #
 # Fully sandboxed: HOME is redirected to a temp dir, so the real ~/.agent daemon,
 # registry, and memory are never touched (removed on exit). No network.
@@ -46,7 +46,7 @@ bad()  { echo "  ❌ $1"; fail=$((fail+1)); }
 # sandbox. Unconditional and SIGKILL: the step is supposed to stop that daemon
 # itself, but a failed assertion, an early `exit`, or a Ctrl-C must not leak a
 # daemon holding a Tantivy writer lock on a directory this trap is about to
-# delete. `wait` reaps the zombie so the pid cannot be recycled under us.
+# delete. `wait` reaps the zombie so the pid cannot be recycled mid-cleanup.
 WATCH_A_PID=""
 cleanup() {
   if [ -n "$WATCH_A_PID" ]; then
@@ -60,7 +60,7 @@ trap cleanup EXIT
 [ -x "$BIN" ] || { echo "FATAL: $BIN not built (run: cargo build -p dreamd)"; exit 1; }
 command -v python3 >/dev/null || { echo "FATAL: python3 required (JSON assertions)"; exit 1; }
 
-# --- helpers -----------------------------------------------------------------
+# ── helpers ──────────────────────────────────────────────────────────────────
 
 # Run the CLI inside <dir>; stdout/stderr land in $OUT/$ERR and the exit code in
 # $RC. stdin is /dev/null on purpose: `setup` refuses to prompt off a TTY
@@ -148,9 +148,7 @@ PY
 echo "=== dreamd install-funnel suite (sandbox HOME=$SANDBOX) ==="
 "$BIN" version 2>/dev/null | head -3 || true
 
-# =============================================================================
-# 1. Cold install — the first thing a new user runs
-# =============================================================================
+# ── 1. Cold install — the first thing a new user runs ────────────────────────
 echo "--- cold setup (--yes --harness claude) ---"
 COLD="$(new_project cold)"
 run_in "$COLD" setup --yes --harness claude
@@ -162,17 +160,14 @@ else
   bad ".mcp.json is not a floating pin: $reason"
 fi
 
-# =============================================================================
-# 2. doctor on what setup just made — diagnostic only.
-#    Never `doctor --repair` in a suite: it can hang (AILAB-561).
-# =============================================================================
+# ── 2. doctor on what setup just made ────────────────────────────────────────
+# Diagnostic only. `doctor --repair` rebuilds the index and has its own test
+# (crates/dreamd-cli/tests/doctor_repair.rs).
 echo "--- doctor on the fresh scaffold ---"
 run_in "$COLD" doctor
 expect_rc 0 "doctor on the fresh scaffold"
 
-# =============================================================================
-# 3. Re-running setup is a no-op, not a rewrite (§3 "already wired")
-# =============================================================================
+# ── 3. Re-running setup is a no-op, not a rewrite (the "already wired" row) ───
 echo "--- second setup is idempotent ---"
 snapshot "$COLD/.mcp.json"
 run_in "$COLD" setup --yes --harness claude
@@ -183,10 +178,9 @@ else
   bad ".mcp.json was rewritten by the second setup"
 fi
 
-# =============================================================================
-# 4. `update --dry-run` — prints the restart contract, touches nothing, and
-#    needs no network (the Rust side never downloads; that is the Node shim).
-# =============================================================================
+# ── 4. `update --dry-run` ────────────────────────────────────────────────────
+# Prints the restart contract, touches nothing, and needs no network (the Rust
+# side never downloads; that is the Node shim).
 echo "--- update --dry-run ---"
 run_in "$COLD" update --dry-run
 expect_rc 0 "update --dry-run"
@@ -197,19 +191,18 @@ else
   sed 's/^/      /' "$OUT" | head -10
 fi
 
-# =============================================================================
-# 4b. Live cross-HOME stop (AILAB-584) — the half `--dry-run` cannot reach.
+# ── 4b. Live cross-HOME stop (AILAB-584) ─────────────────────────────────────
+# The half `--dry-run` cannot reach.
 #
-# `update` used to `pkill -f 'dreamd watch'`, which is machine-global: the
-# 2026-08-03 clean-box audit caught a sandboxed `HOME=/tmp/… dreamd update`
-# SIGTERMing the developer's real Cursor MCP server (AILAB-554 F1). A dry run
-# signals nothing, so only a live daemon can prove the fix.
+# `update` stops only daemons attributable to its own home. A machine-global
+# `pkill -f 'dreamd watch'` let a sandboxed `HOME=/tmp/… dreamd update` SIGTERM
+# a developer's real Cursor MCP server (AILAB-554). A dry run signals nothing,
+# so only a live daemon can prove the scoping.
 #
 # Both directions are asserted, because the spare alone is worthless — a stopper
-# that never signalled anything would pass it. Same daemon, twice:
+# that never signaled anything would pass it. Same daemon, twice:
 #   (1) the suite's $HOME runs `update` → the home-a daemon must survive;
 #   (2) home-a runs `update` → that same daemon must go away.
-# =============================================================================
 echo "--- cross-HOME stop (AILAB-584) ---"
 HOME_A="$SANDBOX/home-a"
 mkdir -p "$HOME_A"
@@ -259,7 +252,7 @@ if [ "$started" -eq 1 ]; then
     sed 's/^/      /' "$ERR" | head -5
   fi
   # Hold the liveness check open: `kill` returns on signal *delivery*, so a
-  # wrongly-signalled daemon is still alive for a moment afterwards.
+  # wrongly-signaled daemon is still alive for a moment afterwards.
   still_up=1
   for _ in $(seq 1 5); do
     kill -0 "$WATCH_A_PID" 2>/dev/null || { still_up=0; break; }
@@ -293,10 +286,9 @@ kill -KILL "$WATCH_A_PID" 2>/dev/null
 wait "$WATCH_A_PID" 2>/dev/null
 WATCH_A_PID=""
 
-# =============================================================================
-# 5. Conflict taxonomy — every row of AILAB-548 §3, plus §6A/§6C
-# =============================================================================
-echo "--- conflict taxonomy (AILAB-548 §3 / §6) ---"
+# ── 5. Conflict taxonomy ─────────────────────────────────────────────────────
+# Every row, plus the atomic `--harness both` and the parse-failure refusal.
+echo "--- conflict taxonomy ---"
 
 # Row: hard-pinned dreamd block. Refuse without --force; with --force rewrite to
 # floating while every other server survives.
@@ -350,9 +342,10 @@ else
   bad "[command=dreamd] local-build entry was clobbered"
 fi
 
-# Row: floating package plus an extra `--project-root` arg — our own documented
-# global example. Compatible: exit 0 and the file is left byte-identical. Written
-# with 4-space indent and no trailing newline so any rewrite is visible.
+# Row: floating package plus an extra `--project-root` arg — dreamd's own
+# documented global example. Compatible: exit 0 and the file is left
+# byte-identical. Written with 4-space indent and no trailing newline so any
+# rewrite is visible.
 COMPAT="$(new_project compatible-project-root)"
 printf '%s' '{
     "mcpServers": {
@@ -368,22 +361,22 @@ else
   bad "[--project-root] compatible file was rewritten"
 fi
 
-# Row: malformed JSON. Exit 1, and --force explicitly cannot override it (§6C) —
-# we never overwrite a file we could not read.
+# Row: malformed JSON. Exit 1, and --force explicitly cannot override it —
+# setup never overwrites a file it could not read.
 MALFORMED="$(new_project conflict-malformed)"
 printf '%s\n' '{ "mcpServers": { "dreamd": ' > "$MALFORMED/.mcp.json"
 snapshot "$MALFORMED/.mcp.json"
 run_in "$MALFORMED" setup --yes --harness claude
 expect_rc 1 "[malformed] setup refuses"
 run_in "$MALFORMED" setup --yes --harness claude --force
-expect_rc 1 "[malformed] --force still refuses (§6C)"
+expect_rc 1 "[malformed] --force still refuses (parse failure)"
 if unchanged "$MALFORMED/.mcp.json"; then
   ok "[malformed] unreadable file left untouched"
 else
   bad "[malformed] unreadable file was overwritten"
 fi
 
-# Row: `--harness both` is atomic (§6A). Only .cursor/mcp.json conflicts, so
+# Row: `--harness both` is atomic. Only .cursor/mcp.json conflicts, so
 # .mcp.json — a clean create — must not be written at all.
 ATOMIC="$(new_project conflict-both-atomic)"
 mkdir -p "$ATOMIC/.cursor"

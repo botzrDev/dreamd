@@ -11,11 +11,18 @@ cd "$ROOT"
 
 fail=0
 
+# git grep searches tracked files only and needs nothing beyond git, which
+# every checkout has. Exit 0 is a match, 1 is none, anything else is an error
+# and fails the check rather than passing it silently.
 check() {
   local label="$1"
   shift
-  local matches
-  matches="$(rg -n "$@" 2>/dev/null || true)"
+  local matches status=0
+  matches="$(git grep -nE "$@")" || status=$?
+  if [[ "$status" -gt 1 ]]; then
+    echo "ERROR: git grep failed (exit ${status}) while checking ${label}"
+    exit 2
+  fi
   if [[ -n "$matches" ]]; then
     echo "ERROR: hard-pinned dreamd-mcp@ found in ${label}:"
     echo "$matches"
@@ -26,18 +33,15 @@ check() {
 # MCP adapter configs must use floating "dreamd-mcp", never "dreamd-mcp@…".
 check ".mcp.json.example files" \
   'dreamd-mcp@[0-9]' \
-  adapters/ \
-  --glob '.mcp.json*.example'
+  -- ':(glob)adapters/**/.mcp.json*.example'
 
 # Copy-paste npx one-liners and JSON args arrays in user-facing docs.
 check "user-facing docs" \
   '(npx[^[:alnum:]_-].*dreamd-mcp@|"dreamd-mcp@|\['\''-y'\'', "dreamd-mcp@|\["-y", "dreamd-mcp@)' \
-  README.md GUIDE.md AGENTS.md \
-  adapters/ docs/ packages/dreamd-mcp/README.md \
-  --glob '*.md' --glob '*.json.example' --glob '*.template' \
-  --glob '!docs/spikes/**' \
-  --glob '!CHANGELOG.md' \
-  --glob '!RELEASING.md'
+  -- README.md GUIDE.md AGENTS.md packages/dreamd-mcp/README.md \
+  ':(glob)adapters/**/*.md' ':(glob)adapters/**/*.json.example' ':(glob)adapters/**/*.template' \
+  ':(glob)docs/**/*.md' ':(glob)docs/**/*.json.example' ':(glob)docs/**/*.template' \
+  ':(exclude,glob)docs/spikes/**'
 
 if [[ "$fail" -ne 0 ]]; then
   echo

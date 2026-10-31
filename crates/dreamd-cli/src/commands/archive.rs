@@ -1,4 +1,4 @@
-//! `dreamd archive --force-unpin <id|--all>` — operator safety valve (WEG-134 / DR-116).
+//! `dreamd archive --force-unpin <id|--all>` — operator safety valve (WEG-134).
 //!
 //! Clears the sticky `pinned` flag on episodic entries so the next pruning pass
 //! (`dreamd dream` decay) can remove them. This is the manual escape hatch for
@@ -18,9 +18,10 @@
 //! hand-rolled and lines it does not unpin keep their bytes.
 //!
 //! **Daemon-coexistence guard (correctness, not scope):** a live daemon is the
-//! store's single writer. If we `rewrite_atomic` (temp + rename) underneath it,
-//! an append it makes between our read and our rename is lost. So we refuse
-//! when the daemon probes live and tell the operator to stop it first — a
+//! store's single writer. A `rewrite_atomic` (temp + rename) underneath it
+//! would lose an append it makes between this command's read and its rename.
+//! So the command refuses when the daemon probes live and tells the operator
+//! to stop it first — a
 //! persisted clear is the only correct implementation of "clears the pin
 //! flag". The probe is a bounded connect on whichever transport this target
 //! uses: UDS (`is_daemon_socket_live`) on Unix, a loopback TCP connect to the
@@ -38,6 +39,7 @@ use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 use dreamd_protocol::EventId;
 
+/// Why a `dreamd archive` run failed.
 #[derive(Debug)]
 pub enum ArchiveError {
     /// No `.agent/` store found walking up from `cwd`.
@@ -106,15 +108,12 @@ fn daemon_liveness(path: &Path) -> bool {
 /// Non-Unix probe (AILAB-192): `path` is `~/.agent/server.json` and the daemon
 /// is a loopback TCP listener, so this reads the published address and attempts
 /// a bounded TCP connect to it. A live daemon off Unix holds the JSONL exactly
-/// the way a Unix one does, so the coexistence guard must fire there too — that
-/// is the point of the probe.
+/// the way a Unix one does, so the coexistence guard must fire there too.
 ///
-/// This used to return `false` unconditionally, on the reasoning that a stale
-/// path must not strand the operator with no escape hatch. A connect probe
-/// cannot be stale that way: a `server.json` a `SIGKILL`ed watch left behind
-/// still parses, but nothing is listening on the port it names, so the connect
-/// fails and `--force-unpin` proceeds. Only a daemon that actually answers
-/// blocks the rewrite.
+/// A stale `server.json` cannot strand the operator: one a `SIGKILL`ed watch
+/// left behind still parses, but nothing is listening on the port it names, so
+/// the connect fails and `--force-unpin` proceeds. Only a daemon that actually
+/// answers blocks the rewrite.
 #[cfg(not(unix))]
 fn daemon_liveness(path: &Path) -> bool {
     dreamd_core::daemon_client::tcp_daemon_is_live(path)
@@ -173,8 +172,7 @@ pub fn run(
         }
     };
 
-    // Refuse while a live daemon holds the log: an append it makes between our
-    // read and our rename would be lost. Stop the daemon, then retry.
+    // Refuse while a live daemon holds the log (see the module doc).
     if let Some(sock) = socket {
         if daemon_liveness(sock) {
             writeln!(
@@ -206,7 +204,7 @@ pub fn run(
         }
     }
 
-    // Collect the ids we actually flip true → false so the audit log and the
+    // Collect the ids actually flipped true → false so the audit log and the
     // summary count only real state changes (idempotent clear of an already
     // unpinned entry is a no-op, not an error). One id per pinned line. With
     // no id, `all == true` here (validated above).
@@ -243,7 +241,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    // Fixed young timestamp (2026-07-03Z) — irrelevant to unpin, kept realistic.
+    // Fixed young timestamp (2025-07-03Z) — irrelevant to unpin, kept realistic.
     const NOW_SEC: i64 = 1751500800;
 
     /// Distinct valid `evt_` ids for fixtures (26-char Crockford ULID tail).

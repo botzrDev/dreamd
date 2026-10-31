@@ -55,14 +55,12 @@ from pathlib import Path
 KS = (1, 3, 5, 10, 30, 50)
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 MAX_LINE_BYTES = 4096
-CHUNK_BUDGET = 3300
-FLAT_TS = 1_700_000_000  # --timestamps flat: every learning gets this, so recency cancels  # serialized-line budget per chunk, leaves headroom under MAX_LINE_BYTES
+CHUNK_BUDGET = 3300  # serialized-line budget per chunk, leaves headroom under MAX_LINE_BYTES
+FLAT_TS = 1_700_000_000  # --timestamps flat: every learning gets this, so recency cancels
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-# ---------------------------------------------------------------------------
-# Reference protocol (ported from LongMemEval src/retrieval)
-# ---------------------------------------------------------------------------
+# ── Reference protocol (ported from LongMemEval src/retrieval) ───────────────
 
 
 def process_item_flat_index(data: list[dict], sess_id: str, timestamp: str):
@@ -120,9 +118,7 @@ def evaluate_retrieval_turn2session(rankings, correct_docs, corpus_ids, k=10):
     return evaluate_retrieval(rankings, correct_docs, corpus_ids, k=effective_k)
 
 
-# ---------------------------------------------------------------------------
-# Backends
-# ---------------------------------------------------------------------------
+# ── Backends ─────────────────────────────────────────────────────────────────
 
 
 def norm_tokens(text: str) -> list[str]:
@@ -310,9 +306,7 @@ def dreamd_backend(entry: dict, corpus: list[str], corpus_ids: list[str],
     return rankings, diag
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
+# ── Driver ───────────────────────────────────────────────────────────────────
 
 
 def build_corpus(entry: dict):

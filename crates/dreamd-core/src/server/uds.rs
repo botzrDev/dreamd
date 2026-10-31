@@ -1,19 +1,21 @@
-//! UDS bind / connect / cleanup for `~/.agent/dreamd.sock` (WEG-21 / DR-118).
+//! UDS bind / connect / cleanup for `~/.agent/dreamd.sock` (WEG-21).
 //!
 //! Bind protocol:
 //!   1. Try `UnixListener::bind(path)`.
 //!   2. On `AddrInUse`, try `UnixStream::connect(path)`:
-//!        - Success → another writer-process is alive; the caller becomes a
-//!          client. Returns [`UdsBindError::AlreadyBound`].
+//!        - Success → another daemon is alive. Returns
+//!          [`UdsBindError::AlreadyBound`], and `dreamd watch` exits with
+//!          `ServerError::UdsBind`.
 //!        - Connection refused → orphaned socket file. Unlink + retry bind.
 //!   3. On bind success, chmod the socket to `0600` so only the daemon user
-//!      can connect (paired with `SO_PEERCRED` validation in DR-407).
+//!      can connect (paired with the `SO_PEERCRED` UID check on every request).
 //!
 //! Cleanup: the bind does not own the file. `dreamd watch` unlinks it on
 //! shutdown (`watch.rs`); a file left by a crash or a `SIGKILL` is an orphan,
 //! which the next bind removes (step 2).
 //!
-//! Unix-only. Windows path is DR-121 / WEG-135, deferred to v0.1.1.
+//! Unix-only. Off Unix, `dreamd watch` serves loopback TCP instead
+//! (`watch::bind_listen` / `watch::serve_tcp`).
 
 #![cfg(unix)]
 
@@ -22,12 +24,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-/// Reason a bind attempt did not become the writer-process.
+/// Reason a bind attempt did not get the socket.
 #[derive(Debug, thiserror::Error)]
 pub enum UdsBindError {
-    /// Another writer-process answered on the socket. Caller should connect
-    /// as a client instead of retrying. Carries the connected stream so the
-    /// caller doesn't have to reopen it.
+    /// Another daemon answered on the socket. Carries the connected stream;
+    /// the production caller (`dreamd watch`) drops it and exits.
     #[error("socket already bound by another writer-process")]
     AlreadyBound(UnixStream),
 
@@ -60,8 +61,8 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
-                    // Orphaned socket file: previous writer-process exited
-                    // without cleanup. Unlink and re-bind. We treat NotFound
+                    // Orphaned socket file: the previous daemon exited
+                    // without cleanup. Unlink and re-bind. NotFound counts
                     // as orphaned too — a race where the file vanished
                     // between the AddrInUse bind and the connect attempt is
                     // safe to retry as a fresh bind.
@@ -88,7 +89,7 @@ pub fn try_connect_existing(path: &Path) -> io::Result<UnixStream> {
 const LIVENESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Returns `true` only when a UDS connect to `path` succeeds within
-/// [`LIVENESS_PROBE_TIMEOUT`].
+/// `LIVENESS_PROBE_TIMEOUT` (500 ms).
 ///
 /// Probe-only: the stream is dropped immediately on success. Orphan socket
 /// files (`ConnectionRefused` / `NotFound`) and connect timeouts both map to
@@ -212,7 +213,7 @@ mod tests {
 
         // Simulate a stale socket file: bind, then drop the listener. The
         // kernel socket goes away, but the path remains, so subsequent
-        // connect() attempts will see ConnectionRefused — the exact AC scenario.
+        // connect() attempts will see ConnectionRefused, as after a crash.
         drop(bind_socket_raw(&sock).expect("first bind"));
         assert!(sock.exists(), "stale socket file expected for the test");
 

@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"setup\")"
 ---
-Front door: scaffold .agent/ (via init) and print the harness wiring next steps
+Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps
 
 Usage: setup [OPTIONS]
 

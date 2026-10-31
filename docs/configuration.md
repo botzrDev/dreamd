@@ -36,15 +36,15 @@ This is the exact template written by `dreamd init` (`CONFIG_TEMPLATE`):
 ```toml
 # dreamd config — all keys optional. Precedence: this file > ~/.config/dreamd/config.toml > built-in defaults.
 
-# redaction = true              # redact secrets/PII on POST /api/v1/learn (DR-111)
-# log_level = "info"            # trace | debug | info | warn | error
+# redaction = true              # redact secrets/PII on POST /api/v1/learn
+# log_level = "info"            # parsed but unused; logs follow the DREAMD_LOG env var
 # dream_cycle_mode = "manual"   # "manual" | "auto" — manual only; auto is rejected
 
-# --- LLM keys: read by the dream cycle (AILAB-204) ---
+# --- LLM keys: read by the dream cycle ---
 # provider = ""                 # "anthropic" | "openai"; empty infers from model
 # model = "claude-haiku-4-5"    # model id
 # endpoint = ""                 # base URL override; empty uses the provider default
-# cost_cap_usd = 0.10           # hard per-cycle spend cap — enforced pre-call (AILAB-196)
+# cost_cap_usd = 0.10           # hard per-cycle spend cap, enforced before the model call
 ```
 
 A fully commented project config parses successfully and yields built-in defaults.

@@ -1,8 +1,8 @@
-//! `LESSONS.md` writer/reader (DR-109 / WEG-11).
+//! `LESSONS.md` writer/reader (WEG-11).
 //!
-//! Structured frontmatter + HTML-comment-delimited blocks so the v0.1.1
-//! semantic indexer (DR-211) can extract lessons without leaning on a
-//! markdown AST. One cluster per file — the cluster is a file-level
+//! Structured frontmatter + HTML-comment-delimited blocks so the semantic
+//! indexer can extract lessons without leaning on a markdown AST. One cluster
+//! per file — the cluster is a file-level
 //! invariant carried on [`LessonsFile::cluster_key`], not a per-lesson
 //! field, so an inconsistent state is unrepresentable by construction.
 //!
@@ -23,7 +23,7 @@ pub struct Lesson {
     /// EventId string of the exemplar (or pinned) learning this lesson came from.
     pub id: String,
     pub content: String,
-    /// Reserved; always `false` in v0.1. Forward-compat slot for v0.2.
+    /// Reserved; always `false`.
     pub pinned: bool,
 }
 
@@ -65,9 +65,14 @@ const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 /// lesson boundaries are the HTML comments, provenance is `citations`.
 ///
 /// Split out from the writer (AILAB-341) so `dreamd dream --dry` can print the
-/// file a cycle *would* write without touching disk. The preview is the same
-/// function call the write path makes, so the two cannot drift into printing
-/// one shape and persisting another.
+/// file a cycle *would* write without touching disk. A real cycle stages these
+/// same bytes (`Stage::apply_plan` renders a `LessonsChange::Write` with this
+/// function), so the preview and the cycle cannot drift into printing one
+/// shape and persisting another.
+///
+/// Lesson bodies are written verbatim, not escaped. A body that contains the
+/// close marker `<!-- /dreamd:lesson -->` ends its block early when the file
+/// is parsed back: the parse either fails or yields a lesson the body forged.
 #[must_use]
 pub fn render_lessons_file(file: &LessonsFile) -> String {
     let mut s = String::new();
@@ -102,9 +107,9 @@ pub fn render_lessons_file(file: &LessonsFile) -> String {
 /// Serialize `file` and write it atomically to `path` (via
 /// [`crate::io::write_atomic`]).
 ///
-/// The bytes are exactly [`render_lessons_file`]'s output — the dry-run preview
-/// and this writer share one serializer by construction. That format is
-/// `SPEC.md` §Dream cycle's `LESSONS.md` output.
+/// The bytes are exactly [`render_lessons_file`]'s output. No production path
+/// calls this: a cycle stages the rendered bytes and commits them with its
+/// redo WAL. Tests use it to seed a store.
 pub fn write_lessons_file(path: &Path, file: &LessonsFile) -> io::Result<()> {
     write_atomic(path, render_lessons_file(file).as_bytes())
 }
@@ -160,7 +165,7 @@ fn parse_frontmatter(lines: &[&str]) -> io::Result<(ParsedFrontmatter, usize)> {
     let cluster_key = cluster_key.ok_or_else(|| invalid("missing cluster_key"))?;
     // Absent on every file written before AILAB-200. Missing is empty, not an
     // error — an old `LESSONS.md` must keep parsing, and an empty union just
-    // means `cited_pins` falls back to today's `Lesson.id`-only behavior.
+    // means `cited_pins` falls back to pinning `Lesson.id` alone.
     let citations: Vec<String> = citations
         .unwrap_or_default()
         .split_whitespace()
@@ -425,10 +430,9 @@ mod tests {
         assert_eq!(read_lessons_file(&path).expect("read ok"), f);
     }
 
-    /// AILAB-341: the dry-run preview prints `render_lessons_file`; a real cycle
-    /// persists `write_lessons_file`. If those ever produced different bytes the
-    /// preview would be a lie, so pin the identity rather than trusting that one
-    /// still delegates to the other.
+    /// `write_lessons_file` must write exactly `render_lessons_file`'s bytes,
+    /// since tests seed stores with it and compare against rendered output; pin
+    /// the identity rather than trusting that one still delegates to the other.
     #[test]
     fn write_lessons_file_persists_exactly_render_lessons_file_bytes() {
         let dir = unique_tmpdir("render-eq-write");

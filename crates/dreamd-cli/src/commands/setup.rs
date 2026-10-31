@@ -2,19 +2,21 @@
 //! wiring next steps (AILAB-549).
 //!
 //! The scaffold is [`super::init::run`] verbatim, so `dreamd init` stdout stays
-//! byte-locked against `tests/fixtures/init.golden.txt` (Clip A): setup wraps
-//! init's lines with its own header/footer and never rewrites them.
+//! byte-locked against `tests/fixtures/init.golden.txt`: setup wraps init's
+//! lines with its own header/footer and never rewrites them.
 //!
-//! The harness MCP config is merged by [`super::setup_mcp`] under the ratified
-//! AILAB-548 taxonomy. On a TTY without `--yes`, [`run`] first walks the
-//! AILAB-551 wizard prompts; off a TTY it refuses rather than silently
-//! defaulting, using the same vocabulary as `dreamd reset` (§1.2).
+//! The harness MCP config is merged by [`super::setup_mcp`], which keeps a
+//! compatible `dreamd` entry and refuses a conflicting one without `--force`.
+//! On a TTY without `--yes`, [`run`] first walks the AILAB-551 wizard prompts;
+//! off a TTY it refuses rather than silently defaulting, in the same words as
+//! `dreamd reset`.
 //!
-//! A real run closes with the frozen AILAB-548 §1 success card. Everything it
-//! claims is observed, not assumed: `wired` lists the labels
-//! [`wire_mcp`] actually wrote, and `daemon` reports a UDS liveness probe on
-//! the socket the daemon itself would bind. A `--dry-run` prints the plan and
-//! the next-steps list instead — a plan is not a completed setup.
+//! A real run closes with the fixed-copy success card. Everything it claims is
+//! observed, not assumed: `wired` lists the labels `wire_mcp` actually wrote,
+//! and `daemon` reports a liveness probe of the daemon's own listener (the
+//! socket on Unix, the loopback address in `server.json` elsewhere). A
+//! `--dry-run` prints the plan and the next-steps list instead — a plan is not
+//! a completed setup.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -40,9 +42,9 @@ const CARD_VALUE_COLUMN: usize = 15;
 /// enough that `scaffolded` (the longest label) still leaves a visible gap.
 const CARD_LABEL_WIDTH: usize = CARD_VALUE_COLUMN - CARD_GUTTER.len();
 
-/// How many times we re-probe the socket after spawning the daemon, and how
-/// long we wait between probes — ~2s worst case before the card gives up and
-/// reports `not running`.
+/// How many times to re-probe the daemon after spawning it, and how long to
+/// wait between probes — ~2s worst case before the card gives up and reports
+/// `not running`.
 const WATCH_PROBE_ATTEMPTS: u32 = 20;
 const WATCH_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -59,7 +61,7 @@ pub enum Harness {
 impl Harness {
     /// Project-relative MCP config files this harness reads (adapter READMEs).
     /// Empty for [`Harness::None`]. The global `~/.cursor/mcp.json` is out of
-    /// scope by design (AILAB-548 §2) — `setup` only writes inside the project.
+    /// scope by design — `setup` only writes inside the project.
     pub(crate) fn config_targets(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &[".mcp.json"],
@@ -99,10 +101,14 @@ impl std::fmt::Display for Harness {
 /// contract (`2` usage / `1` runtime) is unchanged from `dreamd init`.
 #[derive(Debug)]
 pub enum SetupError {
+    /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
+    /// or `pyproject.toml`); `cli.rs` maps this to exit code 2.
     NoProjectRoot,
     /// No TTY to prompt on and no `--yes`. Refusing beats silently accepting
-    /// defaults that write files (AILAB-551 §1.2); `cli.rs` maps this to `2`.
+    /// defaults that write files; `cli.rs` maps this to `2`.
     NotATty,
+    /// Writing output, scaffolding the store or registering it failed;
+    /// `cli.rs` maps this to exit code 1.
     Io(std::io::Error),
     /// The harness MCP config could not be written (conflict without `--force`,
     /// malformed existing JSON, or an unwritable path). Details are already on
@@ -130,8 +136,8 @@ impl std::fmt::Display for SetupError {
         match self {
             Self::NoProjectRoot => write!(f, "no project root"),
             // Byte-identical to `ResetError::NotATty` on purpose — one refusal
-            // vocabulary across commands (AILAB-551 §1.2). A test pins the pair.
-            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
+            // vocabulary across commands. A test pins the pair.
+            Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
             Self::Io(e) => write!(f, "{e}"),
             Self::Mcp(e) => write!(f, "{e}"),
         }
@@ -141,8 +147,8 @@ impl std::fmt::Display for SetupError {
 impl std::error::Error for SetupError {}
 
 /// Which prompts to run. A flag the user typed on the command line wins over
-/// its prompt (AILAB-551 §1.7) — detected via `ValueSource::CommandLine`,
-/// never by comparing against clap defaults.
+/// its prompt — detected via `ValueSource::CommandLine`, never by comparing
+/// against clap defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Interactive {
     pub ask_harness: bool,
@@ -165,7 +171,7 @@ pub struct SetupRequest<'a> {
     /// `false` when `--no-write-mcp` was given.
     pub write_mcp: bool,
     /// `--force`: replace an incompatible `mcpServers.dreamd` entry. Never
-    /// overrides a JSON parse failure (AILAB-548 §6C).
+    /// overrides a JSON parse failure.
     pub force: bool,
     /// `--start-watch` was requested: spawn `dreamd watch` in the background
     /// after wiring, then report what the liveness probe actually finds. Never
@@ -213,12 +219,12 @@ pub fn run(
     if !req.yes {
         if !std::io::stdin().is_terminal() {
             // Same line as `dreamd reset` — refusing beats writing files off a
-            // pipe with answers nobody gave (AILAB-551 §1.2).
-            writeln!(err, "error: stdin is not a tty; pass --yes to confirm")?;
+            // pipe with answers nobody gave.
+            writeln!(err, "error: {}", super::confirm::ConfirmError::NotATty)?;
             return Err(SetupError::NotATty);
         }
-        // Ratified: `--dry-run` prints the plan for the flags as given. Asking
-        // questions to then write nothing is noise.
+        // `--dry-run` prints the plan for the flags as given. Asking questions
+        // to then write nothing is noise.
         if !req.dry_run {
             let stdin = std::io::stdin();
             let mut input = stdin.lock();
@@ -277,7 +283,7 @@ pub fn run(
         // be a lie here, so the plan keeps the next-steps list.
         write_next_steps(req, out)?;
     } else {
-        // Reuse init verbatim (non-quiet): the scaffold lines and the DR-413
+        // Reuse init verbatim (non-quiet): the scaffold lines and the first-run
         // privacy disclosure are exactly what a first-run user needs to see.
         init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
         let wired = wire_mcp(req, &project_root, out, err)?;
@@ -315,12 +321,12 @@ pub fn run(
     Ok(())
 }
 
-/// The wizard's harness default. Deliberately NOT the clap default
+/// The wizard's harness default. Deliberately not the clap default
 /// (`Harness::Both`): a user at a prompt is answering for the agent in front of
-/// them, while a scripted `--yes` run wants both configs wired (AILAB-551 §1.6).
+/// them, while a scripted `--yes` run wants both configs wired.
 const HARNESS_PROMPT_DEFAULT: Harness = Harness::Claude;
 
-/// Stand-in for a line we could not read at all. No `parse_*` accepts it, so an
+/// Stand-in for a line that could not be read at all. No `parse_*` accepts it, so an
 /// unreadable answer walks the ordinary re-ask-then-default path instead of
 /// ending the run. The leading NUL keeps it out of anything a user could type.
 const UNREADABLE_ANSWER: &str = "\u{0}<unreadable>";
@@ -345,8 +351,7 @@ fn read_answer(input: &mut dyn BufRead) -> String {
 /// Prompts are written to stderr, never stdout — the TTY gate only checks
 /// *stdin*, so under `dreamd setup > log.txt` on a terminal a stdout prompt
 /// would render nothing while `read_line` blocked, and the question would end
-/// up in the file. `dreamd reset` prompts on stderr for the same reason
-/// (AILAB-551 §1.2 — one refusal/prompt vocabulary across commands).
+/// up in the file. `dreamd reset` prompts on stderr for the same reason.
 fn write_harness_prompt(err: &mut dyn Write) -> std::io::Result<()> {
     writeln!(err)?;
     writeln!(err, "  Which coding agent are you wiring up?")?;
@@ -371,7 +376,7 @@ fn parse_harness_answer(answer: &str) -> Option<Harness> {
 }
 
 /// Ask which harness to wire. Re-asks exactly once on unparseable input, then
-/// takes the default rather than looping (AILAB-548 §1) — a wizard that cannot
+/// takes the default rather than looping — a wizard that cannot
 /// be escaped is worse than one that guesses.
 pub(crate) fn prompt_harness(
     input: &mut dyn BufRead,
@@ -423,7 +428,7 @@ pub(crate) fn prompt_start_watch(
 /// dry-run plan). Runs after the scaffold so a refusal here never leaves a
 /// half-made `.agent/`.
 ///
-/// `--harness both` is all-or-nothing (AILAB-548 §6A): every target is read and
+/// `--harness both` is all-or-nothing: every target is read and
 /// classified before any of them is written.
 ///
 /// Returns the labels that end up carrying the dreamd block — what the success
@@ -450,8 +455,8 @@ fn wire_mcp(
     for label in targets {
         match setup_mcp::plan(project_root, label) {
             Ok(planned) => plans.push(planned),
-            // Unparseable config: refuse before writing anything, `--force`
-            // included (AILAB-548 §6C).
+            // Unparseable config: refuse before writing anything, even under
+            // `--force`.
             Err(e) => return Err(report_mcp_error(e, err)?),
         }
     }
@@ -507,7 +512,7 @@ fn report_mcp_error(e: McpError, err: &mut dyn Write) -> std::io::Result<SetupEr
     Ok(SetupError::Mcp(e))
 }
 
-/// Status line for a target we just wrote (or deliberately did not).
+/// Status line for a target that was just written (or deliberately was not).
 fn applied_status(planned: &TargetPlan) -> String {
     match &planned.action {
         Action::Create => format!("wrote {}", planned.label),
@@ -520,7 +525,7 @@ fn applied_status(planned: &TargetPlan) -> String {
     }
 }
 
-/// Per-target dry-run report: the verdict plus the JSON we would write.
+/// Per-target dry-run report: the verdict plus the JSON that would be written.
 fn report_dry_run(
     req: &SetupRequest<'_>,
     planned: &TargetPlan,
@@ -557,11 +562,11 @@ fn report_dry_run(
     Ok(())
 }
 
-/// Launch `dreamd watch` in the background. Deliberately NOT a daemon: the CLI
+/// Launch `dreamd watch` in the background. Deliberately not a daemon: the CLI
 /// crate forbids `unsafe`, so there is no `setsid` available and the child stays
 /// in setup's session. It outlives setup, but a terminal close can SIGHUP it —
 /// documented, and the success card reports what is actually live rather than
-/// what we hoped for. `dreamd watch` in the foreground remains the supported
+/// what was hoped for. `dreamd watch` in the foreground remains the supported
 /// long-running form.
 fn spawn_watch(project_root: &Path) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
@@ -584,8 +589,8 @@ fn resolve_socket() -> Option<PathBuf> {
     dreamd_core::client::resolve_daemon_socket()
 }
 
-/// No UDS on Windows in v0.1 — there is no socket to resolve, so the card
-/// always reports the daemon down. Mirrors the `cli::run_doctor` arm.
+/// Off Unix the daemon listens on loopback TCP, not a socket, so there is no
+/// socket path to hand `doctor`. Mirrors the `cli::run_doctor` arm.
 #[cfg(not(unix))]
 fn resolve_socket() -> Option<PathBuf> {
     None
@@ -598,15 +603,21 @@ fn socket_is_live(path: &Path) -> bool {
     dreamd_core::server::is_daemon_socket_live(path)
 }
 
-/// Windows fallback so the command compiles; mirrors `status::daemon_liveness`.
-#[cfg(not(unix))]
-fn socket_is_live(path: &Path) -> bool {
-    path.exists()
+/// Is a daemon listening right now? One resolve, one probe, no waiting. On
+/// Unix the probe is the socket from `resolve_socket`, so `daemon_home` is
+/// unused (see that function for why it never derives the path from it).
+#[cfg(unix)]
+fn daemon_is_live(_daemon_home: &Path) -> bool {
+    resolve_socket().is_some_and(|path| socket_is_live(&path))
 }
 
-/// Is a daemon listening right now? One resolve, one probe, no waiting.
-fn daemon_is_live() -> bool {
-    resolve_socket().is_some_and(|path| socket_is_live(&path))
+/// Is a daemon listening right now? Off Unix, a bounded connect to the
+/// loopback address `watch` published in `daemon_home`'s `server.json` — the
+/// same probe `open_daemon_store` uses. A stale `server.json` left by a killed
+/// daemon fails the connect and reads as not live.
+#[cfg(not(unix))]
+fn daemon_is_live(daemon_home: &Path) -> bool {
+    dreamd_core::daemon_client::tcp_daemon_is_live(&DaemonHome::new(daemon_home).server_json())
 }
 
 /// Start the daemon when asked, then report whether one is actually listening.
@@ -614,7 +625,7 @@ fn daemon_is_live() -> bool {
 /// The card reports the probe, not the request: a spawn that failed, a daemon
 /// that has not bound yet, and a daemon someone else started all read the same
 /// way to the user, because all three are answered by the same question — is
-/// anything serving the socket?
+/// a daemon accepting connections?
 fn start_watch_and_probe(
     req: &SetupRequest<'_>,
     project_root: &Path,
@@ -623,13 +634,13 @@ fn start_watch_and_probe(
     if !req.start_watch {
         // No spawn: a daemon may already be up from an earlier session, so ask
         // once rather than assuming it is down.
-        return Ok(daemon_is_live());
+        return Ok(daemon_is_live(req.daemon_home));
     }
 
-    if daemon_is_live() {
-        // Something is already serving the socket. A second `dreamd watch`
-        // would lose the `bind_api_socket` race with `AlreadyBound` and exit
-        // 1 into fully nulled stdio — a guaranteed-doomed process nobody would
+    if daemon_is_live(req.daemon_home) {
+        // A daemon is already up. A second `dreamd watch` would lose to it
+        // (on Unix, `bind_api_socket` fails with `AlreadyBound`) and exit 1
+        // into fully nulled stdio — a guaranteed-doomed process nobody would
         // ever see. Report the daemon that is actually up instead.
         return Ok(true);
     }
@@ -641,14 +652,14 @@ fn start_watch_and_probe(
             err,
             "dreamd: could not start the daemon in the background ({e}) \u{2014} run `dreamd watch` yourself."
         )?;
-        return Ok(daemon_is_live());
+        return Ok(daemon_is_live(req.daemon_home));
     }
 
     // The child has to bind before it is live; poll instead of guessing a
     // single sleep, and return on the first success.
     for _ in 0..WATCH_PROBE_ATTEMPTS {
         std::thread::sleep(WATCH_PROBE_INTERVAL);
-        if daemon_is_live() {
+        if daemon_is_live(req.daemon_home) {
             return Ok(true);
         }
     }
@@ -656,7 +667,7 @@ fn start_watch_and_probe(
 }
 
 /// Advisory `doctor` pass: one verdict line, never an exit code, never a
-/// mutation. Ratified as advisory-only, so every way this can fail — no config,
+/// mutation. Because it is advisory only, every way this can fail — no config,
 /// no discoverable store, doctor itself erroring — skips the beat instead of
 /// failing a setup whose real work is already done.
 ///
@@ -710,8 +721,8 @@ fn write_card_row(out: &mut dyn Write, label: &str, value: &str) -> std::io::Res
     writeln!(out, "{CARD_GUTTER}{label:<CARD_LABEL_WIDTH$}{value}")
 }
 
-/// The AILAB-548 §1 success card — frozen copy, printed once, at the end of a
-/// real (non-dry-run) setup.
+/// The success card — fixed copy, printed once, at the end of a real
+/// (non-dry-run) setup. Tests assert it whole.
 ///
 /// Pure by construction: the wired labels, the harness, and daemon liveness are
 /// all passed in, so the copy is unit-testable without touching a filesystem or
@@ -770,7 +781,7 @@ fn write_success_card(
     }
     if let Some(lesson) = lesson {
         // Their words, not the generic verify sentence: the next search has
-        // to share tokens with the line we just stored.
+        // to share tokens with the line that was just stored.
         writeln!(out, "        {}", lesson.sentence)?;
         writeln!(
             out,
@@ -783,8 +794,9 @@ fn write_success_card(
             "        If the next chat quotes it, reply with that id."
         )?;
     } else {
-        // Byte-identical to adapters/cursor/README.md §6 — one verify sentence
-        // across the docs and the CLI, when setup stored no sentence.
+        // Byte-identical to the "Verify" step of adapters/cursor/README.md —
+        // one verify sentence across the docs and the CLI, when setup stored
+        // no sentence.
         writeln!(
             out,
             "        \"What has dreamd remembered about this codebase?\""
@@ -816,8 +828,8 @@ fn write_success_card(
 
 fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
     let targets = req.harness.config_targets();
-    // Only hand out the copy-paste block when we did NOT write the config
-    // ourselves (`--no-write-mcp` / `--harness none`).
+    // Only hand out the copy-paste block when setup did not write the config
+    // itself (`--no-write-mcp` / `--harness none`).
     let show_mcp_step = !req.write_mcp || targets.is_empty();
 
     writeln!(out)?;
@@ -852,8 +864,9 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
     )
 }
 
-/// Clustering key for the one sentence `setup` stores. Language-first, so it
-/// matches the dream-cycle key shape, and fixed so a later search can name it.
+/// Clustering key for the one sentence `setup` stores. It has the dream-cycle
+/// key shape (`[a-z0-9_]` segments joined by `::`) and is fixed so a later
+/// search can name it.
 const FIRST_LESSON_SKILL: &str = "setup::first_lesson";
 
 /// The Cursor rule `setup` writes. The adapter file is the source, so a manual
@@ -1101,9 +1114,9 @@ fn append_via_daemon(
 }
 
 /// A daemon that is actually accepting connections, or `None` so the caller
-/// opens its own coordinator. Unix uses the same socket the success card
-/// probes. Off Unix the card has no UDS path; this probe is the loopback
-/// listener `server.json` names, so a running `watch` stays the only writer.
+/// opens its own coordinator. It probes what `daemon_is_live` probes: the
+/// socket on Unix, the loopback listener `server.json` names elsewhere, so a
+/// running `watch` stays the only writer.
 fn open_daemon_store(
     daemon_home: &Path,
     project_root: &Path,
@@ -1175,10 +1188,10 @@ mod tests {
     fn setup_not_a_tty_matches_reset_vocabulary() {
         assert_eq!(
             SetupError::NotATty.to_string(),
-            "stdin is not a tty; pass --yes to confirm"
+            super::super::confirm::ConfirmError::NotATty.to_string()
         );
-        // AILAB-551 §1.2: the two commands must refuse in the same words, so
-        // drift in either one fails here rather than shipping.
+        // The two commands must refuse in the same words, so drift in either
+        // one fails here rather than shipping.
         assert_eq!(
             SetupError::NotATty.to_string(),
             super::super::reset::ResetError::NotATty.to_string(),
@@ -1294,7 +1307,7 @@ mod tests {
         assert_eq!(
             printed,
             "\n  Which coding agent are you wiring up?\n    1) Claude Code        \u{2192} .mcp.json\n    2) Cursor             \u{2192} .cursor/mcp.json\n    3) Both\n    4) Skip \u{2014} I'll wire it myself\n  [1-4, default 1]: ",
-            "AILAB-548 §1 copy is frozen"
+            "the harness prompt copy is fixed"
         );
     }
 
@@ -1330,7 +1343,7 @@ mod tests {
         assert_eq!(
             printed,
             "\n  Start the shared memory daemon now? It serializes writes across agents.\n  [y/N]: ",
-            "AILAB-548 §1 copy is frozen"
+            "the watch prompt copy is fixed"
         );
     }
 
@@ -1342,7 +1355,7 @@ mod tests {
         String::from_utf8(out).expect("card copy is utf-8")
     }
 
-    /// The card is frozen AILAB-548 §1 copy, so it is asserted whole — the same
+    /// The card is fixed copy, so it is asserted whole — the same
     /// way the two prompts are. Substring checks let blank-line layout and the
     /// `Next:`/`Undo:` indentation drift without a single test going red; this
     /// is the assertion that makes any card edit deliberate.
@@ -1364,7 +1377,7 @@ mod tests {
              Re-run with --no-write-mcp to skip config writes entirely.\n\
              \n  \
              Source, docs, issues: https://github.com/botzrDev/dreamd\n",
-            "AILAB-548 §1 card copy is frozen"
+            "the success card copy is fixed"
         );
     }
 
@@ -1387,7 +1400,7 @@ mod tests {
              You should see it call search_nodes.\n\
              \n  \
              Source, docs, issues: https://github.com/botzrDev/dreamd\n",
-            "AILAB-548 §1 card copy is frozen"
+            "the success card copy is fixed"
         );
     }
 
@@ -1406,7 +1419,7 @@ mod tests {
             rendered.contains(
                 "  Undo: remove the \"dreamd\" block from .mcp.json and .cursor/mcp.json."
             ),
-            "Undo must name every file we touched; got: {rendered}"
+            "Undo must name every file setup touched; got: {rendered}"
         );
     }
 

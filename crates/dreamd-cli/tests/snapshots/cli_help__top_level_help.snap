@@ -7,25 +7,25 @@ Portable memory layer for AI coding agents
 Usage: dreamd [COMMAND]
 
 Commands:
-  archive         Maintain the on-disk memory log. Today: unpin entries with --force-unpin
+  archive         Maintain the on-disk memory log; its one operation is unpinning entries (--force-unpin)
   blame           Show which stored memories drove a query's recall ranking
   doctor          Run health checks and print status (dream-cycle mode, etc.)
   dream           Run a dream cycle: write LESSONS.md and prune decayed episodic events. Uses a configured LLM, or the deterministic exemplar when there is no key
   forget          Remove one episodic event and the lesson state that names it
-  init            Scaffold a new per-project .agent/ store and register it. An existing .agent/ is left unchanged. If it is missing from the registry, init registers it
-  mcp             Start the MCP server (bridges to daemon if running, otherwise in-process)
+  init            Scaffold a new per-project .agent/ store and register it
+  mcp             Start the MCP server, bridged to the running daemon or, on Unix, in-process when none is running
   memory          Deprecated, removed in 2.0. Name memory snapshots as branches and check them out
   migrate         Migrate episodic schema versions. The only path is 1.0.0 to 1.0.0, a no-op
-  recall          Search stored memories by query, ranked by relevance and importance (markdown table)
-  score           List the top-N stored memories by importance, without a search query
+  recall          Search stored memories by query, ranked by BM25 × salience (markdown table)
+  score           List the top-N stored memories by salience, without a search query
   salience-drift  Report the salience distribution, top clusters, and drift against the snapshot from 7 days ago
-  reset           Reset scratch state. Today only `workspace` is supported
+  reset           Reset scratch state; `workspace` is the only target
   service         Manage the per-user service that runs `dreamd watch` (Linux systemd --user unit / macOS LaunchAgent / Windows scheduled task)
-  setup           Front door: scaffold .agent/ (via init) and print the harness wiring next steps
+  setup           Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps
   status          Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall       Stop local dreamd servers, unregister this project, and clear caches
-  update          Clear the native binary cache so `npx -y dreamd-mcp` fetches latest
-  watch           Run the daemon in foreground mode. Blocks until SIGINT/SIGTERM
+  update          Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release
+  watch           Run the daemon in the foreground until it gets SIGINT or SIGTERM
   vectors         Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged
   version         Print structured version information (semver, commit, build date, target, schema)
   help            Print this message or the help of the given subcommand(s)

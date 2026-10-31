@@ -1,16 +1,13 @@
 //! Per-project `.agent/` store + global daemon home (`~/.agent/`) path resolution.
 //!
-//! DR-101 mandates that every adapter and call site resolve paths through this
-//! module rather than concatenating strings. Two roots exist and MUST stay
-//! distinct:
+//! Every adapter and call site resolves paths through this module rather than
+//! concatenating strings. Two roots exist and must stay distinct:
 //!
 //! * [`AgentRoot`] — `<project>/.agent/`. Owned by the project, committed to
 //!   git (except `.dreamd/`). Multiple instances coexist across projects.
 //! * [`DaemonHome`] — `~/.agent/`. Owned by the user's daemon process. Holds
 //!   the unix socket, registry, auth token, the published loopback address
 //!   (AILAB-192), and log. Never lives inside a project store.
-//!
-//! See `context/planning/PRD.md` Part III §1 + Part IV §1.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -20,8 +17,7 @@ use thiserror::Error;
 /// Errors returned by [`AgentRoot::discover`].
 ///
 /// Kept deliberately small — `NotFound` is the only failure mode the ancestor
-/// walk surfaces today. Add variants as new resolver callers land (DR-113 /
-/// WEG-15).
+/// walk surfaces. Add variants as new resolver callers need them.
 #[derive(Debug, Error)]
 pub enum LayoutError {
     /// No `.agent/` directory was found in `start` or any of its ancestors.
@@ -53,7 +49,7 @@ impl AgentRoot {
     /// `dreamd init`, before any store exists. The two answer different
     /// questions and stay separate.
     ///
-    /// Used by post-init commands (e.g. `dreamd reset workspace`, DR-113) that
+    /// Used by post-init commands (e.g. `dreamd reset workspace`) that
     /// must operate against the *existing* store rather than the project-root
     /// sentinel set `dreamd init` uses. Symlinks in the walk are followed via
     /// `Path::exists`.
@@ -108,20 +104,21 @@ impl AgentRoot {
     }
 
     /// `<project>/.agent/.dreamd/` — daemon-private state for this project
-    /// (WAL, state.json, cached indexes). Gitignored by `dreamd init` (DR-105).
+    /// (WAL, state.json, cached indexes). Gitignored by `dreamd init`.
     pub fn dreamd_dir(&self) -> PathBuf {
         self.agent_dir().join(".dreamd")
     }
 
     /// `<project>/.agent/episodic/AGENT_LEARNINGS.jsonl` — the canonical
-    /// append-only event log. All writes go through the coordinator
-    /// (see ARCHITECTURE.md "Load-bearing engineering decisions" §1).
+    /// append-only event log. Appends go through the coordinator; the CLI
+    /// rewrites (`forget`, `archive`, `memory checkout`) run in-process under
+    /// the project writer lock (see ARCHITECTURE.md "Load-bearing decisions" §1).
     pub fn episodic_jsonl(&self) -> PathBuf {
         self.episodic_dir().join("AGENT_LEARNINGS.jsonl")
     }
 
     /// `<project>/.agent/semantic/LESSONS.md` — consolidated lesson output of
-    /// the dream cycle. Replaced atomically (DR-104).
+    /// the dream cycle. Replaced atomically.
     pub fn lessons_md(&self) -> PathBuf {
         self.semantic_dir().join("LESSONS.md")
     }
@@ -134,23 +131,25 @@ impl AgentRoot {
 
     /// `<project>/.agent/personal/PREFERENCES.md` — user-private preferences.
     /// Excluded from LLM dream-cycle calls unless `--share-personal` is set.
-    /// Replaced atomically (DR-104).
+    /// Replaced atomically.
     pub fn preferences_md(&self) -> PathBuf {
         self.personal_dir().join("PREFERENCES.md")
     }
 
     /// `<project>/.agent/personal/DECISIONS.md` — user-private decision log.
     /// Excluded from LLM dream-cycle calls unless `--share-personal` is set.
-    /// Replaced atomically (DR-104).
+    /// Replaced atomically.
     pub fn decisions_md(&self) -> PathBuf {
         self.personal_dir().join("DECISIONS.md")
     }
 
     /// `<project>/.agent/.dreamd/state.json` — per-project daemon state.
     ///
-    /// Schema lives with DR-106 / WEG-10; the writer is `dreamd init`
-    /// (DR-105 / WEG-9), whose locked stdout reads
-    /// "initialized .agent/.dreamd/state.json" verbatim against this path.
+    /// Schema is [`DaemonState`](crate::daemon_state::DaemonState). `dreamd init`
+    /// scaffolds it (its locked stdout reads
+    /// "initialized .agent/.dreamd/state.json" verbatim against this path);
+    /// every later change goes through
+    /// [`update_daemon_state`](crate::daemon_state::update_daemon_state).
     /// Distinct from `~/.agent/registry.toml` (DaemonHome) — there is no
     /// daemon-home `state.json` file.
     pub fn state_json(&self) -> PathBuf {
@@ -278,8 +277,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// no `HOME` at all, so without this `dreamd service install` (AILAB-203)
 /// would never find `~/.agent` on the one OS whose service path depends on
 /// it; Git-Bash and WSL do set `HOME`, and it keeps winning there. Unix
-/// behaviour is byte-for-byte what it has always been: `USERPROFILE` is never
-/// consulted.
+/// never consults `USERPROFILE`.
 ///
 /// Driven by a `windows` **argument** rather than a `#[cfg(windows)]` branch
 /// on purpose. A cfg-gated fallback would never be compiled, let alone
@@ -294,9 +292,10 @@ pub fn home_dir() -> Option<PathBuf> {
 /// `.npm/_npx` — which resolves against whatever directory the command happens
 /// to be run from.
 ///
-/// For the AILAB-584 stop scope that is not a cosmetic bug: a relative
-/// `cache_dir` is canonicalized against this process's cwd, so a process whose
-/// executable sits under `$PWD/.cache/dreamd-mcp` attributes to us and gets
+/// For the `dreamd update` process-stop sweep (AILAB-584) that is not a
+/// cosmetic bug: a relative `cache_dir` is canonicalized against this
+/// process's cwd, so a process whose executable sits under
+/// `$PWD/.cache/dreamd-mcp` is attributed to this install and gets
 /// SIGTERMed no matter whose `$HOME` it serves — the cross-home kill, re-opened
 /// by a blank variable (reproduced under `env HOME= dreamd update`). For
 /// `uninstall` it is worse still: `resolve_npx_dir` would hand the scoped npx
@@ -305,7 +304,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Empty is therefore treated exactly like unset everywhere, and — since a
 /// blank `%USERPROFILE%` derails a path in precisely the same way — that rule
 /// applies to both variables here, not just to `HOME`. Callers already have a
-/// defined "no home directory" behaviour (skip with a note, refuse, or exit 2),
+/// defined "no home directory" behavior (skip with a note, refuse, or exit 2),
 /// which is the correct answer for a process that genuinely has no home.
 pub fn resolve_home_from_vars(
     home: Option<OsString>,
@@ -325,7 +324,7 @@ pub fn resolve_home_from_vars(
 }
 
 /// Global daemon home at `~/.agent/`. Holds the unix socket, project registry,
-/// auth token, the published loopback address (AILAB-192), and log file. MUST be
+/// auth token, the published loopback address (AILAB-192), and log file. Must be
 /// a separate directory from any project's `.agent/` store — co-locating them
 /// would let a project's git history leak the auth token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -345,12 +344,12 @@ impl DaemonHome {
     }
 
     /// `~/.agent/dreamd.sock` — unix domain socket the daemon binds.
-    /// Permissions must be `0600` (DR-101 / ARCHITECTURE.md §5).
+    /// Permissions must be `0600` (ARCHITECTURE.md §5).
     pub fn socket_path(&self) -> PathBuf {
         self.home.join("dreamd.sock")
     }
 
-    /// `~/.agent/registry.toml` — known project `.agent/` roots (DR-412).
+    /// `~/.agent/registry.toml` — known project `.agent/` roots.
     pub fn registry_toml(&self) -> PathBuf {
         self.home.join("registry.toml")
     }
@@ -366,7 +365,7 @@ impl DaemonHome {
         self.home.join("registry.toml.lock")
     }
 
-    /// `~/.agent/auth.json` — bearer token for the Windows TCP fallback.
+    /// `~/.agent/auth.json` — bearer token for the Windows loopback TCP transport.
     pub fn auth_json(&self) -> PathBuf {
         self.home.join("auth.json")
     }
@@ -392,17 +391,17 @@ impl DaemonHome {
     }
 }
 
-/// Snippet appended to a project's `.gitignore` by `dreamd init` (DR-105).
+/// Snippet appended to a project's `.gitignore` by `dreamd init`.
 ///
 /// Only `.dreamd/` is ignored. Episodic, semantic, and personal content are
 /// meant to be committed so memory travels with the repo. The leading `/`
 /// anchors the pattern at the repo root — a project store is, by definition,
-/// at the repo root (DR-101), so we do not want to match a nested
+/// at the repo root, so the pattern must not match a nested
 /// `something/.agent/.dreamd/` the user might create elsewhere in the tree.
 pub const GITIGNORE_SNIPPET: &str = "/.agent/.dreamd/\n";
 
 /// Byte-exact contents of `working/WORKSPACE.md` as scaffolded by `dreamd init`
-/// and re-written by `dreamd reset workspace` (DR-105 / DR-113). One definition
+/// and re-written by `dreamd reset workspace`. One definition
 /// of "fresh workspace" — reset equals init for this file.
 pub const DEFAULT_WORKSPACE_MD: &str =
     "Reserved for agent scratch state. The dream cycle does not read or write this file.\n";
@@ -582,13 +581,13 @@ mod tests {
 
     #[test]
     fn gitignore_snippet_targets_only_dreamd_subdir() {
-        // Anchored at repo root with leading `/` so we never match a nested
+        // Anchored at repo root with leading `/` so it never matches a nested
         // `something/.agent/.dreamd/` the user might create elsewhere.
         assert!(GITIGNORE_SNIPPET.contains("/.agent/.dreamd/"));
         assert!(GITIGNORE_SNIPPET
             .lines()
             .all(|l| l.is_empty() || l.starts_with('/')));
-        // Must NOT ignore the whole .agent/ tree — episodic/semantic/personal
+        // Must not ignore the whole .agent/ tree — episodic/semantic/personal
         // are meant to be committed so memory travels with the repo.
         assert!(!GITIGNORE_SNIPPET.lines().any(|l| {
             let t = l.trim();

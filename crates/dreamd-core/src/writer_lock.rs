@@ -7,14 +7,20 @@
 //! holder's pid and [`WriterKind`], which [`WriterLock::acquire`] reads back from
 //! the stamp the holder wrote into the lockfile.
 //!
-//! Acquisition is one sequence, in this order: lock, stamp, open the
-//! provenance ledger (cutting a torn final line), reset a stale `in_progress`
-//! status when there is no WAL, then WAL recovery, which rolls a committed
-//! cycle forward and wipes any staged one. Only after that may the caller open
-//! the index and start the coordinator, and both of those take a `&WriterLock`
-//! so they cannot be reached without one. The token carries the project's one
-//! ledger appender ([`WriterLock::ledger`]); a roll-forward records its edges
-//! through it.
+//! Acquisition is one sequence, in this order: lock, refuse if a pre-lock
+//! dreamd holds Tantivy's own index lock, stamp, open the provenance ledger
+//! (cutting a torn final line), reset a stale `in_progress` status when there
+//! is no WAL, then WAL recovery, which rolls a committed cycle forward and
+//! wipes any staged one. A [`WriterKind::Repair`] writer moves an unreadable
+//! WAL aside and recovers again instead of refusing.
+//!
+//! Only after that may the caller open the index and start the coordinator.
+//! `TantivyIndexHandle::open` takes a `&WriterLock`, and
+//! `MemoryCoordinator::open` takes the lock's [`Ledger`], which outside this
+//! crate only a `WriterLock` hands out. `MemoryCoordinator::open_at` takes
+//! neither; it is for tests and cannot run a dream cycle. The token carries
+//! the project's one ledger appender ([`WriterLock::ledger`]); a roll-forward
+//! records its edges through it.
 //!
 //! The lock is an advisory `flock` (Unix) / `LockFileEx` (Windows) through
 //! [`File::try_lock`]. It belongs to the open file description, so a second
@@ -117,6 +123,8 @@ pub enum WriterLockError {
         .0.display()
     )]
     NoAgentStore(PathBuf),
+    /// Creating `.agent/.dreamd/`, or opening, locking or stamping the
+    /// lockfile, failed.
     #[error("project writer lock I/O: {0}")]
     Io(#[from] io::Error),
     /// The lock was taken, but resetting a stale status or WAL recovery failed.
@@ -531,7 +539,7 @@ mod tests {
     }
 
     /// A hand-written legacy WAL with no `Commit`: the temp goes, the
-    /// destination stays, status `failed`, as before 1.1.0.
+    /// destination stays, status `failed`, as before 1.2.0.
     #[test]
     fn acquire_keeps_a_legacy_wal_meaning() {
         let (root, _g) = store("wl-legacy-wal");
@@ -601,9 +609,10 @@ mod tests {
         }
     }
 
-    /// A pre-lock dreamd holds only Tantivy's writer lock. Before this lock
-    /// existed, an index open wiped an outdated index before it took that lock,
-    /// so a second writer replaced the first one's index underneath it.
+    /// A pre-lock dreamd holds only Tantivy's writer lock, and its index open
+    /// wiped an outdated index before taking that lock. The probe refuses
+    /// before anything is wiped, so a second writer cannot replace the first
+    /// one's index underneath it.
     #[cfg(unix)]
     #[tokio::test]
     async fn legacy_index_writer_is_refused_before_the_index_is_wiped() {

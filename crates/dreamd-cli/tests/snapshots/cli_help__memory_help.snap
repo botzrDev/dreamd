@@ -9,11 +9,11 @@ Refs live under .agent/.dreamd/branches/. Checkout replaces the live memory file
 Usage: memory <COMMAND>
 
 Commands:
-  branch    Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot <NAME>, and make it current
-  checkout  Deprecated, removed in 2.0. Replace the live memory files with branch <NAME> and make it current
+  branch    Deprecated, removed in 2.0. Snapshot the live memory files, name the snapshot `<NAME>`, and make it current
+  checkout  Deprecated, removed in 2.0. Replace the live memory files with branch `<NAME>` and make it current
   branches  Deprecated, removed in 2.0. List branches; `*` marks the current one
-  delete    Deprecated, removed in 2.0. Delete branch <NAME>. A later dream cycle removes the object if no ref names it
-  bisect    Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot (BZR-153)
+  delete    Deprecated, removed in 2.0. Delete branch `<NAME>`. A later dream cycle removes the object if no ref names it
+  bisect    Deprecated, removed in 2.0. Binary-search the snap-* timeline for the first bad snapshot
   diff      Deprecated, removed in 2.0. Compare two snapshots: added/removed events, salience changes, file verdicts
   help      Print this message or the help of the given subcommand(s)
 

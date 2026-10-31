@@ -1,16 +1,14 @@
-//! WEG-43 / DR-203 — custom BM25 × salience collector.
+//! Custom BM25 × salience collector (WEG-43).
 //!
 //! Tantivy's built-in `TopDocs` collector ranks by BM25 alone. dreamd needs
-//! BM25 _multiplied by_ a query-time salience score (ARCHITECTURE.md decision #2,
-//! PRD FR-4.2), so the score is never indexed. This module implements the
+//! BM25 _multiplied by_ a query-time salience score (ARCHITECTURE.md decision #2),
+//! so the score is never indexed. This module implements the
 //! [`Collector`]/[`SegmentCollector`] pair that fetches the three salience
 //! fastfields and the searcher's recurrence table (`crate::recurrence`) per
-//! matching doc, reweights the score with [`salience`], and evicts via a
-//! min-heap of size `k`.
+//! matching doc, reweights the score with
+//! [`salience_with_context`], and evicts via a min-heap of size `k`.
 //!
-//! Production path (WEG-69): HTTP/MCP recall → `TantivyIndexHandle::reader`
-//! → [`recall`]. This module owns the collector engine; the write path is
-//! untouched.
+//! Production path: HTTP/MCP recall → `TantivyIndexHandle::reader` → [`recall`].
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -31,12 +29,12 @@ use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
 use crate::salience::{salience_with_context, RecurrenceContext};
 
 /// One hydrated result from a salience-scored recall query. Score is
-/// `f64` to preserve precision for `dreamd recall --explain` (DR-703);
+/// `f64` to preserve precision for `dreamd recall --explain`;
 /// Tantivy's internal `Score` is `f32` and gets widened before the
 /// salience multiply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallResult {
-    /// BM25 x salience product, widened to `f64` for the `--explain` formatter (DR-703).
+    /// BM25 x salience product, widened to `f64` for the `--explain` formatter.
     pub score: f64,
     /// Full text of the learning, hydrated from Tantivy's `STORED` content field (WEG-43).
     pub content: String,
@@ -55,11 +53,11 @@ pub struct RecallResult {
     pub skill_action: String,
     /// Provenance harness identifier hydrated from the stored `source_harness` field.
     pub source_harness: String,
-    /// Raw BM25 score before the salience multiply, for the `--explain` formatter (DR-703).
+    /// Raw BM25 score before the salience multiply, for the `--explain` formatter.
     pub bm25: f64,
-    /// Salience multiplier at query time, for the `--explain` formatter (DR-703).
+    /// Salience multiplier at query time, for the `--explain` formatter.
     pub salience: f64,
-    /// Event id hydrated from the `STORED` `event_id` field (WEG-45 / DR-703).
+    /// Event id hydrated from the `STORED` `event_id` field (WEG-45).
     /// Empty string when the document predates the field or carries no id;
     /// surfaced as the `id` column by the `dreamd recall` formatter (WEG-51).
     pub event_id: String,
@@ -170,7 +168,7 @@ impl SegmentCollector for SalienceSegmentCollector {
         let rec = u64::from(self.recurrence.get(doc));
 
         // Capture bm25 and salience before multiplying — after the product they are
-        // unrecoverable (0*anything=0; needed for the --explain formatter, DR-703).
+        // unrecoverable (0*anything=0; needed for the --explain formatter).
         let bm25 = score as f64;
         let sal = salience_with_context(self.now_sec, ts, p, imp, RecurrenceContext::recall(rec));
         let final_score = bm25 * sal;
@@ -247,7 +245,7 @@ impl Collector for SalienceCollector {
             heap: BinaryHeap::with_capacity(self.k + 1),
             k: self.k,
             segment_ord: segment_local_id,
-            // Tantivy 0.26 `FastFieldReaders::{u64,f64}` take `&str`, not Field IDs.
+            // The pinned Tantivy's `FastFieldReaders::{u64,f64}` take `&str`, not Field IDs.
             timestamp_col: ff.u64(TIMESTAMP_SEC_FIELD)?,
             pain_col: ff.f64(PAIN_FIELD)?,
             importance_col: ff.f64(IMPORTANCE_FIELD)?,
@@ -280,8 +278,8 @@ impl Collector for SalienceCollector {
 
 /// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s and sort descending by score.
 ///
-/// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is crate-private
-/// on [`ScoredDoc`], so hydration must stay inside this module.
+/// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is private to
+/// this module on [`ScoredDoc`], so hydration must stay inside it.
 fn hydrate_scored(
     searcher: tantivy::Searcher,
     fields: &SchemaFields,
@@ -289,7 +287,7 @@ fn hydrate_scored(
 ) -> tantivy::Result<Vec<RecallResult>> {
     let mut results = Vec::with_capacity(top_docs.len());
     for scored in top_docs {
-        // `searcher.doc` is generic over `D: DocumentDeserialize` in 0.26;
+        // `searcher.doc` is generic over `D: DocumentDeserialize`;
         // annotate as `TantivyDocument` so the value-trait methods resolve.
         let doc: TantivyDocument = searcher.doc(scored.doc_address)?;
         let content = doc
@@ -343,9 +341,8 @@ fn hydrate_scored(
 
 /// Execute a salience-scored BM25 recall query.
 ///
-/// `now_sec` is caller-provided so tests stay deterministic — same
-/// invariant as `LessonsFile` (drift entry `timestamps-caller-provided-no-utc-now`):
-/// no wall-clock call inside this function.
+/// `now_sec` is caller-provided so tests stay deterministic: this function
+/// reads no clock.
 pub fn recall(
     reader: &RecallReader,
     fields: &SchemaFields,
@@ -431,7 +428,7 @@ fn exclude(
     Box::new(BooleanQuery::new(clauses))
 }
 
-/// Top-`n` documents by query-time salience with no lexical filter (DR-704 / WEG-52).
+/// Top-`n` documents by query-time salience with no lexical filter (WEG-52).
 ///
 /// Uses Tantivy [`AllQuery`] (every doc matches with score **1.0**) so
 /// [`SalienceCollector`] heap order is salience order. Printed `bm25 ≈ 1` and
@@ -492,7 +489,7 @@ mod tests {
     #[test]
     fn test_event_id_hydrated() {
         // `event_id` is `STORED` in the schema (WEG-45); recall() must hydrate it
-        // onto the result so the DR-703 `id` column is real (WEG-51 / DR-703).
+        // onto the result so the `dreamd recall` `id` column is real (WEG-51).
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         let mut writer = index.writer(15_000_000).expect("create writer");
@@ -516,7 +513,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].event_id, "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "recall must hydrate the STORED event_id onto RecallResult"
+            "recall must hydrate the stored event_id onto RecallResult"
         );
     }
 
@@ -649,7 +646,7 @@ mod tests {
         let results = recall(&reader, &fields, "axum error handling", 3, NOW_SEC).unwrap();
         insta::with_settings!({
             // Numeric fields are formula-derived f64s — filter all three so the
-            // snapshot stays stable under irrelevant floating-point drift (DR-703).
+            // snapshot stays stable under irrelevant floating-point drift.
             filters => vec![
                 (r"score: -?\d+\.\d+", "score: <f64>"),
                 (r"bm25: -?\d+\.\d+", "bm25: <f64>"),
@@ -660,7 +657,7 @@ mod tests {
         });
     }
 
-    /// WEG-52 / DR-704 — top-N by salience with no lexical filter.
+    /// Top-N by salience with no lexical filter (WEG-52).
     /// Distinct pain/age so order is unambiguous; content strings do not share
     /// a BM25 term, proving ranking is not lexical match.
     #[test]

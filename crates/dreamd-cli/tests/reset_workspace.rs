@@ -1,8 +1,8 @@
-//! Subprocess integration tests for `dreamd reset workspace` (DR-113 / WEG-15).
+//! Subprocess integration tests for `dreamd reset workspace` (WEG-15).
 //!
 //! Parallel in spirit to `init_golden.rs` but without a stdout golden: the
-//! single log line embeds an absolute path that varies per `tempdir`. We
-//! instead assert the file contents are byte-identical to
+//! single log line embeds an absolute path that varies per `tempdir`. These
+//! tests instead assert the file contents are byte-identical to
 //! `DEFAULT_WORKSPACE_MD` (the same content `dreamd init` scaffolds) and that
 //! exit codes match the locked contract:
 //!   * `--yes` → exit 0, WORKSPACE.md overwritten.
@@ -23,8 +23,7 @@ fn reset_workspace_yes_overwrites_file_and_exits_zero() {
     // Daemon HOME, separate from the project dir. Sharing tmp would let the
     // `init` below pre-create ~/.agent (= tmp/.agent) by writing registry.toml,
     // so init would skip the scaffold and `.agent/working/` would never exist
-    // for the reset to clear. (That was attributed to init_tracing before
-    // AILAB-184; the registry write is the real cause and still applies.)
+    // for the reset to clear.
     let home = tempfile::tempdir().unwrap();
 
     let init = Command::new(dreamd_bin())
@@ -77,9 +76,9 @@ fn reset_workspace_with_no_agent_dir_exits_two_and_creates_nothing() {
     // intentionally no `.agent/` and no project-root sentinel either.
     // Daemon HOME, separate from the project dir, so anything this invocation
     // writes under ~/.agent lands off tmp and the `!tmp/.agent` assertion holds.
-    // Since AILAB-184 `reset workspace` writes nothing there (one-shots are
-    // console-only, and this run exits 2 before touching daemon home), so the
-    // split is defensive suite hygiene rather than load-bearing here.
+    // `reset workspace` writes nothing there (one-shots are console-only, and
+    // this run exits 2 before touching daemon home), so the split is defensive
+    // suite hygiene rather than load-bearing here.
     let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())

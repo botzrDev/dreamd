@@ -15,7 +15,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 | `watch` | Foreground daemon until SIGINT/SIGTERM | [http-api.md](./http-api.md), [install.md](./install.md) |
 | `mcp` | MCP server, stdio by default | [mcp-transports.md](./mcp-transports.md) |
 | `dream` | Dream cycle | [GUIDE.md](../GUIDE.md) §4, [architecture.md](./architecture.md) |
-| `doctor` | Health checks; `--repair` rebuilds the index; `--provenance` checks the ledger | [provenance.md](./provenance.md), [troubleshooting.md](./troubleshooting.md) |
+| `doctor` | Health checks; `--repair` rebuilds the index and moves aside a dream-cycle WAL that cannot be parsed; `--provenance` checks the ledger | [provenance.md](./provenance.md), [troubleshooting.md](./troubleshooting.md) |
 | `status` | Daemon liveness, project, last cycle, log tail | [below](#status) |
 | `service` | OS supervisor for `watch` | [install.md](./install.md) |
 | `recall` | Ranked search | [observability.md](./observability.md) |
@@ -29,7 +29,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 | `reset workspace` | Restore `working/WORKSPACE.md` | [below](#reset-workspace) |
 | `vectors enable` | Download the optional model; exit 2 on the default binary. Deprecated, with the `vectors` feature; removed in 2.0 | [vectors.md](./vectors.md) |
 | `uninstall` | Stop processes, unregister, clear caches | [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) |
-| `update` | Clear the native binary cache | same README |
+| `update` | Stop processes, clear the native binary cache | same README |
 | `version` | Version, commit, build date, target, schema, vectors | [below](#version) |
 
 `dream --dry` prints the `LESSONS.md` it would write and writes nothing. `dream --no-llm` forces the deterministic lesson and still goes through a live daemon. `dream --no-commit` skips the git commit and also skips the daemon, so do not run it while `dreamd watch` is serving that project ([troubleshooting.md](./troubleshooting.md)). `dream --auto` prints a deprecation notice (it is removed in 2.0) and still exits 2.

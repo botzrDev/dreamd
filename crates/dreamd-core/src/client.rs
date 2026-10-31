@@ -24,16 +24,18 @@ pub enum DreamProxyOutcome {
     /// HTTP 404 — daemon up but this project isn't registered with it. → run in-process.
     ProjectNotRegistered,
     /// HTTP 409 — a cycle is already running for this project. Caller surfaces
-    /// an error and does NOT run in-process (that would race the coordinator).
+    /// an error and does not run in-process (that would race the coordinator).
     InProgress,
 }
 
 /// Genuine proxy failures (connect-after-reachable, handshake, transport, or a
-/// daemon 4xx/5xx other than 404/409). The caller surfaces these and does NOT
+/// daemon 4xx/5xx other than 404/409). The caller surfaces these and does not
 /// fall back to in-process.
 #[derive(Debug)]
 pub enum DreamProxyError {
+    /// A transport stage failed after the daemon was found reachable.
     Transport(String),
+    /// The daemon answered with a status other than 200, 404 or 409.
     DaemonError { status: u16, body: String },
 }
 
@@ -80,8 +82,9 @@ pub(crate) fn map_dream_status(
 ///
 /// `no_llm` travels as the [`NO_LLM_HEADER`] header, not as a reason to skip
 /// the proxy: skipping would run a second cycle in this process while the
-/// daemon's coordinator still owns the JSONL. `--no-commit` remains the only
-/// flag that bypasses the daemon.
+/// daemon's coordinator still owns the JSONL. `--no-commit` is the only
+/// write-path flag that bypasses the daemon; `--dry` also skips the proxy, but
+/// writes nothing.
 pub async fn proxy_dream_cycle(
     sock_path: &Path,
     project_root: &Path,
@@ -234,8 +237,8 @@ mod tests {
         assert_eq!(req.method, "POST");
         assert_eq!(req.uri, "/api/v1/dream");
         assert_eq!(req.agent_root.as_deref(), Some("/some/project/root"));
-        // AILAB-204: the header is OMITTED by default, not sent as "0" — a
-        // daemon that predates this ticket must see an unchanged request.
+        // The header is omitted by default, not sent as "0" — a daemon that
+        // predates `--no-llm` (AILAB-204) must see an unchanged request.
         assert_eq!(
             req.no_llm, None,
             "{NO_LLM_HEADER} must be absent when --no-llm is not set"
@@ -252,7 +255,7 @@ mod tests {
     async fn proxy_dream_cycle_sends_no_llm_header_when_set() {
         let (outcome, req) = round_trip(true, false).await;
         assert_eq!(outcome, DreamProxyOutcome::Ran);
-        assert_eq!(req.uri, "/api/v1/dream", "--no-llm must NOT skip the proxy");
+        assert_eq!(req.uri, "/api/v1/dream", "--no-llm must not skip the proxy");
         assert_eq!(
             req.no_llm.as_deref(),
             Some(NO_LLM_HEADER_VALUE),
@@ -273,7 +276,7 @@ mod tests {
         assert_eq!(outcome, DreamProxyOutcome::Ran);
         assert_eq!(
             req.uri, "/api/v1/dream",
-            "--share-personal must NOT skip the proxy"
+            "--share-personal must not skip the proxy"
         );
         assert_eq!(
             req.share_personal.as_deref(),
