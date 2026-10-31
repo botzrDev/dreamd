@@ -53,6 +53,19 @@ pub struct RecallParams {
 /// Default max results for recall when `k` is omitted (HTTP and MCP).
 pub const DEFAULT_RECALL_K: u32 = 5;
 
+/// Longest recall query, in UTF-8 bytes, that `GET /api/v1/recall` answers
+/// and MCP `search_nodes` accepts in either mode (BZR-1301). Percent-encoding
+/// at most triples it, so `/api/v1/recall?q=…&k=4294967295` stays under the
+/// 65,534-byte URI limit of the `http` crate (client) and of hyper (server).
+pub const MAX_RECALL_QUERY_BYTES: usize = 16_384;
+
+/// The one message for a query over [`MAX_RECALL_QUERY_BYTES`]: the daemon's
+/// `414` body, the daemon client's `414` arm, and the checks both MCP stores
+/// run before they search.
+pub fn query_too_long_message() -> String {
+    format!("query exceeds {MAX_RECALL_QUERY_BYTES} bytes; pass a shorter query")
+}
+
 impl RecallParams {
     /// Resolved `k` query param — [`DEFAULT_RECALL_K`] when omitted.
     pub fn k_or_default(&self) -> u32 {
@@ -179,6 +192,15 @@ mod tests {
         assert!(
             RecallParams::from_query("exclude=evt_a").is_err(),
             "q is still required"
+        );
+    }
+
+    /// BZR-1301: the only test that spells the query limit's number.
+    #[test]
+    fn query_too_long_message_text() {
+        assert_eq!(
+            query_too_long_message(),
+            "query exceeds 16384 bytes; pass a shorter query"
         );
     }
 }

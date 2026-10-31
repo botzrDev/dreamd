@@ -1478,3 +1478,55 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - At VERIFY, mutate the call site as well as the callee: swap a `warn` arm for `panic!`, drop a constant from an expression, skip one input class.
   - Same family as `an-ordering-test-must-fail-the-step-it-orders` and `mutate-each-check-of-a-compound-guard-alone`.
 - **Cross-refs:** `an-ordering-test-must-fail-the-step-it-orders`, `mutate-each-check-of-a-compound-guard-alone`, `mutation-must-get-past-the-backstop`
+
+### error-text-names-its-crate-by-grep-not-by-guess
+
+- **Rule:** When a ticket says which library produced an error string, grep that library's source under `~/.cargo/registry/src/` for the exact string before the spec decides where the fix goes.
+- **Why:** BZR-1301's Linear text said hyper's "uri too long" reached the MCP caller, and asked for a length guard so it never reaches the daemon. The string comes from the `http` crate: `Uri`'s `MAX_LEN` is 65,534, and `build_recall_request` hit it on the client while parsing the URI. No request was sent. hyper's own server limit at the same length answers `414` with an empty body and no text. A guard on the daemon alone would have left the client error in place.
+- **How to apply:**
+  - `grep -rn 'uri too long' ~/.cargo/registry/src/*/http-1.*/src/ ~/.cargo/registry/src/*/hyper-1.*/src/`.
+  - Name the crate, file and line in the spec's pre-flight facts.
+  - Check both ends of a client/server pair: the client's builder can fail before the server sees anything.
+- **Cross-refs:** `v2-beats-linear-ac`, `rmcp-tool-description-requires-string-literal`
+
+### a-proxy-checks-what-it-converts-before-it-converts
+
+- **Rule:** A client that forwards raw fields for the server to validate checks, itself, every field it converts lossily on the way. `memory_store::build_learn_request` runs `LearnIngress::validate_optional_pain` and `validate_optional_importance` before `placeholder_learning` casts both to `f32`.
+- **Why:** BZR-1301. The proxy's rustdoc said the daemon re-checks every field, which was true of what arrived. But `placeholder_learning` cast `f64` to `f32` first. A probe on `52c38e9` showed the result:
+  - `pain: 1e40` became infinity, `serde_json` wrote it as `null`, axum answered `422`, and the caller got `-32603` `daemon error 422 …: pain: invalid type: null` instead of `pain must be in 0.0..=10.0`;
+  - `pain: 10.0000001` rounded to `10.0` and landed;
+  - in-process, both gave the right text.
+- **How to apply:**
+  - List each `as` cast and narrowing conversion between the caller's type and the wire type. For each one, either the server checks the caller's value, or the client runs the same validator before converting.
+  - Call the shared validator, not a copy, so both modes print the same text.
+  - Test a value just past the bound (`10.000_000_1`) and one that overflows the narrow type (`1e40`).
+- **Cross-refs:** `agentlearning-placeholder-id`, `doc-first-append-via-uds-learn`, `mcp-error-code-is-who-can-fix-it`
+
+### mcp-error-code-is-who-can-fix-it
+
+- **Rule:** `MemoryStoreError` has three kinds, one per JSON-RPC code:
+  - `InvalidParams` (`-32602`): an argument the caller can fix;
+  - `InvalidRequest` (`-32600`): project state that changing the arguments will not fix (an unregistered root, a rejected content type, an index that will not open in-process);
+  - `Internal` (`-32603`): everything else.
+
+  A new caller-input error is `InvalidParams` in both modes, with one message.
+- **Why:** BZR-1301's Linear AC asked for `-32602` "as rmcp maps it today". rmcp does that only for its own parameter deserialization (`failed to deserialize parameters: …`). dreamd's errors went through `From<MemoryStoreError> for McpError`, which had no `-32602` arm. So every input error was `-32600`, and three caller-caused paths were `-32603`: the long query, `pain: 1e40`, and an in-process oversize learning.
+- **How to apply:**
+  - Before citing what a library "does today", find the code path the dreamd error actually takes.
+  - `docs/http-api.md` "MCP tool errors" is the table; a new message gets a row there.
+  - One mismatch is left as is: in-process, a query the parser rejects is still `-32600` (`recall failed: …`), where daemon mode gives `-32602` with the same text. BZR-1301's D1 changed only the daemon.
+- **Cross-refs:** `a-proxy-checks-what-it-converts-before-it-converts`, `linear-search-nodes-layer-filter-does-not-exist`
+
+### derived-serde-struct-accepts-a-json-array
+
+- **Rule:** To read one member of a JSON object, parse `serde_json::Value` and call `.get("name")`. Do not `from_slice` into a `#[derive(Deserialize)] struct { name: String }`.
+- **Why:** serde's derived visitor also accepts a sequence, so `["x"]` deserializes as `{ name: "x" }`. BZR-1301's `daemon_error_message` must give the generic label for any body that is not the daemon's `{"error": …}` envelope. Mutant M3 (the derived struct) fails test 3 on the `["error"]` body.
+- **How to apply:** See `memory_store::daemon_error_message`. A test of an envelope reader includes a JSON array body.
+- **Cross-refs:** `mutate-each-check-of-a-compound-guard-alone`
+
+### daemon-recall-tests-run-without-the-test-coordinator
+
+- **Rule:** In `mcp/mod.rs` tests, a daemon-mode `search_nodes` test calls `spawn_test_daemon(.., false)`. With `true`, the fixture holds the project writer lock for its own coordinator and wires no primary index handle. The daemon's lazy index open for recall then cannot take the lock, and every recall answers `500` `index open failed: project writer lock is held by pid … (watch)`.
+- **Why:** BZR-1301's first base probe sent appends and searches to one `spawn_test_daemon(.., true)` daemon. Every search came back `-32603` with that lock message, which hid the real answers: a `500` for a parser rejection, and success for a 20 KB query. A production daemon serves its booted project from the pinned primary handle, so only the fixture behaves this way.
+- **How to apply:** Use a daemon with `true` for appends and a second one, on its own root, with `false` for recall, as `test_remote_search_nodes_refuses_a_query_over_the_limit` does.
+- **Cross-refs:** `index-fixtures-must-write-the-log-first`
