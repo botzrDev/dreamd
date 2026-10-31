@@ -18,6 +18,8 @@ npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 
 Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
 
+If you want agent memory you can trace and undo, star the repo to follow releases. When a memory goes wrong, an issue with the `blame` output helps us fix it.
+
 ---
 
 ## Why auditable memory
