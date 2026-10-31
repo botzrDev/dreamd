@@ -1528,9 +1528,11 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     match commands::uninstall::run_gated(
         &req,
         &stops,
-        args.yes,
-        is_tty,
-        &mut read_line,
+        commands::uninstall::Confirmation {
+            yes: args.yes,
+            is_tty,
+            read_line: &mut read_line,
+        },
         &mut stop,
         &mut out,
         &mut err,
