@@ -15,6 +15,8 @@ use std::path::Path;
 use dreamd_core::io::write_atomic;
 use dreamd_core::{AgentRoot, LayoutError, DEFAULT_WORKSPACE_MD};
 
+use super::confirm::{self, ConfirmError};
+
 /// Why a `dreamd reset workspace` run did not clear the workspace.
 #[derive(Debug)]
 pub enum ResetError {
@@ -38,7 +40,7 @@ impl std::fmt::Display for ResetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => write!(f, "no .agent/ directory found"),
-            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
+            Self::NotATty => std::fmt::Display::fmt(&ConfirmError::NotATty, f),
             Self::Declined => write!(f, "reset declined"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -70,21 +72,31 @@ pub fn run_workspace(
     };
 
     let target = root.workspace_md();
-
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            writeln!(err, "error: stdin is not a tty; pass --yes to confirm")?;
+    let prompt = format!("Reset WORKSPACE.md at {}? [y/N] ", target.display());
+    let decision = {
+        let mut read = |prompt: &str| -> Result<Option<String>, ConfirmError> {
+            if !std::io::stdin().is_terminal() {
+                return Ok(None);
+            }
+            write!(err, "{prompt}")?;
+            err.flush()?;
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line)?;
+            Ok(Some(line))
+        };
+        confirm::confirm_destructive(yes, &prompt, &mut read)
+    };
+    match decision {
+        Ok(()) => {}
+        Err(ConfirmError::NotATty) => {
+            writeln!(err, "error: {}", ConfirmError::NotATty)?;
             return Err(ResetError::NotATty);
         }
-        write!(err, "Reset WORKSPACE.md at {}? [y/N] ", target.display())?;
-        err.flush()?;
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        let answer = line.trim();
-        if !(answer == "y" || answer == "Y") {
+        Err(ConfirmError::Declined) => {
             writeln!(err, "aborted")?;
             return Err(ResetError::Declined);
         }
+        Err(ConfirmError::Io(source)) => return Err(ResetError::Io(source)),
     }
 
     write_atomic(&target, DEFAULT_WORKSPACE_MD.as_bytes())?;
@@ -105,7 +117,7 @@ mod tests {
         );
         assert_eq!(
             ResetError::NotATty.to_string(),
-            "stdin is not a tty; pass --yes to confirm"
+            ConfirmError::NotATty.to_string()
         );
         assert_eq!(ResetError::Declined.to_string(), "reset declined");
         let io = ResetError::from(std::io::Error::other("disk full"));

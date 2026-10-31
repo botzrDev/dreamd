@@ -384,9 +384,9 @@ impl std::fmt::Display for ServiceError {
                 "scheduled-task XML {} already exists; rerun `dreamd service install --force` to overwrite it.",
                 path.display()
             ),
-            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
-            Self::Declined => write!(f, "uninstall declined"),
-            Self::Stdin(e) => write!(f, "could not read the confirmation from stdin: {e}"),
+            Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
+            Self::Declined => std::fmt::Display::fmt(&super::confirm::ConfirmError::Declined, f),
+            Self::Stdin(e) => super::confirm::fmt_io(e, f),
             Self::CurrentExe(e) => write!(f, "could not resolve this binary's path: {e}"),
             Self::Io { path, source } => {
                 write!(f, "could not write {}: {source}", path.display())
@@ -1269,39 +1269,42 @@ pub(crate) fn run_schtasks_uninstall_with(
     finish_uninstall(removed.as_deref(), daemon_home, purge)
 }
 
+impl From<super::confirm::ConfirmError> for ServiceError {
+    fn from(err: super::confirm::ConfirmError) -> Self {
+        match err {
+            super::confirm::ConfirmError::NotATty => Self::NotATty,
+            super::confirm::ConfirmError::Declined => Self::Declined,
+            super::confirm::ConfirmError::Io(source) => Self::Stdin(source),
+        }
+    }
+}
+
 /// The `--purge` gate, run before any mutation. A no-op without `--purge`
-/// (there is nothing destructive to confirm) and with `--yes` (the flag *is*
-/// the confirmation, exactly as on `reset workspace` and on the macOS install
-/// `--force`). `--yes` without `--purge` therefore lands here and is ignored.
+/// (there is nothing destructive to confirm). `--yes` skips the prompt via
+/// [`super::confirm::confirm_destructive`]. The prompt stays
+/// `Delete the daemon home {path}? [y/N] `.
 ///
-/// Otherwise this is the `reset workspace` decision verbatim: non-tty stdin is
-/// refused rather than silently obeyed in a pipeline, and only `y` / `Y`
-/// proceeds.
-///
-/// Neither refusal is printed here. The user-facing wording is carried by
-/// [`ServiceError::NotATty`] and [`ServiceError::Declined`], and printed
-/// exactly once by `cli::service_exit` — the same single-print contract
-/// `reset workspace` has, reached from the other end: there the copy is
-/// written inside `reset::run_workspace` and the caller returns a bare exit 2,
-/// here the copy lives in `Display` and the caller is the only writer.
+/// Neither refusal is printed here. The wording is [`ServiceError`]'s
+/// `Display`, which forwards to [`super::confirm::ConfirmError`], and
+/// `cli::service_exit` prints it once.
 fn confirm_purge(
     daemon_home: &Path,
     purge: bool,
     yes: bool,
     confirm: Confirm<'_>,
 ) -> Result<(), ServiceError> {
-    if !purge || yes {
+    if !purge {
         return Ok(());
     }
     let prompt = format!("Delete the daemon home {}? [y/N] ", daemon_home.display());
-    let Some(line) = confirm(&prompt)? else {
-        return Err(ServiceError::NotATty);
-    };
-    let answer = line.trim();
-    if answer == "y" || answer == "Y" {
-        return Ok(());
-    }
-    Err(ServiceError::Declined)
+    super::confirm::confirm_destructive(yes, &prompt, &mut |prompt: &str| match confirm(prompt) {
+        Ok(line) => Ok(line),
+        Err(ServiceError::Stdin(source)) => Err(super::confirm::ConfirmError::Io(source)),
+        Err(other) => Err(super::confirm::ConfirmError::Io(std::io::Error::other(
+            other.to_string(),
+        ))),
+    })
+    .map_err(ServiceError::from)
 }
 
 /// The production [`Confirm`]: `None` when stdin is not a tty, otherwise the
@@ -2233,16 +2236,18 @@ WantedBy=default.target
     /// and users meet it the same way.
     #[test]
     fn display_covers_uninstall_confirmation_variants() {
+        use super::super::confirm::ConfirmError;
         assert_eq!(
             ServiceError::NotATty.to_string(),
-            "stdin is not a tty; pass --yes to confirm"
+            ConfirmError::NotATty.to_string()
         );
-        assert_eq!(ServiceError::Declined.to_string(), "uninstall declined");
-        let stdin = ServiceError::Stdin(std::io::Error::other("closed"));
         assert_eq!(
-            stdin.to_string(),
-            "could not read the confirmation from stdin: closed"
+            ServiceError::Declined.to_string(),
+            ConfirmError::Declined.to_string()
         );
+        let stdin = ServiceError::Stdin(std::io::Error::other("closed"));
+        let shared = ConfirmError::Io(std::io::Error::other("closed"));
+        assert_eq!(stdin.to_string(), shared.to_string());
     }
 
     #[cfg(unix)]

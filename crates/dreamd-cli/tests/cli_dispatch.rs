@@ -496,6 +496,89 @@ fn reset_workspace_without_yes_on_non_tty_exits_two() {
     );
 }
 
+/// `dreamd uninstall` without `--yes` on a non-TTY stdin exits 2, prints one
+/// line, and leaves the registry and both caches in place. `-q` is the same.
+/// `--yes` runs the cleanup.
+#[test]
+fn uninstall_without_yes_on_non_tty_exits_two_and_yes_cleans() {
+    let planted = || {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("Cargo.toml"), b"[package]\n").unwrap();
+        let init = Command::new(dreamd_bin())
+            .arg("init")
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("dreamd init");
+        assert!(
+            init.status.success(),
+            "init stderr={}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let cache = home.path().join(".cache/dreamd-mcp/0");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("dreamd"), b"bin").unwrap();
+        let npx = home.path().join(".npm/_npx/aaa");
+        std::fs::create_dir_all(&npx).unwrap();
+        std::fs::write(
+            npx.join("package.json"),
+            br#"{"dependencies":{"dreamd-mcp":"1"}}"#,
+        )
+        .unwrap();
+        (project, home)
+    };
+
+    let refuse = |args: &[&str]| {
+        let (project, home) = planted();
+        let registry = home.path().join(".agent/registry.toml");
+        let before = std::fs::read(&registry).unwrap();
+        let out = Command::new(dreamd_bin())
+            .args(args)
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("dreamd uninstall");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "args={args:?} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty(), "args={args:?}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(
+            stderr,
+            format!(
+                "dreamd: error — {}\n",
+                dreamd::commands::confirm::ConfirmError::NotATty
+            )
+        );
+        assert_eq!(std::fs::read(&registry).unwrap(), before);
+        assert!(home.path().join(".cache/dreamd-mcp/0/dreamd").is_file());
+        assert!(home.path().join(".npm/_npx/aaa/package.json").is_file());
+    };
+    refuse(&["uninstall"]);
+    refuse(&["uninstall", "-q"]);
+
+    let (project, home) = planted();
+    let out = Command::new(dreamd_bin())
+        .args(["uninstall", "--yes"])
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("dreamd uninstall --yes");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let registry = std::fs::read_to_string(home.path().join(".agent/registry.toml")).unwrap();
+    assert!(!registry.contains("root ="), "{registry}");
+    assert!(!home.path().join(".cache/dreamd-mcp").exists());
+    assert!(!home.path().join(".npm/_npx/aaa").exists());
+}
+
 /// `dreamd status` with no daemon reports `daemon: not running` and exits 1.
 #[test]
 fn status_without_daemon_exits_one() {

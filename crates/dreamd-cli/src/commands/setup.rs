@@ -137,7 +137,7 @@ impl std::fmt::Display for SetupError {
             Self::NoProjectRoot => write!(f, "no project root"),
             // Byte-identical to `ResetError::NotATty` on purpose — one refusal
             // vocabulary across commands. A test pins the pair.
-            Self::NotATty => write!(f, "stdin is not a tty; pass --yes to confirm"),
+            Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
             Self::Io(e) => write!(f, "{e}"),
             Self::Mcp(e) => write!(f, "{e}"),
         }
@@ -220,7 +220,7 @@ pub fn run(
         if !std::io::stdin().is_terminal() {
             // Same line as `dreamd reset` — refusing beats writing files off a
             // pipe with answers nobody gave.
-            writeln!(err, "error: stdin is not a tty; pass --yes to confirm")?;
+            writeln!(err, "error: {}", super::confirm::ConfirmError::NotATty)?;
             return Err(SetupError::NotATty);
         }
         // `--dry-run` prints the plan for the flags as given. Asking questions
@@ -1188,7 +1188,7 @@ mod tests {
     fn setup_not_a_tty_matches_reset_vocabulary() {
         assert_eq!(
             SetupError::NotATty.to_string(),
-            "stdin is not a tty; pass --yes to confirm"
+            super::super::confirm::ConfirmError::NotATty.to_string()
         );
         // The two commands must refuse in the same words, so drift in either
         // one fails here rather than shipping.

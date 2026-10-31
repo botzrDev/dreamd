@@ -115,6 +115,14 @@ pub struct StopScope<'a> {
 #[cfg(unix)]
 const PROC_ROOT: &str = "/proc";
 
+/// One process [`stop_local_servers`] would signal: the pattern it matched
+/// and its pid. Spared processes are not included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedStop {
+    pub pid: u32,
+    pub label: &'static str,
+}
+
 /// A running process that matched [`STOP_PATTERNS`] **and** is the `dreamd`
 /// binary (see [`is_dreamd_binary`]), plus the two facts [`attributable`] needs
 /// to decide whether it is ours.
@@ -204,26 +212,29 @@ fn stop_scoped(
         );
     }
 
-    for candidate in collect_candidates(proc_root, scope) {
-        let label = matched_pattern(&candidate.argv).unwrap_or("dreamd");
-        if !attributable(candidate.exe.as_deref(), candidate.home.as_deref(), scope) {
-            report.spared = true;
-            // Describes *this invocation's* scope and nothing about the spared
-            // process beyond its pid and which pattern it matched. Printing the
-            // foreign process's `HOME=` or executable path would hand every
-            // user on a shared box an inventory of other users' dreamd servers.
-            let _ = writeln!(
-                err,
-                "dreamd: warning — left `{label}` pid {pid} running: not attributable to \
-                 this invocation's $HOME ({home}) or native binary cache ({cache}), so it \
-                 may belong to another home or user. Stop it yourself if it is yours.",
-                pid = candidate.pid,
-                home = describe_scope(scope.home),
-                cache = describe_scope(scope.cache_dir),
-            );
+    let candidates = collect_candidates(proc_root, scope);
+    for candidate in &candidates {
+        if attributable(candidate.exe.as_deref(), candidate.home.as_deref(), scope) {
             continue;
         }
-        match kill(candidate.pid) {
+        report.spared = true;
+        let label = matched_pattern(&candidate.argv).unwrap_or("dreamd");
+        // Describes *this invocation's* scope and nothing about the spared
+        // process beyond its pid and which pattern it matched. Printing the
+        // foreign process's `HOME=` or executable path would hand every
+        // user on a shared box an inventory of other users' dreamd servers.
+        let _ = writeln!(
+            err,
+            "dreamd: warning — left `{label}` pid {pid} running: not attributable to \
+             this invocation's $HOME ({home}) or native binary cache ({cache}), so it \
+             may belong to another home or user. Stop it yourself if it is yours.",
+            pid = candidate.pid,
+            home = describe_scope(scope.home),
+            cache = describe_scope(scope.cache_dir),
+        );
+    }
+    for target in planned_stops(&candidates, scope) {
+        match kill(target.pid) {
             Ok(()) => report.matched = true,
             Err(e) => {
                 // A signal that did not land leaves the process running just as
@@ -235,9 +246,10 @@ fn stop_scoped(
                 report.spared = true;
                 let _ = writeln!(
                     err,
-                    "dreamd: warning — could not stop `{label}` pid {} ({e}); \
+                    "dreamd: warning — could not stop `{label}` pid {pid} ({e}); \
                      stop it manually if still running.",
-                    candidate.pid,
+                    label = target.label,
+                    pid = target.pid,
                 );
             }
         }
@@ -730,6 +742,25 @@ pub fn clear_dir_tree(dir: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// Directories under `npx_dir` that [`clear_scoped_npx`] would remove, in
+/// `read_dir` order. A missing cache root is `Ok` with nothing listed.
+/// Does not delete.
+pub fn dreamd_mcp_npx_entries(npx_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut matched = Vec::new();
+    let entries = match std::fs::read_dir(npx_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(matched),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() && entry_is_dreamd_mcp_npx_install(&path) {
+            matched.push(path);
+        }
+    }
+    Ok(matched)
+}
+
 /// Scoped npx-cache clear: delete only entries that
 /// `entry_is_dreamd_mcp_npx_install` recognizes as dreamd-mcp installs —
 /// the same scoping as the README manual recipe. Never wipes unrelated
@@ -737,24 +768,46 @@ pub fn clear_dir_tree(dir: &Path) -> std::io::Result<bool> {
 /// (see `commands::uninstall`). A missing cache root is `Ok` with nothing
 /// removed. Returns the removed entry paths.
 pub fn clear_scoped_npx(npx_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut removed = Vec::new();
-    let entries = match std::fs::read_dir(npx_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if entry_is_dreamd_mcp_npx_install(&path) {
-            std::fs::remove_dir_all(&path)?;
-            removed.push(path);
-        }
+    let removed = dreamd_mcp_npx_entries(npx_dir)?;
+    for path in &removed {
+        std::fs::remove_dir_all(path)?;
     }
     Ok(removed)
+}
+
+/// Processes [`stop_local_servers`] would signal for `scope`, in the order
+/// they would be signaled. Non-Unix is empty: this command does not scan a
+/// process table there.
+#[cfg(unix)]
+pub fn attributable_targets(scope: &StopScope<'_>) -> Vec<PlannedStop> {
+    planned_stops(&collect_candidates(Path::new(PROC_ROOT), scope), scope)
+}
+
+/// Non-unix: no process table. See the unix arm.
+#[cfg(not(unix))]
+pub fn attributable_targets(scope: &StopScope<'_>) -> Vec<PlannedStop> {
+    let _ = scope;
+    Vec::new()
+}
+
+/// Same as [`attributable_targets`] against an injected process table.
+#[cfg(all(unix, test))]
+pub(crate) fn attributable_targets_in(proc_root: &Path, scope: &StopScope<'_>) -> Vec<PlannedStop> {
+    planned_stops(&collect_candidates(proc_root, scope), scope)
+}
+
+#[cfg(unix)]
+fn planned_stops(candidates: &[Candidate], scope: &StopScope<'_>) -> Vec<PlannedStop> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            attributable(candidate.exe.as_deref(), candidate.home.as_deref(), scope)
+        })
+        .map(|candidate| PlannedStop {
+            pid: candidate.pid,
+            label: matched_pattern(&candidate.argv).unwrap_or("dreamd"),
+        })
+        .collect()
 }
 
 /// `true` iff the npx cache entry at `entry` is a dreamd-mcp install.
@@ -1074,6 +1127,57 @@ mod tests {
         assert!(report.matched, "a signaled process must be reported");
         assert!(!report.spared, "nothing was left running");
         assert!(err.is_empty(), "no warning expected, got: {err}");
+    }
+
+    /// The plan's process list is the set `stop_scoped` signals, in the same
+    /// order. A match that is not attributable is in neither.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attributable_targets_match_the_pids_stop_signals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let proc_root = root.join("proc");
+        let home = root.join("home/ours");
+        let other = root.join("home/theirs");
+        let cache = home.join(".cache/dreamd-mcp");
+        let exe = home.join(".cargo/bin/dreamd");
+        let their_exe = other.join(".cargo/bin/dreamd");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        touch_binary(&exe);
+        touch_binary(&their_exe);
+        write_proc_entry(
+            &proc_root,
+            70,
+            &["dreamd", "mcp"],
+            Some(other.to_str().unwrap()),
+            &their_exe,
+        );
+        write_proc_entry(
+            &proc_root,
+            42,
+            &["dreamd", "watch"],
+            Some(home.to_str().unwrap()),
+            &exe,
+        );
+
+        let scope = StopScope {
+            home: Some(&home),
+            cache_dir: Some(&cache),
+        };
+        let targets = attributable_targets_in(&proc_root, &scope);
+        let (signalled, _, _) = run_stop(&proc_root, &scope);
+        assert_eq!(
+            targets.iter().map(|stop| stop.pid).collect::<Vec<_>>(),
+            signalled
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].pid, 42);
+        assert_eq!(targets[0].label, "dreamd watch");
+        assert!(
+            !targets.iter().any(|stop| stop.pid == 70),
+            "a non-attributable match is not a planned stop"
+        );
     }
 
     /// A signal that does not land (no `kill(1)` on the box, EPERM) leaves the

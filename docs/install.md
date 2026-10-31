@@ -356,8 +356,9 @@ Because it is destructive it asks first, like `dreamd reset workspace`: pass
 stdin it refuses and changes nothing.
 
 Note this is not `dreamd uninstall`, which is a different verb: that one stops
-running `dreamd` processes, drops the socket and clears the download cache,
-while leaving the systemd unit or LaunchAgent in place.
+running `dreamd` processes, drops the socket, unregisters the current project,
+and clears the download cache. It asks first (`y` on a tty, or `--yes`).
+The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
 
 If you ever need to undo the service by hand — a unit installed by a build of
 `dreamd` you no longer have, say — the equivalent commands are:

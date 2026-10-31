@@ -6,6 +6,7 @@
 
 pub mod archive;
 pub mod blame;
+pub mod confirm;
 pub mod deprecation;
 pub mod doctor;
 pub mod dream;

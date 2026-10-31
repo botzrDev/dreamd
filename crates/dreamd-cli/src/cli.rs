@@ -6,6 +6,7 @@
 //!   - `1` -- runtime / I/O error
 //!   - `2` -- usage error (missing subcommand, no project root)
 
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -179,6 +180,13 @@ pub enum Command {
     /// Print daemon liveness, resolved project, last dream cycle, and recent log.
     Status,
     /// Stop local dreamd servers, unregister this project, and clear caches.
+    ///
+    /// Prints the processes, registry block, and cache paths it will change,
+    /// then waits for `y` on a tty. `--yes` skips the prompt. Without a tty
+    /// and without `--yes` it exits 2 and changes nothing. `--quiet` does
+    /// not skip the prompt.
+    ///
+    /// The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
     Uninstall(UninstallArgs),
     /// Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release.
     Update(UpdateArgs),
@@ -579,6 +587,9 @@ pub struct UninstallArgs {
     /// Suppress non-essential output (errors still print to stderr).
     #[arg(short = 'q', long)]
     pub quiet: bool,
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for the `dreamd update` subcommand (AILAB-226).
@@ -1495,19 +1506,40 @@ fn run_uninstall(args: UninstallArgs) -> ExitCode {
     // AILAB-584 — the stop pass signals only processes attributable to this
     // invocation's home/cache. The scope is captured here rather than threaded
     // through `Stopper` so the command modules and their fake stoppers stay
-    // unchanged.
+    // unchanged. The plan lists the same set before anything is signaled.
     let scope = commands::lifecycle_cleanup::StopScope {
         home: home.as_deref(),
         cache_dir: cache_dir.as_deref(),
     };
+    let stops = commands::lifecycle_cleanup::attributable_targets(&scope);
     let mut stop =
         |e: &mut dyn std::io::Write| commands::lifecycle_cleanup::stop_local_servers(&scope, e);
-    match commands::uninstall::run(&req, &mut stop, &mut out, &mut err) {
+    // The reader writes through `err` (already locked). The stderr macros
+    // would deadlock on that lock. `read_line` runs only after the plan and prompt.
+    let is_tty = std::io::stdin().is_terminal();
+    let mut read_line = || {
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(commands::confirm::ConfirmError::from)?;
+        Ok(line)
+    };
+    match commands::uninstall::run_gated(
+        &req,
+        &stops,
+        args.yes,
+        is_tty,
+        &mut read_line,
+        &mut stop,
+        &mut out,
+        &mut err,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(commands::uninstall::UninstallError::Io(e)) => {
-            eprintln!("dreamd: error — {e}");
-            ExitCode::from(1)
-        }
+        Err(
+            commands::uninstall::GatedError::NotATty | commands::uninstall::GatedError::Declined,
+        ) => ExitCode::from(2),
+        Err(commands::uninstall::GatedError::Reported) => ExitCode::from(1),
     }
 }
 
@@ -2842,13 +2874,21 @@ mod tests {
 
     #[test]
     fn parses_uninstall_flags() {
-        let cli = Cli::try_parse_from(["dreamd", "uninstall", "--keep-caches", "--all-npx", "-q"])
-            .unwrap();
+        let cli = Cli::try_parse_from([
+            "dreamd",
+            "uninstall",
+            "--keep-caches",
+            "--all-npx",
+            "-q",
+            "--yes",
+        ])
+        .unwrap();
         match cli.command {
             Some(Command::Uninstall(args)) => {
                 assert!(args.keep_caches);
                 assert!(args.all_npx);
                 assert!(args.quiet);
+                assert!(args.yes);
             }
             _ => panic!("expected Uninstall"),
         }
@@ -2858,9 +2898,14 @@ mod tests {
                 assert!(!args.keep_caches);
                 assert!(!args.all_npx);
                 assert!(!args.quiet);
+                assert!(!args.yes);
             }
             _ => panic!("expected Uninstall with default flags"),
         }
+        assert!(
+            Cli::try_parse_from(["dreamd", "uninstall", "-y"]).is_err(),
+            "--yes is long-only"
+        );
     }
 
     #[test]

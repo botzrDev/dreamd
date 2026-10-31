@@ -110,23 +110,29 @@ is therefore a no-op. There is no `dreamd reset --all` — use `dreamd uninstall
 ### Uninstall
 
 ```sh
-npx -y dreamd-mcp uninstall     # or, with a native binary: dreamd uninstall
+npx -y dreamd-mcp uninstall          # prompts for y when stdin is a tty
+npx -y dreamd-mcp uninstall --yes    # no prompt; the form to use in a script
 ```
 
 One command: stops local `dreamd mcp` / `dreamd watch` processes, removes the
 daemon socket, unregisters the current project from the registry (skipped with a
 benign note when run outside a project root), and clears the native binary cache
 (`~/.cache/dreamd-mcp`) plus the dreamd-mcp-scoped entries under `~/.npm/_npx`.
+On a tty it prints that plan and waits for `y`. `--yes` skips the wait. Without
+a tty and without `--yes` it exits 2 and changes nothing.
 Safe to run twice — a second run succeeds with nothing left to do.
 
 | Flag | Effect |
 |---|---|
+| `--yes` | Skip the confirmation prompt. Required when stdin is not a tty. `--quiet` does not imply it. |
 | `--keep-caches` | Skip the cache clears |
 | `--all-npx` | Loud: wipe the **entire** `~/.npm/_npx` (every npx-cached package, not just dreamd). Prints a warning before deleting. |
 | `--quiet` / `-q` | Suppress non-essential output |
 
 Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, and every
-project's `.agent/` memory store. To wipe a project's store entirely, see
+project's `.agent/` memory store.
+The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
+To wipe a project's store entirely, see
 [Full fresh store](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)
 in the troubleshooting guide — delete `.agent/` and re-run `npx -y dreamd-mcp init`. That is
 destructive; back up first if the store has value.

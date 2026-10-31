@@ -11,10 +11,14 @@
 //! messaging.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use super::confirm::{self, ConfirmError};
 use super::init;
-use super::lifecycle_cleanup::{self, Stopper};
+use super::lifecycle_cleanup::{self, PlannedStop, StopScope, Stopper};
+
+/// Prompt written to stderr after the plan, on a tty, before the answer.
+pub const PROMPT: &str = "Proceed with dreamd uninstall? [y/N] ";
 
 /// Failure modes for `dreamd uninstall`. Everything user-fixable is benign
 /// messaging, not an error; only real I/O failures (permission denied on a
@@ -272,4 +276,196 @@ fn clear_caches(
     }
 
     Ok(())
+}
+
+/// Why [`run_gated`] did not finish. [`GatedError::NotATty`] and
+/// [`GatedError::Declined`] are exit 2. [`GatedError::Reported`] is exit 1
+/// and the line is already on `err`.
+#[derive(Debug)]
+pub enum GatedError {
+    NotATty,
+    Declined,
+    Reported,
+}
+
+/// What the plan says it will delete.
+#[derive(Debug)]
+pub enum DeletePlan {
+    /// `--keep-caches`, which wins over `--all-npx`.
+    KeepCaches,
+    /// Existing paths [`run`] would delete, native cache first.
+    Paths(Vec<PathBuf>),
+}
+
+/// The preview [`render_plan`] prints. Built with reads only.
+#[derive(Debug)]
+pub struct UninstallPlan {
+    pub stops: Vec<PlannedStop>,
+    pub registry_root: Option<String>,
+    pub deletes: DeletePlan,
+}
+
+/// Read the process table, the registry, and the cache directories. Does not
+/// signal, flock, or delete.
+pub fn build_plan(
+    req: &UninstallRequest<'_>,
+    scope: &StopScope<'_>,
+) -> Result<UninstallPlan, std::io::Error> {
+    plan_with_stops(req, &lifecycle_cleanup::attributable_targets(scope))
+}
+
+fn plan_with_stops(
+    req: &UninstallRequest<'_>,
+    stops: &[PlannedStop],
+) -> Result<UninstallPlan, std::io::Error> {
+    Ok(UninstallPlan {
+        stops: stops.to_vec(),
+        registry_root: registry_root(req)?,
+        deletes: delete_plan(req)?,
+    })
+}
+
+/// The plan text: three sections, no blank lines, trailing newline.
+pub fn render_plan(plan: &UninstallPlan) -> String {
+    let mut out = String::from("will stop:\n");
+    if plan.stops.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for stop in &plan.stops {
+            out.push_str(&format!("  {} pid {}\n", stop.label, stop.pid));
+        }
+    }
+    out.push_str("will remove registry block:\n");
+    if let Some(root) = &plan.registry_root {
+        out.push_str("[[projects]]\n");
+        out.push_str(&format!("root = \"{root}\"\n"));
+    } else {
+        out.push_str("  (none)\n");
+    }
+    out.push_str("will delete:\n");
+    match &plan.deletes {
+        DeletePlan::KeepCaches => out.push_str("  (none) --keep-caches\n"),
+        DeletePlan::Paths(paths) if paths.is_empty() => out.push_str("  (none)\n"),
+        DeletePlan::Paths(paths) => {
+            for path in paths {
+                out.push_str(&format!("  {}\n", path.display()));
+            }
+        }
+    }
+    out
+}
+
+/// Confirm, then [`run`].
+///
+/// `stops` is the process list from [`lifecycle_cleanup::attributable_targets`]
+/// for this invocation. It is passed in so the stop closure can borrow the
+/// same scope after the list is already owned.
+///
+/// `is_tty` is false when stdin is not a terminal: the refusal is one line,
+/// stdout stays empty, and `read_line` is not called. On a tty the plan is
+/// written first (even when `quiet`), then [`PROMPT`], then `read_line`.
+/// `--yes` does not call `read_line`. The plan is written for `--yes` only
+/// when `quiet` is false. After `y`, `Y`, or `--yes`, [`run`] is the body.
+pub fn run_gated(
+    req: &UninstallRequest<'_>,
+    stops: &[PlannedStop],
+    yes: bool,
+    is_tty: bool,
+    read_line: &mut dyn FnMut() -> Result<String, ConfirmError>,
+    stop: Stopper<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), GatedError> {
+    let plan = match plan_with_stops(req, stops) {
+        Ok(plan) => plan,
+        Err(error) => return Err(report(err, &error)),
+    };
+    let rendered = render_plan(&plan);
+
+    if !yes {
+        if !is_tty {
+            return Err(report(err, &ConfirmError::NotATty).not_tty());
+        }
+        if let Err(error) = write!(out, "{rendered}") {
+            return Err(report(err, &error));
+        }
+        if let Err(error) = write!(err, "{PROMPT}") {
+            return Err(report(err, &error));
+        }
+        if let Err(error) = err.flush() {
+            return Err(report(err, &error));
+        }
+        let line = match read_line() {
+            Ok(line) => line,
+            Err(error) => return Err(report(err, &error)),
+        };
+        let mut once = Some(line);
+        if let Err(error) = confirm::confirm_destructive(false, PROMPT, &mut |_| Ok(once.take())) {
+            return Err(match error {
+                ConfirmError::NotATty => report(err, &ConfirmError::NotATty).not_tty(),
+                ConfirmError::Declined => report(err, &ConfirmError::Declined).declined(),
+                ConfirmError::Io(source) => report(err, &ConfirmError::Io(source)),
+            });
+        }
+    } else if !req.quiet {
+        if let Err(error) = write!(out, "{rendered}") {
+            return Err(report(err, &error));
+        }
+    }
+
+    match run(req, stop, out, err) {
+        Ok(()) => Ok(()),
+        Err(UninstallError::Io(error)) => Err(report(err, &error)),
+    }
+}
+
+fn report(err: &mut dyn Write, error: &impl std::fmt::Display) -> GatedError {
+    let _ = writeln!(err, "dreamd: error — {error}");
+    GatedError::Reported
+}
+
+impl GatedError {
+    fn not_tty(self) -> Self {
+        match self {
+            Self::Reported => Self::NotATty,
+            other => other,
+        }
+    }
+
+    fn declined(self) -> Self {
+        match self {
+            Self::Reported => Self::Declined,
+            other => other,
+        }
+    }
+}
+
+fn registry_root(req: &UninstallRequest<'_>) -> Result<Option<String>, std::io::Error> {
+    let Some(root) = init::find_project_root(req.cwd) else {
+        return Ok(None);
+    };
+    let registry = dreamd_core::DaemonHome::new(req.daemon_home).registry_toml();
+    Ok(dreamd_core::registry::resolve_project(&registry, &root)?.map(|entry| entry.root))
+}
+
+fn delete_plan(req: &UninstallRequest<'_>) -> Result<DeletePlan, std::io::Error> {
+    if req.keep_caches {
+        return Ok(DeletePlan::KeepCaches);
+    }
+    let mut paths = Vec::new();
+    if let Some(cache) = req.cache_dir {
+        if cache.is_dir() {
+            paths.push(cache.to_path_buf());
+        }
+    }
+    if let Some(npx) = req.npx_dir {
+        if req.all_npx {
+            if npx.exists() {
+                paths.push(npx.to_path_buf());
+            }
+        } else {
+            paths.extend(lifecycle_cleanup::dreamd_mcp_npx_entries(npx)?);
+        }
+    }
+    Ok(DeletePlan::Paths(paths))
 }

@@ -2,7 +2,11 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"uninstall\")"
 ---
-Stop local dreamd servers, unregister this project, and clear caches
+Stop local dreamd servers, unregister this project, and clear caches.
+
+Prints the processes, registry block, and cache paths it will change, then waits for `y` on a tty. `--yes` skips the prompt. Without a tty and without `--yes` it exits 2 and changes nothing. `--quiet` does not skip the prompt.
+
+The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
 
 Usage: uninstall [OPTIONS]
 
@@ -16,5 +20,8 @@ Options:
   -q, --quiet
           Suppress non-essential output (errors still print to stderr)
 
+      --yes
+          Skip the confirmation prompt
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
