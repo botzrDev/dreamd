@@ -17,6 +17,8 @@ use tantivy::query::AllQuery;
 use tantivy::schema::{TantivyDocument, Value};
 use tantivy::TantivyError;
 
+use dreamd_protocol::AgentLearning;
+
 use crate::daemon_state::read_daemon_state;
 use crate::index::{build_schema, Layer};
 use crate::layout::AgentRoot;
@@ -120,14 +122,7 @@ pub fn check_store(
             unpinned.insert(ev.id.as_str());
         }
     }
-    for (id, &count) in &log_counts {
-        if count > 1 {
-            out.push(Violation::DuplicateEventId {
-                id: (*id).to_owned(),
-                count,
-            });
-        }
-    }
+    out.extend(duplicate_event_ids(&events));
 
     // Read once; the semantic and citation checks both use it.
     let lessons = match read_lessons_file(&agent_root.lessons_md()) {
@@ -233,6 +228,24 @@ pub fn check_store(
     }
 
     Ok(out)
+}
+
+/// One [`Violation::DuplicateEventId`] for each id that more than one record
+/// in `events` carries, sorted by id. The one duplicate detector: [`check_store`]
+/// and `dreamd doctor` both call it (BZR-1302).
+pub fn duplicate_event_ids(events: &[AgentLearning]) -> Vec<Violation> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for ev in events {
+        *counts.entry(ev.id.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|&(_, count)| count > 1)
+        .map(|(id, count)| Violation::DuplicateEventId {
+            id: id.to_owned(),
+            count,
+        })
+        .collect()
 }
 
 /// What [`read_index_docs`] reads from one searcher.
@@ -413,6 +426,30 @@ mod tests {
             violations,
             vec![Violation::DuplicateEventId { id: dup, count: 2 }]
         );
+    }
+
+    /// BZR-1302 test 11: one violation per repeated id, sorted by id, with
+    /// its count; an id seen once is not reported.
+    #[test]
+    fn duplicate_event_ids_reports_each_repeated_id_sorted() {
+        let (a, b, c) = (id('A'), id('B'), id('C'));
+        let events = [
+            learning(&a, "a1", false),
+            learning(&b, "b1", false),
+            learning(&a, "a2", false),
+            learning(&c, "c1", false),
+            learning(&c, "c2", false),
+            learning(&c, "c3", false),
+        ];
+
+        assert_eq!(
+            duplicate_event_ids(&events),
+            vec![
+                Violation::DuplicateEventId { id: a, count: 2 },
+                Violation::DuplicateEventId { id: c, count: 3 },
+            ]
+        );
+        assert_eq!(duplicate_event_ids(&[]), vec![]);
     }
 
     #[cfg(unix)]

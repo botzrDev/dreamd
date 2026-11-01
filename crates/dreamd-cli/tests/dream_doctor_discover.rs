@@ -159,3 +159,43 @@ fn doctor_from_subdir_uses_parent_store() {
         "doctor stdout must report dream_cycle_mode; got: {stdout}",
     );
 }
+
+/// BZR-1302 test 10: `run_doctor` passes the daemon-home `registry.toml`, so
+/// the binary names the line that does not parse and exits 1.
+#[test]
+fn doctor_reports_an_unparseable_registry() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".agent")).unwrap();
+    std::fs::write(
+        home.path().join(".agent/registry.toml"),
+        "[[projects]]\nroot = \"/x\"\n!!!\n",
+    )
+    .unwrap();
+
+    // A scaffolded store, the shape of `doctor_from_subdir_uses_parent_store`,
+    // in its own project dir so the daemon home is not the store.
+    let project = tempfile::tempdir().unwrap();
+    for sub in ["working", "episodic", "semantic", "personal", ".dreamd"] {
+        std::fs::create_dir_all(project.path().join(".agent").join(sub)).unwrap();
+    }
+
+    let out = Command::new(dreamd_bin())
+        .arg("doctor")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env_remove("DREAMD_SOCK")
+        .output()
+        .expect("run dreamd doctor");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unparseable registry must fail doctor; stderr={}\nstdout={stdout}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        stdout.contains("registry: parse error at line 3  [WARNING: "),
+        "got: {stdout}",
+    );
+}
