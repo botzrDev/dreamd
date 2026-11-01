@@ -10,6 +10,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **tantivy 0.26.1 → 0.27.0, tokio 1.52.3 → 1.54.1, and libz-sys 1.1.28 → 1.1.31.** Columnar blocks stay zstd-compressed, now through `zstd` 0.14.3, `zstd-safe` 8.2.0 and `zstd-sys` 2.1.2. That clears RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403, RUSTSEC-2026-0386 and RUSTSEC-2026-0418. An index written by 0.26.1 (schema `index/1.3`) opens in place.
 
+### Added
+
+- **`dreamd doctor` reports hand-edited lines that the readers quietly work around.** Four new WARNING lines: `score_range` for a `pain` or `importance` outside `0.0..=10.0`, which recall scores at the nearest bound; `duplicate_id` for an event id on more than one line, which the index holds once; `future_timestamp` for a `timestamp` more than 24 h ahead of the clock, which recall scores as new; and `registry: parse error at line N` for a `~/.agent/registry.toml` that does not parse, which makes `dreamd status` report `not registered` and the daemon answer `500`. Like `malformed line(s)`, the log warnings give a count and the first five line numbers. Doctor exits 1 when any of them prints; on such a store it used to exit 0. Recall, the index and the dream cycle read these lines exactly as before. `docs/troubleshooting.md` says what each reader does and how to fix the line. Library: new `invariants::duplicate_event_ids`, which `check_store` now calls.
+
 ### Changed
 
 - **`GET /api/v1/recall` answers `414` when `q` is over 16384 bytes, and `400` when the query parser rejects `q`.** The `414` body is `{"error":"query exceeds 16384 bytes; pass a shorter query"}`. Before, the daemon searched any `q` that fit hyper's 65,534-byte URI limit. A `q` the parser rejects, such as an unbalanced `"` or `rust::tokio`, answered `500`; it now answers `400` with the same `{"error":"recall failed: …"}` body. `search_nodes` applies the same length limit in both modes, before it searches or sends anything.

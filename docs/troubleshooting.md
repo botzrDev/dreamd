@@ -240,6 +240,42 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ---
 
+## `dreamd doctor` warns about a hand-edited line
+
+`AGENT_LEARNINGS.jsonl` and `~/.agent/registry.toml` are plain files you may edit. The write paths (`append_node`, `POST /api/v1/learn`, `dreamd init`) refuse what these warnings describe; a line written by hand skips those checks. The readers keep working, and `dreamd doctor` tells you what they are doing with the line. Each of these warnings makes `dreamd doctor` exit 1. Line numbers are lines of the file, blank and malformed lines included; doctor lists the first five.
+
+The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNINGS.jsonl` rebuild it: stop `dreamd watch`, run `dreamd doctor --repair`, start `dreamd watch` again.
+
+### `score_range: N line(s) …`
+
+**What the reader does:** The line is a record and is indexed with the stored value. Recall clamps `pain` and `importance` to `0.0..=10.0` when it scores, so a value above 10 scores as 10, and a negative value scores as 0, which makes the record's salience 0.0. `dreamd recall --explain` shows the clamped factor.
+
+**Fix:** Set the value on that line to a number from `0.0` to `10.0`, then rebuild the index as above.
+
+### `duplicate_id: N line(s) …`
+
+**What the reader does:** Readers of the log keep every copy, but the index holds one document per id, so recall returns one of them. An index that already holds the id keeps the copy it indexed, and a copy added later by hand is never indexed. A rebuilt index holds the last copy in the file. `dreamd forget <id>` removes every copy, and a pin applies to every copy.
+
+**Fix:** Keep one line per id and delete the other copies. If a copy holds a different learning you want to keep, delete it and add it again with `append_node` or `POST /api/v1/learn`, which gives it a new id; do not write an id by hand. Then rebuild the index as above, so that it holds the copy you kept.
+
+### `future_timestamp: N line(s) …`
+
+**What the reader does:** Recall floors the record's age at 0, so it scores as if it had just been written until the clock reaches its timestamp. Until then it counts in the dream cycle's 7- and 30-day recurrence windows, and decay does not archive it until 90 days after that timestamp.
+
+**Fix:** Set `timestamp` to when the learning happened, in RFC 3339 UTC (for example `2026-10-31T09:30:00Z`), then rebuild the index as above. Doctor flags a timestamp more than 24 hours ahead of this machine's clock; if it flags every recent line, check the clock first.
+
+### `registry: parse error at line N`
+
+**Symptom:** Besides the doctor line, `dreamd status` prints `(not registered)` for a project you registered, and the daemon answers every request with `500 {"error":"registry read failed"}`. `dreamd mcp` in daemon mode reports that as `daemon error 500 Internal Server Error: {"error":"registry read failed"}`. `registry: error  [WARNING: could not read …]` is the same failure for a file that is not UTF-8 or cannot be read.
+
+**What the reader does:** `dreamd status` treats a registry it cannot parse as having no entries and does not print the error. The daemon re-reads `registry.toml` when the file changes; while it does not parse, every project lookup fails, nothing is cached, and the daemon serves no project. `dreamd init` and `dreamd init --uninstall-project` refuse and print the parse error with its line and column.
+
+**Fix:** Edit the line doctor names. Each entry is a `[[projects]]` line followed by `root = "/absolute/path/to/project"`. Or delete `~/.agent/registry.toml` and run `dreamd init` in each project; `init` registers an existing `.agent/` without changing it. The daemon reads the fixed file on its next request; no restart is needed.
+
+**Prevention:** Write learnings through `append_node` or `POST /api/v1/learn`, and change the registry with `dreamd init` and `dreamd init --uninstall-project`.
+
+---
+
 ## Still stuck?
 
 1. `npx -y dreamd-mcp doctor` — dream-cycle mode and index health; `dreamd status` for last cycle (cargo-installed binary)

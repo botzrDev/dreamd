@@ -693,6 +693,9 @@ fn report_doctor(cwd: &Path, out: &mut dyn Write) -> std::io::Result<()> {
         &agent_root,
         skip.as_ref(),
         socket.as_deref(),
+        // init::run parsed the registry under its lock before this beat; an
+        // unparseable registry fails setup there.
+        None,
         // `repair: false` is load-bearing: a diagnostic beat the user did not
         // ask for must never unlink a socket or rebuild an index.
         super::doctor::DoctorFlags {

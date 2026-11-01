@@ -822,6 +822,10 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let socket = dreamd_core::client::resolve_daemon_socket();
     #[cfg(not(unix))]
     let socket: Option<PathBuf> = None;
+    // The daemon-home registry, built the way `run_status` builds it; doctor
+    // only reads it, to report a file that does not parse (BZR-1302).
+    let registry =
+        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml());
     // Unlocked handles, deliberately — do not hoist a `.lock()` out here.
     // `--repair` reopens the index, and Tantivy's `segment_updater` thread logs
     // through the tracing console layer, which writes to `std::io::stderr`.
@@ -847,6 +851,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         &agent_root,
         skip.as_ref(),
         socket.as_deref(),
+        registry.as_deref(),
         flags,
         now_sec,
         &mut out,

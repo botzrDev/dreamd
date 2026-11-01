@@ -6,9 +6,13 @@
 //! dream-cycle mode, scaffolded subdirs, index coverage of the episodic log
 //! (the set difference between log ids and committed index ids), lessons the
 //! last semantic pass could not index, episodic log health (malformed lines /
-//! torn tail), record and index schema versions, orphaned daemon socket,
-//! Tantivy lock-file presence, last autobiography skip, and whether the
-//! dream-cycle WAL is readable.
+//! torn tail), record and index schema versions, hand-edited log lines (a
+//! `pain` or `importance` the ingest validators refuse, an event id on more
+//! than one line, a `timestamp` more than 24 h ahead of the clock), whether
+//! the daemon-home `registry.toml` parses, orphaned daemon socket, Tantivy
+//! lock-file presence, last autobiography skip, and whether the dream-cycle
+//! WAL is readable. The hand-edit and registry checks only report: the
+//! readers keep skipping, clamping and upserting as before (BZR-1302).
 //!
 //! `--repair` unlinks an orphaned daemon socket and rebuilds the derived
 //! Tantivy cache by replaying the episodic log, which it only ever reads. The
@@ -36,12 +40,16 @@ use std::path::{Path, PathBuf};
 use dreamd_core::autobiography::AutobiographySkip;
 use dreamd_core::config::{load_config, Config, DreamCycleMode};
 use dreamd_core::consolidation;
+use dreamd_core::episodic::MALFORMED_LINE_NUMBERS_CAP;
+use dreamd_core::id_minter::MAX_SEED_SKEW;
 use dreamd_core::index::{
     check_manifest_version, ManifestCheckOutcome, ManifestVersionError, RecurrenceSidecar,
     INDEX_MANIFEST_FILENAME, SCHEMA_VERSION as INDEX_SCHEMA_VERSION,
 };
+use dreamd_core::ingress::LearnIngress;
 use dreamd_core::layout::AgentRoot;
 use dreamd_core::llm;
+use dreamd_core::registry::Registry;
 use dreamd_protocol::{AgentLearning, RECORD_SCHEMA_VERSION};
 
 /// Mode flags for a doctor run. Mirrors `cli::DoctorArgs` without pulling
@@ -66,9 +74,14 @@ pub struct DoctorFlags {
 /// caller always passes `None`: the daemon there is loopback TCP, and
 /// `--repair` probes it through `server.json` instead.
 ///
+/// `registry` is the daemon-home `registry.toml`, or `None` when the home
+/// directory can't be resolved. Doctor only reads it, to report a file the
+/// daemon and `dreamd status` cannot parse.
+///
 /// `now_sec` is caller-provided (unix seconds) so the recurrence windows
 /// `--cluster-health` recomputes stay deterministic under test, matching the
-/// dream cycle's own convention — do not call `Utc::now()` below.
+/// dream cycle's own convention — do not call `Utc::now()` below. The
+/// `future_timestamp` check measures "ahead of the clock" from it too.
 ///
 /// Returns `Ok(true)` if all checks passed (exit 0 caller), `Ok(false)` if any
 /// WARNING or ERROR was emitted or a repair step failed (exit 1 caller).
@@ -78,6 +91,7 @@ pub fn run(
     agent_root: &AgentRoot,
     skip: Option<&AutobiographySkip>,
     socket: Option<&Path>,
+    registry: Option<&Path>,
     flags: DoctorFlags,
     now_sec: i64,
     out: &mut impl Write,
@@ -220,23 +234,37 @@ pub fn run(
         }
     }
 
-    // One read of the episodic log backs both the record-schema check and
-    // --cluster-health cluster derivation (an absent log reads as no records).
-    let events = match dreamd_core::episodic::read_all(&episodic_path) {
-        Ok(events) => Some(events),
-        Err(e) => {
-            writeln!(
-                out,
-                "schema_record: error  [WARNING: could not read the episodic log: {e}]"
-            )?;
-            all_ok = false;
-            None
-        }
-    };
-    if let Some(events) = &events {
+    // One read of the episodic log backs the record-schema check, the three
+    // hand-edit checks and --cluster-health (an absent log reads as no records).
+    // `events` is what `read_all` returns, in the same order; `lines[i]` is the
+    // file line of `events[i]`, the numbering `malformed line(s)` uses (blank,
+    // malformed and torn lines count too).
+    let records: Option<(Vec<usize>, Vec<AgentLearning>)> =
+        match dreamd_core::episodic::read_raw(&episodic_path) {
+            Ok(raw) => Some(
+                raw.into_iter()
+                    .enumerate()
+                    .filter_map(|(i, line)| line.parsed.map(|record| (i + 1, record)))
+                    .unzip(),
+            ),
+            Err(e) => {
+                writeln!(
+                    out,
+                    "schema_record: error  [WARNING: could not read the episodic log: {e}]"
+                )?;
+                all_ok = false;
+                None
+            }
+        };
+    if let Some((lines, events)) = &records {
         all_ok &= check_schema_record(events, out)?;
+        all_ok &= check_score_range(lines, events, out)?;
+        all_ok &= check_duplicate_ids(lines, events, out)?;
+        all_ok &= check_future_timestamps(lines, events, now_sec, out)?;
     }
+    let events = records.as_ref().map(|(_, events)| events.as_slice());
 
+    all_ok &= check_registry(registry, out)?;
     all_ok &= check_schema_index(agent_root, out)?;
     all_ok &= check_orphaned_uds(socket, out)?;
     #[cfg(unix)]
@@ -255,7 +283,7 @@ pub fn run(
     }
 
     if flags.cluster_health {
-        all_ok &= check_cluster_health(agent_root, events.as_deref(), now_sec, out)?;
+        all_ok &= check_cluster_health(agent_root, events, now_sec, out)?;
         // AILAB-196 — additive report, deliberately not `&=`-ed into `all_ok`.
         report_next_cycle_cost(agent_root, now_sec, out)?;
     }
@@ -329,6 +357,166 @@ fn check_schema_record(events: &[AgentLearning], out: &mut impl Write) -> io::Re
         )?;
         Ok(false)
     }
+}
+
+/// `{n} line(s) (first at line(s) {list})`: `n` uncapped, the list the first
+/// `MALFORMED_LINE_NUMBERS_CAP` line numbers in file order, joined with ", ".
+fn lines_head(lines: &[usize]) -> String {
+    let first = lines
+        .iter()
+        .take(MALFORMED_LINE_NUMBERS_CAP)
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} line(s) (first at line(s) {first})", lines.len())
+}
+
+/// The file lines of the records in `events` that `flag` picks, in file
+/// order. `lines[i]` is the file line of `events[i]`.
+fn flagged_lines(
+    lines: &[usize],
+    events: &[AgentLearning],
+    flag: impl Fn(&AgentLearning) -> bool,
+) -> Vec<usize> {
+    lines
+        .iter()
+        .zip(events)
+        .filter(|(_, record)| flag(record))
+        .map(|(&line, _)| line)
+        .collect()
+}
+
+/// Records whose `pain` or `importance` the ingest validators refuse. Doctor
+/// calls the validators `POST /api/v1/learn` runs, on the parsed `f32` the
+/// index stores, so its bounds are theirs. Recall clamps these values
+/// (`salience::clamp_score`); this only reports them (BZR-1302).
+fn check_score_range(
+    lines: &[usize],
+    events: &[AgentLearning],
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    let flagged = flagged_lines(lines, events, |record| {
+        LearnIngress::validate_pain(record.pain).is_err()
+            || LearnIngress::validate_importance(record.importance).is_err()
+    });
+    if flagged.is_empty() {
+        return Ok(true);
+    }
+    writeln!(
+        out,
+        "score_range: {}  [WARNING: pain or importance outside 0.0..=10.0 in \
+         AGENT_LEARNINGS.jsonl; recall scores these lines at the nearest bound]",
+        lines_head(&flagged)
+    )?;
+    Ok(false)
+}
+
+/// Every line whose event id another line also carries, first copies
+/// included: fixing the warning means choosing which copy to keep. The ids
+/// come from `invariants::duplicate_event_ids`, the one duplicate detector;
+/// doctor counts no ids itself (BZR-1302).
+fn check_duplicate_ids(
+    lines: &[usize],
+    events: &[AgentLearning],
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    use dreamd_core::invariants::{duplicate_event_ids, Violation};
+
+    let violations = duplicate_event_ids(events);
+    if violations.is_empty() {
+        return Ok(true);
+    }
+    let repeated: BTreeSet<&str> = violations
+        .iter()
+        .filter_map(|violation| match violation {
+            Violation::DuplicateEventId { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let flagged = flagged_lines(lines, events, |record| {
+        repeated.contains(record.id.as_str())
+    });
+    writeln!(
+        out,
+        "duplicate_id: {}  [WARNING: {} event id(s) on more than one line of \
+         AGENT_LEARNINGS.jsonl; the index keeps one document per id]",
+        lines_head(&flagged),
+        violations.len()
+    )?;
+    Ok(false)
+}
+
+/// Records whose `timestamp` is more than [`MAX_SEED_SKEW`] (24 h, the
+/// minter's "ahead of the clock") past `now_sec`. Reads the `timestamp`
+/// field, not the id. Recall floors such a record's age at 0; this only
+/// reports it (BZR-1302).
+fn check_future_timestamps(
+    lines: &[usize],
+    events: &[AgentLearning],
+    now_sec: i64,
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    let horizon = now_sec.saturating_add(MAX_SEED_SKEW.as_secs() as i64);
+    let flagged = flagged_lines(lines, events, |record| {
+        record.timestamp.timestamp() > horizon
+    });
+    if flagged.is_empty() {
+        return Ok(true);
+    }
+    writeln!(
+        out,
+        "future_timestamp: {}  [WARNING: timestamp more than 24 h ahead of the clock in \
+         AGENT_LEARNINGS.jsonl; recall scores these lines as new until the clock reaches them]",
+        lines_head(&flagged)
+    )?;
+    Ok(false)
+}
+
+/// Report a daemon-home `registry.toml` that does not parse as a [`Registry`],
+/// the type `registry::resolve_project` and `RegistryCache` parse with. A
+/// `None` path or an absent file passes silently. Only reads the file; it does
+/// not check whether this project is registered (BZR-1302).
+fn check_registry(registry: Option<&Path>, out: &mut impl Write) -> io::Result<bool> {
+    let Some(path) = registry else {
+        return Ok(true);
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => {
+            writeln!(
+                out,
+                "registry: error  [WARNING: could not read {}: {e}]",
+                path.display()
+            )?;
+            return Ok(false);
+        }
+    };
+    let e = match toml::from_str::<Registry>(&raw) {
+        Ok(_) => return Ok(true),
+        Err(e) => e,
+    };
+    // The 1-based line of the span's start, counted over bytes so a span
+    // inside a multi-byte character cannot panic.
+    let at = e
+        .span()
+        .map(|span| {
+            let end = span.start.min(raw.len());
+            let line = raw.as_bytes()[..end]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1;
+            format!(" at line {line}")
+        })
+        .unwrap_or_default();
+    writeln!(
+        out,
+        "registry: parse error{at}  [WARNING: {} does not parse; `dreamd status` reports \
+         every project as not registered and the daemon answers 500 until it parses]",
+        path.display()
+    )?;
+    Ok(false)
 }
 
 /// Report the Tantivy index manifest stream (`index::SCHEMA_VERSION` via
@@ -1050,7 +1238,10 @@ mod tests {
     ) -> (bool, String, String) {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let ok = run(cfg, root, skip, socket, flags, NOW_SEC, &mut out, &mut err).expect("run ok");
+        let ok = run(
+            cfg, root, skip, socket, None, flags, NOW_SEC, &mut out, &mut err,
+        )
+        .expect("run ok");
         (
             ok,
             String::from_utf8(out).expect("utf8 stdout"),
@@ -2264,5 +2455,467 @@ mod tests {
             )),
             "{output}"
         );
+    }
+
+    // ---- BZR-1302: hand-edit anomalies and the registry ----
+
+    const SCORE_RANGE_HINT: &str = "[WARNING: pain or importance outside 0.0..=10.0 in \
+                                    AGENT_LEARNINGS.jsonl; recall scores these lines at the \
+                                    nearest bound]";
+    const FUTURE_TIMESTAMP_HINT: &str = "[WARNING: timestamp more than 24 h ahead of the \
+                                         clock in AGENT_LEARNINGS.jsonl; recall scores these \
+                                         lines as new until the clock reaches them]";
+
+    fn duplicate_id_hint(ids: usize) -> String {
+        format!(
+            "[WARNING: {ids} event id(s) on more than one line of AGENT_LEARNINGS.jsonl; \
+             the index keeps one document per id]"
+        )
+    }
+
+    fn registry_parse_line(path: &Path, line: usize) -> String {
+        format!(
+            "registry: parse error at line {line}  [WARNING: {} does not parse; `dreamd \
+             status` reports every project as not registered and the daemon answers 500 \
+             until it parses]",
+            path.display()
+        )
+    }
+
+    /// One log line written as raw JSON, so values such as `1e40` and
+    /// `10.0000001` reach the file as written.
+    fn raw_record(suffix: char, pain: &str, importance: &str, timestamp: &str) -> String {
+        format!(
+            "{{\"schema_version\":\"1.0.0\",\"id\":\"{}\",\"timestamp\":\"{timestamp}\",\
+             \"pain\":{pain},\"importance\":{importance},\"pinned\":false,\
+             \"skill_action\":\"rust::eh\",\"source_harness\":\"test-harness\",\
+             \"content\":\"entry {suffix}\"}}",
+            evt_id(suffix)
+        )
+    }
+
+    /// `NOW_SEC + offset` as RFC 3339 UTC.
+    fn at(offset: i64) -> String {
+        DateTime::<Utc>::from_timestamp(NOW_SEC + offset, 0)
+            .expect("valid ts")
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// A record with in-range scores, written at `NOW_SEC`.
+    fn clean_record(suffix: char) -> String {
+        raw_record(suffix, "5.0", "6.0", &at(0))
+    }
+
+    /// Write `lines` as the episodic log, each ended by `\n`.
+    fn write_log(root: &AgentRoot, lines: &[String]) {
+        let mut body = String::new();
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(root.episodic_jsonl(), body).unwrap();
+    }
+
+    fn run_with_registry(
+        cfg: &Config,
+        root: &AgentRoot,
+        registry: Option<&Path>,
+    ) -> (bool, String) {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let ok = run(
+            cfg,
+            root,
+            None,
+            None,
+            registry,
+            DoctorFlags::default(),
+            NOW_SEC,
+            &mut out,
+            &mut err,
+        )
+        .expect("run ok");
+        (ok, String::from_utf8(out).expect("utf8 stdout"))
+    }
+
+    /// Full-line equality, not a substring match.
+    fn assert_has_line(output: &str, expected: &str) {
+        assert!(
+            output.lines().any(|line| line == expected),
+            "expected the line {expected:?}\ngot:\n{output}"
+        );
+    }
+
+    /// `expected` is the only line of `output` that carries a WARNING.
+    fn assert_only_warning(output: &str, expected: &str) {
+        let warnings: Vec<&str> = output
+            .lines()
+            .filter(|line| line.contains("WARNING"))
+            .collect();
+        assert_eq!(warnings, vec![expected], "got:\n{output}");
+    }
+
+    /// `s` as a TOML basic string (a Windows path holds backslashes).
+    fn toml_string(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// The test 5 registry: one valid entry, then garbage on line 3.
+    fn garbage_registry(root: &AgentRoot) -> String {
+        let canonical = fs::canonicalize(root.project_root()).unwrap();
+        format!(
+            "[[projects]]\nroot = {}\nthis is garbage\n",
+            toml_string(&canonical.to_string_lossy())
+        )
+    }
+
+    /// BZR-1302 test 1a.
+    #[test]
+    fn score_range_lists_every_line_the_validators_refuse() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("score-range");
+        write_log(
+            &root,
+            &[
+                "not json".to_string(),
+                raw_record('0', "5.0", "6.0", &at(0)),
+                raw_record('1', "50", "6.0", &at(0)),
+                raw_record('2', "5.0", "-1", &at(0)),
+                raw_record('3', "1e40", "6.0", &at(0)),
+                raw_record('4', "11", "11", &at(0)),
+                raw_record('5', "5.0", "10.000001", &at(0)),
+                raw_record('6', "10.0000001", "6.0", &at(0)),
+                raw_record('7', "10.0", "0.0", &at(0)),
+                raw_record('8', "-0.5", "6.0", &at(0)),
+                raw_record('9', "5.0", "12", &at(0)),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        // Every line but `not json` is a record, so lines 8 and 9 were read.
+        assert_has_line(&output, "schema_record: ok (10 record(s) at 1.0.0)");
+        assert_has_line(
+            &output,
+            &format!("score_range: 7 line(s) (first at line(s) 3, 4, 5, 6, 7)  {SCORE_RANGE_HINT}"),
+        );
+        assert!(!output.contains("duplicate_id:"), "got:\n{output}");
+        assert!(!output.contains("future_timestamp:"), "got:\n{output}");
+        assert!(!ok);
+    }
+
+    /// BZR-1302 test 1b.
+    #[test]
+    fn score_range_alone_fails_the_run() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("score-range-alone");
+        write_log(
+            &root,
+            &[clean_record('0'), raw_record('1', "50", "6.0", &at(0))],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_only_warning(
+            &output,
+            &format!("score_range: 1 line(s) (first at line(s) 2)  {SCORE_RANGE_HINT}"),
+        );
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// BZR-1302 test 2a.
+    #[test]
+    fn duplicate_id_lists_every_copy_of_each_repeated_id() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("duplicate-id");
+        write_log(
+            &root,
+            &[
+                "not json".to_string(),
+                clean_record('A'),
+                clean_record('B'),
+                clean_record('A'),
+                clean_record('C'),
+                clean_record('A'),
+                clean_record('B'),
+                clean_record('D'),
+                clean_record('D'),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(
+            &output,
+            &format!(
+                "duplicate_id: 7 line(s) (first at line(s) 2, 3, 4, 6, 7)  {}",
+                duplicate_id_hint(3)
+            ),
+        );
+        assert!(!output.contains("score_range:"), "got:\n{output}");
+        assert!(!output.contains("future_timestamp:"), "got:\n{output}");
+        assert!(!ok);
+    }
+
+    /// BZR-1302 test 2b.
+    #[test]
+    fn duplicate_id_alone_fails_the_run() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("duplicate-id-alone");
+        write_log(&root, &[clean_record('A'), clean_record('A')]);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_only_warning(
+            &output,
+            &format!(
+                "duplicate_id: 2 line(s) (first at line(s) 1, 2)  {}",
+                duplicate_id_hint(1)
+            ),
+        );
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// BZR-1302 test 3a: more than 24 h ahead is flagged; exactly 24 h is not.
+    #[test]
+    fn future_timestamp_lists_lines_more_than_a_day_ahead() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("future-timestamp");
+        write_log(
+            &root,
+            &[
+                "not json".to_string(),
+                raw_record('0', "5.0", "6.0", &at(0)),
+                raw_record('1', "5.0", "6.0", &at(3_600)),
+                raw_record('2', "5.0", "6.0", &at(86_400)),
+                raw_record('3', "5.0", "6.0", &at(86_401)),
+                raw_record('4', "5.0", "6.0", "2099-01-01T00:00:00Z"),
+                raw_record('5', "5.0", "6.0", &at(86_402)),
+                raw_record('6', "5.0", "6.0", &at(90_000)),
+                raw_record('7', "5.0", "6.0", &at(100_000)),
+                raw_record('8', "5.0", "6.0", &at(200_000)),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(
+            &output,
+            &format!(
+                "future_timestamp: 6 line(s) (first at line(s) 5, 6, 7, 8, 9)  \
+                 {FUTURE_TIMESTAMP_HINT}"
+            ),
+        );
+        assert!(!output.contains("score_range:"), "got:\n{output}");
+        assert!(!output.contains("duplicate_id:"), "got:\n{output}");
+        assert!(!ok);
+    }
+
+    /// BZR-1302 test 3b.
+    #[test]
+    fn future_timestamp_alone_fails_the_run() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("future-timestamp-alone");
+        write_log(
+            &root,
+            &[
+                clean_record('0'),
+                raw_record('1', "5.0", "6.0", &at(86_401)),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_only_warning(
+            &output,
+            &format!("future_timestamp: 1 line(s) (first at line(s) 2)  {FUTURE_TIMESTAMP_HINT}"),
+        );
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// BZR-1302 test 4: doctor warns about a score exactly when recall's
+    /// clamp changes it.
+    #[test]
+    fn score_range_warning_matches_the_clamp() {
+        use dreamd_core::salience::clamp_score;
+
+        for v in [
+            -1.0_f32,
+            -0.0,
+            0.0,
+            5.0,
+            10.0,
+            10.000_001,
+            11.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            let unclamped = clamp_score(f64::from(v)) == f64::from(v);
+            assert_eq!(
+                LearnIngress::validate_pain(v).is_ok(),
+                unclamped,
+                "pain {v}"
+            );
+            assert_eq!(
+                LearnIngress::validate_importance(v).is_ok(),
+                unclamped,
+                "importance {v}"
+            );
+        }
+    }
+
+    /// BZR-1302 test 5.
+    #[test]
+    fn registry_with_a_garbage_line_names_the_line() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("registry-garbage");
+        let path = dir.path().join("registry.toml");
+        let raw = garbage_registry(&root);
+        fs::write(&path, &raw).unwrap();
+
+        let (ok, output) = run_with_registry(&cfg, &root, Some(&path));
+
+        assert_only_warning(&output, &registry_parse_line(&path, 3));
+        assert!(!ok);
+        let message = toml::from_str::<Registry>(&raw).unwrap_err().to_string();
+        assert!(
+            message.starts_with("TOML parse error at line 3,"),
+            "{message}"
+        );
+        assert!(
+            dreamd_core::registry::resolve_project(&path, root.project_root()).is_err(),
+            "the readers refuse the same file"
+        );
+    }
+
+    /// BZR-1302 test 6: TOML that is not a `Registry`.
+    #[test]
+    fn registry_of_the_wrong_shape_names_the_line() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("registry-shape");
+        let path = dir.path().join("registry.toml");
+        for (raw, line) in [
+            ("projects = 5\n", 1),
+            ("[[projects]]\nfoo = \"x\"\n", 1),
+            ("[[projects]]\nroot = \"/a\"\n\n[[projects]]\nroot = 5\n", 5),
+        ] {
+            fs::write(&path, raw).unwrap();
+
+            let (ok, output) = run_with_registry(&cfg, &root, Some(&path));
+
+            assert_has_line(&output, &registry_parse_line(&path, line));
+            assert!(!ok, "{raw:?}");
+            assert!(
+                dreamd_core::registry::resolve_project(&path, root.project_root()).is_err(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// BZR-1302 test 7: a registry that is not UTF-8 is a read error.
+    #[test]
+    fn registry_that_is_not_utf8_is_an_error() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("registry-utf8");
+        let path = dir.path().join("registry.toml");
+        fs::write(&path, b"[[projects]]\nroot = \"\xff\"\n").unwrap();
+
+        let (ok, output) = run_with_registry(&cfg, &root, Some(&path));
+
+        assert_has_line(
+            &output,
+            &format!(
+                "registry: error  [WARNING: could not read {}: stream did not contain valid UTF-8]",
+                path.display()
+            ),
+        );
+        assert!(!ok);
+    }
+
+    /// BZR-1302 test 8: none of the four lines on a clean store, whatever the
+    /// registry argument.
+    #[test]
+    fn clean_store_prints_none_of_the_hand_edit_lines() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("hand-edit-clean");
+        seed_events(
+            &root,
+            &[
+                learning('0', "rust::eh", RECORD_SCHEMA_VERSION),
+                learning('1', "rust::eh", RECORD_SCHEMA_VERSION),
+            ],
+        );
+        let registered = dir.path().join("registry.toml");
+        let canonical = fs::canonicalize(root.project_root()).unwrap();
+        fs::write(
+            &registered,
+            format!(
+                "[[projects]]\nroot = {}\n",
+                toml_string(&canonical.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let absent = dir.path().join("no-such-home/.agent/registry.toml");
+
+        for registry in [Some(registered.as_path()), None, Some(absent.as_path())] {
+            let (ok, output) = run_with_registry(&cfg, &root, registry);
+
+            for prefix in [
+                "score_range:",
+                "duplicate_id:",
+                "future_timestamp:",
+                "registry:",
+            ] {
+                assert!(!output.contains(prefix), "{registry:?}: got:\n{output}");
+            }
+            assert!(ok, "{registry:?}: got:\n{output}");
+        }
+    }
+
+    /// BZR-1302 test 9: the four lines, in order, between `schema_record:`
+    /// and `schema_index:`.
+    #[test]
+    fn all_four_hand_edit_lines_print_in_order() {
+        let cfg = Config::default();
+        let (root, dir) = setup_agent_root("hand-edit-all");
+        write_log(
+            &root,
+            &[
+                clean_record('A'),
+                raw_record('B', "50", "6.0", &at(0)),
+                clean_record('A'),
+                raw_record('C', "5.0", "6.0", "2099-01-01T00:00:00Z"),
+            ],
+        );
+        let path = dir.path().join("registry.toml");
+        fs::write(&path, garbage_registry(&root)).unwrap();
+
+        let (ok, output) = run_with_registry(&cfg, &root, Some(&path));
+
+        let lines: Vec<&str> = output.lines().collect();
+        let record = lines
+            .iter()
+            .position(|line| line.starts_with("schema_record:"))
+            .expect("schema_record line");
+        let index = lines
+            .iter()
+            .position(|line| line.starts_with("schema_index:"))
+            .expect("schema_index line");
+        assert_eq!(
+            lines[record + 1..index].to_vec(),
+            vec![
+                format!("score_range: 1 line(s) (first at line(s) 2)  {SCORE_RANGE_HINT}"),
+                format!(
+                    "duplicate_id: 2 line(s) (first at line(s) 1, 3)  {}",
+                    duplicate_id_hint(1)
+                ),
+                format!(
+                    "future_timestamp: 1 line(s) (first at line(s) 4)  {FUTURE_TIMESTAMP_HINT}"
+                ),
+                registry_parse_line(&path, 3),
+            ],
+            "got:\n{output}"
+        );
+        assert!(!ok);
     }
 }
