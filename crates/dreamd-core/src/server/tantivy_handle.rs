@@ -16,11 +16,14 @@
 //!
 //! **Steady state.** The indexer task receives `IndexerMsg::Append` from the
 //! `MemoryCoordinator` (WEG-7) after each successful `sync_data`, upserts it,
-//! and commits on a wall-clock cadence ([`DEFAULT_COMMIT_CADENCE`], 5 seconds).
+//! and commits on a wall-clock cadence ([`DEFAULT_COMMIT_CADENCE`], 5 seconds),
+//! or sooner when a recall has appends ahead of it (`RecallFlusher`, BZR-1437).
 //!
 //! **One persist step.** Every commit, here and in the indexer task, is
-//! `IndexerPersist::commit`: Tantivy commit, then `index_doc` ledger edges for
-//! the ids it covered, then the watermark (the largest committed id) on disk.
+//! `IndexerPersist::commit`: Tantivy commit, then a reload of the recall
+//! reader, then `index_doc` ledger edges for the ids it covered, then the
+//! watermark (the largest committed id) on disk. The recall reader is
+//! `ReloadPolicy::Manual`: that reload is the only thing that moves it.
 //!
 //! **Lock-file behavior.** The on-disk `.tantivy-writer.lock` /
 //! `.tantivy-meta.lock` files persist after SIGKILL but are not the gate —
@@ -97,6 +100,99 @@ pub const WRITER_HEAP_BYTES: usize = 50_000_000;
 /// Relative directory holding the per-project Tantivy index segments.
 pub const INDEX_DIR_NAME: &str = "index";
 
+/// How long a recall waits for the indexer to commit the appends ahead of it
+/// (BZR-1437). Past it, the recall searches the last commit.
+pub(crate) const RECALL_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What [`RecallFlusher::commit_pending`] did. The recall searches either way,
+/// so this is a plain enum, not a `Result` a caller could `?` into a failure.
+#[derive(Debug)]
+pub(crate) enum RecallFlush {
+    /// The index had committed every counted append; nothing was sent.
+    NothingPending,
+    /// The indexer committed what it held, reloaded the reader, and acked.
+    Committed,
+    /// The persist step failed. If Tantivy committed, the reader was reloaded.
+    Failed(IndexError),
+    /// The indexer task is gone: its channel is closed or the ack was dropped.
+    IndexerGone,
+    /// No ack within the wait, the send included.
+    TimedOut,
+}
+
+/// Commits a project's pending appends before a recall (BZR-1437). Cloned out
+/// of a [`TantivyIndexHandle`], so no map lock is held across the wait.
+#[derive(Clone)]
+pub(crate) struct RecallFlusher {
+    indexer: mpsc::Sender<IndexerMsg>,
+    committed: Arc<Mutex<CommitMark>>,
+}
+
+impl RecallFlusher {
+    /// Commit before a recall when `appended` is more than the index has
+    /// committed, waiting at most [`RECALL_FLUSH_TIMEOUT`].
+    ///
+    /// `appended` is `AppendMark::appended` of the coordinator that feeds this
+    /// index, read before this call. The coordinator counts an append before it
+    /// hands it to the indexer and acks it after, so every append acked before
+    /// that read is counted. The mark's `committed_appends` grows only after a
+    /// commit and its reader reload. So with nothing pending this sends nothing
+    /// and returns at once, and a burst of recalls after one append commits once.
+    ///
+    /// Otherwise it sends one `IndexerMsg::Flush`. The indexer channel is FIFO
+    /// and the coordinator awaits its `Append` send, so the flush queues behind
+    /// every counted append. A timeout, a failed persist or a gone indexer is
+    /// logged here; the recall then searches the last commit.
+    pub(crate) async fn commit_pending(&self, appended: u64) -> RecallFlush {
+        self.commit_pending_within(appended, RECALL_FLUSH_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::commit_pending`] with the wait as an argument, for tests.
+    async fn commit_pending_within(&self, appended: u64, limit: Duration) -> RecallFlush {
+        let committed = self
+            .committed
+            .lock()
+            .expect("commit mark poisoned")
+            .committed_appends;
+        if committed >= appended {
+            return RecallFlush::NothingPending;
+        }
+        let outcome = tokio::time::timeout(limit, flush_once(&self.indexer))
+            .await
+            .unwrap_or(RecallFlush::TimedOut);
+        match &outcome {
+            RecallFlush::Failed(e) => {
+                tracing::warn!(error = ?e, "commit before recall failed; searching the last commit");
+            }
+            RecallFlush::TimedOut => {
+                tracing::warn!(
+                    wait = ?limit,
+                    "the indexer did not commit within the recall wait; searching the last commit"
+                );
+            }
+            RecallFlush::IndexerGone => {
+                tracing::debug!("the indexer is gone; searching the last commit");
+            }
+            RecallFlush::NothingPending | RecallFlush::Committed => {}
+        }
+        outcome
+    }
+}
+
+/// Send one `IndexerMsg::Flush` and wait for its ack.
+async fn flush_once(indexer: &mpsc::Sender<IndexerMsg>) -> RecallFlush {
+    let (ack, rx) = oneshot::channel();
+    if indexer.send(IndexerMsg::Flush { ack }).await.is_err() {
+        return RecallFlush::IndexerGone;
+    }
+    match rx.await {
+        Ok(Ok(())) => RecallFlush::Committed,
+        Ok(Err(e)) => RecallFlush::Failed(e),
+        Err(_) => RecallFlush::IndexerGone,
+    }
+}
+
 /// Tantivy-backed concrete [`IndexHandle`] for one project root.
 pub struct TantivyIndexHandle {
     last_used: Mutex<Instant>,
@@ -104,6 +200,8 @@ pub struct TantivyIndexHandle {
     reader: RecallReader,
     /// What the indexer's persist step last published (BZR-1243).
     commit_mark: Arc<Mutex<CommitMark>>,
+    #[cfg(test)]
+    counts: Arc<crate::server::indexer_actor::IndexerCounts>,
 }
 
 impl TantivyIndexHandle {
@@ -170,9 +268,10 @@ impl TantivyIndexHandle {
         let (schema, fields) = build_schema();
         let index = open_or_create_index(&index_dir, schema, &manifest_path, &progress_path)?;
         write_manifest_if_absent(&manifest_path)?;
-        // `Index::reader()` uses the same policy, so recall reloads as before.
-        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay)
-            .map_err(tantivy_to_index)?;
+        // Manual: the persist step reloads it right after every Tantivy commit
+        // (BZR-1437), so a commit is visible the moment the step returns, with
+        // no file-watch poll in between.
+        let reader = RecallReader::open(&index, ReloadPolicy::Manual).map_err(tantivy_to_index)?;
         let mut writer: IndexWriter<TantivyDocument> =
             index.writer(WRITER_HEAP_BYTES).map_err(tantivy_to_index)?;
 
@@ -206,19 +305,19 @@ impl TantivyIndexHandle {
             &read_progress(&progress_path)?,
             Arc::clone(&commit_mark),
         );
+        persist.reload_on_commit(reader.clone());
         persist.cover_all(&events);
         persist.commit(&mut writer)?;
-        // 6. The reader was created before this commit and uses the default
-        //    `ReloadPolicy::OnCommitWithDelay`, so the first query after open
-        //    would otherwise see a stale view until the background reload
-        //    fires. Force a synchronous reload so recall reflects the commit
-        //    the moment `open()` returns — the cross-harness read-after-open
-        //    case (a fresh process indexing a prior process's append).
-        //    Steady-state cadence commits from `run_indexer` are still picked
-        //    up by OnCommitWithDelay (WEG-264).
+        // 6. The persist step reloaded the reader, but a reload error there
+        //    only warns. Reload once more and fail `open` if it cannot load the
+        //    commit, so recall reflects the commit the moment `open()` returns:
+        //    the cross-harness read-after-open case (a fresh process indexing a
+        //    prior process's append, WEG-264).
         reader.reload().map_err(tantivy_to_index)?;
 
         // 7. The indexer task.
+        #[cfg(test)]
+        let counts = Arc::clone(&persist.counts);
         let (tx, rx) = mpsc::channel::<IndexerMsg>(DEFAULT_INDEXER_CHANNEL_CAPACITY);
         let state = IndexerState {
             persist,
@@ -237,7 +336,15 @@ impl TantivyIndexHandle {
             indexer: IndexerHandle { tx, join },
             reader,
             commit_mark,
+            #[cfg(test)]
+            counts,
         })
+    }
+
+    /// What the indexer was asked to commit and committed (BZR-1437).
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> &crate::server::indexer_actor::IndexerCounts {
+        &self.counts
     }
 
     /// What the indexer has committed, as of its last successful persist step
@@ -253,6 +360,14 @@ impl TantivyIndexHandle {
     /// `MemoryCoordinator::open` so coordinator appends route to this index.
     pub fn sender(&self) -> mpsc::Sender<IndexerMsg> {
         self.indexer.sender()
+    }
+
+    /// What a recall uses to commit the appends ahead of it (BZR-1437).
+    pub(crate) fn recall_flusher(&self) -> RecallFlusher {
+        RecallFlusher {
+            indexer: self.sender(),
+            committed: Arc::clone(&self.commit_mark),
+        }
     }
 
     /// Returns this project's reader, with the recurrence warmer attached
@@ -1270,10 +1385,9 @@ mod tests {
     /// A process that opens a `TantivyIndexHandle` and is the first to index a
     /// JSONL record must see that record on its *first* query through
     /// `reader()` (WEG-264). The reader is created before the open's commit
-    /// with `ReloadPolicy::OnCommitWithDelay`, so without the forced reload in
-    /// `open` that commit stays invisible until a later reload. This is the
-    /// cross-harness case where agent #2 is the first process to index agent
-    /// #1's append.
+    /// with `ReloadPolicy::Manual`, so without a reload in `open` that commit
+    /// stays invisible until a later one. This is the cross-harness case where
+    /// agent #2 is the first process to index agent #1's append.
     #[tokio::test]
     async fn fresh_handle_reader_sees_replayed_events_without_reload() {
         let dir = unique_tmpdir("fresh-reader-replay");
@@ -2717,6 +2831,198 @@ mod tests {
              is still the truth about what is in it — overwriting it here would \
              claim a clean pass that never happened"
         );
+    }
+
+    // ── BZR-1437: every commit reloads the recall reader ────────────────────
+
+    /// Open `agent_root`'s index with an empty log already in place, so writing
+    /// the log later grows the same file and no tick sees it replaced.
+    fn open_over_an_empty_log(
+        agent_root: &AgentRoot,
+        lock: &WriterLock,
+        cadence: Duration,
+    ) -> TantivyIndexHandle {
+        std::fs::write(agent_root.episodic_jsonl(), b"").unwrap();
+        TantivyIndexHandle::open(agent_root, lock, cadence).expect("open")
+    }
+
+    /// Write `learning` to the log, then hand it to the indexer, as the
+    /// coordinator does.
+    async fn append_through_the_indexer(
+        dir: &Path,
+        handle: &TantivyIndexHandle,
+        learning: AgentLearning,
+    ) {
+        prime_jsonl(dir, std::slice::from_ref(&learning));
+        handle
+            .sender()
+            .send(IndexerMsg::Append {
+                event_id: learning.id.clone(),
+                learning,
+            })
+            .await
+            .expect("send append");
+    }
+
+    /// A cadence commit is visible through the handle's reader as soon as the
+    /// commit mark covers it. Nothing calls `reload()`.
+    #[tokio::test]
+    async fn a_cadence_commit_reloads_the_recall_reader() {
+        let dir = unique_tmpdir("bzr1437-cadence-reload");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let lock = writer_lock(&agent_root);
+        let handle = open_over_an_empty_log(&agent_root, &lock, Duration::from_millis(100));
+
+        let learning = sample_learning(make_event_id('1'), "rust::bzr1437", "cadence reload");
+        append_through_the_indexer(&dir, &handle, learning).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle.commit_mark().committed_appends < 1 {
+            assert!(Instant::now() < deadline, "no cadence commit within 5 s");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            handle.reader().searcher().num_docs(),
+            1,
+            "the commit mark is published after the reload"
+        );
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A persist step that fails after the Tantivy commit (here at
+    /// `failpoint-after-commit`, before the ledger) still leaves the commit
+    /// visible through the handle's reader.
+    #[tokio::test]
+    async fn a_failed_ledger_append_still_reloads_the_recall_reader() {
+        let dir = unique_tmpdir("bzr1437-failed-persist-reload");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let lock = writer_lock(&agent_root);
+        let handle = open_over_an_empty_log(&agent_root, &lock, Duration::from_secs(3600));
+
+        let failpoint = agent_root.dreamd_dir().join("failpoint-after-commit");
+        std::fs::write(&failpoint, b"").unwrap();
+        let learning = sample_learning(make_event_id('2'), "rust::bzr1437", "failed persist");
+        append_through_the_indexer(&dir, &handle, learning).await;
+        let err = flush(&handle).await.expect_err("the persist step fails");
+        std::fs::remove_file(&failpoint).unwrap();
+
+        assert!(
+            format!("{err:?}").contains("failpoint-after-commit"),
+            "the failure is the failpoint's: {err:?}"
+        );
+        assert_eq!(
+            handle.reader().searcher().num_docs(),
+            1,
+            "Tantivy committed, so the reader sees the doc"
+        );
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A flusher over `tx`, for an index whose mark says `committed_appends`.
+    fn flusher_over(tx: mpsc::Sender<IndexerMsg>, committed_appends: u64) -> RecallFlusher {
+        RecallFlusher {
+            indexer: tx,
+            committed: Arc::new(Mutex::new(CommitMark {
+                committed_appends,
+                ..CommitMark::default()
+            })),
+        }
+    }
+
+    /// R1: with every counted append committed, nothing is sent.
+    #[tokio::test]
+    async fn commit_pending_sends_nothing_when_nothing_is_pending() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let flusher = flusher_over(tx, 3);
+
+        for appended in [0, 3] {
+            let outcome = flusher.commit_pending(appended).await;
+            assert!(
+                matches!(outcome, RecallFlush::NothingPending),
+                "appended {appended}, committed 3: {outcome:?}"
+            );
+        }
+        assert!(rx.try_recv().is_err(), "no request reached the indexer");
+    }
+
+    /// With an append pending, the indexer commits it, and the handle's reader
+    /// sees it with no reload by the caller.
+    #[tokio::test]
+    async fn commit_pending_commits_and_reloads() {
+        let dir = unique_tmpdir("bzr1437-commit-pending");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let lock = writer_lock(&agent_root);
+        let handle = open_over_an_empty_log(&agent_root, &lock, Duration::from_secs(3600));
+
+        let learning = sample_learning(make_event_id('3'), "rust::bzr1437", "commit pending");
+        append_through_the_indexer(&dir, &handle, learning).await;
+        let outcome = handle.recall_flusher().commit_pending(1).await;
+
+        assert!(matches!(outcome, RecallFlush::Committed), "{outcome:?}");
+        assert_eq!(handle.reader().searcher().num_docs(), 1);
+        assert_eq!(handle.commit_mark().committed_appends, 1);
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// R2: an indexer that takes the request and never answers, or a channel
+    /// so full the request cannot be sent, ends the wait at the limit.
+    #[tokio::test]
+    async fn commit_pending_gives_up_at_the_limit() {
+        let limit = Duration::from_millis(200);
+
+        // The indexer holds the request and never acks it.
+        let (tx, _held) = mpsc::channel(1);
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            flusher_over(tx, 0).commit_pending_within(1, limit),
+        )
+        .await
+        .expect("the wait must end on its own");
+        assert!(matches!(outcome, RecallFlush::TimedOut), "{outcome:?}");
+        assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+
+        // The channel is full, so the send itself waits.
+        let (tx, _held) = mpsc::channel(1);
+        let (ack, _ack_rx) = oneshot::channel();
+        tx.try_send(IndexerMsg::Flush { ack })
+            .expect("fill the channel");
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            flusher_over(tx, 0).commit_pending_within(1, limit),
+        )
+        .await
+        .expect("a full channel must not hold the wait past its limit");
+        assert!(matches!(outcome, RecallFlush::TimedOut), "{outcome:?}");
+        assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    }
+
+    /// A gone indexer ends the wait at once: a closed channel, or an indexer
+    /// that drops the ack.
+    #[tokio::test]
+    async fn commit_pending_reports_a_gone_indexer() {
+        let limit = Duration::from_secs(5);
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let started = Instant::now();
+        let outcome = flusher_over(tx, 0).commit_pending_within(1, limit).await;
+        assert!(matches!(outcome, RecallFlush::IndexerGone), "{outcome:?}");
+        assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+
+        let (tx, mut rx) = mpsc::channel::<IndexerMsg>(1);
+        tokio::spawn(async move { drop(rx.recv().await) });
+        let started = Instant::now();
+        let outcome = flusher_over(tx, 0).commit_pending_within(1, limit).await;
+        assert!(matches!(outcome, RecallFlush::IndexerGone), "{outcome:?}");
+        assert!(started.elapsed() < limit, "{:?}", started.elapsed());
     }
 }
 

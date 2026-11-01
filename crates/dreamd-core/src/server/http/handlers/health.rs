@@ -18,8 +18,8 @@ use super::super::state::AppState;
 /// [`live_index_freshness`](crate::server::live_index_freshness). No file is
 /// read. A project that is not loaded is opened, as recall opens it. `stale`
 /// is `true` while appends this daemon made are not yet committed, which is
-/// normal for up to one commit cadence. A change to the log made outside the
-/// daemon shows in `dreamd doctor`, not here.
+/// normal until the next cadence commit or recall (BZR-1437). A change to the
+/// log made outside the daemon shows in `dreamd doctor`, not here.
 ///
 /// Off Unix, health compares the JSONL tail with
 /// `index_progress.json` on disk through
