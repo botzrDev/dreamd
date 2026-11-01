@@ -2731,7 +2731,8 @@ fn windows_mmapped_segment_file_survives_gc_until_unmap() {
     use std::collections::HashSet;
     use std::io::Write;
 
-    use tantivy::directory::{ManagedDirectory, MmapDirectory};
+    use tantivy::directory::{ManagedDirectory, MmapDirectory, TerminatingWrite};
+    use tantivy::Directory;
 
     let dir = tempfile::tempdir().unwrap();
     let path = std::path::Path::new("segment_file");

@@ -77,7 +77,7 @@ Install the git hooks once per clone. The pre-commit hook runs `cargo fmt --all 
 git config core.hooksPath .githooks
 ```
 
-CI runs lint and test on Linux and macOS as merge gates, plus Linux-only gates for binary size, idle RSS, the no-`.git` tarball build, the npm shim, and the install funnel. The Windows test matrix is `continue-on-error`. `windows-replace-probe` is a merge gate and runs only the production parent-flush test. Learn, the dream cycle, and the Tantivy index run on Windows. Linux and macOS gates must be green before merge. Every job is described in [`docs/ci.md`](./docs/ci.md).
+CI runs lint and test on Linux and macOS as merge gates, plus Linux-only gates for binary size, idle RSS, the no-`.git` tarball build, the npm shim, and the install funnel. The Windows test matrix is `continue-on-error`. `windows-replace-probe` is a merge gate and runs the `io::tests` replace tests, including the production parent-flush test. Learn, the dream cycle, and the Tantivy index run on Windows. Linux and macOS gates must be green before merge. Every job is described in [`docs/ci.md`](./docs/ci.md).
 
 ## Your first contribution in ~15 minutes
 

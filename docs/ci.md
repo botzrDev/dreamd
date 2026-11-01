@@ -23,7 +23,7 @@ Every Rust job in all four workflows installs the same pinned toolchain, `dtolna
 | [Security audit](#security-audit) | **Yes** | `cargo audit` against RustSec advisory DB |
 | [License & dependency policy](#license--dependency-policy) | **Yes** | `cargo deny check` (licenses + advisories) |
 | [Test](#test) | **Yes** (Linux + macOS) | `cargo test --all-features --workspace` on three OSes |
-| [Windows replace probe](#test) | **Yes** | One Windows test: the production parent-directory open returns `Ok` |
+| [Windows replace probe](#test) | **Yes** | `io::tests` on Windows: the production parent-directory flush returns `Ok`, and a failure before the rename leaves the destination untouched |
 | [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be ≤ 20 MB (20,971,520 bytes) |
 | [Idle-RSS gate](#idle-rss-gate) | **Yes** | Daemon idle memory < 30 MB (Linux) |
 | [Tarball build sentinel](#tarball-build-sentinel) | **Yes** | `cargo build` without `.git/` must not leak vergen sentinels |
@@ -103,7 +103,7 @@ Enforces license allowlist and advisory policy defined in `deny.toml`. CI pins `
 cargo test --all-features --workspace
 ```
 
-Windows is in the matrix for visibility but is non-gating (`continue-on-error`). The crate **compiles** on Windows (AILAB-174). `dreamd watch` boots there over loopback TCP with a bearer token (AILAB-192). Learn, the dream cycle, and the Tantivy index run there. `uds` / `uds_server` / `client` stay Unix-only. The matrix job stays informational. `windows-replace-probe` is a required job: it runs only `io::tests::windows_parent_flush_uses_production_open`.
+Windows is in the matrix for visibility but is non-gating (`continue-on-error`). The crate **compiles** on Windows (AILAB-174). `dreamd watch` boots there over loopback TCP with a bearer token (AILAB-192). Learn, the dream cycle, and the Tantivy index run there. `uds` / `uds_server` / `client` stay Unix-only. The matrix job stays informational. `windows-replace-probe` is a required job: it runs `io::tests` and fails unless `windows_parent_flush_uses_production_open` and `injected_failure_preserves_original_and_keeps_tmp` both ran and passed.
 
 ### Reproduce a specific OS locally
 

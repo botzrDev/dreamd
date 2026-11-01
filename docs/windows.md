@@ -63,7 +63,8 @@ peer-UID check, and the `dreamd dream` UDS proxy. Windows serves the same
 axum router over loopback TCP. `dreamd dream` on Windows runs in-process; it
 does not proxy over a socket. The Windows test matrix stays
 `continue-on-error`. A separate job, `windows-replace-probe`, is a merge gate
-and runs only the production parent-open test.
+and runs the `io::tests` replace tests, including the production parent-open
+test.
 
 ## `dreamd watch` on Windows: loopback TCP + bearer
 
