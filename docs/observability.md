@@ -73,6 +73,8 @@ The markdown table columns, in order, are:
 - `total` — `RecallResult::score` (BM25 × salience)
 - `layer` — `episodic` or `semantic`
 
+A control character (U+0000–U+001F or U+007F) in `content` or `skill_action` prints as its Unicode control picture, such as `␀` for NUL, `␛` for ESC and `␡` for DEL, so the table stays plain text. In `content`, tabs, newlines and other whitespace still collapse to one space first. `dreamd recall`, `dreamd score` and `dreamd salience-drift` print control characters the same way. `--json` output does not: JSON escapes U+0000–U+001F (`\u0000`, `\u001b`, `\t`, …) and writes U+007F as it is.
+
 Empty results still print the header and `(0 hits)`, exiting 0.
 
 `--explain` appends the same per-hit DR-204 factor block `dreamd recall
