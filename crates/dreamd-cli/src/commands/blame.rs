@@ -3,9 +3,12 @@
 //! One-shot, read-only. Copies the discover / `Index::open_in_dir` (never the
 //! writer-spawning `TantivyIndexHandle` open constructor) / `dreamd_core::recall`
 //! sequence from [`crate::commands::recall::run`] and reuses its
-//! [`crate::commands::recall::RecallError`], [`crate::commands::recall::truncate_content`],
+//! [`crate::commands::recall::RecallError`], [`crate::commands::recall::content_cell`],
+//! [`crate::commands::recall::escape_controls`], [`crate::commands::recall::truncate_content`],
 //! and [`crate::commands::recall::explain_factors`], so the salience arithmetic
-//! has one implementation.
+//! and the control-character rule each have one implementation. The table
+//! prints `content` through `content_cell` and `skill_action` through
+//! `escape_controls`; `--json` keeps `truncate_content` alone (BZR-1303).
 //!
 //! The rendered shape is a different table than `dreamd recall`: `id`,
 //! `timestamp`, `skill_action`, `content`, `bm25`, `salience`, `total`, `layer`
@@ -20,7 +23,9 @@ use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
 use tantivy::{Index, ReloadPolicy};
 
-use crate::commands::recall::{explain_factors, truncate_content, RecallError};
+use crate::commands::recall::{
+    content_cell, escape_controls, explain_factors, truncate_content, RecallError,
+};
 
 /// Max width of the rendered `content` cell, in characters. Blame's cap (80) is
 /// wider than recall's (60) — this is a separate table with its own column set.
@@ -47,12 +52,12 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
     out.push('\n');
 
     for r in results {
-        let content = truncate_content(&r.content, CONTENT_WIDTH);
+        let content = content_cell(&r.content, CONTENT_WIDTH);
         out.push_str(&format!(
             "| {id} | {ts} | {skill} | {content} | {bm25:.4} | {sal:.4} | {total:.4} | {layer} |\n",
             id = r.event_id,
             ts = r.timestamp_sec,
-            skill = r.skill_action,
+            skill = escape_controls(&r.skill_action),
             bm25 = r.bm25,
             sal = r.salience,
             total = r.score,
@@ -392,6 +397,71 @@ mod tests {
         assert!(close(&hit["pain"], results[0].pain));
         assert!(close(&hit["importance"], results[0].importance));
         assert_eq!(hit["recurrence"], results[0].recurrence);
+    }
+
+    /// BZR-1303: stored content holding NUL, ESC, U+001F, DEL, a tab and a `|`.
+    const CONTROL_CONTENT: &str =
+        "needle NUL\u{0} ESC\u{1b}[31mred US\u{1f} DEL\u{7f} tab\there pipe | end";
+
+    /// A hit whose `content` and `skill_action` both hold control characters.
+    fn control_result() -> RecallResult {
+        let mut r = result(
+            CONTROL_CONTENT,
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAH",
+            NOW_SEC,
+            10.0,
+            10.0,
+            0,
+            1.0,
+        );
+        r.skill_action = "rust::nul\u{0}key".to_string();
+        r
+    }
+
+    #[test]
+    fn blame_table_prints_control_pictures() {
+        let r = control_result();
+        let want = concat!(
+            "| id | timestamp | skill_action | content | bm25 | salience | total | layer |\n",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+            "| evt_01ARZ3NDEKTSV4RRFFQ69G5FAH | 1750000000 | rust::nul\u{2400}key | needle NUL\u{2400} ESC\u{241b}[31mred US\u{241f} DEL\u{2421} tab here pipe \\| end | 1.0000 | 1.0000 | 1.0000 | episodic |\n",
+        );
+        assert_eq!(
+            render_report(std::slice::from_ref(&r), NOW_SEC, false),
+            want
+        );
+
+        let explained = render_report(&[r], NOW_SEC, true);
+        assert!(
+            explained
+                .chars()
+                .all(|c| c == '\n' || !c.is_ascii_control()),
+            "got: {explained:?}"
+        );
+    }
+
+    /// `--json` is unchanged by BZR-1303: serde escapes U+0000–U+001F, DEL
+    /// stays raw, and no control picture appears. Passes on the base too.
+    #[test]
+    fn blame_json_keeps_the_stored_characters() {
+        let out = render_json(&[control_result()], NOW_SEC, false);
+        let want = concat!(
+            r#"[{"bm25":1.0,"content":"needle NUL\u0000 ESC\u001b[31mred US\u001f DEL"#,
+            "\u{7f}",
+            r#" tab here pipe \\| end","id":"evt_01ARZ3NDEKTSV4RRFFQ69G5FAH","layer":"episodic","salience":1.0,"skill_action":"rust::nul\u0000key","timestamp":1750000000,"total":1.0}]"#,
+            "\n"
+        );
+        assert_eq!(out, want);
+
+        let parsed: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(
+            parsed[0]["content"],
+            truncate_content(CONTROL_CONTENT, CONTENT_WIDTH)
+        );
+        assert!(
+            !out.chars().any(|c| ('\u{2400}'..='\u{2421}').contains(&c)),
+            "got: {out:?}"
+        );
     }
 
     #[test]

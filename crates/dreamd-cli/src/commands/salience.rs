@@ -17,6 +17,8 @@ use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader};
 use tantivy::{Index, ReloadPolicy};
 
+use crate::commands::recall::escape_controls;
+
 /// Why a `dreamd salience-drift` run failed.
 #[derive(Debug)]
 pub enum SalienceError {
@@ -50,7 +52,8 @@ impl std::fmt::Display for SalienceError {
 impl std::error::Error for SalienceError {}
 
 /// Default (non-`--json`) rendering: one summary line, then one line per
-/// cluster in `top_clusters` order.
+/// cluster in `top_clusters` order. A control character in `skill_action`
+/// prints as its control picture ([`crate::commands::recall::escape_controls`]).
 #[must_use]
 pub fn render_text(report: &SalienceReport) -> String {
     let drift = match report.drift {
@@ -64,7 +67,9 @@ pub fn render_text(report: &SalienceReport) -> String {
     for c in &report.top_clusters {
         s.push_str(&format!(
             "{} count={} mean={:.6}\n",
-            c.skill_action, c.count, c.mean
+            escape_controls(&c.skill_action),
+            c.count,
+            c.mean
         ));
     }
     s
@@ -168,6 +173,31 @@ mod tests {
         );
         assert!(
             render_text(&report(None)).starts_with("2026-09-29 total=3 mean=0.250000 drift=none\n")
+        );
+    }
+
+    /// BZR-1303: `skill_action` has no whitespace collapse, so TAB and LF print
+    /// as their pictures too.
+    #[test]
+    fn render_text_prints_control_pictures_in_skill_action() {
+        let mut r = report(None);
+        r.top_clusters = vec![
+            ClusterSalience {
+                skill_action: "rust::nul\u{0}key".to_string(),
+                count: 1,
+                mean: 0.5,
+            },
+            ClusterSalience {
+                skill_action: "rust::tab\tkey\nnext".to_string(),
+                count: 2,
+                mean: 0.25,
+            },
+        ];
+        assert_eq!(
+            render_text(&r),
+            "2026-09-29 total=3 mean=0.250000 drift=none\n\
+             rust::nul\u{2400}key count=1 mean=0.500000\n\
+             rust::tab\u{2409}key\u{240a}next count=2 mean=0.250000\n"
         );
     }
 

@@ -134,6 +134,9 @@ pub fn explain_factors(r: &RecallResult, now_sec: i64) -> ExplainFactors {
 /// Collapse whitespace and truncate `s` to at most `max` characters, appending
 /// `…` when clipped. Embedded `|` is escaped afterward so it cannot split the
 /// markdown row (the escape is not counted against `max`).
+///
+/// Table cells call [`content_cell`], which escapes control characters after
+/// this; `blame --json` calls this alone, so its JSON is unchanged (BZR-1303).
 pub fn truncate_content(s: &str, max: usize) -> String {
     // Collapse any run of whitespace (incl. newlines) to a single space so the
     // cell stays on one row.
@@ -148,6 +151,37 @@ pub fn truncate_content(s: &str, max: usize) -> String {
     // Escape after truncation so a `\|` pair is never split, leaving no dangling
     // backslash.
     clipped.replace('|', "\\|")
+}
+
+/// Replace each ASCII control character in `s` (U+0000–U+001F and U+007F)
+/// with its Unicode control picture: C0 becomes U+2400 plus its code point
+/// (`␀` for NUL, `␛` for ESC, `␟` for U+001F) and DEL becomes U+2421 (`␡`).
+/// Every other character is kept. One character in, one out, so the
+/// character count does not change.
+///
+/// The one control-character rule for CLI text output (BZR-1303). No JSON
+/// path calls it; serde escapes U+0000–U+001F itself.
+pub fn escape_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{7f}' => '\u{2421}',
+            // Control Pictures line up with C0: U+2400 + the code point.
+            c if c.is_ascii_control() => {
+                char::from_u32(0x2400 + u32::from(c)).expect("U+2400..=U+241F are chars")
+            }
+            c => c,
+        })
+        .collect()
+}
+
+/// One stored-content cell of a CLI markdown table: [`truncate_content`]
+/// (collapse whitespace, clip to `max` characters with `…`, escape `|`), then
+/// [`escape_controls`]. A control character counts as one character against
+/// `max`, the width of the picture it becomes, so it is never cut in half.
+/// `dreamd recall`, `dreamd score` and `dreamd blame` print `content` through
+/// this; `blame --json` calls `truncate_content` alone.
+pub fn content_cell(s: &str, max: usize) -> String {
+    escape_controls(&truncate_content(s, max))
 }
 
 /// Render the markdown table (and, when `explain`, the per-hit factor blocks)
@@ -165,7 +199,7 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
     for (i, r) in results.iter().enumerate() {
         let rank = i + 1;
         let age = age_days(now_sec, r.timestamp_sec);
-        let content = truncate_content(&r.content, CONTENT_WIDTH);
+        let content = content_cell(&r.content, CONTENT_WIDTH);
         out.push_str(&format!(
             "| {rank} | {id} | {score:.4} | {bm25:.4} | {sal:.4} | {age:.1} | {pain:.1} | {rec} | {content} |\n",
             id = r.event_id,
@@ -422,6 +456,117 @@ mod tests {
         assert!(
             !got.contains(" | "),
             "raw ` | ` would split the row; got: {got}"
+        );
+    }
+
+    /// BZR-1303: stored content holding NUL, ESC, U+001F, DEL, a tab and a `|`.
+    const CONTROL_CONTENT: &str =
+        "needle NUL\u{0} ESC\u{1b}[31mred US\u{1f} DEL\u{7f} tab\there pipe | end";
+    /// [`CONTROL_CONTENT`] as a table cell: whitespace collapsed, `|` escaped,
+    /// each control character as its control picture.
+    const CONTROL_CELL: &str =
+        "needle NUL\u{2400} ESC\u{241b}[31mred US\u{241f} DEL\u{2421} tab here pipe \\| end";
+
+    #[test]
+    fn escape_controls_maps_every_c0_to_its_control_picture() {
+        for cp in 0u32..=0x1f {
+            let c = char::from_u32(cp).unwrap();
+            let want = char::from_u32(0x2400 + cp).unwrap().to_string();
+            assert_eq!(escape_controls(&c.to_string()), want, "U+{cp:04X}");
+        }
+        assert_eq!(escape_controls("\u{0}"), "\u{2400}");
+        assert_eq!(escape_controls("\u{1b}"), "\u{241b}");
+        assert_eq!(escape_controls("\u{1f}"), "\u{241f}");
+    }
+
+    #[test]
+    fn escape_controls_maps_del_to_symbol_for_delete() {
+        assert_eq!(escape_controls("\u{7f}"), "\u{2421}");
+    }
+
+    /// C1 and bidi controls are out of scope (BZR-1303 D3), and text that only
+    /// looks like an escape is not one.
+    #[test]
+    fn escape_controls_leaves_every_other_char_alone() {
+        let mut s: String = (0x20u8..=0x7e).map(char::from).collect();
+        s.push_str("\u{80}\u{85}\u{9b}\u{9f}\u{a0}\u{202e}\u{2066}\u{200b}…\u{2400}\\u0000|\\|é🦀");
+        assert_eq!(escape_controls(&s), s);
+    }
+
+    #[test]
+    fn escape_controls_keeps_the_char_count() {
+        let s = format!("{CONTROL_CONTENT}\u{2}\u{1c}");
+        assert_eq!(escape_controls(&s).chars().count(), s.chars().count());
+    }
+
+    #[test]
+    fn content_cell_collapses_whitespace_and_escapes_the_rest() {
+        assert_eq!(
+            content_cell("a\tb\nc\u{b}d\u{c}e\rf  g\u{85}h", CONTENT_WIDTH),
+            "a b c d e f g h"
+        );
+        assert_eq!(
+            content_cell("a\u{1c}b\u{1d}c\u{1e}d\u{1f}e", CONTENT_WIDTH),
+            "a\u{241c}b\u{241d}c\u{241e}d\u{241f}e"
+        );
+    }
+
+    #[test]
+    fn content_cell_escapes_pipe_then_controls() {
+        assert_eq!(content_cell(CONTROL_CONTENT, CONTENT_WIDTH), CONTROL_CELL);
+    }
+
+    /// A control character counts as one character against the width, the
+    /// width of its picture; the `|` escape is still not counted.
+    #[test]
+    fn content_cell_counts_a_control_as_one_char() {
+        assert_eq!(CONTENT_WIDTH, 60);
+        let a = |n: usize| "a".repeat(n);
+        let cases = [
+            (format!("{}\u{0}", a(59)), format!("{}\u{2400}", a(59)), 60),
+            (
+                format!("{}\u{0}bc", a(58)),
+                format!("{}\u{2400}…", a(58)),
+                60,
+            ),
+            (format!("{}\u{0}b", a(59)), format!("{}…", a(59)), 60),
+            (format!("{}|bc", a(58)), format!("{}\\|…", a(58)), 61),
+        ];
+        for (input, want, chars) in cases {
+            let got = content_cell(&input, CONTENT_WIDTH);
+            assert_eq!(got, want, "input {input:?}");
+            assert_eq!(got.chars().count(), chars, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn recall_table_prints_control_pictures() {
+        let r = result(
+            CONTROL_CONTENT,
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAH",
+            NOW_SEC,
+            10.0,
+            10.0,
+            0,
+            1.0,
+        );
+        let want = concat!(
+            "| rank | id | score | bm25 | salience | age_days | pain | recurrence | content |\n",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+            "| 1 | evt_01ARZ3NDEKTSV4RRFFQ69G5FAH | 1.0000 | 1.0000 | 1.0000 | 0.0 | 10.0 | 0 | needle NUL\u{2400} ESC\u{241b}[31mred US\u{241f} DEL\u{2421} tab here pipe \\| end |\n",
+        );
+        assert_eq!(
+            render_report(std::slice::from_ref(&r), NOW_SEC, false),
+            want
+        );
+
+        let explained = render_report(&[r], NOW_SEC, true);
+        assert!(explained.starts_with(want), "got: {explained:?}");
+        assert!(
+            explained
+                .chars()
+                .all(|c| c == '\n' || !c.is_ascii_control()),
+            "got: {explained:?}"
         );
     }
 
