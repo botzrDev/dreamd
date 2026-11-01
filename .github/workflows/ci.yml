@@ -124,9 +124,12 @@ jobs:
         run: cargo test --all-features --workspace
 
   # ── Windows replace probe ────────────────────────────────────────────────────
-  # The matrix Windows job is continue-on-error and already red. This job is
-  # the proof that the production parent flush (write access plus
-  # FILE_FLAG_BACKUP_SEMANTICS, then sync_all) returns Ok on the runner volume.
+  # The matrix Windows job is continue-on-error and already red. This job runs
+  # `io::tests` on Windows. It is the proof that the production parent flush
+  # (write access plus FILE_FLAG_BACKUP_SEMANTICS, then sync_all) returns Ok on
+  # the runner volume, and that a failure before the rename leaves the
+  # destination untouched. The step fails unless both of those tests ran and
+  # passed, so a renamed test cannot go green as `0 passed`.
   windows-replace-probe:
     name: Windows replace probe
     needs: lint
@@ -139,8 +142,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Parent flush probe
-        run: cargo test -p dreamd-core --lib io::tests::windows_parent_flush_uses_production_open -- --exact
+      - name: Replace probe (io::tests)
+        shell: bash
+        run: |
+          cargo test -p dreamd-core --lib io::tests:: 2>&1 | tee probe.log
+          for t in windows_parent_flush_uses_production_open injected_failure_preserves_original_and_keeps_tmp; do
+            grep -qF "test io::tests::$t ... ok" probe.log \
+              || { echo "::error::io::tests::$t did not run and pass"; exit 1; }
+          done
 
   # ── MCP npx shim tests ───────────────────────────────────────────────────────
   # The dreamd-mcp shim's tests (version↔manifest↔server.json consistency, arg
