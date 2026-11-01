@@ -186,7 +186,7 @@ sequenceDiagram
 |---|---|---|
 | JSONL append | `write_all` + `sync_data` before HTTP 201 | `episodic::recover` on coordinator open (a final record missing its `\n` gets one; any other torn fragment is truncated; mid-file bad lines stay in place) |
 | Dream cycle | Outputs staged and fsynced; one redo WAL write commits them | `recover_on_startup` in `WriterLock::acquire` (redo WAL rolls forward; stage dir wiped) |
-| Tantivy index | 5 s commit cadence; coordinator → indexer awaited `send` (backpressures when full) | Coverage pass in `TantivyIndexHandle::open` and on `IndexerMsg::Resync` (set difference of log ids and indexed `evt_` ids) |
+| Tantivy index | 5 s commit cadence, plus a commit before a recall that has appends ahead of it (BZR-1437); coordinator → indexer awaited `send` (backpressures when full) | Coverage pass in `TantivyIndexHandle::open` and on `IndexerMsg::Resync` (set difference of log ids and indexed `evt_` ids) |
 
 Module map for this section (BZR-170 split): `server/tantivy_handle.rs` keeps `TantivyIndexHandle` (`open` / `flush` / `shutdown` / `close`) and the open-time coverage pass; `server/indexer_actor.rs` is the indexer task (`IndexerMsg`, commit cadence, the persist step, semantic pass, prune); `recurrence.rs` is recall's per-searcher recurrence table (`RecurrenceWarmer`, `RecallReader`); `server/index_coverage.rs` is the set difference (`cover`, `assess_index_coverage`); `server/index_freshness.rs` is the watermark (`index_progress.json`) and `assess_index_freshness`; `server/index_map.rs` defines `IndexError` and the per-project handle map.
 

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::Config;
+use crate::recurrence::RecallReader;
 use crate::registry::RegistryCache;
+use crate::server::tantivy_handle::RecallFlusher;
 #[cfg(unix)]
 use crate::server::{AppendMark, CommitMark};
 use crate::server::{
@@ -200,6 +202,34 @@ impl AppState {
         }
 
         self.with_runtime(root, |runtime| f(runtime.index()))
+    }
+
+    /// What a recall on `root` needs (BZR-1437): the index's reader, its
+    /// [`RecallFlusher`], and the paired coordinator's append count, read now.
+    /// It pairs as `live_marks` does: `primary` with the boot supervisor for
+    /// the boot root, otherwise `root`'s runtime, opened on a miss. Every part
+    /// is a clone, so no lock is held across the flush or the search.
+    pub(crate) fn recall_target(
+        &self,
+        root: &Path,
+    ) -> Result<(RecallReader, RecallFlusher, u64), IndexError> {
+        if let Some((primary_root, handle)) = self.primary.as_ref() {
+            if primary_root.as_path() == root {
+                return Ok((
+                    handle.reader().clone(),
+                    handle.recall_flusher(),
+                    self.supervisor.append_mark().appended,
+                ));
+            }
+        }
+        self.with_runtime(root, |runtime| {
+            let index = runtime.index();
+            (
+                index.reader().clone(),
+                index.recall_flusher(),
+                runtime.supervisor().append_mark().appended,
+            )
+        })
     }
 
     /// The marks of `root`'s coordinator and index, as one wired pair: `primary`

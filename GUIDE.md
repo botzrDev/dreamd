@@ -110,7 +110,7 @@ final_score = bm25 × salience
 
 Each result includes `score`, `bm25`, `salience`, `source` (`episodic` for a raw event, `semantic` for a `LESSONS.md` lesson), `content`, and `metadata` (timestamp, pain, importance, recurrence, plus `skill_action` and `source_harness` — each hit's cluster key and authoring harness, so recall is cross-harness-attributable).
 
-> **Timing:** A learning appended seconds ago may not appear until the next index commit (5 s cadence). An empty `{"results": []}` right after an append is normal; wait a few seconds and retry.
+> **Timing:** `search_nodes` and `GET /api/v1/recall` see every learning whose `append_node` or `POST /api/v1/learn` returned before the search. When the index has not committed one yet, the search asks for that commit first and waits at most one second; past that it answers from what is already committed. `dreamd recall` and the other CLI commands read the index on disk, so they can trail an append by up to 5 s (the index commit cadence) while `dreamd watch` or `dreamd mcp` is running.
 
 On 1.0.0 and later, add `&explain=1` to get a `citations` array beside `results` (id, score components, layer, age, pain, importance, recurrence per hit). See [docs/observability.md](./docs/observability.md). With a cargo-installed binary, `dreamd recall "axum unwrap" --explain` prints the same ranking as a table with the factor breakdown.
 
@@ -194,7 +194,7 @@ Point two agents at the same project:
 | Cline | [adapters/cline/README.md](./adapters/cline/README.md) |
 | Aider | [adapters/aider/README.md](./adapters/aider/README.md) |
 
-With `npx -y dreamd-mcp watch` running, both harnesses share one coordinator. A learning appended in Cursor is recallable in Claude Code after the commit cadence.
+With `npx -y dreamd-mcp watch` running, both harnesses share one coordinator. A learning appended in Cursor is recallable in Claude Code as soon as its append returns.
 
 Try it:
 

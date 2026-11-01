@@ -222,7 +222,7 @@ For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (s
 | Cause | Check |
 |---|---|
 | Empty store | `wc -l .agent/episodic/AGENT_LEARNINGS.jsonl` |
-| Read-after-write window | Wait up to 5 s after append (index commit cadence) |
+| Read-after-write window | `search_nodes` and `GET /api/v1/recall` see an append as soon as it returns, waiting at most 1 s for the index. `dreamd recall` reads the index on disk and can trail an append by up to 5 s (index commit cadence) |
 | Query mismatch | Try broader terms from known `content` |
 | Wrong project | Verify `X-Agent-Root` / MCP project discovery points at this repo |
 | Index stale | `npx -y dreamd-mcp doctor`; rebuild with `dreamd doctor --repair` (cargo-installed `dreamd`, or `npx -y dreamd-mcp doctor --repair`). Stop the daemon first — `--repair` refuses while one is live |

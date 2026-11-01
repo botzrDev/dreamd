@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::ingress::DEFAULT_RECALL_K;
 #[cfg(unix)]
-use crate::memory_store::{new_index_map, SharedIndexMap};
+use crate::memory_store::{new_index_map, PinnedIndex, SharedIndexMap};
 use crate::memory_store::{
     AppendRequest, DaemonStore, InProcessStore, MemoryStoreError, SharedMemoryStore,
 };
@@ -60,6 +60,8 @@ use crate::memory_store::{
 use crate::privacy::DR413_DISCLOSURE;
 #[cfg(unix)]
 use crate::server::ProjectRuntime;
+#[cfg(unix)]
+use crate::server::Supervisor;
 #[cfg(unix)]
 use crate::writer_lock::WriterKind;
 // AILAB-206: `dreamd mcp --bind` options, and the gate they bind through.
@@ -155,14 +157,14 @@ impl McpRunError {
 /// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
 /// generated `Tool.description` equals this const so the copies cannot drift.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails.";
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed.";
 
 /// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
 /// the real write target: `append_node` appends an episodic event to
 /// `AGENT_LEARNINGS.jsonl`; `.agent/semantic/LESSONS.md` is written by the
 /// dream cycle, never by this tool.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones.";
+const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones. Once this returns, search_nodes includes the event, unless indexing it takes more than one second.";
 
 /// Parameters for the `search_nodes` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -237,7 +239,7 @@ impl MemoryMcpServer {
     fn in_process(
         agent_root: Option<AgentRoot>,
         coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
-        #[cfg(unix)] pinned: Option<Arc<TantivyIndexHandle>>,
+        #[cfg(unix)] pinned: Option<PinnedIndex>,
         #[cfg(unix)] index_map: SharedIndexMap,
     ) -> Self {
         Self {
@@ -295,17 +297,27 @@ impl MemoryMcpServer {
         )
     }
 
-    /// Like [`Self::with_coordinator`], but pins the index handle the
-    /// coordinator's `indexer_tx` writes to, so appends and `search_nodes`
-    /// share one `IndexWriter` (WEG-252 / watch topology). The handle is never
-    /// evicted, unlike an entry in the lazy map.
+    /// Like [`Self::with_coordinator`] with `supervisor`'s coordinator, but
+    /// pins the index handle that coordinator writes to, so appends and
+    /// `search_nodes` share one `IndexWriter` (WEG-252 / watch topology), and
+    /// a search first commits the coordinator's acked appends (BZR-1437). The
+    /// handle is never evicted, unlike an entry in the lazy map.
     #[cfg(unix)]
     pub fn with_coordinator_and_index(
         root: AgentRoot,
-        tx: mpsc::Sender<MemoryCoordinatorMsg>,
+        supervisor: &Supervisor,
         handle: Arc<TantivyIndexHandle>,
     ) -> Self {
-        Self::in_process(Some(root), Some(tx), Some(handle), new_index_map())
+        let pinned = PinnedIndex {
+            index: handle,
+            appends: supervisor.append_mark_handle(),
+        };
+        Self::in_process(
+            Some(root),
+            Some(supervisor.sender()),
+            Some(pinned),
+            new_index_map(),
+        )
     }
 
     /// Create a daemon-backed server: tool calls are proxied to the running
@@ -358,7 +370,7 @@ impl MemoryMcpServer {
     /// never opens an index per call (WEG-252).
     #[cfg(unix)]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -386,7 +398,7 @@ impl MemoryMcpServer {
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -405,7 +417,7 @@ impl MemoryMcpServer {
     /// `AGENT_LEARNINGS.jsonl` only -- `.agent/semantic/LESSONS.md` is the
     /// dream cycle's output, not this tool's.
     #[tool(
-        description = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones."
+        description = "Append a raw episodic event -- use when: the user corrects you, the user states a decision, note that, remember, log this, save this lesson. Writes AGENT_LEARNINGS.jsonl, not LESSONS.md; lessons come from the dream cycle. Put the user's own words in content. One precise event beats several vague ones. Once this returns, search_nodes includes the event, unless indexing it takes more than one second."
     )]
     async fn append_node(
         &self,
@@ -599,7 +611,7 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
                 .map_err(|e| McpRunError::Service(e.to_string()))?;
             let server = MemoryMcpServer::with_coordinator_and_index(
                 root,
-                runtime.supervisor().sender(),
+                runtime.supervisor(),
                 Arc::clone(runtime.index()),
             );
             let served = transport.serve(server).await;
@@ -793,6 +805,9 @@ mod tests {
             "what did we decide",
             "previously decided",
             "current task",
+            // BZR-1437: what a search sees of earlier appends, and its bound.
+            "saved with append_node before the search is included",
+            "more than one second",
         ] {
             assert!(
                 SEARCH_NODES_DESCRIPTION.contains(needle),
@@ -822,6 +837,11 @@ mod tests {
         assert!(
             APPEND_NODE_DESCRIPTION.contains("decision"),
             "APPEND_NODE_DESCRIPTION must invite a decision: {APPEND_NODE_DESCRIPTION}"
+        );
+        assert!(
+            APPEND_NODE_DESCRIPTION.contains("search_nodes includes the event, unless indexing"),
+            "APPEND_NODE_DESCRIPTION must say when a search sees the event (BZR-1437): \
+             {APPEND_NODE_DESCRIPTION}"
         );
         for forbidden in ["Writes LESSONS.md", "to LESSONS.md", "into LESSONS.md"] {
             assert!(
@@ -1138,7 +1158,7 @@ mod tests {
         let runtime = ProjectRuntime::open(&root, WriterKind::Mcp).expect("open project runtime");
         let server = MemoryMcpServer::with_coordinator_and_index(
             root,
-            runtime.supervisor().sender(),
+            runtime.supervisor(),
             Arc::clone(runtime.index()),
         );
 
@@ -2045,5 +2065,356 @@ mod tests {
             assert_eq!(remote.code, local.code, "{query}");
             assert_eq!(remote.message, local.message, "{query}");
         }
+    }
+
+    // ── BZR-1437: a search sees every append acked before it ─────────────────
+
+    /// An index cadence no test reaches, so only a commit before the recall
+    /// can make an append visible.
+    #[cfg(unix)]
+    const NO_CADENCE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// `dreamd mcp`'s in-process topology with a cadence the test picks: one
+    /// writer lock, an index, and a coordinator wired to that index.
+    #[cfg(unix)]
+    struct PinnedSession {
+        server: MemoryMcpServer,
+        index: Arc<TantivyIndexHandle>,
+        _supervisor: crate::server::Supervisor,
+        _lock: crate::writer_lock::WriterLock,
+    }
+
+    #[cfg(unix)]
+    fn pinned_session(root: &AgentRoot, cadence: std::time::Duration) -> PinnedSession {
+        use crate::server::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+
+        let lock = writer_lock(root);
+        let index =
+            Arc::new(TantivyIndexHandle::open(root, &lock, cadence).expect("open the index"));
+        let supervisor = Supervisor::start(
+            root,
+            &lock,
+            COORDINATOR_CHANNEL_CAPACITY,
+            Some(index.sender()),
+        )
+        .expect("start the coordinator");
+        let server = MemoryMcpServer::with_coordinator_and_index(
+            root.clone(),
+            &supervisor,
+            Arc::clone(&index),
+        );
+        PinnedSession {
+            server,
+            index,
+            _supervisor: supervisor,
+            _lock: lock,
+        }
+    }
+
+    /// The text of a tool result.
+    #[cfg(unix)]
+    fn tool_text(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .find_map(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("text content present")
+    }
+
+    /// `append_node` with `content`; returns the minted id.
+    #[cfg(unix)]
+    async fn append_text(server: &MemoryMcpServer, content: &str) -> String {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let result = server
+            .append_node(Parameters(AppendNodeParams {
+                content: content.to_string(),
+                source_harness: "test-harness".to_string(),
+                skill_action: "rust::bzr1437".to_string(),
+                pain: Some(6.0),
+                importance: Some(7.0),
+                client_dedup_key: None,
+            }))
+            .await
+            .expect("append_node ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_text(&result)).expect("valid json");
+        parsed["id"].as_str().expect("a minted id").to_owned()
+    }
+
+    /// `search_nodes` for `query`; returns each hit's content. A tool error
+    /// fails the test.
+    #[cfg(unix)]
+    async fn search_contents(server: &MemoryMcpServer, query: &str, k: u32) -> Vec<String> {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let result = server
+            .search_nodes(Parameters(SearchNodesParams {
+                query: query.to_string(),
+                k: Some(k),
+            }))
+            .await
+            .expect("search_nodes ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_text(&result)).expect("valid json");
+        parsed["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|r| r["content"].as_str().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    /// The ticket's case: in-process, no daemon. The first search after an
+    /// append finds it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_in_process_finds_an_append_from_the_same_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+
+        let id = append_text(&s.server, "bzr1437 zorbleflux in-process").await;
+        let hits = search_contents(&s.server, "zorbleflux", 5).await;
+
+        assert!(
+            hits.iter().any(|c| c == "bzr1437 zorbleflux in-process"),
+            "the first search must find the append; got {hits:?}"
+        );
+        assert_eq!(
+            s.index
+                .commit_mark()
+                .last_indexed_id
+                .map(|i| i.as_str().to_owned()),
+            Some(id),
+            "the search committed the append"
+        );
+    }
+
+    /// A daemon over UDS whose booted project has a pinned index and a
+    /// coordinator wired to it, as `dreamd watch` boots one. Returns the index.
+    #[cfg(unix)]
+    async fn spawn_daemon_with_primary(
+        root: &AgentRoot,
+        canonical: std::path::PathBuf,
+        registry_path: std::path::PathBuf,
+        sock_path: &std::path::Path,
+        cadence: std::time::Duration,
+    ) -> Arc<TantivyIndexHandle> {
+        use crate::config::Config;
+        use crate::server::uds_server::{bind_api_socket, serve_uds};
+        use crate::server::{build_router, AppState, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
+
+        let lock = writer_lock(root);
+        let index =
+            Arc::new(TantivyIndexHandle::open(root, &lock, cadence).expect("open the index"));
+        let supervisor = Supervisor::start(
+            root,
+            &lock,
+            COORDINATOR_CHANNEL_CAPACITY,
+            Some(index.sender()),
+        )
+        .expect("start the coordinator");
+        let state = AppState::new(
+            registry_path,
+            supervisor,
+            Config::default(),
+            nix::unistd::Uid::current().as_raw(),
+        )
+        .with_primary(canonical, Arc::clone(&index));
+        let router = build_router(state);
+        let listener = bind_api_socket(sock_path).expect("bind api socket");
+        tokio::spawn(async move {
+            serve_uds(listener, router).await.ok();
+        });
+        // Let the accept loop start before the first client connect.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        index
+    }
+
+    /// The same sequence through a running daemon: `append_node` then
+    /// `search_nodes`, proxied over UDS. The first search finds the append.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_through_the_daemon_finds_an_append_from_the_same_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+        let canonical_str = canonical.to_str().expect("utf-8 path").to_owned();
+        let registry_path = dir.path().join("registry.toml");
+        write_registry(&registry_path, &canonical_str);
+        let sock_path = dir.path().join("d.sock");
+        let index = spawn_daemon_with_primary(
+            &root,
+            canonical.clone(),
+            registry_path,
+            &sock_path,
+            NO_CADENCE,
+        )
+        .await;
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+
+        let id = append_text(&server, "bzr1437 quillwhisk daemon").await;
+        let hits = search_contents(&server, "quillwhisk", 5).await;
+
+        assert!(
+            hits.iter().any(|c| c == "bzr1437 quillwhisk daemon"),
+            "the first search through the daemon must find the append; got {hits:?}"
+        );
+        assert_eq!(
+            index
+                .commit_mark()
+                .last_indexed_id
+                .map(|i| i.as_str().to_owned()),
+            Some(id),
+            "the search committed the append"
+        );
+    }
+
+    /// FIFO: every append acked before a search is in its results, those made
+    /// one after another and those made at the same time.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_sees_every_append_acked_before_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+
+        let mut expected = Vec::new();
+        for i in 0..20 {
+            let content = format!("bzr1437 glimmerstat serial {i}");
+            append_text(&s.server, &content).await;
+            expected.push(content);
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..10 {
+            let server = s.server.clone();
+            let content = format!("bzr1437 glimmerstat concurrent {i}");
+            expected.push(content.clone());
+            tasks.spawn(async move { append_text(&server, &content).await });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.expect("append task");
+        }
+
+        let hits = search_contents(&s.server, "glimmerstat", 100).await;
+        for content in &expected {
+            assert!(
+                hits.contains(content),
+                "{content:?} was acked before the search and must be in it; got {} hits",
+                hits.len()
+            );
+        }
+        assert_eq!(hits.len(), expected.len(), "no other hits: {hits:?}");
+    }
+
+    /// R1: a search with nothing pending sends the indexer no commit request,
+    /// before any append and after an append is committed. The first search
+    /// after an append sends one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn searches_with_nothing_pending_send_no_commit_request() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+        let flushes = || s.index.counts().flush_requests.load(SeqCst);
+
+        for _ in 0..5 {
+            search_contents(&s.server, "nothingyet", 5).await;
+        }
+        assert_eq!(flushes(), 0, "no append yet: no commit request");
+
+        append_text(&s.server, "bzr1437 pendingonce").await;
+        search_contents(&s.server, "pendingonce", 5).await;
+        assert_eq!(flushes(), 1, "the first search after an append asks once");
+
+        for _ in 0..5 {
+            search_contents(&s.server, "pendingonce", 5).await;
+        }
+        assert_eq!(flushes(), 1, "the append is committed: no further request");
+    }
+
+    /// R1: a burst of searches after one append causes one commit, and every
+    /// search in it finds the append.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_burst_of_searches_after_one_append_commits_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+        let commits = || s.index.counts().commits.load(SeqCst);
+        let before = commits();
+
+        append_text(&s.server, "bzr1437 burstwhistle").await;
+        for i in 0..10 {
+            let hits = search_contents(&s.server, "burstwhistle", 5).await;
+            assert!(
+                hits.iter().any(|c| c == "bzr1437 burstwhistle"),
+                "search {i} of the burst missed the append: {hits:?}"
+            );
+        }
+        assert_eq!(commits() - before, 1, "one append, one commit");
+    }
+
+    /// R2: when the indexer does not commit within the recall wait, the search
+    /// answers from the last commit with no error. The late commit still lands,
+    /// and the next search finds it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stalled_indexer_times_out_and_search_answers_from_the_last_commit() {
+        use crate::server::indexer_actor::FLUSH_STALL;
+        use crate::server::tantivy_handle::RECALL_FLUSH_TIMEOUT;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+
+        append_text(&s.server, "bzr1437 stallprobe alpha").await;
+        let hits = search_contents(&s.server, "stallprobe", 5).await;
+        assert!(
+            hits.iter().any(|c| c.ends_with("alpha")),
+            "the first search commits alpha: {hits:?}"
+        );
+
+        let stall = root.dreamd_dir().join("failpoint-flush-stall");
+        std::fs::write(&stall, b"").expect("arm the stall");
+        append_text(&s.server, "bzr1437 stallprobe beta").await;
+        let started = Instant::now();
+        let hits = search_contents(&s.server, "stallprobe", 5).await;
+        let waited = started.elapsed();
+        std::fs::remove_file(&stall).expect("disarm the stall");
+
+        assert!(
+            waited >= RECALL_FLUSH_TIMEOUT,
+            "the search waits for the indexer: {waited:?}"
+        );
+        assert!(
+            waited < FLUSH_STALL,
+            "the search must not wait out the stall: {waited:?}"
+        );
+        assert!(
+            hits.iter().any(|c| c.ends_with("alpha")),
+            "the search answers from the last commit: {hits:?}"
+        );
+        assert!(
+            !hits.iter().any(|c| c.ends_with("beta")),
+            "beta is not committed yet: {hits:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while s.index.commit_mark().committed_appends < 2 {
+            assert!(Instant::now() < deadline, "the stalled commit never landed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let hits = search_contents(&s.server, "stallprobe", 5).await;
+        assert!(
+            hits.iter().any(|c| c.ends_with("beta")),
+            "the late commit is visible: {hits:?}"
+        );
     }
 }

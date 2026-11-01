@@ -2944,3 +2944,169 @@ async fn health_opens_a_cold_project_like_recall() {
         "a registered root without `.agent/`: {json}"
     );
 }
+
+// ── BZR-1437: recall commits the appends acked before it ─────────────────────
+
+/// `GET /api/v1/recall` right after `POST /api/v1/learn` finds the learning.
+/// The primary index commits only every hour, so only a commit before the
+/// recall can make it visible.
+#[tokio::test]
+async fn recall_sees_a_learn_acked_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state.clone());
+
+    let id = post_learn(&router, &root, "bzr1437 quillwhisk router").await;
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/recall?q=quillwhisk&k=5")
+                .header("x-agent-root", &root)
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let hits = json["results"].as_array().expect("results array");
+    assert!(
+        hits.iter()
+            .any(|r| r["content"] == "bzr1437 quillwhisk router"),
+        "the first recall must find the learning: {json}"
+    );
+    assert_eq!(
+        primary_of(&state)
+            .commit_mark()
+            .last_indexed_id
+            .map(|i| i.as_str().to_owned()),
+        Some(id),
+        "the recall committed the learning"
+    );
+}
+
+/// `GET /api/v1/recall` for `q` on `root`: the status and the body.
+async fn recall_of(router: &axum::Router, root: &str, q: &str) -> (StatusCode, serde_json::Value) {
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(with_peer_uid(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/recall?q={q}&k=5"))
+                .header("x-agent-root", root)
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// The content of every hit in a recall body.
+fn hit_contents(json: &serde_json::Value) -> Vec<String> {
+    json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["content"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+/// R1 in the daemon: a recall with nothing pending sends the indexer no
+/// commit request. It reads the booted project's coordinator's append count.
+#[tokio::test]
+async fn recalls_with_nothing_pending_send_no_commit_request() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state.clone());
+    let primary = primary_of(&state);
+    let flushes = || primary.counts().flush_requests.load(SeqCst);
+
+    for _ in 0..3 {
+        let (status, _) = recall_of(&router, &root, "nothingyet").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(flushes(), 0, "no learn yet: no commit request");
+
+    post_learn(&router, &root, "bzr1437 daemonpending").await;
+    recall_of(&router, &root, "daemonpending").await;
+    assert_eq!(flushes(), 1, "the first recall after a learn asks once");
+    for _ in 0..3 {
+        recall_of(&router, &root, "daemonpending").await;
+    }
+    assert_eq!(flushes(), 1, "the learn is committed: no further request");
+}
+
+/// R2 in the daemon: when the indexer does not commit within the recall wait,
+/// `GET /api/v1/recall` answers `200` from the last commit.
+#[tokio::test]
+async fn recall_answers_from_the_last_commit_when_the_indexer_stalls() {
+    use crate::server::indexer_actor::FLUSH_STALL;
+    use crate::server::tantivy_handle::RECALL_FLUSH_TIMEOUT;
+
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state.clone());
+
+    post_learn(&router, &root, "bzr1437 daemonstall alpha").await;
+    let (_, json) = recall_of(&router, &root, "daemonstall").await;
+    assert!(
+        hit_contents(&json).iter().any(|c| c.ends_with("alpha")),
+        "the first recall commits alpha: {json}"
+    );
+
+    let stall = AgentRoot::new(dir.path())
+        .dreamd_dir()
+        .join("failpoint-flush-stall");
+    std::fs::write(&stall, b"").unwrap();
+    post_learn(&router, &root, "bzr1437 daemonstall beta").await;
+    let started = std::time::Instant::now();
+    let (status, json) = recall_of(&router, &root, "daemonstall").await;
+    let waited = started.elapsed();
+    std::fs::remove_file(&stall).unwrap();
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a timed-out wait is not an error: {json}"
+    );
+    assert!(
+        waited >= RECALL_FLUSH_TIMEOUT,
+        "the recall waits: {waited:?}"
+    );
+    assert!(
+        waited < FLUSH_STALL,
+        "the recall must not wait out the stall: {waited:?}"
+    );
+    let hits = hit_contents(&json);
+    assert!(hits.iter().any(|c| c.ends_with("alpha")), "{json}");
+    assert!(!hits.iter().any(|c| c.ends_with("beta")), "{json}");
+}

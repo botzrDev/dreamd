@@ -25,6 +25,7 @@ use crate::index::{Layer, SchemaFields};
 use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::provenance::{Kind, Ledger};
+use crate::recurrence::RecallReader;
 use crate::server::index_coverage::{cover, CoverageReport};
 use crate::server::index_freshness::{
     read_jsonl_events, write_progress, CommitMark, IndexProgress,
@@ -111,8 +112,9 @@ pub enum IndexerMsg {
         learning: AgentLearning,
     },
     /// Commit pending appends now rather than at the next cadence tick.
-    /// `TantivyIndexHandle::flush` sends it: the shutdown drain when the index
-    /// handle is still shared, and tests. The `ack` oneshot resolves with
+    /// `TantivyIndexHandle::flush` sends it (the shutdown drain when the index
+    /// handle is still shared, and tests), and so does a recall that has
+    /// appends ahead of it (`RecallFlusher`, BZR-1437). The `ack` oneshot resolves with
     /// `Ok(())` after a successful persist step (or when nothing was pending),
     /// or `Err(IndexError)` if it failed.
     Flush {
@@ -159,6 +161,21 @@ impl IndexerHandle {
     }
 }
 
+/// What an indexer was asked to commit and what it committed, for tests
+/// (BZR-1437). Shared between the persist step and the handle.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct IndexerCounts {
+    /// `IndexerMsg::Flush` messages taken off the channel.
+    pub(crate) flush_requests: std::sync::atomic::AtomicU64,
+    /// Successful Tantivy commits in the persist step.
+    pub(crate) commits: std::sync::atomic::AtomicU64,
+}
+
+/// How long the `failpoint-flush-stall` test hook holds a `Flush` (BZR-1437).
+#[cfg(test)]
+pub(crate) const FLUSH_STALL: Duration = Duration::from_secs(3);
+
 /// The one persist step every Tantivy commit in production code goes through.
 ///
 /// [`Self::commit`] commits, then appends an `index_doc` edge for every id in
@@ -186,6 +203,11 @@ pub(crate) struct IndexerPersist {
     pushed: u64,
     /// A coverage pass ran since the last successful persist.
     covered: bool,
+    /// The handle's recall reader, reloaded after every Tantivy commit
+    /// (BZR-1437).
+    recall: Option<RecallReader>,
+    #[cfg(test)]
+    pub(crate) counts: Arc<IndexerCounts>,
 }
 
 impl IndexerPersist {
@@ -211,7 +233,17 @@ impl IndexerPersist {
             received: 0,
             pushed: 0,
             covered: false,
+            recall: None,
+            #[cfg(test)]
+            counts: Arc::default(),
         }
+    }
+
+    /// Reload `reader` after every successful Tantivy commit from now on
+    /// (BZR-1437). The handle's reader is `ReloadPolicy::Manual`, so this is
+    /// what moves it.
+    pub(crate) fn reload_on_commit(&mut self, reader: RecallReader) {
+        self.recall = Some(reader);
     }
 
     /// One `IndexerMsg::Append` taken off the channel, before its
@@ -240,9 +272,10 @@ impl IndexerPersist {
         self.covered = true;
     }
 
-    /// The one persist step: commit, then `index_doc` edges for `pending`, then
-    /// the watermark, then the [`CommitMark`]. Every Tantivy commit in
-    /// production code is this call.
+    /// The one persist step: commit, then reload the recall reader (BZR-1437),
+    /// then `index_doc` edges for `pending`, then the watermark, then the
+    /// [`CommitMark`]. Every Tantivy commit in production code is this call.
+    /// So once the mark covers an append, the reader already sees it.
     ///
     /// On a ledger failure `pending` stays intact, the watermark does not move
     /// and the mark is not published, so the next commit retries the edges. The
@@ -257,6 +290,18 @@ impl IndexerPersist {
         writer: &mut IndexWriter<TantivyDocument>,
     ) -> Result<(), IndexError> {
         writer.commit().map_err(tantivy_to_index)?;
+        #[cfg(test)]
+        self.counts
+            .commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Visible from here: before the ledger and the watermark, so a persist
+        // step that fails after the commit does not hide committed docs. A
+        // reload error keeps the old searcher until the next commit's reload.
+        if let Some(reader) = &self.recall {
+            if let Err(e) = reader.reload() {
+                tracing::warn!(error = ?e, "recall reader reload after commit failed");
+            }
+        }
         #[cfg(test)]
         if self
             .progress_path
@@ -349,6 +394,23 @@ pub(crate) async fn run_indexer(
                         state.persist.push(event_id);
                     }
                     Some(IndexerMsg::Flush { ack }) => {
+                        #[cfg(test)]
+                        {
+                            state
+                                .persist
+                                .counts
+                                .flush_requests
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            // A stalled indexer, for the recall-wait tests.
+                            if state
+                                .persist
+                                .progress_path
+                                .with_file_name("failpoint-flush-stall")
+                                .exists()
+                            {
+                                tokio::time::sleep(FLUSH_STALL).await;
+                            }
+                        }
                         let result = if state.persist.has_pending() {
                             state.persist.commit(&mut writer)
                         } else {

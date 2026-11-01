@@ -9,7 +9,7 @@ dreamd gives you persistent memory across every coding agent you use. What Claud
 ## Protocol note — do this first
 
 After `initialize`, send `notifications/initialized` before calling any tools, as the MCP lifecycle requires.  
-A node you just appended becomes searchable after the next index commit (up to 5 s) — an empty result right after an append is that delay, not a failure.
+A search finds every node whose `append_node` returned before it. If the index needs more than one second to catch up, the search answers from what is already indexed, and the node shows up in a later search.
 
 ---
 

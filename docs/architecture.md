@@ -255,12 +255,21 @@ cases: `pain=0` or `importance=0` → score 0; `recurrence=0` → ln factor 1.
 
 Full derivation and lineage: [`salience.md`](salience.md).
 
-### Read-after-write visibility (commit-cadence window)
+### Read-after-write visibility (commit cadence and recall commit)
 
 The indexer commits to Tantivy on a wall-clock cadence
-(`DEFAULT_COMMIT_CADENCE`, default 5 seconds — `server/tantivy_handle.rs`). A
-document appended via `POST /api/v1/learn` at T+0 is **not** searchable until
-the next commit lands — worst-case T+5s.
+(`DEFAULT_COMMIT_CADENCE`, default 5 seconds — `server/tantivy_handle.rs`), and
+a recall (`search_nodes`, `GET /api/v1/recall`) with appends ahead of it asks
+for a commit first (BZR-1437). The recall compares the coordinator's
+`AppendMark::appended` with the index's `CommitMark::committed_appends`. Only
+when appends are pending does it send `IndexerMsg::Flush`, which queues behind
+those appends, and wait at most 1 s (`RECALL_FLUSH_TIMEOUT`). The persist step
+reloads the recall reader right after each Tantivy commit, before it publishes
+the commit mark. So a document appended at T+0 is found by any recall sent
+after its append returned. If the indexer does not answer within the wait, the
+recall searches the last commit, and the document is found after the next
+cadence commit, worst case T+5s. The CLI readers open the index on disk and
+see the last commit.
 
 This is a *freshness* constraint, not a *latency* constraint. The
 `<5ms P50 warm` recall latency applies to the query operation itself and
@@ -269,10 +278,11 @@ public copy or benchmark commentary. To re-run the Criterion recall bench at
 n=1k/10k/100k see [`benchmarks.md`](benchmarks.md); the last recorded values
 are in [`../PERF.md`](../PERF.md).
 
-A lower cadence (toward 1s) would buy sub-5s freshness at the cost of higher
-I/O, but there is no user-facing cadence setting (DR-307 / WEG-140, not
-shipped): the value is a constructor argument, and every production caller
-passes `DEFAULT_COMMIT_CADENCE`.
+A recall that follows an append pays for one commit; a burst of recalls after
+one append commits once. A lower cadence (toward 1s) would make the CLI readers
+fresher at the cost of higher I/O, but there is no user-facing cadence setting
+(DR-307 / WEG-140, not shipped): the value is a constructor argument, and every
+production caller passes `DEFAULT_COMMIT_CADENCE`.
 
 For the forward-looking plan across a future Tantivy major bump — how each schema
 field is consumed, the custom collector's Tantivy-internal assumptions, and what a

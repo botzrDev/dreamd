@@ -726,9 +726,10 @@ impl MemoryCoordinator {
     /// so it waits.
     ///
     /// The append is acked once the indexer *accepts* the message; the Tantivy
-    /// commit still lands on the usual 5 s cadence. A closed channel is terminal
-    /// for live routing: warn once, drop the sender, and let the next open's
-    /// coverage pass pick the append up.
+    /// commit lands on the 5 s cadence, or sooner when a recall asks for it
+    /// (BZR-1437). A closed channel is terminal for live routing: warn once,
+    /// drop the sender, and let the next open's coverage pass pick the append
+    /// up.
     async fn route_to_indexer(&mut self, event_id: &EventId, learning: &AgentLearning) {
         let Some(tx) = self.indexer_tx.as_ref() else {
             return;

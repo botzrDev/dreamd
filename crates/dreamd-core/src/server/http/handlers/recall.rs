@@ -85,14 +85,16 @@ pub(crate) async fn get_recall(
     // Resolve the reader for this project: the pinned primary handle when this
     // is the daemon's booted project (so recall sees the coordinator's live
     // appends, WEG-264), else the index of the project's lazily-opened
-    // runtime (`AppState::runtimes`). RecallReader is Clone (Arc-backed);
-    // cloning it means the `runtimes` mutex is never held across the Tantivy
-    // search.
-    let reader =
-        match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {
-            Ok(r) => r,
-            Err(e) => return error_500(&format!("index open failed: {e}")),
-        };
+    // runtime (`AppState::runtimes`). Every part is an Arc-backed clone, so the
+    // `runtimes` mutex is never held across the flush or the Tantivy search.
+    let (reader, flusher, appended) = match state.recall_target(std::path::Path::new(&entry.root)) {
+        Ok(target) => target,
+        Err(e) => return error_500(&format!("index open failed: {e}")),
+    };
+    // BZR-1437: commit the appends acked before this request, if the index has
+    // not, so the search sees them. Bounded; past the wait it searches the
+    // last commit.
+    flusher.commit_pending(appended).await;
 
     // Same recall body as the in-process MCP store (BZR-173) when `exclude` is
     // absent; only the reader differs. The body is already serialized JSON,

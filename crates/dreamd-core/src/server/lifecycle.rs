@@ -155,6 +155,12 @@ impl Supervisor {
         })
     }
 
+    /// The coordinator's [`AppendMark`] itself, shared (BZR-1437). The
+    /// in-process MCP store reads it before each recall.
+    pub(crate) fn append_mark_handle(&self) -> Arc<Mutex<AppendMark>> {
+        Arc::clone(&self.append_mark)
+    }
+
     /// What the coordinator has appended (BZR-1243). A supervisor with no
     /// coordinator behind it returns `AppendMark::default()`.
     pub fn append_mark(&self) -> AppendMark {

@@ -50,6 +50,8 @@ use crate::server::index_map::{ProjectIndexMap, ProjectIndexMapConfig};
 #[cfg(unix)]
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 #[cfg(unix)]
+use crate::server::AppendMark;
+#[cfg(unix)]
 use crate::writer_lock::{WriterKind, WriterLock};
 
 /// The empty recall envelope, returned when there is nothing readable.
@@ -157,6 +159,10 @@ pub(crate) fn new_index_map() -> SharedIndexMap {
 /// | `Some`       | `None`           | index read        | "no agent root" error  |
 /// | `Some`       | `Some`           | index read        | `send().await`         |
 ///
+/// With a [`PinnedIndex`], recall first commits the appends its coordinator
+/// has made that the index has not committed, waiting at most one second
+/// (BZR-1437). So a search finds every append acked before it.
+///
 /// The pinned index and the index map are Unix fields. Windows `dreamd mcp`
 /// does not construct this store; it proxies to `dreamd watch`.
 pub struct InProcessStore {
@@ -166,21 +172,30 @@ pub struct InProcessStore {
     /// it before `index_map` and it is never evicted — the `AppState::primary`
     /// pattern.
     #[cfg(unix)]
-    pinned: Option<Arc<TantivyIndexHandle>>,
+    pinned: Option<PinnedIndex>,
     /// Shared with the owning MCP server. One IndexWriter per root per session
     /// (WEG-252); never open an index per recall. Used only with no `pinned`.
     #[cfg(unix)]
     index_map: SharedIndexMap,
 }
 
+/// The index a coordinator feeds, with that coordinator's append mark
+/// (BZR-1437). Built by `MemoryMcpServer::with_coordinator_and_index`.
+#[cfg(unix)]
+pub struct PinnedIndex {
+    pub(crate) index: Arc<TantivyIndexHandle>,
+    /// What the coordinator has appended, counted before each append is acked.
+    pub(crate) appends: Arc<Mutex<AppendMark>>,
+}
+
 impl InProcessStore {
-    /// Build an in-process store. `pinned` is the handle the coordinator's
+    /// Build an in-process store. `pinned` is the index the coordinator's
     /// indexer writes to (`dreamd mcp`'s topology); with `None`, recall opens a
     /// handle lazily in `index_map`, the MCP session's map.
     pub fn new(
         agent_root: Option<AgentRoot>,
         coordinator_tx: Option<mpsc::Sender<MemoryCoordinatorMsg>>,
-        #[cfg(unix)] pinned: Option<Arc<TantivyIndexHandle>>,
+        #[cfg(unix)] pinned: Option<PinnedIndex>,
         #[cfg(unix)] index_map: SharedIndexMap,
     ) -> Self {
         Self {
@@ -204,8 +219,8 @@ impl InProcessStore {
         query: &str,
         k: u32,
     ) -> Result<String, MemoryStoreError> {
-        let reader = if let Some(handle) = &self.pinned {
-            handle.reader().clone()
+        let reader = if let Some(pinned) = &self.pinned {
+            pinned.index.reader().clone()
         } else {
             let mut map = self
                 .index_map
@@ -248,6 +263,17 @@ impl MemoryStore for InProcessStore {
         };
         #[cfg(unix)]
         {
+            // BZR-1437: commit the appends acked before this recall, if the
+            // index has not, so the search sees them. Bounded; past the wait
+            // it searches the last commit.
+            if let Some(pinned) = &self.pinned {
+                let appended = pinned
+                    .appends
+                    .lock()
+                    .map_err(|_| MemoryStoreError::internal("append mark lock poisoned"))?
+                    .appended;
+                pinned.index.recall_flusher().commit_pending(appended).await;
+            }
             self.recall_local(root, query, k)
         }
         #[cfg(not(unix))]
