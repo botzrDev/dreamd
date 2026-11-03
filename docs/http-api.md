@@ -377,13 +377,28 @@ No request body.
 
 | Status | Body | When |
 |---|---|---|
-| `200 OK` | `{"status":"ok"}` | Cycle completed |
+| `200 OK` | `{"status":"ok","autobiography":{…}}` | Cycle completed. `autobiography` is described below |
 | `409 Conflict` | `{"error":"dream cycle in progress"}` | A cycle is open in the project's coordinator, or `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
 | `400 Bad Request` | `{"error":"…"}` | Missing `X-Agent-Root` |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |
 | `503 Service Unavailable` | `{"error":"coordinator busy, retry"}` | `Retry-After: 1` |
 | `500 Internal Server Error` | `{"error":"…"}` | Coordinator, WAL, or indexer failure |
+
+The 200 body's `autobiography` object reports the git autobiography commit (BZR-1467). Its `outcome` is one of:
+
+| `outcome` | Other keys | Meaning |
+|---|---|---|
+| `committed` | `commit` (the new commit's id) | The cycle committed `LESSONS.md` and the episodic log |
+| `unchanged` | — | Both files already match HEAD, so no commit was made |
+| `no_repo` | — | No git repo at or above the project root |
+| `skipped` | `reason`, `files` | The commit was held. `user_dirty_tree`: the listed files hold changes no dream cycle wrote; commit them with git and the next cycle commits again. `no_baseline`: dreamd has no record yet of what its last cycle wrote, and the next cycle commits |
+
+```json
+{"status":"ok","autobiography":{"outcome":"skipped","reason":"user_dirty_tree","files":[".agent/semantic/LESSONS.md"]}}
+```
+
+The key is absent when the autobiography phase did not run or failed (a failure is logged at ERROR, and the cycle still succeeds). A daemon before 1.2.2 answers `{"status":"ok"}`. Key order is not part of the contract.
 
 #### curl example
 

@@ -1224,6 +1224,7 @@ dependencies = [
  "dreamd-core",
  "dreamd-protocol",
  "getrandom 0.2.17",
+ "git2",
  "insta",
  "serde",
  "serde_json",

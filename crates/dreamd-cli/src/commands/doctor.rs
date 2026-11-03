@@ -270,16 +270,19 @@ pub fn run(
     #[cfg(unix)]
     check_tantivy_locks(agent_root, out)?;
 
-    // WEG-63 — last autobiography skip (if any).
+    // WEG-63 — last autobiography skip (if any), naming the files (BZR-1467).
     if let Some(s) = skip {
         let elapsed = now_sec.saturating_sub(s.at);
         let duration_str = format_elapsed(elapsed);
-        let file_count = s.files.len();
-        writeln!(
+        write!(
             out,
-            "last autobiography skip: {} ago — {} — {} files",
-            duration_str, s.reason, file_count,
+            "last autobiography skip: {} ago — {}",
+            duration_str, s.reason,
         )?;
+        if !s.files.is_empty() {
+            write!(out, " — {}", s.files.join(", "))?;
+        }
+        writeln!(out)?;
     }
 
     if flags.cluster_health {
@@ -1502,11 +1505,39 @@ mod tests {
             output.contains("user_dirty_tree"),
             "reason must appear; got: {output:?}"
         );
+        // BZR-1467: the files are named, not counted.
         assert!(
-            output.contains("2 files"),
-            "file count must appear; got: {output:?}"
+            output.contains(
+                "last autobiography skip: 5 minutes ago — user_dirty_tree — \
+                 .agent/semantic/LESSONS.md, .agent/episodic/AGENT_LEARNINGS.jsonl\n"
+            ),
+            "both files must be named; got: {output:?}"
+        );
+        assert!(
+            !output.contains("2 files"),
+            "the count is gone; got: {output:?}"
         );
         assert!(ok, "skip line must not change all_ok");
+    }
+
+    /// BZR-1467: a skip with no files stops after the reason.
+    #[test]
+    fn doctor_skip_no_repo_names_no_files() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("skip-no-repo");
+        let skip = AutobiographySkip {
+            at: NOW_SEC - 300,
+            reason: "no_repo".to_string(),
+            files: Vec::new(),
+        };
+        let (_ok, output, _) = run_default(&cfg, &root, Some(&skip));
+        let line = output
+            .lines()
+            .find(|l| l.starts_with("last autobiography skip:"))
+            .unwrap_or_else(|| panic!("skip line must be present; got: {output:?}"));
+        assert!(line.ends_with("— no_repo"), "got: {line:?}");
+        assert!(!line.ends_with(" — "), "got: {line:?}");
+        assert_eq!(line.matches(" — ").count(), 1, "got: {line:?}");
     }
 
     #[test]

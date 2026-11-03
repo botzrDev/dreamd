@@ -292,11 +292,12 @@ maintainer must re-verify before bumping — see
 ## Dream cycle
 
 `dream_cycle::run_guarded_cycle` is the one sequencer (BZR-172); both triggers
-are thin adapters over it. It runs the 409 in-progress guard, captures the
-dirty-tree state, dispatches the filesystem phases (prepare, compose and
+are thin adapters over it. It runs the 409 in-progress guard, runs the
+autobiography start check against `state.json`'s `autobiography_baseline`,
+dispatches the filesystem phases (prepare, compose and
 commit: `run_filesystem_phases` in-process, or `PrepareCycle` and `CommitCycle`
-through the daemon's coordinator), then runs the index and autobiography phases
-(`run_post_phases`). `now_sec` is
+through the daemon's coordinator), records the new baseline, then runs the
+index and autobiography phases (`run_post_phases`). `now_sec` is
 caller-provided rather than read from the wall clock, so the deterministic path
 is reproducible from its inputs.
 
@@ -457,23 +458,66 @@ your head:
 ### Autobiography
 
 The final phase git-commits through `git2` into the user's **outer project
-repo**. It stages exactly
+repo**. It commits exactly
 `TRACKED_PATHS = [".agent/semantic/LESSONS.md", ".agent/episodic/AGENT_LEARNINGS.jsonl"]`
-(`autobiography.rs`), commits under the fixed identity
+(`autobiography.rs`) under the fixed identity
 `dreamd <noreply@dreamd.dev>` with the message shape
 `dreamd: cycle YYYY-MM-DD`, and reports
-`Committed(Oid)` / `NoRepo` / `Skipped(SkipReason)` (`AutobiographyOutcome`).
+`Committed(Oid)` / `Unchanged` / `NoRepo` / `Skipped(SkipReason)` (`AutobiographyOutcome`).
 
 The phase is **best-effort**: a failure logs at ERROR and the cycle still
 succeeds (`dream_cycle::run_post_phases`). The memory is the JSONL and `LESSONS.md`;
 the commit is a convenience layered on top of them.
 
-One sharp edge: the dirty-tree check fires at **cycle start, not commit time**
-(`autobiography.rs` module doc). If the tracked files are dirty when the cycle
-begins, the cycle **still runs and overwrites those edits** — only the commit
-is skipped, with a WARN, and the skip is recorded in `state.json`
-(`last_autobiography_skip`), which `dreamd doctor` prints. The check is not a guard on hand-edits to
-`LESSONS.md`; it only decides whether to commit.
+**The start check (BZR-1467).** Whether to commit is decided at **cycle start,
+not commit time**, by comparing bytes, not by asking git for status
+(`autobiography::check_dirty_at_cycle_start`). A tracked file counts as
+dreamd's when the bytes on disk are bytes a dream cycle wrote:
+
+- `LESSONS.md`: absent, equal to HEAD's blob, or equal (by SHA-256) to the
+  baseline's `lessons_sha256`;
+- the episodic log: absent, HEAD's blob a byte prefix of it, or its first
+  `log_len` bytes hashing to the baseline's `log_sha256`. Bytes after either
+  prefix are appends, and appends come through the coordinator;
+- with no baseline, a file HEAD does not track.
+
+The baseline is `state.json`'s `autobiography_baseline`. After every
+successful dispatch, `--no-commit` included, the sequencer records what the
+cycle left (`autobiography::record_baseline`). A file that was clean at cycle
+start advances; a file that was not keeps its old entry. So a hand edit, or a
+`dreamd forget`, `archive --force-unpin` or `memory checkout` that leaves
+bytes neither HEAD nor the baseline explains (they rewrite the store outside a
+cycle), holds the commit on every later cycle until the user commits that
+file, and only that file is named. A store with no baseline
+yet whose files differ from HEAD skips once with reason `no_baseline`, and the
+next cycle compares against the baseline that cycle recorded. A fresh store's
+untracked files are dreamd's, so its first cycle commits. A failed check
+records no baseline, and the commit runs as if the start were clean.
+
+The cycle **still runs** when the commit is held: only the commit is skipped,
+with a WARN naming the files, and the skip is recorded in `state.json`
+(`last_autobiography_skip`). The check is not a guard on hand edits; it only
+decides whether to commit.
+
+**What the commit holds.** The tree is HEAD's tree plus the two tracked
+paths, built in an in-memory `git2::Index`: a present file is staged and
+copied in, an absent one (a store that never promoted, or a retired
+`LESSONS.md`) is removed. The user's other staged files stay staged and stay
+out of the commit, and the repo index afterwards records the two paths as
+committed. A file HEAD does not track and `.gitignore` ignores is neither
+checked nor committed; one HEAD already tracks is committed even if ignored,
+as git does. When the new tree equals HEAD's, the outcome is `Unchanged` and
+no empty commit is made. Paths resolve through the project root: the
+canonical project root minus the canonical repo workdir, joined with each
+tracked path, so a project nested inside a larger repo checks and commits its
+own `.agent/` files.
+
+**Where a skip shows.** `dreamd dream` prints
+`autobiography::skip_message` on its own line after `dream cycle complete …`,
+in-process and through the daemon proxy. `POST /api/v1/dream`'s 200 body has
+an `autobiography` object (`outcome`: `committed`, `unchanged`, `no_repo` or
+`skipped`, with `reason` and `files`). `dreamd doctor` prints the last skip's
+reason and files.
 
 ## WAL / crash recovery
 

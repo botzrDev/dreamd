@@ -26,7 +26,13 @@
 //! The in-process path stages every output, then writes one redo
 //! [`dream_in_progress.wal`](dreamd_core::wal::RedoWal) as its commit point and
 //! applies it. `--no-commit` skips the git autobiography commit but still runs
-//! the full cycle.
+//! the full cycle, including the autobiography start check and its baseline.
+//!
+//! ## Autobiography notice
+//!
+//! When the git commit is held, `dreamd dream` prints why and which files on its
+//! own line after `dream cycle complete …`, in-process and through the proxy
+//! ([`AutobiographyReport::notice`], BZR-1467).
 //!
 //! ## `--dry` contract
 //!
@@ -46,6 +52,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dreamd_core::autobiography::AutobiographyReport;
 use dreamd_core::dream_cycle::{self, DreamCycleError};
 
 /// Errors produced by the `dreamd dream` command.
@@ -114,7 +121,9 @@ pub fn run(
     // never AND-ed into this condition.
     #[cfg(unix)]
     if !no_commit {
-        if let Some(decided) = try_proxy_to_daemon(project_root, out, no_llm, share_personal)? {
+        let sock = dreamd_core::client::resolve_daemon_socket();
+        if let Some(decided) = try_proxy_to_daemon(sock, project_root, out, no_llm, share_personal)?
+        {
             return Ok(decided); // daemon ran it (409 already surfaced as Err)
         }
         // None → no daemon for this project; fall through to in-process.
@@ -122,8 +131,9 @@ pub fn run(
 
     let now_sec = resolve_now_sec()?;
 
-    // The sequencer owns the 409 guard and the WEG-63 dirty capture; under
-    // `--no-commit` it skips the dirty-tree walk.
+    // The sequencer owns the 409 guard and the autobiography start check. Under
+    // `--no-commit` it still runs the check and records the baseline, and skips
+    // only the commit (BZR-1467 D4).
     let result =
         dream_cycle::run_in_process(project_root, now_sec, no_commit, no_llm, share_personal)
             .map_err(DreamCliError::DreamCycle)?;
@@ -135,10 +145,23 @@ pub fn run(
         out,
         "dream cycle complete ({decayed_count} events decayed, {kept_count} kept)",
     )?;
+    let report = result.autobiography.as_ref().map(AutobiographyReport::from);
+    write_notice(out, report.as_ref())?;
+    Ok(())
+}
+
+/// Print the autobiography notice, when the commit was held (BZR-1467 D9).
+fn write_notice(out: &mut impl Write, report: Option<&AutobiographyReport>) -> std::io::Result<()> {
+    if let Some(line) = report.and_then(AutobiographyReport::notice) {
+        writeln!(out, "{line}")?;
+    }
     Ok(())
 }
 
 /// Attempt to proxy the cycle to a running daemon over the UDS.
+///
+/// `sock` is the resolved daemon socket (`run` passes
+/// `client::resolve_daemon_socket()`); `None` means unresolved.
 ///
 /// `Ok(Some(()))` → the daemon ran it (caller returns success). `Ok(None)` →
 /// no daemon owns this project (socket unresolved, unreachable, or 404
@@ -147,14 +170,15 @@ pub fn run(
 /// in-process (that would race the coordinator).
 #[cfg(unix)]
 fn try_proxy_to_daemon(
+    sock: Option<std::path::PathBuf>,
     project_root: &Path,
     out: &mut impl Write,
     no_llm: bool,
     share_personal: bool,
 ) -> Result<Option<()>, DreamCliError> {
-    use dreamd_core::client::{proxy_dream_cycle, resolve_daemon_socket, DreamProxyOutcome};
+    use dreamd_core::client::{proxy_dream_cycle, DreamProxyOutcome};
 
-    let Some(sock) = resolve_daemon_socket() else {
+    let Some(sock) = sock else {
         return Ok(None);
     };
     let outcome = tokio::runtime::Runtime::new()?
@@ -166,8 +190,9 @@ fn try_proxy_to_daemon(
         ))
         .map_err(|e| DreamCliError::DaemonProxy(e.to_string()))?;
     match outcome {
-        DreamProxyOutcome::Ran => {
+        DreamProxyOutcome::Ran(report) => {
             writeln!(out, "dream cycle complete (via daemon)")?;
+            write_notice(out, report.as_ref())?;
             Ok(Some(()))
         }
         DreamProxyOutcome::InProgress => Err(DreamCliError::DaemonInProgress),
@@ -379,6 +404,96 @@ mod tests {
 
         assert_eq!(outcome, DryOutcome::WouldRetire);
         assert!(out.is_empty(), "stdout must be empty on a retire preview");
+    }
+
+    /// BZR-1467 test 30: only a held commit prints a notice.
+    #[test]
+    fn write_notice_prints_only_for_a_skip() {
+        for report in [
+            None,
+            Some(AutobiographyReport::Committed {
+                commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            }),
+            Some(AutobiographyReport::Unchanged),
+            Some(AutobiographyReport::NoRepo),
+        ] {
+            let mut out = Vec::new();
+            write_notice(&mut out, report.as_ref()).unwrap();
+            assert!(out.is_empty(), "{report:?} printed {out:?}");
+        }
+
+        let files = vec![".agent/semantic/LESSONS.md".to_string()];
+        let mut out = Vec::new();
+        write_notice(
+            &mut out,
+            Some(&AutobiographyReport::Skipped {
+                reason: "user_dirty_tree".to_string(),
+                files: files.clone(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "{}\n",
+                dreamd_core::autobiography::skip_message("user_dirty_tree", &files)
+            )
+        );
+    }
+
+    /// BZR-1467 test 29: the proxy path prints the daemon's notice. A fake
+    /// daemon on a Unix socket answers the request with a held commit.
+    #[cfg(unix)]
+    #[test]
+    fn proxy_prints_the_daemon_notice() {
+        use std::io::{Read, Write as _};
+        use std::os::unix::net::UnixListener;
+
+        const BODY: &str = r#"{"status":"ok","autobiography":{"outcome":"skipped","reason":"user_dirty_tree","files":[".agent/semantic/LESSONS.md"]}}"#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("dreamd.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "client closed before the request ended");
+                request.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{BODY}",
+                BODY.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let mut out = Vec::new();
+        let decided = try_proxy_to_daemon(
+            Some(sock),
+            Path::new("/some/project"),
+            &mut out,
+            false,
+            false,
+        )
+        .unwrap();
+        let request = server.join().unwrap();
+
+        assert_eq!(decided, Some(()));
+        assert!(request.starts_with("POST /api/v1/dream "), "got {request}");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "dream cycle complete (via daemon)\n{}\n",
+                dreamd_core::autobiography::skip_message(
+                    "user_dirty_tree",
+                    &[".agent/semantic/LESSONS.md".to_string()]
+                )
+            )
+        );
     }
 
     #[test]

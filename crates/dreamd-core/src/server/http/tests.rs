@@ -1599,6 +1599,90 @@ async fn dream_happy_path_returns_200() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["status"], serde_json::json!("ok"));
+    // BZR-1467 test 25: the phase ran, and a tempdir has no repo above it.
+    assert_eq!(
+        json["autobiography"]["outcome"],
+        serde_json::json!("no_repo")
+    );
+}
+
+/// BZR-1467 test 24: a hand edit the baseline does not explain holds the
+/// commit, and the 200 body says so and names the file.
+#[tokio::test]
+async fn dream_reports_a_held_autobiography_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap();
+    write_registry(&registry_path, root_str);
+
+    let agent_root = AgentRoot::new(dir.path());
+    let jsonl_path = agent_root.episodic_jsonl();
+    std::fs::create_dir_all(jsonl_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(agent_root.semantic_dir()).unwrap();
+    std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+    std::fs::write(
+            &jsonl_path,
+            b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"pain\":5.0,\"importance\":5.0,\"pinned\":false,\"skill_action\":\"rust.test\",\"source_harness\":\"test\",\"content\":\"test content\",\"recurrence\":0}\n",
+        )
+        .unwrap();
+    std::fs::write(agent_root.lessons_md(), b"lessons a cycle wrote\n").unwrap();
+
+    // The user committed both files, and the last cycle recorded them.
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    let mut index = repo.index().unwrap();
+    index
+        .add_path(std::path::Path::new(".agent/semantic/LESSONS.md"))
+        .unwrap();
+    index
+        .add_path(std::path::Path::new(
+            ".agent/episodic/AGENT_LEARNINGS.jsonl",
+        ))
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("user", "user@example.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        .unwrap();
+    let baseline = crate::autobiography::capture_baseline(&agent_root).unwrap();
+    crate::daemon_state::update_daemon_state(&agent_root, |s| {
+        s.autobiography_baseline = Some(baseline)
+    })
+    .unwrap();
+    std::fs::write(agent_root.lessons_md(), b"my hand edit\n").unwrap();
+
+    let state = make_real_state(dir.path(), registry_path);
+    let router = build_router(state);
+    let req = with_peer_uid(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/dream")
+            .header("x-agent-root", root_str)
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({
+            "status": "ok",
+            "autobiography": {
+                "outcome": "skipped",
+                "reason": "user_dirty_tree",
+                "files": [".agent/semantic/LESSONS.md"],
+            },
+        })
+    );
+    assert_eq!(
+        repo.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap(),
+        "initial"
+    );
 }
 
 /// 409 guard: state.json with "in_progress" → 409.

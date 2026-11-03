@@ -8,6 +8,7 @@ use axum::http::{header, HeaderValue};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+use crate::autobiography::AutobiographyReport;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
 use crate::decay::DecayResult;
 use crate::dream_cycle::{self, DreamCycleError};
@@ -29,7 +30,7 @@ use super::super::state::AppState;
 ///   other value, means the personal layer is excluded, which is the default.
 ///
 /// # Responses
-/// * `200` — `{"status":"ok"}` cycle completed
+/// * `200` — `{"status":"ok"}`, plus `"autobiography":{…}` when the phase ran (BZR-1467)
 /// * `409` — `{"error":"dream cycle in progress"}`: a cycle is open in the
 ///   project's coordinator, or `state.json` says `in_progress`
 /// * `403` — peer UID mismatch ([`peer_uid_middleware`](crate::server::http::peer_uid_middleware))
@@ -120,8 +121,8 @@ pub(crate) async fn post_dream(
         ))),
     };
 
-    match result {
-        Ok(_) => {}
+    let cycle = match result {
+        Ok(cycle) => cycle,
         Err(DreamCycleError::InProgress) => {
             return (
                 axum::http::StatusCode::CONFLICT,
@@ -144,13 +145,17 @@ pub(crate) async fn post_dream(
             )
                 .into_response();
         }
-    }
+    };
 
-    (
-        axum::http::StatusCode::OK,
-        axum::Json(serde_json::json!({"status": "ok"})),
-    )
-        .into_response()
+    // BZR-1467: the autobiography outcome, when the phase ran. A failed phase
+    // is an ERROR log and no key, as before.
+    let mut body = serde_json::json!({"status": "ok"});
+    if let Some(outcome) = &cycle.autobiography {
+        if let Ok(report) = serde_json::to_value(AutobiographyReport::from(outcome)) {
+            body["autobiography"] = report;
+        }
+    }
+    (axum::http::StatusCode::OK, axum::Json(body)).into_response()
 }
 
 /// Prepare in the actor, compose here, commit in the actor (BZR-1241). The

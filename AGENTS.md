@@ -404,7 +404,7 @@ Locked 2026-10-24:
     - build: `unsafe_code = "forbid"` now holds in every crate, with no override; dreamd-core's production `nix` dependency drops the `process` feature.
 
     Spec: `assignments/BZR-1244.v2.md`. Amendment 1 fixed two comments; Amendment 2 covers resuming after the mid-ticket commit.
-15. **BZR-1245** — deprecate `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto`. Cap autosnap retention.
+15. **BZR-1245** — on `main` (`ce2daec`). Deprecated `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto` (notices in `commands/deprecation.rs`), and capped autosnap retention at 20 `snap-*` refs (`retention.rs`; named branches, `HEAD` and refs an in-progress bisect names are kept). Spec: `assignments/BZR-1245.v2.md` (Amendments 1–3).
 16. **BZR-1238** — 1.1.0 release prep. Closed 2026-10-30 as superseded by BZR-1304: 1.1.0 and 1.2.0 shipped (v1.2.0 tag 2026-10-29) without this ticket being worked as written.
 
 **Milestone 1.2.1 patch** (filed 2026-10-30 from the 2026-10-29 black-box torture session of v1.2.0; report at `~/dreamd-hell/v12-torture-20261029/REPORT.md`, verified on `2ab0270`). Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The tester withdrew findings 14 and 9 after their own re-runs (client-side capture artifact; "registration" attempts were the finding-2 no-op).
@@ -443,6 +443,18 @@ Status on 2026-11-03 (`origin/main` `da34a3d`):
 - BZR-1304 is Done; its Linear comments are the release record.
 
 Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
+
+**Milestone 1.2.2 polish** (added to the paired loop 2026-11-03, user decision). The findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The paired loop ends when BZR-1473 lands.
+
+26. **BZR-1467** — a dream cycle never makes its git commit in normal use. The autobiography dirty check counts dreamd's own writes: after a fresh setup the untracked log trips `user_dirty_tree`, and later cycles trip it on the previous cycle's `LESSONS.md` and pin rewrite, or on any append. The skip reason appears only in the watch log. Repro and suggested direction are on Linear (2026-11-03). Blocked by BZR-1438 (Done).
+27. **BZR-1468** — `search_nodes` results carry no event id, but setup's `CLAUDE.md` tells the agent to quote one. Blocked by 1467.
+28. **BZR-1469** — setup output: the `dreamd watch` hint fails when no `dreamd` is on `PATH`, and the summary and undo text leave out `CLAUDE.md` and the registry entry. Blocked by 1468.
+29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469.
+30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
+31. **BZR-1472** — the dream commit message does not name the cited event, and the event is pinned without notice. No blocker; runs after 1471.
+32. **BZR-1473** — `forget --dry-run` prints `removed=true`, which reads as if the event was removed. No blocker; runs after 1472.
+
+**Not in the loop:** **BZR-1474** (one daemon socket per user or per project) is a decision ticket for the user.
 
 **Milestone 2.0 removal**
 

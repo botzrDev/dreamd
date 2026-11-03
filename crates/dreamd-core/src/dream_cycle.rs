@@ -28,7 +28,7 @@
 //! runs the commit itself so it can reopen its long-lived append fd after
 //! atomic renames (WEG-271).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Request header that forces the daemon's cycle into deterministic mode
 /// (AILAB-204). Sent as the literal `"1"` and only when `--no-llm` is set.
@@ -45,7 +45,7 @@ pub const SHARE_PERSONAL_HEADER: &str = "x-dreamd-share-personal";
 pub const SHARE_PERSONAL_HEADER_VALUE: &str = "1";
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::autobiography::{self, AutobiographyOutcome};
+use crate::autobiography::{self, AutobiographyOutcome, StartCheck};
 use crate::consolidation::{self, LessonBodySource, LessonPhaseError, SelectedLesson};
 use crate::decay::DecayResult;
 use crate::episodic;
@@ -117,7 +117,8 @@ pub struct PostPhaseOptions<'a> {
     pub project_root: &'a Path,
     pub cycle_date: &'a str,
     pub decay_result: &'a DecayResult,
-    pub dirty_at_cycle_start: &'a [PathBuf],
+    /// The autobiography start check, taken before the cycle ran (BZR-1467).
+    pub start: &'a StartCheck,
     pub commit_autobiography: bool,
     pub index: IndexBackend,
 }
@@ -593,7 +594,7 @@ pub async fn run_post_phases(
         return Ok(None);
     }
 
-    match autobiography::commit_cycle(opts.agent_root, opts.cycle_date, opts.dirty_at_cycle_start) {
+    match autobiography::commit_cycle(opts.agent_root, opts.cycle_date, opts.start) {
         Ok(outcome) => Ok(Some(outcome)),
         Err(e) => {
             tracing::error!(
@@ -611,8 +612,8 @@ pub struct GuardedCycleOptions<'a> {
     pub project_root: &'a Path,
     /// Caller-supplied clock; `cycle_date` is derived from it here.
     pub now_sec: i64,
-    /// `false` on `--no-commit`: skips the dirty-tree walk and the autobiography
-    /// commit.
+    /// `false` on `--no-commit`: skips the autobiography commit. The start check
+    /// and the baseline update still run (BZR-1467 D4).
     pub commit_autobiography: bool,
     pub index: IndexBackend,
 }
@@ -622,9 +623,12 @@ pub struct GuardedCycleOptions<'a> {
 ///
 ///   1. 409 guard ([`ensure_not_in_progress`]);
 ///   2. `cycle_date` from [`cycle_date_from_now_sec`];
-///   3. dirty-path capture, only when the autobiography will commit (WEG-63);
+///   3. the autobiography start check against `state.json`'s baseline, which
+///      runs on `--no-commit` too (WEG-63, BZR-1467);
 ///   4. `dispatch(now_sec, cycle_date)` — the filesystem phases;
-///   5. [`run_post_phases`] with the decay result.
+///   5. the baseline update ([`autobiography::record_baseline`]), only when
+///      the dispatch succeeded and the check ran;
+///   6. [`run_post_phases`] with the decay result.
 ///
 /// `dispatch` is the adapter. The daemon's callback is `dispatch_cycle` (the
 /// `POST /api/v1/dream` handler): it sends `PrepareCycle` to the coordinator
@@ -650,21 +654,36 @@ where
     ensure_not_in_progress(opts.agent_root)?;
     let cycle_date = cycle_date_from_now_sec(opts.now_sec);
 
-    // WEG-63 — capture dirty state before the cycle runs.
-    let dirty_at_cycle_start = if opts.commit_autobiography {
-        autobiography::check_dirty_at_cycle_start(opts.project_root).unwrap_or_default()
-    } else {
-        Vec::new()
+    // WEG-63 / BZR-1467 — what the tracked files hold before the cycle runs.
+    let baseline = crate::daemon_state::read_daemon_state(opts.agent_root)
+        .ok()
+        .and_then(|s| s.autobiography_baseline);
+    let start = match autobiography::check_dirty_at_cycle_start(
+        opts.project_root,
+        baseline.as_ref(),
+    ) {
+        Ok(start) => Some(start),
+        Err(e) => {
+            tracing::warn!(error = %e, "autobiography start check failed; this cycle records no baseline");
+            None
+        }
     };
 
     let decay = dispatch(opts.now_sec, cycle_date.clone()).await?;
+
+    if let Some(start) = &start {
+        if let Err(e) = autobiography::record_baseline(opts.agent_root, baseline.as_ref(), start) {
+            tracing::warn!(error = %e, "could not record the autobiography baseline");
+        }
+    }
+    let start = start.unwrap_or_default();
 
     let autobiography = run_post_phases(PostPhaseOptions {
         agent_root: opts.agent_root,
         project_root: opts.project_root,
         cycle_date: &cycle_date,
         decay_result: &decay,
-        dirty_at_cycle_start: &dirty_at_cycle_start,
+        start: &start,
         commit_autobiography: opts.commit_autobiography,
         index: opts.index,
     })
@@ -937,6 +956,7 @@ async fn prune_decayed_events(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
     const NOW_SEC: i64 = 1_747_137_600;
@@ -1254,6 +1274,247 @@ mod tests {
             ))
             .unwrap_err();
         assert!(matches!(err, DreamCycleError::InProgress));
+    }
+
+    // ── BZR-1467: the sequencer's start check and baseline ──────────────────
+
+    const LESSONS: &str = ".agent/semantic/LESSONS.md";
+    const LOG: &str = ".agent/episodic/AGENT_LEARNINGS.jsonl";
+    const LOG_LINES: &[u8] = b"{\"id\":\"a\",\"pinned\":false}\n{\"id\":\"b\",\"pinned\":false}\n";
+    /// `LOG_LINES` after a pin pass flips `a`.
+    const LOG_PINNED: &[u8] = b"{\"id\":\"a\",\"pinned\":true}\n{\"id\":\"b\",\"pinned\":false}\n";
+
+    /// A git repo whose root is a store holding `LESSONS.md` and two log lines,
+    /// none of them committed yet.
+    fn git_store() -> (tempfile::TempDir, AgentRoot, git2::Repository) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let root = AgentRoot::new(dir.path());
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(root.lessons_md(), b"lessons\n").unwrap();
+        fs::write(root.episodic_jsonl(), LOG_LINES).unwrap();
+        (dir, root, repo)
+    }
+
+    /// Commit `paths` as the user through the repo index. A temp HOME has no
+    /// git identity, so the signature is explicit.
+    fn user_commit(repo: &git2::Repository, paths: &[&str], msg: &str) -> git2::Oid {
+        let mut index = repo.index().unwrap();
+        for p in paths {
+            index.add_path(Path::new(p)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let parent = repo.head().ok().map(|h| h.peel_to_commit().unwrap());
+        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+        let sig = git2::Signature::now("user", "user@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parents)
+            .unwrap()
+    }
+
+    fn head_message(repo: &git2::Repository) -> String {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        head.message().unwrap().to_string()
+    }
+
+    fn append_log(root: &AgentRoot, bytes: &[u8]) {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.episodic_jsonl())
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    fn recorded_baseline(root: &AgentRoot) -> Option<autobiography::AutobiographyBaseline> {
+        crate::daemon_state::read_daemon_state(root)
+            .unwrap()
+            .autobiography_baseline
+    }
+
+    /// One guarded cycle whose dispatch runs `write`, as the filesystem phases
+    /// would, and succeeds.
+    async fn guarded_with(
+        root: &AgentRoot,
+        commit_autobiography: bool,
+        write: impl FnOnce(),
+    ) -> DreamCycleResult {
+        run_guarded_cycle(
+            GuardedCycleOptions {
+                agent_root: root,
+                project_root: root.project_root(),
+                now_sec: NOW_SEC,
+                commit_autobiography,
+                index: IndexBackend::Skip,
+            },
+            |_, _| {
+                write();
+                async { Ok(DecayResult::default()) }
+            },
+        )
+        .await
+        .expect("guarded cycle")
+    }
+
+    /// The reason and files of a skipped cycle; panics on any other outcome.
+    fn skipped(result: &DreamCycleResult) -> (&'static str, Vec<String>) {
+        match &result.autobiography {
+            Some(AutobiographyOutcome::Skipped(reason)) => {
+                (reason.as_str(), reason.files().to_vec())
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// Test 19: `--no-commit` skips only the commit; the baseline is recorded (D4).
+    #[tokio::test]
+    async fn guarded_cycle_no_commit_still_records_the_baseline() {
+        let (_dir, root, repo) = git_store();
+        user_commit(&repo, &[LESSONS, LOG], "initial");
+
+        let result = guarded_with(&root, false, || {
+            fs::write(root.lessons_md(), b"cycle lessons\n").unwrap();
+            fs::write(root.episodic_jsonl(), LOG_PINNED).unwrap();
+        })
+        .await;
+
+        assert!(result.autobiography.is_none());
+        assert_eq!(
+            recorded_baseline(&root),
+            Some(autobiography::capture_baseline(&root).unwrap())
+        );
+        assert_eq!(head_message(&repo), "initial");
+    }
+
+    /// Test 20: a dispatch error returns before the baseline write.
+    #[tokio::test]
+    async fn guarded_cycle_dispatch_error_records_no_baseline() {
+        let (_dir, root, repo) = git_store();
+        user_commit(&repo, &[LESSONS, LOG], "initial");
+
+        let err = run_guarded_cycle(
+            GuardedCycleOptions {
+                agent_root: &root,
+                project_root: root.project_root(),
+                now_sec: NOW_SEC,
+                commit_autobiography: true,
+                index: IndexBackend::Skip,
+            },
+            |_, _| async { Err(DreamCycleError::Coordinator("dispatch failed".to_string())) },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DreamCycleError::Coordinator(_)),
+            "got {err:?}"
+        );
+        assert_eq!(recorded_baseline(&root), None);
+    }
+
+    /// Test 21: a hand edit holds the commit on every cycle until the user
+    /// commits it, and only the edited file is named (D2, §11 H1).
+    #[tokio::test]
+    async fn guarded_cycle_holds_a_hand_edit_until_the_user_commits() {
+        let (_dir, root, repo) = git_store();
+        user_commit(&repo, &[LESSONS, LOG], "initial");
+        autobiography::record_baseline(&root, None, &StartCheck::default()).unwrap();
+        fs::write(root.lessons_md(), b"my hand edit\n").unwrap();
+
+        // Cycle 1 rewrites LESSONS.md and flips a pin.
+        let first = guarded_with(&root, true, || {
+            fs::write(root.lessons_md(), b"cycle 1 lessons\n").unwrap();
+            fs::write(root.episodic_jsonl(), LOG_PINNED).unwrap();
+        })
+        .await;
+        assert_eq!(
+            skipped(&first),
+            ("user_dirty_tree", vec![LESSONS.to_string()])
+        );
+
+        // Cycle 2 appends. The log was dreamd's at start, LESSONS.md still is not.
+        let second = guarded_with(&root, true, || {
+            append_log(&root, b"{\"id\":\"c\",\"pinned\":false}\n");
+        })
+        .await;
+        assert_eq!(
+            skipped(&second),
+            ("user_dirty_tree", vec![LESSONS.to_string()])
+        );
+        assert_eq!(head_message(&repo), "initial");
+
+        // The user commits the file they were told about; the next cycle commits.
+        user_commit(&repo, &[LESSONS], "my lessons");
+        let third = guarded_with(&root, true, || {}).await;
+        assert!(
+            matches!(
+                third.autobiography,
+                Some(AutobiographyOutcome::Committed(_))
+            ),
+            "got {:?}",
+            third.autobiography
+        );
+        assert_eq!(head_message(&repo), "dreamd: cycle 2025-05-13");
+        assert_eq!(
+            recorded_baseline(&root).unwrap().lessons_sha256,
+            autobiography::capture_baseline(&root)
+                .unwrap()
+                .lessons_sha256
+        );
+    }
+
+    /// Test 22: with no baseline, a file that differs from HEAD in a way an
+    /// append does not explain skips once, then the next cycle commits (D3).
+    #[tokio::test]
+    async fn guarded_cycle_bootstrap_skips_once_then_commits() {
+        let (_dir, root, repo) = git_store();
+        user_commit(&repo, &[LESSONS, LOG], "initial");
+        fs::write(root.episodic_jsonl(), LOG_PINNED).unwrap();
+
+        let first = guarded_with(&root, true, || {}).await;
+        assert_eq!(skipped(&first), ("no_baseline", vec![LOG.to_string()]));
+        assert!(recorded_baseline(&root).is_some());
+
+        let second = guarded_with(&root, true, || {}).await;
+        assert!(
+            matches!(
+                second.autobiography,
+                Some(AutobiographyOutcome::Committed(_))
+            ),
+            "got {:?}",
+            second.autobiography
+        );
+    }
+
+    /// Test 23: a start check that fails records no baseline. A corrupt HEAD
+    /// ref fails the check while `capture_baseline` still succeeds, so only the
+    /// sequencer's gate stops the write.
+    #[tokio::test]
+    async fn guarded_cycle_failed_check_records_no_baseline() {
+        let (_dir, root, repo) = git_store();
+        user_commit(&repo, &[LESSONS, LOG], "initial");
+        let head = fs::read_to_string(repo.path().join("HEAD")).unwrap();
+        let branch = head.strip_prefix("ref: ").unwrap().trim().to_string();
+        fs::write(repo.path().join(&branch), b"not-a-sha\n").unwrap();
+        drop(repo);
+
+        let check = autobiography::check_dirty_at_cycle_start(root.project_root(), None);
+        assert!(
+            check
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("corrupted loose reference file")),
+            "the check must fail on the corrupt ref; got {check:?}"
+        );
+        assert!(autobiography::capture_baseline(&root).is_ok());
+
+        let result = guarded_with(&root, true, || {}).await;
+        assert!(
+            result.autobiography.is_none(),
+            "the commit fails too and is logged, not returned"
+        );
+        assert_eq!(recorded_baseline(&root), None);
     }
 
     #[tokio::test]

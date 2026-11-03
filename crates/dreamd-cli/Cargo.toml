@@ -73,3 +73,7 @@ vergen = "=9.0.6"
 [dev-dependencies]
 tempfile = "3"
 insta = { workspace = true }
+# BZR-1467 — `tests/dream_autobiography.rs` builds and reads the test repo
+# with git2 instead of the `git` binary. The version dreamd-core resolves, so
+# no new crate enters the graph.
+git2 = "0.21"

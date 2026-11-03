@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use http_body_util::Full;
 
+use crate::autobiography::AutobiographyReport;
+
 pub use crate::dream_cycle::{
     NO_LLM_HEADER, NO_LLM_HEADER_VALUE, SHARE_PERSONAL_HEADER, SHARE_PERSONAL_HEADER_VALUE,
 };
@@ -17,8 +19,9 @@ pub use crate::dream_cycle::{
 /// to the in-process cycle (both are race-free — no coordinator owns this JSONL).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DreamProxyOutcome {
-    /// Daemon ran the cycle (HTTP 200).
-    Ran,
+    /// Daemon ran the cycle (HTTP 200). Carries the body's `autobiography`
+    /// report; `None` from a daemon before 1.2.2 or any body without a valid object.
+    Ran(Option<AutobiographyReport>),
     /// No live daemon: socket absent or connection refused. → run in-process.
     NotReachable,
     /// HTTP 404 — daemon up but this project isn't registered with it. → run in-process.
@@ -65,7 +68,7 @@ pub(crate) fn map_dream_status(
     body: &Bytes,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
     match status {
-        200 => Ok(DreamProxyOutcome::Ran),
+        200 => Ok(DreamProxyOutcome::Ran(parse_autobiography(body))),
         404 => Ok(DreamProxyOutcome::ProjectNotRegistered),
         409 => Ok(DreamProxyOutcome::InProgress),
         other => Err(DreamProxyError::DaemonError {
@@ -73,6 +76,15 @@ pub(crate) fn map_dream_status(
             body: String::from_utf8_lossy(body).into_owned(),
         }),
     }
+}
+
+/// The 200 body's `autobiography` report (BZR-1467). The `is_object` filter is
+/// load-bearing: serde's internally tagged visitor also accepts a sequence whose
+/// first element is the tag, so `["unchanged"]` would otherwise parse.
+fn parse_autobiography(body: &Bytes) -> Option<AutobiographyReport> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let report = v.get("autobiography").filter(|a| a.is_object())?;
+    serde_json::from_value(report.clone()).ok()
 }
 
 /// Connect to `sock_path` and `POST /api/v1/dream` with `x-agent-root =
@@ -135,7 +147,7 @@ mod tests {
         let empty = Bytes::new();
         assert_eq!(
             map_dream_status(200, &empty).unwrap(),
-            DreamProxyOutcome::Ran
+            DreamProxyOutcome::Ran(None)
         );
         assert_eq!(
             map_dream_status(404, &empty).unwrap(),
@@ -152,6 +164,34 @@ mod tests {
                 assert_eq!(body, "boom");
             }
             other => panic!("expected DaemonError(500), got {other:?}"),
+        }
+    }
+
+    /// BZR-1467 test 26: a 200 body's report, and every body that carries none.
+    #[test]
+    fn map_dream_status_reads_the_autobiography_report() {
+        let skipped = Bytes::from_static(
+            br#"{"status":"ok","autobiography":{"outcome":"skipped","reason":"user_dirty_tree","files":[".agent/semantic/LESSONS.md"]}}"#,
+        );
+        assert_eq!(
+            map_dream_status(200, &skipped).unwrap(),
+            DreamProxyOutcome::Ran(Some(AutobiographyReport::Skipped {
+                reason: "user_dirty_tree".to_string(),
+                files: vec![".agent/semantic/LESSONS.md".to_string()],
+            }))
+        );
+        for body in [
+            &br#"{"status":"ok"}"#[..],
+            b"not json",
+            br#"{"autobiography":["unchanged"]}"#,
+            br#"{"autobiography":{"outcome":"exploded"}}"#,
+        ] {
+            assert_eq!(
+                map_dream_status(200, &Bytes::copy_from_slice(body)).unwrap(),
+                DreamProxyOutcome::Ran(None),
+                "body {:?}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
@@ -233,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_round_trips_over_uds() {
         let (outcome, req) = round_trip(false, false).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
         assert_eq!(req.method, "POST");
         assert_eq!(req.uri, "/api/v1/dream");
         assert_eq!(req.agent_root.as_deref(), Some("/some/project/root"));
@@ -254,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_sends_no_llm_header_when_set() {
         let (outcome, req) = round_trip(true, false).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
         assert_eq!(req.uri, "/api/v1/dream", "--no-llm must not skip the proxy");
         assert_eq!(
             req.no_llm.as_deref(),
@@ -273,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_sends_share_personal_header_when_set() {
         let (outcome, req) = round_trip(false, true).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran);
+        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
         assert_eq!(
             req.uri, "/api/v1/dream",
             "--share-personal must not skip the proxy"

@@ -43,12 +43,24 @@ pub struct AutobiographySkip {
     pub files: Vec<String>,
 }
 
+/// What the last dream cycle left in the two tracked files (BZR-1467). The
+/// autobiography start check reads it to tell dreamd's writes from the user's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutobiographyBaseline {
+    /// SHA-256 (lowercase hex) of `LESSONS.md`; `None` when the cycle left no file.
+    pub lessons_sha256: Option<String>,
+    /// Length in bytes of the episodic log the cycle left.
+    pub log_len: u64,
+    /// SHA-256 (lowercase hex) of those `log_len` bytes.
+    pub log_sha256: String,
+}
+
 /// Typed `.agent/.dreamd/state.json`.
 ///
 /// **Field declaration order is load-bearing**: `#[derive(Serialize)]` emits
 /// declaration order, and `dream_cycle_snapshot__state_json.snap` pins
 /// BTreeMap-alphabetical key order (serde_json has no `preserve_order`
-/// feature here). Keep these five alphabetical or the snapshot breaks.
+/// feature here). Keep these six alphabetical or the snapshot breaks.
 ///
 /// The container-level `#[serde(default)]` is what lets a *partial* on-disk
 /// `state.json` — e.g. `{"schema_version":"1.0","daemon_version":"0.0.0"}` —
@@ -57,6 +69,10 @@ pub struct AutobiographySkip {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonState {
+    /// What the last cycle left in the tracked files (BZR-1467). Absent until
+    /// the first cycle under 1.2.2 records one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autobiography_baseline: Option<AutobiographyBaseline>,
     pub daemon_version: String,
     /// Absent-means-no-skip: serialized only when `Some`, so clearing the
     /// marker omits the key rather than writing JSON `null`, which is the
@@ -71,6 +87,7 @@ pub struct DaemonState {
 impl Default for DaemonState {
     fn default() -> Self {
         Self {
+            autobiography_baseline: None,
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             last_autobiography_skip: None,
             last_dream_cycle_at: None,
