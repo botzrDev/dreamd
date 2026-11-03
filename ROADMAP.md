@@ -63,7 +63,7 @@ BM25 × salience.
   and a rank-fusion helper nothing calls yet. `POST /api/v1/migrate` exists as a
   501 stub.
 
-## In the working tree (1.2.0, not tagged)
+## Shipped — v1.2.0
 
 - **Windows dream cycle and Tantivy index.** Replaces follow the Unix call
   order. The parent flush is not a power-loss proof. Learn still runs when
@@ -71,8 +71,14 @@ BM25 × salience.
   not change during the call. `dreamd watch` indexes live appends. A segment
   file that is still mapped stays in the index directory until the mapping is
   gone; `dreamd doctor --repair` rebuilds that directory after the daemon
-  stops. See [`docs/windows.md`](docs/windows.md). Tag and publish stay human
-  steps.
+  stops. See [`docs/windows.md`](docs/windows.md).
+
+## Shipped — v1.2.1
+
+- **A static Linux binary.** `npx dreamd-mcp` runs on any x86_64 Linux,
+  Alpine included, with no glibc requirement.
+- **Fixes from the 1.2.0 torture session**, listed in
+  [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Next
 

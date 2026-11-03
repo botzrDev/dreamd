@@ -48,6 +48,10 @@ Also:
   section" leaves the GitHub Release without the content. Add the `[X.Y.Z]` link
   reference at the bottom of the file and repoint `[Unreleased]` at `vX.Y.Z...HEAD`.
 
+- Move the version in three places no test checks: the root `Dockerfile`'s
+  `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version badge at the
+  top of `README.md`, and the version line in `GUIDE.md`'s first section.
+
 Do NOT leave real-but-stale shas in `manifest.json` (that is the exact bug this
 procedure prevents) — use `PENDING_*`, which the manifest test rejects, so a
 half-finished release cannot pass CI.
@@ -70,6 +74,12 @@ Commit on a `release/vX.Y.Z` branch (keep it OFF `main` until the step-4 PR merg
 git checkout -b release/vX.Y.Z
 git commit -am "chore: release vX.Y.Z (manifest shas pending build)"
 ```
+
+CI runs on pushes to `main` and on pull requests, not on a pushed `release/*` branch,
+so the local run above is the only test of the bump commit unless you open a PR for it.
+Before cutting the branch, check `Cargo.toml` on `origin/main`: a fix branch can be
+merged into `main` ahead of its bump commit (1.2.1's fixes landed with the version
+still at 1.2.0), and the bump has to be made on top of what `main` holds.
 
 ## 2. Tag → trigger the build
 
@@ -112,9 +122,20 @@ binaries, attached it to the draft release, and opened a PR
 `chore/mcp-manifest-vX.Y.Z` with that fill. Review the PR: the shas in the diff must
 match the `manifest.json` attached to the draft release (they are the same build —
 **take them from the release, do not regenerate separately**; local rebuilds are not
-byte-reproducible and would mismatch). Merge it. The PR branch is cut from the tag,
-so when the step-1 commit lives only on `release/vX.Y.Z` the PR carries that bump commit
-to `main` along with the fill.
+byte-reproducible and would mismatch). Merge it with a merge commit. The PR branch is
+cut from the tag, so when the step-1 commit lives only on `release/vX.Y.Z` the PR carries
+that bump commit to `main` along with the fill.
+
+The `main` ruleset requires one review and signed commits and allows merge or rebase
+only, with an admin bypass. Use `--merge`, never `--rebase`: a rebase rewrites the
+bump commit's sha, and the tag then points at a commit that is not an ancestor of
+`main` (that is why `v1.0.1` is not). An agent session cannot run the `--admin` merge;
+run it yourself:
+
+```sh
+gh pr merge --repo botzrDev/dreamd chore/mcp-manifest-vX.Y.Z --merge --admin
+git merge-base --is-ancestor vX.Y.Z origin/main && echo "tag is on main"   # after git fetch
+```
 
 **If the run ends red at "Open PR with regenerated manifest":** the draft release and
 the pushed branch `chore/mcp-manifest-vX.Y.Z` both exist, and only `gh pr create`
@@ -160,8 +181,13 @@ npm auth expires between releases; **log in FIRST**. The `dataprime1` account us
 not authorized" — npm deliberately hides package existence from unauthenticated
 callers; it is NOT a missing package.
 
+Run every command in this step in your own terminal. Under WSL, npm ignores
+`BROWSER=`; `--no-browser` makes it print the auth URL and poll until you finish in a
+browser. A non-TTY runner (an agent session, or Claude Code's `!` prefix) gets the auth
+URL redacted and npm aborts.
+
 ```sh
-npm login --auth-type=web              # browser flow; authenticate as dataprime1 with the passkey
+npm login --auth-type=web --no-browser # open the printed URL; authenticate as dataprime1 with the passkey
 npm whoami                              # must print: dataprime1
 
 git checkout main && git pull --ff-only   # must contain the step-4 fill commit
@@ -172,6 +198,10 @@ npm publish                            # passkey-prompts; moves the `latest` dis
 npm dist-tag add dreamd-mcp@X.Y.Z next # keep `next` off any older/broken release
 npm view dreamd-mcp dist-tags          # confirm latest = X.Y.Z (and next)
 ```
+
+A new version can take about 5 minutes to reach the registry's read side. Until
+`npm view dreamd-mcp@X.Y.Z version` prints it, `npm dist-tag add` fails; wait and run
+it again.
 
 If replacing a broken prior release, deprecate it (also needs the login above):
 
@@ -204,7 +234,8 @@ Once the npm version is public, refresh the official MCP Registry entry
 (`io.github.botzrDev/dreamd`) so it points at the new version: from
 `packages/dreamd-mcp`, `mcp-publisher login github` (a GitHub identity
 authorized for `botzrDev` — org membership must be public), then
-`mcp-publisher publish server.json`. Full procedure, validation
+`mcp-publisher publish server.json`. The login token expires within hours, so log in
+again right before you publish, even if you logged in earlier the same day. Full procedure, validation
 (`just mcp-registry-validate`), and the confirming `curl` live in
 `packages/dreamd-mcp/README.md` §Official MCP Registry. Deliberately not
 automated in CI — no workflow holds registry credentials.

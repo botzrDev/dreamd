@@ -12,7 +12,7 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
-This guide describes dreamd 1.2.0. That is the published npm package (`latest` and `next`). If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. A few commands are not forwarded by the 1.2.0 npm shim and need the `dreamd` binary: `status`, `recall`, `score`, `archive`, `migrate`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
+This guide describes dreamd 1.2.1. That is the published npm package (`latest` and `next`). If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. The 1.2.0 npm shim did not forward `status`, `recall`, `score`, `archive` and `migrate`; from 1.2.1 every command here runs as `npx -y dreamd-mcp <cmd>`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
 
 ```bash
 # npm (no Rust required)
@@ -41,7 +41,7 @@ ls -la .agent/
 npx -y dreamd-mcp doctor
 ```
 
-`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Last cycle status is `dreamd status` (requires a cargo-installed `dreamd` binary; the npm shim does not forward `status`); it exits 1 while no daemon is running.
+`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Last cycle status is `npx -y dreamd-mcp status` (1.2.1 and later; the 1.2.0 shim did not forward `status`); it exits 1 while no daemon is running.
 
 ---
 
@@ -236,7 +236,7 @@ ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 
 ## 8. Inspect and undo
 
-These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the npm shim (1.0.0 and later); in 1.2.0, `recall` and `score` still need the cargo-installed `dreamd`.
+These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the npm shim (1.0.0 and later); `recall` and `score` are forwarded from 1.2.1.
 
 See why a query ranked the way it did:
 

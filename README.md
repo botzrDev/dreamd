@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.2.1-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -118,7 +118,7 @@ npx -y dreamd-mcp dream --dry   # preview the lesson the next cycle would write
 npx -y dreamd-mcp doctor
 ```
 
-The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` for the `dreamd` binary. The shim forwards a subset of commands (`npx -y dreamd-mcp --help` lists them); `recall`, `score`, `status`, `archive` and `migrate` need the `dreamd` binary.
+The npm shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>` on the npm path, or `cargo install --path crates/dreamd-cli` for the `dreamd` binary. From 1.2.1 the shim forwards every `dreamd` command; the 1.2.0 shim did not forward `recall`, `score`, `status`, `archive` and `migrate`.
 
 Adapters: [Claude Code](./adapters/claude-code/README.md) · [Cursor](./adapters/cursor/README.md) · [Cline](./adapters/cline/README.md)
 
@@ -218,7 +218,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.2.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.2.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
