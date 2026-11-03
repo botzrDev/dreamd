@@ -5,11 +5,12 @@
 # and answers initialize and tools/list over stdio. Bump the version with each
 # npm release.
 #
-# The base must be Debian 13 (trixie) or newer: the prebuilt linux-x86_64
-# binary needs glibc 2.39, and the default node:22-slim (bookworm) has 2.36.
+# From 1.2.1 the prebuilt linux-x86_64 binary is static, so any Node base
+# works, Alpine included. 1.2.0 needed glibc 2.39, which is why this base is
+# Debian 13 (trixie).
 FROM node:22-trixie-slim
 
-ARG DREAMD_MCP_VERSION=1.2.0
+ARG DREAMD_MCP_VERSION=1.2.1
 
 RUN npm install -g "dreamd-mcp@${DREAMD_MCP_VERSION}" \
     && dreamd-mcp version
