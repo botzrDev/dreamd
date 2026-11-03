@@ -29,16 +29,15 @@ jobs:
           # npx shim's platform target (see packages/dreamd-mcp/bin/dreamd-mcp.js
           # getPlatformTarget); the shim downloads `<asset_name>.tar.gz` and
           # extracts the `dreamd` binary.
-          # Linux (GNU)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: dreamd
-            asset_name: linux-x86_64
-          # Linux (musl — fully static; not consumed by the shim, kept as an extra)
+          # Linux: the shim downloads `linux-x86_64`, which is the static musl
+          # build. The same binary is also attached as `linux-x86_64-musl`.
+          # There is no glibc Linux asset: a glibc build on ubuntu-latest needs
+          # the runner's glibc (2.39 on 24.04), so it failed on Ubuntu 22.04,
+          # Debian 12 and RHEL 9 (BZR-1438).
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact_name: dreamd
-            asset_name: linux-x86_64-musl
+            asset_name: linux-x86_64
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -100,6 +99,16 @@ jobs:
             exit 1
           fi
 
+      - name: Set up Node (Linux compatibility shim check)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Linux compatibility (BZR-1438)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: scripts/linux-compat.sh target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
       - name: Package tarball
         shell: bash
         run: |
@@ -114,6 +123,18 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}.tar.gz
           path: ${{ matrix.asset_name }}.tar.gz
+          if-no-files-found: error
+
+      - name: Copy the Linux tarball to its musl alias
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cp linux-x86_64.tar.gz linux-x86_64-musl.tar.gz
+
+      - name: Upload the musl alias artifact
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-musl.tar.gz
+          path: linux-x86_64-musl.tar.gz
           if-no-files-found: error
 
   # ── Publish to GitHub Releases ────────────────────────────────────────────────

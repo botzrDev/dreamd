@@ -418,6 +418,25 @@ Locked 2026-10-24:
 24. **BZR-1303** — CLI markdown tables escape C0 control characters; `recall` currently leaks a stored NUL to stdout.
 25. **BZR-1304** — 1.2.1 release prep (hitl). Tag and publish stay human.
 
+Status on 2026-11-03 (`origin/main` `da34a3d`):
+- On `main`:
+  - 1297 (`442228c`, `4b3a9a0`);
+  - 1298 (`a06ff76`);
+  - 1299 (`fb30024`, `4adbbaa`);
+  - 1300 (`14800d0`, `a52b16d`);
+  - 1301 (`edf9f85`, `3bd371a`);
+  - 1302 (`0e0df5a`);
+  - 1303 (`d6e4a9b`);
+  - **BZR-1417**, the Windows replace probe (`7f2bc0f`);
+  - **BZR-1437**, `search_nodes` commits pending appends first (`da34a3d`).
+- 1298 and 1299 landed with no CHANGELOG bullet; BZR-1304 adds them.
+- Added to the milestone after filing:
+  - **BZR-1438**: the Linux release binary needed glibc 2.39. Austin picked option C on 2026-11-03: the static musl build ships as `linux-x86_64`. Spec `assignments/BZR-1438.v2.md`.
+    - Its rebuild STOP check tripped: `doctor --repair` over 20,000 events took a median 714 ms on musl and 354 ms on glibc (2.02×, against a 1.5× limit). `recall_subtree` 10k stayed between 0.92× and 1.08× of glibc.
+    - Austin chose the same day to ship musl with its built-in malloc and no added allocator (§12 D3 stays "none"). A mimalloc probe matched glibc's rebuild time but raised idle VmRSS from 15 MB to 25–27 MB, against the 30 MB limit.
+  - **BZR-1401**: re-run the torture matrix on the 1.2.1 tree before release prep. 48 of 48 checks passed on 2026-11-03, on the BZR-1438 tree's static musl binary (crates identical to `da34a3d`).
+- Scope, decided 2026-11-03: 1.2.1 is `main` plus BZR-1438. BZR-1467, 1468, 1469 and 1470 moved to milestone **1.2.2 polish**. The remaining order is 1438 → 1401 → 1304.
+
 Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
 
 **Milestone 2.0 removal**

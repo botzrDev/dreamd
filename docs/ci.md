@@ -24,8 +24,9 @@ Every Rust job in all four workflows installs the same pinned toolchain, `dtolna
 | [License & dependency policy](#license--dependency-policy) | **Yes** | `cargo deny check` (licenses + advisories) |
 | [Test](#test) | **Yes** (Linux + macOS) | `cargo test --all-features --workspace` on three OSes |
 | [Windows replace probe](#test) | **Yes** | `io::tests` on Windows: the production parent-directory flush returns `Ok`, and a failure before the rename leaves the destination untouched |
-| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be ≤ 20 MB (20,971,520 bytes) |
+| [Binary size gate](#binary-size-gate) | **Yes** | Stripped release binary must be ≤ 24 MB (25,165,824 bytes) |
 | [Idle-RSS gate](#idle-rss-gate) | **Yes** | Daemon idle memory < 30 MB (Linux) |
+| [Linux compatibility](#linux-compatibility) | **Yes** | The static musl release binary: no dynamic dependencies, the end-to-end smoke in Ubuntu 20.04 / 22.04, Debian 12 and Alpine containers, and the npx shim in Ubuntu 22.04 and Debian 12 |
 | [Tarball build sentinel](#tarball-build-sentinel) | **Yes** | `cargo build` without `.git/` must not leak vergen sentinels |
 | [DCO sign-off](#dco-sign-off) | **Yes** (PRs only) | Every commit must have `Signed-off-by` trailer |
 | [MCP shim](#mcp-shim) | **Yes** | `node --test` in `packages/dreamd-mcp` |
@@ -119,12 +120,12 @@ cargo test --all-features --workspace
 
 **Runs on:** `ubuntu-latest`  
 **Blocks merge:** Yes  
-**Limit:** Stripped `target/release/dreamd` ≤ **20 MB** (20,971,520 bytes, NFR-2)
+**Limit:** Stripped `target/release/dreamd` ≤ **24 MB** (25,165,824 bytes, NFR-2)
 
 ```bash
 cargo build --release --workspace
 strip target/release/dreamd
-stat -c%s target/release/dreamd   # fails when > 20971520
+stat -c%s target/release/dreamd   # fails when > 25165824
 ```
 
 This is the default-features build. CI emits a soft warning above **16 MB** (16,777,216 bytes); the current binary is over that line, so the warning fires on every run and is not a failure. Check the job summary for the measured size.
@@ -154,6 +155,33 @@ The script spawns `dreamd watch` in a throwaway workspace, waits for the socket,
 Same build and measure commands as the Linux gate above. `scripts/idle-rss.sh` branches on `uname -s`: on Darwin it reuses the spawn / socket-readiness / 2 s settle path, samples `ps -o rss=`, prints MB, and exits 0 without comparing to `LIMIT_MB` (the env var is ignored on macOS). A build or daemon-spawn failure still fails the job; the RSS number never does. Read the value from the job's step summary and record it in `PERF.md` by hand.
 
 `ps -o rss=` is not `phys_footprint` (Activity Monitor "Memory" uses a different accounting that excludes clean file-backed pages such as shared dylib text). The macOS number is recorded on its own and is not compared to the Linux 30 MB gate; a macOS threshold will be calibrated from the observed value + 20% headroom on a later ticket (AILAB-176).
+
+---
+
+## Linux compatibility
+
+**Runs on:** `ubuntu-latest`  
+**Blocks merge:** Yes  
+**Job:** `linux-compat`
+
+The `linux-x86_64` release asset, which the `dreamd-mcp` shim downloads, is the static `x86_64-unknown-linux-musl` build (BZR-1438). A glibc build on `ubuntu-latest` needs the runner's glibc (2.39 on Ubuntu 24.04), so it did not start on Ubuntu 22.04, Debian 12, Amazon Linux 2023 or RHEL 9. This job builds the release binary exactly as `release.yml` does, checks its size against the 24 MB limit, and runs `scripts/linux-compat.sh` on it. The release workflow runs the same script on the musl build before it packages the tarball.
+
+`scripts/linux-compat.sh <path-to-dreamd>` checks, in order, and stops at the first failure:
+
+1. **Static.** `readelf` finds no program interpreter and no `NEEDED` entries.
+2. **Smoke.** In each of `IMAGES` (default `ubuntu:20.04 ubuntu:22.04 debian:12 alpine:3.20`), with `--network none`, `scripts/linux-compat-smoke.sh` runs `--version`, `init`, `watch` (socket within 10 s, idle VmRSS ≤ `RSS_LIMIT_KIB`, default 30720, SIGTERM exit 0), an in-process `dreamd mcp` `append_node`, a `search_nodes` in a second session that finds it, and checks that the episodic log has one line.
+3. **Shim.** In each of `SHIM_IMAGES` (default `ubuntu:22.04 debian:12`), with `--network none`, the shim from `packages/dreamd-mcp` runs `version` against a copy of its manifest that carries the binary's sha256 and a seeded cache, using the host's `node`.
+
+Run it locally with docker and a musl build:
+
+```bash
+rustup target add x86_64-unknown-linux-musl   # and: sudo apt-get install musl-tools
+cargo build --release --target x86_64-unknown-linux-musl
+strip target/x86_64-unknown-linux-musl/release/dreamd
+scripts/linux-compat.sh target/x86_64-unknown-linux-musl/release/dreamd
+```
+
+It writes only to a `mktemp -d` directory and never touches your own dreamd home or the repo's `manifest.json`.
 
 ---
 
@@ -235,7 +263,7 @@ Three jobs report a size to the step summary and compare it to nothing. None is 
 | `size-report-macos` | `macos-latest` | `cargo build --release`, stripped | |
 | `size-report-windows` | `windows-latest` | `cargo build --release`, **unstripped** `dreamd.exe` | `continue-on-error: true` |
 
-The CI NFR-2 gate (stripped `dreamd` ≤ 20 MB) measures the default Linux build only. The `vectors` feature is off by default and is not a release asset; its size is recorded, never gated. The Windows figure is never a gate. (The release workflow separately enforces the same 20 MB limit on its Linux and macOS release binaries.)
+The CI NFR-2 gate (stripped `dreamd` ≤ 24 MB) measures the default Linux build only; the `linux-compat` job checks the musl release build against the same limit. The `vectors` feature is off by default and is not a release asset; its size is recorded, never gated. The Windows figure is never a gate. (The release workflow separately enforces the same 24 MB limit on its Linux and macOS release binaries.)
 
 ---
 
@@ -277,7 +305,7 @@ To promote 85% to a blocking gate, uncomment `exit 1` in the workflow's "Summari
 
 ## Notify on main CI failure
 
-Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, audit, deny. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
+Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
 
 ---
 
@@ -285,17 +313,16 @@ Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, ta
 
 Triggered by pushing a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. Not a PR gate for ordinary contributor PRs, and it does **not** run the test suite — a tag is only as green as the `main` commit it points at.
 
-1. **Build** — `cargo build --release --target <triple>` (default features) for five targets, each packaged as `<asset>.tar.gz` holding the binary at its root:
+1. **Build** — `cargo build --release --target <triple>` (default features) for four targets, each packaged as `<asset>.tar.gz` holding the binary at its root:
 
    | Target | Asset | Notes |
    |---|---|---|
-   | `x86_64-unknown-linux-gnu` | `linux-x86_64` | consumed by the `dreamd-mcp` shim |
-   | `x86_64-unknown-linux-musl` | `linux-x86_64-musl` | static extra; the shim does not download it |
+   | `x86_64-unknown-linux-musl` | `linux-x86_64` + `linux-x86_64-musl` | static; one binary under two names, consumed by the `dreamd-mcp` shim as `linux-x86_64`. Checked by `scripts/linux-compat.sh` before it is packaged. There is no glibc Linux asset (BZR-1438). |
    | `x86_64-apple-darwin` | `darwin-x86_64` | consumed by the shim |
    | `aarch64-apple-darwin` | `darwin-aarch64` | consumed by the shim |
    | `x86_64-pc-windows-msvc` | `windows-x86_64` | `continue-on-error`; not stripped, no size check, no manifest entry |
 
-   Linux and macOS binaries are stripped and fail the build above 20 MB (20,971,520 bytes, NFR-2).
+   Linux and macOS binaries are stripped and fail the build above 24 MB (25,165,824 bytes, NFR-2).
 2. **Release** — regenerates `packages/dreamd-mcp/manifest.json` from those exact binaries with `scripts/update-mcp-manifest.sh` (sha256 of the *extracted* `dreamd`, three shim platforms), writes `checksums.txt`, pulls the `## [X.Y.Z]` block out of `CHANGELOG.md` as the release notes, and creates a **draft** GitHub Release with the tarballs, `checksums.txt`, and `manifest.json` attached. A tag whose name contains a hyphen (`v0.1.0-rc.5`) is marked a prerelease; a hyphen-free tag (`v1.0.0`) is a stable release once the draft is published.
 3. **Manifest PR** — the same job pushes a `chore/mcp-manifest-vX.Y.Z` branch with the regenerated manifest (a DCO-signed bot commit) and opens a PR to `main`. It never pushes to `main`.
 

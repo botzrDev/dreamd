@@ -300,6 +300,75 @@ jobs:
             echo "Daemon idle VmRSS: **${MB} MB** (limit: 30 MB, NFR-1, Linux only)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Linux compatibility (BZR-1438) ───────────────────────────────────────────
+  # The shim's `linux-x86_64` release asset is the static musl build. Build it
+  # exactly as release.yml does (a narrower `-p` build can unify features
+  # differently), hold it to the NFR-2 limit, and run scripts/linux-compat.sh:
+  # static check, the end-to-end smoke in old and new glibc images and Alpine,
+  # and the shim in Ubuntu 22.04 and Debian 12.
+  linux-compat:
+    name: Linux compatibility (static musl, BZR-1438)
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-musl-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-musl-
+
+      - name: Build release binary (musl)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Strip binary
+        run: strip target/x86_64-unknown-linux-musl/release/dreamd
+
+      - name: Enforce binary size limit — NFR-2
+        id: size
+        run: |
+          BINARY=target/x86_64-unknown-linux-musl/release/dreamd
+          SIZE_BYTES=$(stat -c%s "$BINARY")
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+          echo "Stripped musl binary: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          echo "size_mb=$SIZE_MB" >> "$GITHUB_OUTPUT"
+          echo "size_bytes=$SIZE_BYTES" >> "$GITHUB_OUTPUT"
+          MAX_BYTES=$((24 * 1024 * 1024))
+          if [ "$SIZE_BYTES" -gt "$MAX_BYTES" ]; then
+            echo "::error::Binary size ${SIZE_MB} MB exceeds the 24 MB limit (NFR-2)"
+            exit 1
+          fi
+
+      - name: Linux compatibility
+        run: scripts/linux-compat.sh target/x86_64-unknown-linux-musl/release/dreamd
+
+      - name: Write step summary
+        run: |
+          {
+            echo "### Linux compatibility (static musl)"
+            echo "Stripped size: **${{ steps.size.outputs.size_mb }} MB** (${{ steps.size.outputs.size_bytes }} bytes; limit: 24 MB)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ── Tarball-build sentinel check (WEG-18) ────────────────────────────────────
   # Simulates `cargo install dreamd` from a crates.io tarball (no `.git/`).
   # vergen-gitcl with default `fail_on_error=false` emits `VERGEN_IDEMPOTENT_OUTPUT`
@@ -643,7 +712,7 @@ jobs:
   # ── Notify on main CI failure (WEG-257) ──────────────────────────────────────
   notify-failure:
     name: Notify on main CI failure
-    needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate, audit, deny]
+    needs: [lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

@@ -202,7 +202,7 @@ Full notes: [CHANGELOG.md](./CHANGELOG.md).
 
 **Does dreamd stop memory poisoning?** No. It makes a poisoned memory findable and removable, and it keeps a record. It does not screen what agents write. See [SECURITY.md](./SECURITY.md).
 
-**Do I need Rust?** No. `npx -y dreamd-mcp` downloads a prebuilt binary for Linux x86_64 and macOS. Rust is only needed to build from source (and for native Windows).
+**Do I need Rust?** No. `npx -y dreamd-mcp` downloads a prebuilt binary for Linux x86_64 and macOS. The Linux binary is static, with no glibc requirement, and is checked on Ubuntu 20.04, Ubuntu 22.04, Debian 12 and Alpine 3.20. Rust is only needed to build from source (and for native Windows).
 
 **Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand; durable appends should go through the daemon or MCP so there is one writer.
 
@@ -240,6 +240,8 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 ## Platforms
 
 Linux, macOS and Windows. Windows serves over loopback TCP. See [docs/windows.md](./docs/windows.md).
+
+The prebuilt Linux x86_64 binary is one static build with no glibc requirement, checked on Ubuntu 20.04, Ubuntu 22.04, Debian 12 and Alpine 3.20. Linux arm64 has no prebuilt binary.
 
 ---
 

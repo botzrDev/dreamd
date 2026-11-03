@@ -99,7 +99,9 @@ Watch it: `gh run watch $(gh run list --workflow release.yml --limit 1 --json da
 
 When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 7 assets: five
 tarballs (`linux-x86_64`, `linux-x86_64-musl`, `darwin-x86_64`, `darwin-aarch64`,
-`windows-x86_64`, each `.tar.gz`), `checksums.txt`, and `manifest.json`. If the
+`windows-x86_64`, each `.tar.gz`), `checksums.txt`, and `manifest.json`.
+`linux-x86_64` is the static musl build, and `linux-x86_64-musl` is the same binary
+under its old name; there is no glibc Linux asset (BZR-1438). If the
 Windows build failed (it is `continue-on-error`) there are 6 and the release is still
 usable — the npm shim has no Windows manifest entry.
 
@@ -182,6 +184,14 @@ npm deprecate dreamd-mcp@X.Y.Z-1 "Broken; upgrade to X.Y.Z+"
 ```sh
 npx --yes dreamd-mcp@X.Y.Z version    # downloads the native binary, sha-verifies, prints X.Y.Z build info
 npx --yes dreamd-mcp@X.Y.Z init       # scaffolds .agent/ in a project with a root sentinel
+```
+
+Then run the published package on two older Linux userlands. Both must print
+`dreamd X.Y.Z`:
+
+```sh
+docker run --rm node:22-bookworm npx --yes dreamd-mcp@X.Y.Z version
+docker run --rm -e PATH=/node/bin:/usr/bin:/bin -v "$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")":/node:ro ubuntu:22.04 npx --yes dreamd-mcp@X.Y.Z version
 ```
 
 `init` scaffolds `.agent/` only (no `AGENTS.md`). Agent usage guidance reaches
