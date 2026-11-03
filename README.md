@@ -186,6 +186,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.2.1** (2026-11-03) | Static Linux binary with no glibc requirement (runs on Ubuntu 20.04 and 22.04, Debian 12 and Alpine); fixes from the 1.2.0 torture session; the npm shim forwards every `dreamd` command |
 | **v1.2.0** (2026-10-29) | Windows dream cycle and Tantivy index; audit fixes (writer lock, atomic dream cycle, faithful log rewrites, index coverage); deprecates `dreamd memory` branch commands, `vectors enable` and `dream --auto` for removal in 2.0. No 1.1.0 tag |
 | **v1.0.1** (2026-10-21) | Dependency security fixes |
 | **v1.0.0** (2026-10-02) | Provenance ledger and `doctor --provenance`, `dreamd forget`, `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations on HTTP recall |

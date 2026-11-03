@@ -48,9 +48,12 @@ Also:
   section" leaves the GitHub Release without the content. Add the `[X.Y.Z]` link
   reference at the bottom of the file and repoint `[Unreleased]` at `vX.Y.Z...HEAD`.
 
-- Move the version in three places no test checks: the root `Dockerfile`'s
+- Move the version in four places no test checks: the root `Dockerfile`'s
   `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version badge at the
-  top of `README.md`, and the version line in `GUIDE.md`'s first section.
+  top of `README.md`, the version line in `GUIDE.md`'s first section, and both fields
+  in `plugins/dreamd/.claude-plugin/plugin.json`: `"version"` and the
+  `dreamd-mcp@X.Y.Z` pin in `mcpServers`. A plugin left on the old pin keeps its
+  users on the old binary.
 
 Do NOT leave real-but-stale shas in `manifest.json` (that is the exact bug this
 procedure prevents) — use `PENDING_*`, which the manifest test rejects, so a
