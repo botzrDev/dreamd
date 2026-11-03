@@ -127,7 +127,7 @@ Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle
 
 Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
 
-On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). The workspace version is now `1.2.1` (unreleased; tag and publish stay human). The npm dist-tags after 1.0.1 have not been re-checked here.
+On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag and publish stay human.
 
 Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, animated GIF, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
 
@@ -436,6 +436,11 @@ Status on 2026-11-03 (`origin/main` `da34a3d`):
     - Austin chose the same day to ship musl with its built-in malloc and no added allocator (§12 D3 stays "none"). A mimalloc probe matched glibc's rebuild time but raised idle VmRSS from 15 MB to 25–27 MB, against the 30 MB limit.
   - **BZR-1401**: re-run the torture matrix on the 1.2.1 tree before release prep. 48 of 48 checks passed on 2026-11-03, on the BZR-1438 tree's static musl binary (crates identical to `da34a3d`).
 - Scope, decided 2026-11-03: 1.2.1 is `main` plus BZR-1438. BZR-1467, 1468, 1469 and 1470 moved to milestone **1.2.2 polish**. The remaining order is 1438 → 1401 → 1304.
+
+**Released 2026-11-03.** BZR-1438 (`0bd2e77`) and BZR-1401 are Done.
+- Tag `v1.2.1` is `042d9d2`; the GitHub release was published 14:49:51Z and is Latest. PR #61 landed as a rebase, so the tag is not an ancestor of `main`; `abc16b6` has the identical tree.
+- npm `dreamd-mcp@1.2.1` is `latest` and `next`. The MCP registry's latest is 1.2.1.
+- BZR-1304 is Done; its Linear comments are the release record.
 
 Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
 
