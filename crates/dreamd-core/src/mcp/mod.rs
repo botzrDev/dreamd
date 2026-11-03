@@ -157,7 +157,7 @@ impl McpRunError {
 /// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
 /// generated `Tool.description` equals this const so the copies cannot drift.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed.";
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed.";
 
 /// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
 /// the real write target: `append_node` appends an episodic event to
@@ -370,7 +370,7 @@ impl MemoryMcpServer {
     /// never opens an index per call (WEG-252).
     #[cfg(unix)]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -398,7 +398,7 @@ impl MemoryMcpServer {
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -799,6 +799,8 @@ mod tests {
             "source=episodic",
             "source=semantic",
             "no layer",
+            // BZR-1468: every hit carries its stored id.
+            "Each hit has an id",
             // v1 trigger phrases (AILAB-357) -- must survive the rewrite.
             "recall",
             "did we discuss",
@@ -2142,10 +2144,10 @@ mod tests {
         parsed["id"].as_str().expect("a minted id").to_owned()
     }
 
-    /// `search_nodes` for `query`; returns each hit's content. A tool error
+    /// `search_nodes` for `query`; returns each hit as JSON. A tool error
     /// fails the test.
     #[cfg(unix)]
-    async fn search_contents(server: &MemoryMcpServer, query: &str, k: u32) -> Vec<String> {
+    async fn search_hits(server: &MemoryMcpServer, query: &str, k: u32) -> Vec<serde_json::Value> {
         use rmcp::handler::server::wrapper::Parameters;
 
         let result = server
@@ -2157,12 +2159,47 @@ mod tests {
             .expect("search_nodes ok");
         let parsed: serde_json::Value =
             serde_json::from_str(&tool_text(&result)).expect("valid json");
-        parsed["results"]
-            .as_array()
-            .expect("results array")
+        parsed["results"].as_array().expect("results array").clone()
+    }
+
+    /// `search_nodes` for `query`; returns each hit's content. A tool error
+    /// fails the test.
+    #[cfg(unix)]
+    async fn search_contents(server: &MemoryMcpServer, query: &str, k: u32) -> Vec<String> {
+        search_hits(server, query, k)
+            .await
             .iter()
             .map(|r| r["content"].as_str().unwrap_or("").to_owned())
             .collect()
+    }
+
+    /// The `id` of the hit whose `content` is `content`, or `None` when no hit
+    /// has that content. A matching hit with no `id` key gives `Some(Null)`.
+    #[cfg(unix)]
+    fn id_of_hit(hits: &[serde_json::Value], content: &str) -> Option<serde_json::Value> {
+        hits.iter()
+            .find(|r| r["content"] == content)
+            .map(|r| r.get("id").cloned().unwrap_or(serde_json::Value::Null))
+    }
+
+    /// BZR-1468 test 5: in-process, the hit for an append carries the id
+    /// `append_node` returned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_in_process_hit_carries_the_appended_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let s = pinned_session(&root, NO_CADENCE);
+
+        let content = "bzr1468 snorkelwisp in-process";
+        let id = append_text(&s.server, content).await;
+        let hits = search_hits(&s.server, "snorkelwisp", 5).await;
+
+        assert_eq!(
+            id_of_hit(&hits, content),
+            Some(serde_json::Value::String(id)),
+            "the hit must carry the appended id; got {hits:?}"
+        );
     }
 
     /// The ticket's case: in-process, no daemon. The first search after an
@@ -2268,6 +2305,39 @@ mod tests {
                 .map(|i| i.as_str().to_owned()),
             Some(id),
             "the search committed the append"
+        );
+    }
+
+    /// BZR-1468 test 6: through the daemon, which passes its body through, the
+    /// hit for an append carries the id `append_node` returned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_nodes_through_the_daemon_hit_carries_the_appended_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let root = setup_agent_root(&canonical);
+        let canonical_str = canonical.to_str().expect("utf-8 path").to_owned();
+        let registry_path = dir.path().join("registry.toml");
+        write_registry(&registry_path, &canonical_str);
+        let sock_path = dir.path().join("d.sock");
+        let _index = spawn_daemon_with_primary(
+            &root,
+            canonical.clone(),
+            registry_path,
+            &sock_path,
+            NO_CADENCE,
+        )
+        .await;
+        let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
+
+        let content = "bzr1468 snorkelwisp daemon";
+        let id = append_text(&server, content).await;
+        let hits = search_hits(&server, "snorkelwisp", 5).await;
+
+        assert_eq!(
+            id_of_hit(&hits, content),
+            Some(serde_json::Value::String(id)),
+            "the hit through the daemon must carry the appended id; got {hits:?}"
         );
     }
 

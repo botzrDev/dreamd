@@ -108,6 +108,10 @@ pub struct RecallResponse {
 /// One salience-ranked hit on the wire.
 #[derive(serde::Serialize)]
 pub struct RecallResultJson {
+    /// The document's stored id (`RecallResult::event_id`): the event's `evt_`
+    /// id, or `lsn_` + the exemplar's id for a lesson. Always serialized; empty
+    /// only for a document indexed with no id.
+    pub id: String,
     /// Final ranking score: BM25 × salience (query-time; never indexed).
     pub score: f64,
     /// Raw Tantivy BM25 component before salience multiply.

@@ -207,6 +207,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 {
   "results": [
     {
+      "id": "evt_01J1Z7Q8K4M2N6P3R5S7T9V0WX",
       "score": 0.99,
       "bm25": 1.8,
       "salience": 0.55,
@@ -227,6 +228,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 
 | Field | Description |
 |---|---|
+| `id` | The document's stored id: an event's `evt_…` id, or `lsn_` followed by the exemplar event's id for a lesson |
 | `score` | Combined ranking score used for ordering: `bm25 × salience` |
 | `bm25` | Raw BM25 relevance |
 | `salience` | Query-time salience multiplier — the formula below without its BM25 term |
@@ -238,7 +240,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 | `metadata.skill_action` | Hierarchical cluster key of the matched learning (e.g. `rust::error_handling::axum_rejection`) |
 | `metadata.source_harness` | Harness that authored the learning (e.g. `"cursor"`, `"claude-code"`) — makes recall cross-harness-attributable |
 
-Hits carry no event id; request `explain=1` for the `citations[].id` of each hit.
+An event's `id` is what `dreamd forget`, `dreamd recall --without` and `exclude=` take. A lesson's `lsn_…` id works with `exclude=` and `--without`; `dreamd forget` refuses it.
 
 **Score formula** (computed at query time, not stored):
 

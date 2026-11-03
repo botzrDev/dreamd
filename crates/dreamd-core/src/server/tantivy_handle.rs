@@ -2379,13 +2379,10 @@ mod tests {
         }
     }
 
-    /// BZR-1242: a lesson's recall recurrence is its `cluster_key`'s subtree
-    /// count, and each episodic doc's is its own key's.
-    #[tokio::test]
-    async fn lesson_doc_recurrence_is_its_cluster_subtree() {
-        let dir = unique_tmpdir("lesson-subtree");
-        let _g = DirGuard(dir.clone());
-        let agent_root = AgentRoot::new(&dir);
+    /// The BZR-1242 store: three `rust::eh::unwrap` and two `rust::eh::expect`
+    /// events about "quokka", and a `rust::eh` lesson whose exemplar is the
+    /// first unwrap event. Returns the unwrap ids and the expect ids.
+    fn seed_quokka_store(dir: &Path, agent_root: &AgentRoot) -> (Vec<EventId>, Vec<EventId>) {
         let unwrap: Vec<EventId> = ['0', '1', '2'].map(make_event_id).to_vec();
         let expect: Vec<EventId> = ['3', '4'].map(make_event_id).to_vec();
         let events: Vec<AgentLearning> = unwrap
@@ -2397,12 +2394,23 @@ mod tests {
                     .map(|id| sample_learning(id.clone(), "rust::eh::expect", "quokka expect")),
             )
             .collect();
-        prime_jsonl(&dir, &events);
+        prime_jsonl(dir, &events);
         write_lessons(
-            &agent_root,
+            agent_root,
             "rust::eh",
             vec![lesson(unwrap[0].as_str(), "quokka: prefer ? over unwrap")],
         );
+        (unwrap, expect)
+    }
+
+    /// BZR-1242: a lesson's recall recurrence is its `cluster_key`'s subtree
+    /// count, and each episodic doc's is its own key's.
+    #[tokio::test]
+    async fn lesson_doc_recurrence_is_its_cluster_subtree() {
+        let dir = unique_tmpdir("lesson-subtree");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let (unwrap, expect) = seed_quokka_store(&dir, &agent_root);
 
         let lock = writer_lock(&agent_root);
         let handle =
@@ -2431,6 +2439,57 @@ mod tests {
                 id: unwrap[0].as_str().to_owned()
             }]
         );
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// BZR-1468 test 4: the recall body's ids are the indexed ids, a lesson
+    /// hit's is its `lsn_` id, and every event hit's parses as an `EventId`.
+    #[tokio::test]
+    async fn recall_json_ids_are_the_indexed_ids() {
+        let dir = unique_tmpdir("recall-json-ids");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        let (unwrap, _) = seed_quokka_store(&dir, &agent_root);
+
+        let lock = writer_lock(&agent_root);
+        let handle =
+            TantivyIndexHandle::open(&agent_root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
+        let (_, fields) = build_schema();
+        let now_sec = chrono::Utc::now().timestamp();
+        let json = crate::memory_store::recall_to_json(handle.reader(), "quokka", 10, now_sec)
+            .expect("recall_to_json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let hits = value["results"].as_array().expect("results array");
+
+        let mut got: Vec<String> = hits
+            .iter()
+            .map(|h| h["id"].as_str().expect("a string id").to_owned())
+            .collect();
+        got.sort();
+        let mut want: Vec<String> = crate::recall(handle.reader(), &fields, "quokka", 10, now_sec)
+            .expect("recall")
+            .into_iter()
+            .map(|r| r.event_id)
+            .collect();
+        want.sort();
+        assert_eq!(want.len(), 6, "five events and one lesson match: {want:?}");
+        assert_eq!(got, want, "{json}");
+
+        let lessons: Vec<&serde_json::Value> =
+            hits.iter().filter(|h| h["source"] == "semantic").collect();
+        assert_eq!(lessons.len(), 1, "{json}");
+        assert_eq!(
+            lessons[0]["id"],
+            semantic_event_id(unwrap[0].as_str()),
+            "{json}"
+        );
+        for hit in hits.iter().filter(|h| h["source"] == "episodic") {
+            let id = hit["id"].as_str().expect("a string id");
+            assert!(
+                EventId::parse(id).is_ok(),
+                "an event hit's id must parse as an EventId: {id:?}"
+            );
+        }
         handle.shutdown().await.expect("shutdown");
     }
 

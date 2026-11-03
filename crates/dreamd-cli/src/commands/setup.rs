@@ -885,7 +885,7 @@ const CLAUDE_BLOCK_END: &str = "<!-- dreamd:end -->";
 const CLAUDE_BLOCK_BODY: &str = "\
 At the start of a task, call `search_nodes` with the user's request as the query.
 
-If a hit overlaps the task, quote one line of its content and its event id in the reply. If the search is empty, say nothing about memory.
+If a hit overlaps the task, quote one line of its content and its id in the reply. If the search is empty, say nothing about memory.
 
 When the user corrects you or states a decision, call `append_node` with those same words in `content`, `source_harness` set to \"claude-code\", and a `skill_action` of lowercase segments joined by `::`.
 ";
@@ -1186,6 +1186,25 @@ mod tests {
     /// counts re-asks.
     const HARNESS_MARKER: &str = "  [1-4, default 1]: ";
     const WATCH_MARKER: &str = "  [y/N]: ";
+
+    /// BZR-1468 test 8: both habit files ask for the hit's `id`, which every
+    /// recall hit now carries, and neither asks for an "event id".
+    #[test]
+    fn habit_text_asks_for_the_hit_id() {
+        for (name, text) in [
+            ("CLAUDE_BLOCK_BODY", CLAUDE_BLOCK_BODY),
+            ("CURSOR_RECALL_RULE", CURSOR_RECALL_RULE),
+        ] {
+            assert!(
+                text.contains("quote one line of its content and its id in the reply."),
+                "{name} must ask for the hit's id: {text}"
+            );
+            assert!(
+                !text.contains("event id"),
+                "{name} must not ask for an event id: {text}"
+            );
+        }
+    }
 
     #[test]
     fn setup_not_a_tty_matches_reset_vocabulary() {

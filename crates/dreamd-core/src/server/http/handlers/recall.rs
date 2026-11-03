@@ -55,7 +55,7 @@ fn recall_to_json_excluding(
 ///   (BZR-194). Citations cover the filtered hits. No cluster parameter.
 ///
 /// # Responses
-/// * `200` — `{"results":[{"score","bm25","salience","source","content","metadata":{…}}]}`,
+/// * `200` — `{"results":[{"id","score","bm25","salience","source","content","metadata":{…}}]}`,
 ///   plus `"citations":[…]` when `explain=1`
 /// * `400` — `q` missing, `k` not an unsigned integer, or a `q` the query
 ///   parser rejects (`recall failed: …`, BZR-1301)

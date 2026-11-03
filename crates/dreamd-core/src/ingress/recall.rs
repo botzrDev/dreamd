@@ -17,6 +17,8 @@ impl RecallIngress {
     }
 
     /// Serialize recall results to the canonical JSON string (HTTP + MCP local).
+    /// Each hit carries `id`, its first key: the document's stored id
+    /// (`RecallResult::event_id`), unchanged.
     ///
     /// No `citations` key — callers that need the factor breakdown use
     /// [`Self::to_json_with_citations`] instead.
@@ -58,6 +60,8 @@ impl RecallIngress {
 
     fn map_one(r: RecallResult) -> RecallResultJson {
         RecallResultJson {
+            // The stored id exactly as indexed, for an event or a lesson.
+            id: r.event_id,
             score: r.score,
             bm25: r.bm25,
             salience: r.salience,
@@ -107,6 +111,87 @@ mod tests {
         assert_eq!(r.metadata.recurrence, 2);
         assert_eq!(r.metadata.skill_action, "rust::tokio::async");
         assert_eq!(r.metadata.source_harness, "cursor");
+    }
+
+    /// BZR-1468 test 1: the hit's stored id is its first key, exact bytes.
+    #[test]
+    fn to_json_puts_the_stored_id_first() {
+        let json = RecallIngress::to_json(vec![RecallResult {
+            score: 1.5,
+            bm25: 0.8,
+            salience: 1.2,
+            layer: Layer::Episodic,
+            content: "rust tokio".to_string(),
+            timestamp_sec: 1_700_000_000,
+            pain: 7.0,
+            importance: 8.0,
+            recurrence: 2,
+            skill_action: "rust::tokio::async".to_string(),
+            source_harness: "cursor".to_string(),
+            event_id: "evt_test".to_string(),
+        }]);
+        assert_eq!(
+            json,
+            r#"{"results":[{"id":"evt_test","score":1.5,"bm25":0.8,"salience":1.2,"source":"episodic","content":"rust tokio","metadata":{"timestamp_sec":1700000000,"pain":7.0,"importance":8.0,"recurrence":2,"skill_action":"rust::tokio::async","source_harness":"cursor"}}]}"#
+        );
+    }
+
+    /// BZR-1468 test 2: a lesson's `lsn_` id and an empty id come back as
+    /// stored, and the empty one is still serialized.
+    #[test]
+    fn to_json_keeps_lesson_and_empty_ids_as_stored() {
+        let lesson = RecallResult {
+            layer: Layer::Semantic,
+            event_id: "lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            ..sample_result()
+        };
+        let empty = RecallResult {
+            layer: Layer::Episodic,
+            event_id: String::new(),
+            ..sample_result()
+        };
+        let json = RecallIngress::to_json(vec![lesson, empty]);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let results = value["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2, "{json}");
+        assert_eq!(
+            results[0]["id"], "lsn_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "a lesson hit keeps its stored lsn_ id: {json}"
+        );
+        let second = results[1].as_object().expect("hit object");
+        assert!(
+            second.contains_key("id"),
+            "an empty id is still serialized: {json}"
+        );
+        assert_eq!(second["id"], "", "{json}");
+    }
+
+    /// BZR-1468 test 3: with `explain=1`, each hit's `id` equals its
+    /// citation's, in order.
+    #[test]
+    fn to_json_with_citations_ids_match_results() {
+        let first = RecallResult {
+            event_id: "evt_01ARZ3NDEKTSV4RRFFQ69G5FA1".to_string(),
+            ..sample_result()
+        };
+        let second = RecallResult {
+            event_id: "evt_01ARZ3NDEKTSV4RRFFQ69G5FA2".to_string(),
+            ..sample_result()
+        };
+        let json = RecallIngress::to_json_with_citations(vec![first, second], 1_700_100_000);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let results = value["results"].as_array().expect("results array");
+        let citations = value["citations"].as_array().expect("citations array");
+        assert_eq!(results.len(), 2, "{json}");
+        assert_eq!(citations.len(), 2, "{json}");
+        for (i, (hit, citation)) in results.iter().zip(citations).enumerate() {
+            assert_eq!(
+                hit["id"], citation["id"],
+                "results[{i}].id must equal citations[{i}].id: {json}"
+            );
+        }
+        assert_eq!(results[0]["id"], "evt_01ARZ3NDEKTSV4RRFFQ69G5FA1", "{json}");
+        assert_eq!(results[1]["id"], "evt_01ARZ3NDEKTSV4RRFFQ69G5FA2", "{json}");
     }
 
     fn sample_result() -> RecallResult {

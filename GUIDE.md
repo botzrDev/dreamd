@@ -108,7 +108,7 @@ final_score = bm25 × salience
 
 > See [docs/salience.md](./docs/salience.md) for the factor-by-factor derivation.
 
-Each result includes `score`, `bm25`, `salience`, `source` (`episodic` for a raw event, `semantic` for a `LESSONS.md` lesson), `content`, and `metadata` (timestamp, pain, importance, recurrence, plus `skill_action` and `source_harness` — each hit's cluster key and authoring harness, so recall is cross-harness-attributable).
+Each result includes `id` (an event's `evt_…` id, or a lesson's `lsn_…` id), `score`, `bm25`, `salience`, `source` (`episodic` for a raw event, `semantic` for a `LESSONS.md` lesson), `content`, and `metadata` (timestamp, pain, importance, recurrence, plus `skill_action` and `source_harness` — each hit's cluster key and authoring harness, so recall is cross-harness-attributable).
 
 > **Timing:** `search_nodes` and `GET /api/v1/recall` see every learning whose `append_node` or `POST /api/v1/learn` returned before the search. When the index has not committed one yet, the search asks for that commit first and waits at most one second; past that it answers from what is already committed. `dreamd recall` and the other CLI commands read the index on disk, so they can trail an append by up to 5 s (the index commit cadence) while `dreamd watch` or `dreamd mcp` is running.
 

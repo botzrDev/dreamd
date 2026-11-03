@@ -13,7 +13,7 @@ There is no config key and no default-on mode: the query parameter is the
 whole switch.
 
 MCP `search_nodes` does not take `explain` and never returns `citations`. It
-always returns the same body it always has.
+returns the same body as `GET /api/v1/recall` without `explain`.
 
 ## Fields
 

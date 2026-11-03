@@ -3098,6 +3098,38 @@ async fn recall_of(router: &axum::Router, root: &str, q: &str) -> (StatusCode, s
     (status, body_json(resp).await)
 }
 
+/// BZR-1468 test 7: the `GET /api/v1/recall` hit for a learning carries the
+/// id `POST /api/v1/learn` returned.
+#[tokio::test]
+async fn recall_hit_carries_the_learned_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state);
+
+    let content = "bzr1468 snorkelwisp router";
+    let id = post_learn(&router, &root, content).await;
+    let (status, json) = recall_of(&router, &root, "snorkelwisp").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let hit = json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .find(|r| r["content"] == content)
+        .unwrap_or_else(|| panic!("the recall must find the learning: {json}"));
+    assert_eq!(
+        hit.get("id"),
+        Some(&serde_json::Value::String(id)),
+        "the hit must carry the learned id: {json}"
+    );
+}
+
 /// The content of every hit in a recall body.
 fn hit_contents(json: &serde_json::Value) -> Vec<String> {
     json["results"]

@@ -5,6 +5,6 @@ alwaysApply: true
 
 At the start of a task, call `search_nodes` with the user's request as the query.
 
-If a hit overlaps the task, quote one line of its content and its event id in the reply. If the search is empty, say nothing about memory.
+If a hit overlaps the task, quote one line of its content and its id in the reply. If the search is empty, say nothing about memory.
 
 When the user corrects you or states a decision, call `append_node` with those same words in `content`, `source_harness` set to `"cursor"`, and a `skill_action` of lowercase segments joined by `::`.

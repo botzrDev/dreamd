@@ -446,7 +446,29 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
 
 **Milestone 1.2.2 polish** (added to the paired loop 2026-11-03, user decision). The findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The paired loop ends when BZR-1473 lands.
 
-26. **BZR-1467** — a dream cycle never makes its git commit in normal use. The autobiography dirty check counts dreamd's own writes: after a fresh setup the untracked log trips `user_dirty_tree`, and later cycles trip it on the previous cycle's `LESSONS.md` and pin rewrite, or on any append. The skip reason appears only in the watch log. Repro and suggested direction are on Linear (2026-11-03). Blocked by BZR-1438 (Done).
+26. **BZR-1467** — on `main` (`6db64aa`). The autobiography start check compares bytes instead of asking git for status (drift entry `autobiography-check-is-content-not-git-status`):
+    - `LESSONS.md` is dreamd's when it is absent, equals HEAD's blob, or matches `state.json`'s new `autobiography_baseline` hash;
+    - the log is dreamd's when HEAD's blob is a prefix of it, or its first `log_len` bytes match the baseline;
+    - with no baseline, a file HEAD does not track is dreamd's.
+
+    `record_baseline` runs after every successful dispatch, `--no-commit` included. A file dirty at cycle start keeps its old entry, so a hand edit holds only that file until the user commits it. The hold is the user's ruling (D2, 2026-11-03); holding per file is the PM's call (§11 H1). The commit's tree is HEAD's tree plus the two paths, built in an in-memory index. It respects `.gitignore` for paths HEAD does not track, makes no empty commit (`Unchanged`), and resolves paths through the project root. `POST /api/v1/dream`'s 200 body has an `autobiography` object, `dreamd dream` prints `skip_message`, and doctor names the files.
+
+    PM verification:
+    - workspace 1383 / 1 / 0 (`weg12` load flake, which passed alone twice);
+    - red-first 27 and 28 on `ca8323e`;
+    - 19 PM mutants fail as named;
+    - stripped `dreamd` 21,913,728 bytes;
+    - an e2e run with the release binary.
+
+    The user committed `6db64aa` during VERIFY, and it equals the verified tree. The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
+
+    Held for later (spec §11):
+    - H2: a cycle commits during a merge or rebase;
+    - H3: git filters such as `core.autocrlf`;
+    - H4: crash windows leave the old baseline;
+    - H5: in the daemon, a second cycle can race the first cycle's post-phase `state.json` writes.
+
+    The `no_baseline` text reads "… differ from HEAD" for one file. Spec: `assignments/BZR-1467.v2.md` (Amendment 1).
 27. **BZR-1468** — `search_nodes` results carry no event id, but setup's `CLAUDE.md` tells the agent to quote one. Blocked by 1467.
 28. **BZR-1469** — setup output: the `dreamd watch` hint fails when no `dreamd` is on `PATH`, and the summary and undo text leave out `CLAUDE.md` and the registry entry. Blocked by 1468.
 29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469.
@@ -1399,7 +1421,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Include hostile inputs: unknown members, number text that does not round-trip, torn tails, duplicate ids, a forged lesson marker.
   - Mark the model path with a marker string, so a dump proves the path ran.
   - For a CLI comparison, copy both release binaries to the same name (`base/dreamd`, `head/dreamd`): clap prints `argv[0]` in every `Usage:` line, so differently named binaries differ on every `--help` (BZR-1244).
-  - Keep the fixture's `HOME` short, or use `dream --no-commit`. A scratch path makes `~/.agent/dreamd.sock` longer than `SUN_LEN`, and the daemon-proxy attempt then fails the command.
+  - Keep the fixture's `HOME` short, or use `dream --no-commit`. A scratch path makes `~/.agent/dreamd.sock` longer than `SUN_LEN`, and the daemon-proxy attempt then fails the command. For an in-process CLI run, pointing `DREAMD_SOCK` at a short path that does not exist also works: the proxy sees no daemon (BZR-1467 e2e).
 - **Cross-refs:** `in-memory-value-is-not-the-round-tripped-file`, `mutation-must-get-past-the-backstop`, `jsonl-rewrites-go-through-patch-lines`
 
 ### in-memory-value-is-not-the-round-tripped-file
@@ -1456,13 +1478,14 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### mid-ticket-commit-keeps-the-ticket-base
 
 - **Rule:** When the user commits a ticket's tree before sign-off, the ticket's base sha does not move. Every diff, grep, red-first run and bench baseline still compares with the base. The dev resumes from `HEAD` as its own unverified work. If the dev session that wrote the code is gone, the new one reads every mutation site in the committed code before running anything, because the commit can capture a mutant left in place mid-run.
-- **Why:** It has happened on three tickets. On BZR-1242, `3a610fd` held a tree with two failing tests. On BZR-1243, `cd575af` was committed and pushed with no report, and that CLeetus session's context was lost when it restarted. On BZR-1244, `9bfd00b` was committed before the report, and its message described BZR-1243's work. Once committed, `git status` no longer lists the ticket's files. Greps written as `git status --porcelain` or `git diff --name-only` with no range then see nothing, and pass.
+- **Why:** It has happened on four tickets. On BZR-1242, `3a610fd` held a tree with two failing tests. On BZR-1243, `cd575af` was committed and pushed with no report, and that CLeetus session's context was lost when it restarted. On BZR-1244, `9bfd00b` was committed before the report, and its message described BZR-1243's work. On BZR-1467, `6db64aa` was committed during VERIFY, after the report, and it matched the verified tree. Once committed, `git status` no longer lists the ticket's files. Greps written as `git status --porcelain` or `git diff --name-only` with no range then see nothing, and pass.
 - **How to apply:**
   - Append an amendment to the spec. It keeps the base, adds a range to every scope command (`git diff --name-status <base> HEAD`, plus `--diff-filter=A` for new files), and asks for the mutation-site audit.
   - Red-first runs use `git archive <base>` into a scratch copy. Never `checkout` or `restore`.
   - Record the hash of every path changed since the base, not only the paths changed since `HEAD`, and check them at LANDED.
   - Tell the user. A pushed partial commit means any rework lands as a follow-up commit.
   - Read the commit message too. Flag one that names another ticket's work, or a sign-off line that is a template placeholder; amending or leaving it is the user's call.
+  - At the start of VERIFY, snapshot the tree you verify (the mutant source copy will do). If a commit lands mid-VERIFY, compare `git rev-parse HEAD:<p>` with `git hash-object` of the snapshot for every path in `git diff --name-only <base> HEAD`. When all of them match, SIGN-OFF and LANDED are one step.
 - **Cross-refs:** `git-diff-name-only-misses-untracked`, `report-back-paste-can-be-truncated`
 
 ### zsh-does-not-word-split-unquoted-variables
@@ -1497,7 +1520,12 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Work through each test's input by hand against the rules, the edge cases especially: the clock running backwards, a same-name collision, a pinned name outside the window.
   - If a test is the only thing that pins an exception, say so in the spec, and give the mutation that breaks it.
   - Same family as `guards-vs-mandates-same-line`: the spec has to pass its own checks.
-- **Cross-refs:** `guards-vs-mandates-same-line`, `mutate-each-check-of-a-compound-guard-alone`
+  - When a test pins exact bytes, work out which serializer writes them. Here serde_json has no `preserve_order`, so `json!` and `to_value` sort keys, while a derive writes declaration order (internally tagged: the tag first).
+  - When a ticket adds an early return (such as "no empty commits"), run each existing test's input through it.
+- **Recurred on BZR-1467.** CLeetus's pre-flight found two such expectations, and Amendment 1 fixed both:
+  - test 24 asked for a 200 body "exactly" in an order that `json!` cannot produce;
+  - test 18 kept `commit_cycle_clears_prior_skip_marker`'s `Committed` assertion on a tree that D7 now reports as `Unchanged`.
+- **Cross-refs:** `guards-vs-mandates-same-line`, `mutate-each-check-of-a-compound-guard-alone`, `derived-serde-struct-accepts-a-json-array`
 
 ### every-stated-rule-in-section-3-gets-a-mutation-row
 
@@ -1557,6 +1585,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** To read one member of a JSON object, parse `serde_json::Value` and call `.get("name")`. Do not `from_slice` into a `#[derive(Deserialize)] struct { name: String }`.
 - **Why:** serde's derived visitor also accepts a sequence, so `["x"]` deserializes as `{ name: "x" }`. BZR-1301's `daemon_error_message` must give the generic label for any body that is not the daemon's `{"error": …}` envelope. Mutant M3 (the derived struct) fails test 3 on the `["error"]` body.
 - **How to apply:** See `memory_store::daemon_error_message`. A test of an envelope reader includes a JSON array body.
+- **Also an internally tagged enum (BZR-1467).** `#[serde(tag = "outcome")]` accepts a sequence whose first element is the tag, so `["unchanged"]` deserializes as `Unchanged`. `client::parse_autobiography` takes `.get("autobiography")`, filters `is_object`, then deserializes. Mutant M25 drops the filter and fails test 26.
 - **Cross-refs:** `mutate-each-check-of-a-compound-guard-alone`
 
 ### daemon-recall-tests-run-without-the-test-coordinator
@@ -1565,3 +1594,14 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** BZR-1301's first base probe sent appends and searches to one `spawn_test_daemon(.., true)` daemon. Every search came back `-32603` with that lock message, which hid the real answers: a `500` for a parser rejection, and success for a 20 KB query. A production daemon serves its booted project from the pinned primary handle, so only the fixture behaves this way.
 - **How to apply:** Use a daemon with `true` for appends and a second one, on its own root, with `false` for recall, as `test_remote_search_nodes_refuses_a_query_over_the_limit` does.
 - **Cross-refs:** `index-fixtures-must-write-the-log-first`
+
+### autobiography-check-is-content-not-git-status
+
+- **Rule:** The autobiography start check decides by bytes, never by git status. `LESSONS.md` and the episodic log are compared with HEAD's blob and with `state.json`'s per-file `autobiography_baseline`. The commit builds its tree from HEAD's tree in an in-memory `git2::Index` that holds only the two tracked paths. Never use `repo.index().write_tree()` for it.
+- **Why:** Before BZR-1467, `status_file` flagged every write dreamd makes itself: the untracked log after setup, the previous cycle's pin rewrite, and every append. A cycle therefore never committed in normal use. The repo-index tree would also have swept the user's staged files into dreamd's commit. The first PM design held the whole baseline when either file was dirty. That would have made the user commit dreamd's own log rewrite to release a `LESSONS.md` hold, so the baseline advances per file (§11 H1, oracle-checked).
+- **How to apply:**
+  - A write to the tracked files outside a dream cycle holds the commit by design until the user commits that file. That covers `forget`, `archive --force-unpin` and `memory checkout`. Do not "fix" this by advancing the baseline from those commands without a user decision.
+  - Any path that runs a cycle and writes the tracked files goes through `dream_cycle::run_guarded_cycle`, so the baseline is recorded after the dispatch.
+  - `update_daemon_state` is an unlocked read-modify-write. The post phases run after the cycle's ticket is released (BZR-1467 §11 H5).
+  - BZR-1467 §6 greps 1–2 guard the status calls and the repo-index tree.
+- **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`, `split-actor-protocol-needs-a-lease-and-a-spawned-handler`, `spec-test-expectations-follow-from-the-rule-text`
