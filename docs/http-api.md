@@ -391,7 +391,7 @@ The 200 body's `autobiography` object reports the git autobiography commit (BZR-
 
 | `outcome` | Other keys | Meaning |
 |---|---|---|
-| `committed` | `commit` (the new commit's id) | The cycle committed `LESSONS.md` and the episodic log |
+| `committed` | `commit` (the new commit's id) | The cycle committed the episodic log, and `LESSONS.md` when that file exists |
 | `unchanged` | — | Both files already match HEAD, so no commit was made |
 | `no_repo` | — | No git repo at or above the project root |
 | `skipped` | `reason`, `files` | The commit was held. `user_dirty_tree`: the listed files hold changes no dream cycle wrote; commit them with git and the next cycle commits again. `no_baseline`: dreamd has no record yet of what its last cycle wrote, and the next cycle commits |

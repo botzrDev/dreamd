@@ -46,7 +46,7 @@ After a `forget`, `doctor --provenance` reports the removed event's old ledger e
 
 ## How agents learn
 
-Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries its source harness. A learning cycle (`dreamd dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo (skipped if either file has uncommitted edits). Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
+Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries an `id` (`evt_` for an event, `lsn_` for a lesson) and its source harness. A learning cycle (`dreamd dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo as `dreamd: cycle YYYY-MM-DD`. That commit is skipped when a file holds a change no dream cycle wrote (a hand edit, `forget`, or `archive --force-unpin`). Appends and a cycle's own rewrites do not hold it. Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
 
 ## Install
 
@@ -140,6 +140,8 @@ done
 ## Override (development only)
 
 Set `DREAMD_BIN=/path/to/dreamd` to use a local build instead of the cached release binary. This skips SHA-256 verification, so you must also set `DREAMD_BIN_ALLOW_UNVERIFIED=1`; `DREAMD_BIN` on its own is refused. Never point production MCP configs at an unverified binary.
+
+The shim runs the binary, the cached release one or `DREAMD_BIN`, with `DREAMD_LAUNCHER=npx` set, so `dreamd setup`'s hints name the npx form (`npx -y dreamd-mcp watch`).
 
 ```sh
 cargo install --path crates/dreamd-cli

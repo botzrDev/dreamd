@@ -35,6 +35,6 @@ Other harnesses: `npx -y dreamd-mcp setup --harness claude|cursor|both` writes t
 
 Call `append_node` with `content: "dreamd install check"`, `source_harness: "cline"`, `skill_action: "setup::verify"`. It returns an `evt_` id, and `.agent/episodic/AGENT_LEARNINGS.jsonl` has the line at once (the memory is plain text).
 
-Then call `search_nodes` with `query: "install check"`. A new event can take about 10 seconds to reach the search index, so if the results are empty, wait 15 seconds and search again before treating it as a failure.
+Then call `search_nodes` with `query: "install check"`. The search commits a pending append and waits at most one second, so the new event is in the results unless indexing it takes longer than that. If the results are still empty, the query did not match.
 
 More detail: [adapters/cline/README.md](./adapters/cline/README.md).

@@ -145,7 +145,7 @@ Recall ranks episodes and lessons with BM25 × salience (age decay, pain, import
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 
-`setup` scaffolds the store by calling `init`, then writes the harness MCP config. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall` (project `.agent/` stores are left in place). `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
+`setup` scaffolds the store by calling `init`, then writes the harness MCP config. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall`. On a tty it waits for `y`; pass `--yes` in a script. Without a tty and without `--yes` it exits 2 and changes nothing. Project `.agent/` stores are left in place. `npx -y` is npx's flag, not dreamd's `--yes`. `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
 
 ---
 
@@ -162,7 +162,7 @@ The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
 | `dreamd forget <event-id>` | Remove one episodic event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
 | `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges and corrupt lines. Read-only. See [docs/provenance.md](./docs/provenance.md) |
-| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.1.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
+| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.2.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
 
 ---
 
@@ -207,7 +207,7 @@ Full notes: [CHANGELOG.md](./CHANGELOG.md).
 
 **Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand; durable appends should go through the daemon or MCP so there is one writer.
 
-**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` stops processes and clears caches; `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store ([docs/install.md](./docs/install.md)).
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` asks for `y` on a tty (`--yes` in a script) before it stops processes and clears caches. `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store ([docs/install.md](./docs/install.md)).
 
 **Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt npm binary for Windows. Details: [docs/windows.md](./docs/windows.md).
 

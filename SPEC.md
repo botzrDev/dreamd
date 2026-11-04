@@ -119,7 +119,7 @@ flowchart TD
     H --> J["stage outputs → commit (redo WAL) → apply"]
 ```
 
-**Promotion.** A cluster is promoted when its recurrence exceeds an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
+**Promotion.** A cluster is promoted when its recurrence is at least an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
 
 **Output format.** The dream cycle writes to `semantic/LESSONS.md`. The file MUST begin with a YAML frontmatter block followed by one lesson block per promoted cluster:
 

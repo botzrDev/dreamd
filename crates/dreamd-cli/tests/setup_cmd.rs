@@ -26,12 +26,15 @@ fn project_and_home() -> (tempfile::TempDir, tempfile::TempDir) {
     (project, home)
 }
 
+/// `DREAMD_LAUNCHER` is cleared so a developer's shell cannot change which
+/// command the hints name.
 fn run_setup(project: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(dreamd_bin())
         .arg("setup")
         .args(args)
         .current_dir(project)
         .env("HOME", home)
+        .env_remove("DREAMD_LAUNCHER")
         .output()
         .expect("run dreamd setup")
 }

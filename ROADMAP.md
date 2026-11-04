@@ -59,8 +59,9 @@ BM25 × salience.
   ([`docs/benchmarks.md`](docs/benchmarks.md)). Latency only; not a
   recall-quality benchmark.
 - **Groundwork that does not change recall** — an optional `vectors` cargo
-  feature (off by default, not in release binaries) that only downloads a model,
-  and a rank-fusion helper nothing calls yet. `POST /api/v1/migrate` exists as a
+  feature (off by default, not in release binaries) that only downloads a model.
+  A rank-fusion helper shipped here and was later removed; recall never called it.
+  `POST /api/v1/migrate` exists as a
   501 stub.
 
 ## Shipped — v1.2.0
@@ -90,7 +91,7 @@ BM25 × salience.
 - **Remove the deprecated surfaces** — the six `dreamd memory` subcommands
   (`branch`, `checkout`, `branches`, `delete`, `diff`, `bisect`),
   `dreamd vectors enable` and the `vectors` feature, and `dream --auto`. Each
-  was deprecated in 1.1.0 and is removed in 2.0 (BZR-1246).
+  was deprecated in 1.2.0 (there is no 1.1.0 tag) and is removed in 2.0 (BZR-1246).
 
 ## On the roadmap — not shipped
 

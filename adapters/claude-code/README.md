@@ -32,6 +32,8 @@ The block in `.mcp.json.example`:
 }
 ```
 
+**Resumed sessions:** Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
+
 ## 3. Start the daemon (multi-agent setups)
 
 For a single agent on Linux or macOS, the in-process MCP server is sufficient. On Windows, start `dreamd watch` first; there is no in-process server. If **several agents write to the same project simultaneously**, start one shared daemon:

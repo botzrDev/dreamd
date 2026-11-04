@@ -1,13 +1,13 @@
 # dreamd compared
 
-Honest comparison as of v1.0.0 (dreamd column re-checked for 1.0.0; competitor cells and star counts are as dated in the table). Concede competitor strengths; name our gaps.
+Honest comparison of the current tree (dreamd column re-checked for 1.2.1; competitor cells and star counts are as dated in the table). Concede competitor strengths; name our gaps.
 For the product story, see [marketing.md](./marketing.md). For install and usage, see the [README](../README.md).
 
 ---
 
 ## TL;DR
 
-| Dimension | dreamd v1.0.0 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
+| Dimension | dreamd 1.2.1 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
 |---|---|---|---|---|---|
 | Cross-harness portability | ✓ Claude Code / Cursor / Cline share one `.agent/` | ✓ MCP + broad framework integrations; hosted path common | — harness-native (stateful Letta agent) | ✓ any MCP-capable client | — Cline-native markdown ritual |
 | Salience-aware recall | ✓ BM25 × published formula ([SPEC.md](../SPEC.md)); `dreamd recall --explain` / `dreamd blame` / `dreamd score --explain` | extraction + retrieval (managed / hosted options) | agent-managed memory / sleep-time reflection | string search over knowledge-graph nodes | LLM reads structured markdown; no ranking formula |
@@ -22,7 +22,7 @@ Cell legend: ✓ = strength for that dimension; — = not offered (or not yet fo
 
 ---
 
-## Weaknesses we own (v1.0.0)
+## Weaknesses we own
 
 Pulled from [AGENTS.md](../AGENTS.md) scope — not a marketing softener:
 

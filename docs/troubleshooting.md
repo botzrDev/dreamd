@@ -2,7 +2,7 @@
 
 Symptom → cause → fix → prevention. For deeper reference see [http-api.md](./http-api.md), [configuration.md](./configuration.md), and [SECURITY.md](../SECURITY.md).
 
-Commands below use the cargo-installed `dreamd` binary. On the npm path the shim does **not** put `dreamd` on `PATH` — use `npx -y dreamd-mcp <cmd>` for `init`, `setup`, `watch`, `doctor`, `dream`, `reset`, `service`, `uninstall`, `update`, `version`, `mcp`, `blame`, `salience-drift`, `memory`, `forget`, and `vectors`. The shim does **not** forward `status`, `recall`, `score`, `archive`, or `migrate` (an unlisted first token is passed to `dreamd mcp` as an argument and fails there); those need `cargo install --path crates/dreamd-cli`.
+Commands below use `dreamd`. On the npm path the shim does **not** put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>`. From 1.2.1 that forwards every command. The 1.2.0 shim did not forward `status`, `recall`, `score`, `archive`, or `migrate` (an unlisted first token was passed to `dreamd mcp` and failed there).
 
 ---
 
@@ -51,6 +51,7 @@ A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these
 4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1
 5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
 6. Native Windows — the npx shim has no Windows binary and exits 1. Build `dreamd` and start `dreamd watch` first (see [windows.md](./windows.md))
+7. A resumed Claude Code session from another folder. Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
 
 **Fix:**
 
@@ -77,7 +78,7 @@ Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (da
 
 ```bash
 npx -y dreamd-mcp watch    # recovers on startup before serving
-dreamd status              # last_dream_cycle (cargo-installed `dreamd`; npm shim does not forward `status`)
+npx -y dreamd-mcp status   # last_dream_cycle
 # or: cat .agent/.dreamd/state.json
 npx -y dreamd-mcp doctor   # dream-cycle mode + index health; with the daemon stopped, --repair rebuilds a stale index
 ```

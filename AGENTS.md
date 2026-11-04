@@ -469,7 +469,26 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H5: in the daemon, a second cycle can race the first cycle's post-phase `state.json` writes.
 
     The `no_baseline` text reads "… differ from HEAD" for one file. Spec: `assignments/BZR-1467.v2.md` (Amendment 1).
-27. **BZR-1468** — `search_nodes` results carry no event id, but setup's `CLAUDE.md` tells the agent to quote one. Blocked by 1467.
+27. **BZR-1468** — on `main` (`1a59f1c`). Every recall hit carries `id`, its first key:
+    - `RecallResultJson.id` is the stored `RecallResult::event_id`, unchanged: the `evt_…` id for an event, `lsn_evt_…` for a lesson (user ruling D1). One `map_one` serves in-process and daemon-mode `search_nodes`, `GET /api/v1/recall`, `explain=1` and `exclude=`;
+    - `id` is always serialized. serde_json has no `preserve_order`, so declaration order is key order;
+    - the `search_nodes` description (the const and both literals) says "Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson." The `CLAUDE.md` block and the Cursor rule say "its id".
+
+    PM verification:
+    - workspace 1393 / 0 / 0;
+    - red-first on `6db64aa`;
+    - M1–M8 plus PM-only P5 (`forget` accepting `lsn_`) and P7 (`blame` blanking the id) fail as named;
+    - stripped `dreamd` 21,912,960 bytes;
+    - r1 made test 9 retry its first search (drift entry `search-after-append-tests-retry-past-the-commit-bound`).
+
+    The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit. The dated capture in `docs/spikes/dr-014-cline-mcp.md` stays as history.
+
+    Held for later (spec §11):
+    - H1: `forget lsn_…` still answers "is not an event id";
+    - H2: a daemon from an older version answers without `id`;
+    - H3: a habit block written by an older setup keeps "event id" until setup reruns.
+
+    Spec: `assignments/BZR-1468.v2.md` (Amendment 1).
 28. **BZR-1469** — setup output: the `dreamd watch` hint fails when no `dreamd` is on `PATH`, and the summary and undo text leave out `CLAUDE.md` and the registry entry. Blocked by 1468.
 29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469.
 30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
@@ -834,6 +853,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Why:** AILAB-196 §4 originally grepped `count_tokens|count-tokens|messages/count` in `llm.rs`. Phase 1 rustdoc explaining the rejected remote token-count endpoint tripped it. Same family as `guards-vs-mandates-same-line`.
 - **How to apply:** Grep call syntax / URLs (`\.count_tokens\(`, `messages/count`) and drop `///` / `//!` / `//` lines. Do not ban the English words in docs.
 - **Recurred on BZR-1243.** §4 grep 3 banned `std::fs|fs::read|canonicalize` anywhere in `router.rs`. The dev's own rustdoc ("canonicalizes the path") tripped it, and the dev reworded the comment to pass. Ban `canonicalize\(` and drop comment lines instead.
+- **Recurred on BZR-1468.** §6 grep 4a banned the token `lsn_` in `ingress/recall.rs`'s production slice, so the dev wrote that file's comments without it. The grep was after a stripping call; `trim_start_matches\("lsn_"\)` would have said so.
 - **Cross-refs:** `guards-vs-mandates-same-line`
 
 ### spec-grep-file-wide-hits-the-tickets-own-fixtures
@@ -1334,6 +1354,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **How to apply:**
   - For each mutation row, ask whether anything after the disabled step repairs the same fault, and if so, name a test of what only that step does.
   - Run PM-side mutants in a copy of the repo, never in the dev's tree. Give each mutant its own `CARGO_TARGET_DIR`, or mutate one copy at a time. A second copy built into the same target dir ran without its own mutation.
+  - To reuse one copy, restore it with `rsync -rlp --checksum`, not `rsync -a`. `-a` puts back the snapshot's old mtimes, so when the next mutant edits a different crate, cargo does not rebuild the crate the last mutant changed and its mutation leaks into the next run (BZR-1468: M5 into M7, M8 into P5 and P7). Check each log for `Compiling <crate>`.
   - Do not run `cargo test --workspace` while another build is compiling. `weg12_concurrency_torture`'s 10 s small-payload budget failed at 28 s under that load and passed in 2–3 s alone (WEG-511 is the same flake class).
   - Describe each mutant by the rule it changes, and check that it compiles. BZR-1235's M4 said to parse the torn tail with `from_slice::<serde_json::Value>`, which cannot produce the `AgentLearning` that arm pushes. The dev matched on `Value` and pushed only when `parse_record` succeeded, so the mutant still accepted any JSON.
 - **Cross-refs:** `un-ignore-ac-can-name-tests-never-written`, `gated-consumer-is-what-makes-a-full-channel-test-real`
@@ -1541,6 +1562,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Before queuing, list §3's rule sentences and point each at a mutation row.
   - At VERIFY, mutate the call site as well as the callee: swap a `warn` arm for `panic!`, drop a constant from an expression, skip one input class.
   - Same family as `an-ordering-test-must-fail-the-step-it-orders` and `mutate-each-check-of-a-compound-guard-alone`.
+- **Recurred on BZR-1469.** The spec moved the spawn-failure copy into a pure helper so it could be tested (test 8), but left the call site's `req.launcher` argument untested. PM mutant P1, which passes `Launcher::Binary` there, survived every suite. No test can make `spawn_watch` fail, so it was held as H6 instead of adding a spawner seam. When a spec splits copy into a helper because the caller is unreachable, it says so in §11 from the start.
 - **Cross-refs:** `an-ordering-test-must-fail-the-step-it-orders`, `mutate-each-check-of-a-compound-guard-alone`, `mutation-must-get-past-the-backstop`
 
 ### error-text-names-its-crate-by-grep-not-by-guess
@@ -1605,3 +1627,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - `update_daemon_state` is an unlocked read-modify-write. The post phases run after the cycle's ticket is released (BZR-1467 §11 H5).
   - BZR-1467 §6 greps 1–2 guard the status calls and the repo-index tree.
 - **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`, `split-actor-protocol-needs-a-lease-and-a-spawned-handler`, `spec-test-expectations-follow-from-the-rule-text`
+
+### search-after-append-tests-retry-past-the-commit-bound
+
+- **Rule:** A test that appends and then searches in-process retries its first search, a bounded number of times, when it checks something other than freshness. `search_nodes` waits at most 1 s for the index to commit pending appends (BZR-1437). Under disk load the first search can answer from the last commit and come back empty.
+- **Why:** BZR-1468's test 9 (`tests/search_nodes_id.rs`) checks that a hit's id works with `blame` and `forget`. It failed once in about 26 PM runs, with `search_nodes must find the append: []`, while a local etcd and a parallel build loaded the disk. The spec had asked for one search. Amendment 1 (r1) added the retry: 10 tries, 200 ms apart, in the same session. Red-first still fails at the id assertion.
+- **How to apply:**
+  - Retry only the first search, and fail with the last results and the original message.
+  - Leave the freshness bound to the BZR-1437 tests, and do not raise the 1 s bound to make a test pass.
+  - A timing flake in an unrelated test (`weg12`) under the same load is not evidence against the diff: compare base and head, alternating, in one scratch copy.
+- **Cross-refs:** `weg12-direct-channel-not-http-hammer`, `mutation-must-get-past-the-backstop`

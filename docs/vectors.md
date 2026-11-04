@@ -1,6 +1,6 @@
 # Optional vector backend (`vectors` feature)
 
-**Status: a model download command only; vector recall is not implemented. `dreamd vectors enable` and the `vectors` feature are deprecated in 1.1.0 and will be removed in 2.0 (BZR-1245); recall never used the model.** The `vectors` Cargo feature is off by default. The default `dreamd` binary does not link `fastembed`, and the release artifacts are built without the feature. Recall is still BM25 × salience. There is no JSONL vector index, nothing embeds text, and `embedding` ledger lines are still not written (see [`provenance.md`](./provenance.md)). There is no dense ranking to fuse and no hybrid query mode.
+**Status: a model download command only; vector recall is not implemented. `dreamd vectors enable` and the `vectors` feature were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0 (BZR-1245); recall never used the model.** The `vectors` Cargo feature is off by default. The default `dreamd` binary does not link `fastembed`, and the release artifacts are built without the feature. Recall is still BM25 × salience. There is no JSONL vector index, nothing embeds text, and `embedding` ledger lines are still not written (see [`provenance.md`](./provenance.md)). There is no dense ranking to fuse and no hybrid query mode.
 
 ## `dreamd vectors enable`
 

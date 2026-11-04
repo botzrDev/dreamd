@@ -28,8 +28,8 @@ Each entry in `citations` is:
 | `layer` | Memory layer: `episodic` or `semantic` — the same token as the paired `results[].source` |
 | `snippet` | Full stored learning text, no truncation |
 | `age_days` | `(now - timestamp) / 86400`, floored at 0: the age the salience formula uses |
-| `pain` | Stored 0.0–10.0 subjective friction score — the raw value, not divided by 10 |
-| `importance` | Stored 0.0–10.0 long-term relevance score — the raw value, not divided by 10 |
+| `pain` | Stored subjective friction score. Ingest keeps it in 0.0–10.0; a hand-edited line can lie outside that. This field is the stored number, not divided by 10 |
+| `importance` | Stored long-term relevance score. Same range rule as `pain`: the stored number, not divided by 10 |
 | `recurrence` | Live episodic events whose `skill_action` equals the hit's or extends it with `::`, counted from the index per searcher. An event counts itself; a lesson gets its `cluster_key`'s count |
 
 `layer` names the Tantivy document layer a hit was indexed under —

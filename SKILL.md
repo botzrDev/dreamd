@@ -31,7 +31,7 @@ A search finds every node whose `append_node` returned before it. If the index n
 
 Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Use plain words. A colon is query syntax, and a `skill_action` pasted as the query (for example `rust::error`) fails the search.
 
-Each result carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can see each hit's cluster and which tool taught it.
+Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a lesson. It also carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can quote the hit and see which tool taught it.
 
 **Call `search_nodes` when:**
 
@@ -171,7 +171,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 | Mistake                                                 | Fix                                                                                 |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | Skipping `notifications/initialized`                    | Send it after `initialize`, per the MCP lifecycle                                   |
-| Searching immediately after `append_node`               | The index commits every 5 s; retry after a few seconds                              |
+| Treating an empty `search_nodes` just after `append_node` as a timing miss | The search commits pending appends and waits at most one second. Empty after that means the query did not match |
 | Using slashes in `skill_action` (`rust/borrow-checker`) | Use `::` (`rust::borrow_checker`) — slashes are rejected                            |
 | Omitting `source_harness`                               | Required field; omitting causes a deserialization error                             |
 | No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |

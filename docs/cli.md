@@ -4,7 +4,7 @@
 
 `dreamd --help` and `dreamd <command> --help` are the flag lists. This page is the map, plus the commands that have no other page: `status`, `score`, `setup`, `reset workspace`, and `version`.
 
-On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>`. It does not forward `status`, `recall`, `score`, `archive`, or `migrate`; those need a cargo-installed `dreamd`. See [troubleshooting.md](./troubleshooting.md).
+On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp <cmd>`. From 1.2.1 it forwards every `dreamd` command, including `status`, `recall`, `score`, `archive`, and `migrate`. The 1.2.0 shim did not. See [troubleshooting.md](./troubleshooting.md).
 
 ## Commands
 
@@ -28,7 +28,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 | `migrate` | Episodic schema migrate; the only path is `1.0.0` to `1.0.0` | [migrate.md](./migrate.md) |
 | `reset workspace` | Restore `working/WORKSPACE.md` | [below](#reset-workspace) |
 | `vectors enable` | Download the optional model; exit 2 on the default binary. Deprecated, with the `vectors` feature; removed in 2.0 | [vectors.md](./vectors.md) |
-| `uninstall` | Stop processes, unregister, clear caches | [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) |
+| `uninstall` | Stop processes, unregister, clear caches. Asks for `y` on a tty; `--yes` in a script; exit 2 otherwise | [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) |
 | `update` | Stop processes, clear the native binary cache | same README |
 | `version` | Version, commit, build date, target, schema, vectors | [below](#version) |
 

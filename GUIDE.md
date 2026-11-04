@@ -30,7 +30,7 @@ cd ~/your-project    # must contain .git/, Cargo.toml, package.json, or pyprojec
 npx -y dreamd-mcp setup
 ```
 
-**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — an empty `episodic/AGENT_LEARNINGS.jsonl`, a `working/WORKSPACE.md` scratch file, a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor.
+**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — an empty `episodic/AGENT_LEARNINGS.jsonl`, a `working/WORKSPACE.md` scratch file, a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor. It also merges a `<!-- dreamd:start -->` block into `CLAUDE.md` (Claude Code) or writes `.cursor/rules/dreamd-recall.mdc` (Cursor), and the card it prints at the end lists each of these, with an Undo line for each.
 
 `setup` prompts when it has a TTY; pass `--yes` (with `--harness claude|cursor|both|none`) in scripts. `npx -y dreamd-mcp init` is the lower-level scaffold primitive — it creates the store and writes no harness config, which is also what `npx -y dreamd-mcp setup --no-write-mcp` gives you. A second `init` where `.agent/` already exists and the project is already registered prints `already initialized` and returns before the `.gitignore` append. If `.agent/` exists but the registry entry is missing — after `dreamd init --uninstall-project`, a lost `registry.toml`, or a moved `HOME` — `dreamd init` registers it and does not rewrite the store. `dreamd init --uninstall-project` removes only the registry entry; run `dreamd init` again to put it back.
 
@@ -247,7 +247,7 @@ dreamd blame "axum error"              # id, timestamp, skill_action, content, b
 
 After section 4 the lesson shows up as its own row with an `lsn_evt_…` id and layer `semantic`, next to the episodic events it was promoted from.
 
-Branch the memory files before an experiment, then compare. The `dreamd memory` commands are deprecated in 1.1.0 and will be removed in 2.0; `.agent/` is plain files, so git can do the same job:
+Branch the memory files before an experiment, then compare. The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0; `.agent/` is plain files, so git can do the same job:
 
 ```bash
 dreamd memory branch before-experiment   # snapshots the live files, prints the object id

@@ -379,7 +379,7 @@ A cluster qualifies for promotion when it holds at least
 trailing window (`WINDOW_7_DAYS_SEC`, `WINDOW_30_DAYS_SEC`; the OR-logic is in
 `compute_promoted_clusters`). Either window alone is
 sufficient — this catches both a burst inside a week and a slow drip across a
-month. The counts are planned for `semantic/recurrence_counts.json` as
+month. The counts are written to `semantic/recurrence_counts.json` as
 `RecurrenceSidecar { schema_version: "1.0", clusters }` (`plan::plan_cycle`,
 through `consolidation::sidecar_bytes`), and staged with the cycle's other
 outputs. Recall does not read that file. Its `recurrence` is all-time and per
@@ -405,7 +405,7 @@ daemon restart. There is no expiry timer, no age filter, and no read-time
 staleness check — one cycle run past the trailing window is the whole
 mechanism. A malformed `LESSONS.md` is the deliberate exception: it leaves the
 index untouched, because a corrupt file must never wipe the semantic layer. The
-cited exemplars **stay pinned** — retirement removes the derived document, not
+events the lesson cited **stay pinned** — retirement removes the derived document, not
 the source events.
 
 Every pass that resolves lessons records the ones it could **not** index — a
