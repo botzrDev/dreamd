@@ -787,10 +787,11 @@ per request and emits one `http request` event into it, with a generated
 Two layers:
 
 - **Console → stderr, always.** stdout is reserved for the MCP JSON-RPC channel
-  (`rmcp::transport::stdio`), so logs must never write to it. Format is
-  TTY-conditional: pretty human-readable text when stderr is a terminal, JSON
-  when it is not (CI, service-managed daemon). Detection uses
-  `std::io::IsTerminal` — no `atty` crate.
+  (`rmcp::transport::stdio`), so logs must never write to it. The format is
+  human-readable text whether or not stderr is a terminal, with ANSI colour
+  only on a terminal (detected with `std::io::IsTerminal` — no `atty` crate).
+  `DREAMD_LOG_FORMAT=json` prints one JSON object per line instead
+  (BZR-1470).
 - **File → `~/.agent/dreamd.log`, JSON always — daemon only.** Only `dreamd
   watch`, the long-running daemon, installs this layer; every other invocation
   (`init`, `status`, `doctor`, `dream`, `reset`, `mcp`, bare `--version`, …)
@@ -807,8 +808,15 @@ Two layers:
   buffered file logs. The path is resolved via `DaemonHome::log_file()`, never
   hardcoded.
 
-Level comes from the `DREAMD_LOG` env var (`error|warn|info|debug|trace`,
-standard `EnvFilter` syntax), defaulting to `info`. `DREAMD_LOG` is owned here
+Each layer has its own filter, from the `DREAMD_LOG` env var
+(`error|warn|info|debug|trace`, standard `EnvFilter` syntax). When it is unset,
+empty or invalid, dreamd's own targets log at `info`, every other target
+(tantivy, rmcp, hyper, tower-http, …) at `warn`, and the per-request `http`
+span and `http request` event reach `dreamd.log` only, so `dreamd watch`'s
+console shows its start and stop lines and warnings, not every request. A set
+`DREAMD_LOG` replaces both defaults and applies to both layers:
+`DREAMD_LOG=info` brings library INFO and the request lines back to the
+console, and `DREAMD_LOG=off` silences both. `DREAMD_LOG` is owned here
 (DR-004 / WEG-32), not by the config loader.
 
 If the log directory is not writable, `init_tracing` degrades to console-only

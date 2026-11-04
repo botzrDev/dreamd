@@ -39,6 +39,22 @@ A stale socket file left by a crashed daemon (`kill -9`) is **not** one of these
 
 ---
 
+## Watch shows only its start line
+
+**Symptom:** `dreamd watch` prints `dreamd watch: serving on …` and then nothing while harnesses use it.
+
+**Cause:** By default the console shows the daemon's start and stop lines, warnings and errors, but not one line per request. The per-request `http request` lines go to `~/.agent/dreamd.log`, which is JSON.
+
+**Fix:**
+
+```bash
+tail -f ~/.agent/dreamd.log        # one JSON line per request
+DREAMD_LOG=info dreamd watch       # request lines (and library INFO) on the console too
+DREAMD_LOG_FORMAT=json dreamd watch  # console lines as JSON
+```
+
+---
+
 ## MCP server won't connect
 
 **Symptom:** Harness shows dreamd MCP disconnected, or `dreamd mcp` exits right after starting.

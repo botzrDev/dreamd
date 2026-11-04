@@ -489,7 +489,31 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H3: a habit block written by an older setup keeps "event id" until setup reruns.
 
     Spec: `assignments/BZR-1468.v2.md` (Amendment 1).
-28. **BZR-1469** — setup output: the `dreamd watch` hint fails when no `dreamd` is on `PATH`, and the summary and undo text leave out `CLAUDE.md` and the registry entry. Blocked by 1468.
+28. **BZR-1469** — on `main` (`47f8c94`). `dreamd setup` names commands that work for the launcher, and its card lists everything it wrote:
+    - the npx shim runs the binary with `DREAMD_LAUNCHER=npx` at both exec sites (user ruling D1). Under it, setup's hints name `npx -y dreamd-mcp watch`, `doctor` and `init --uninstall-project`. A `dreamd` binary still names `dreamd …`;
+    - the success card has one row per thing dreamd owns in the project: the store, the registry entry, the `.gitignore` line, each MCP file, each habit file (the `CLAUDE.md` block, the Cursor rule) and the daemon. A store or registry entry that was already there is marked (PM call D3);
+    - `Undo:` is always printed, with a line per row, and names deleting `.agent/` only when that run created it (user ruling D2);
+    - `docs/troubleshooting.md` gains the resumed-session cause: a Claude Code session resumed from another folder does not load this repo's `.mcp.json`.
+
+    PM verification:
+    - workspace 1404 / 0 / 0;
+    - M1–M19 and PM-only P2–P7, P9 and P10 fail as named; P8 is guarded by §6 grep 2;
+    - a real-shim e2e card is byte-identical to §3.5 (1132 bytes);
+    - stripped `dreamd` is 21,918,592 bytes.
+
+    The user's commit also carries docs edits made after sign-off. Three signed-off docs (`GUIDE.md`, `docs/troubleshooting.md`, `packages/dreamd-mcp/README.md`) and 16 files outside the ticket changed, docs only. The PM re-checked them against the tree (`assignments/reports/BZR-1469.verify.landed.md`). Every claim holds except `SKILL.md`'s "Empty after that means the query did not match", which is false when the commit takes longer than the 1 s bound (`search-after-append-tests-retry-past-the-commit-bound`).
+
+    The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
+
+    Held for later (spec §11, Amendment 2):
+    - H1: other commands' hints (doctor's `--repair` advice, `status`, `watch`, MCP errors) still name `dreamd …`;
+    - H2: the first-lesson sentence setup stores has no Undo line;
+    - H3: `init` prints `.agent/.dreamd/` without the leading slash the `.gitignore` line gets;
+    - H4: every setup run rewrites the Cursor rule and the `CLAUDE.md` block;
+    - H5: `DREAMD_LAUNCHER` is inherited by the `watch` setup spawns and by an IDE's npx `dreamd mcp`;
+    - H6: no test reaches `watch_spawn_failed_line`'s launcher argument (PM mutant P1 survives).
+
+    Spec: `assignments/BZR-1469.v2.md` (Amendments 1–2).
 29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469.
 30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
 31. **BZR-1472** — the dream commit message does not name the cited event, and the event is pinned without notice. No blocker; runs after 1471.
@@ -1507,6 +1531,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Tell the user. A pushed partial commit means any rework lands as a follow-up commit.
   - Read the commit message too. Flag one that names another ticket's work, or a sign-off line that is a template placeholder; amending or leaving it is the user's call.
   - At the start of VERIFY, snapshot the tree you verify (the mutant source copy will do). If a commit lands mid-VERIFY, compare `git rev-parse HEAD:<p>` with `git hash-object` of the snapshot for every path in `git diff --name-only <base> HEAD`. When all of them match, SIGN-OFF and LANDED are one step.
+  - Keep that snapshot until LANDED. `git hash-object` without `-w` writes no object, so a recorded hash cannot be diffed with `git diff <hash> HEAD:<p>` ("bad object"). The snapshot copy is the only way to show what changed after sign-off.
+- **Also after sign-off (BZR-1469).** `47f8c94` held the signed-off code, plus docs edits the user made after sign-off: three signed-off docs and 16 files outside the ticket. The commit message named only BZR-1469. The LANDED hash check caught it. The PM diffed each snapshot copy with `HEAD`, re-checked every changed claim against the tree, and landed the ticket once every signed-off path held.
 - **Cross-refs:** `git-diff-name-only-misses-untracked`, `report-back-paste-can-be-truncated`
 
 ### zsh-does-not-word-split-unquoted-variables

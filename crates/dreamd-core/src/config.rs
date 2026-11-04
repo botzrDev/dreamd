@@ -33,8 +33,9 @@ pub struct Config {
     /// Redact secrets/PII on `POST /api/v1/learn`. Default `true`.
     pub redaction: bool,
     /// Parsed and merged like any other key, but nothing reads it: the log
-    /// filter is the `DREAMD_LOG` environment variable (default `info`). Kept
-    /// so existing `config.toml` files that set it still parse.
+    /// filter is the `DREAMD_LOG` environment variable (default: dreamd's
+    /// targets at info, libraries at warn). Kept so existing `config.toml`
+    /// files that set it still parse.
     pub log_level: String,
     /// Dream-cycle scheduling mode. Only `"manual"` is supported; `"auto"` is
     /// rejected with [`AUTO_MODE_UNSUPPORTED`].

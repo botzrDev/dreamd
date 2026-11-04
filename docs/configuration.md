@@ -115,7 +115,7 @@ redaction = false
 # .agent/.dreamd/config.toml
 log_level = "debug"
 # → effective parsed config: log_level=debug, redaction=false
-# → live logs still follow DREAMD_LOG (default info)
+# → live logs still follow DREAMD_LOG (default: dreamd info, libraries warn)
 ```
 
 ---
@@ -130,7 +130,8 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 | `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. Requires `DREAMD_BIN_ALLOW_UNVERIFIED=1` or the shim exits 1. Skips SHA-256 verification. |
 | `DREAMD_BIN_ALLOW_UNVERIFIED` | unset | `npx dreamd-mcp` shim only | Must be `1` alongside `DREAMD_BIN` to accept an unverified local binary. |
 | `DREAMD_LAUNCHER` | unset | `dreamd setup` | The `npx dreamd-mcp` shim sets it to `npx` when it runs the binary. When the value is exactly `npx`, setup's hints print `npx -y dreamd-mcp <command>` instead of `dreamd <command>`. Not meant to be set by hand. |
-| `DREAMD_LOG` | `info` | CLI / daemon tracing | Live log filter (`trace`, `debug`, `info`, `warn`, `error`). Not a TOML key. |
+| `DREAMD_LOG` | dreamd `info`, libraries `warn` | CLI / daemon tracing | Live log filter (`trace`, `debug`, `info`, `warn`, `error`, or `EnvFilter` directives). Not a TOML key. A set, valid value replaces the defaults for both the console and `~/.agent/dreamd.log`; an empty or invalid value gets the defaults. `info` shows library INFO lines (tantivy, rmcp) and `dreamd watch`'s per-request lines on the console. |
+| `DREAMD_LOG_FORMAT` | `text` | CLI / daemon console | `json` (exactly) prints the console's lines on stderr as JSON objects, one per line. Any other value is text. `~/.agent/dreamd.log` is JSON either way. |
 | `HOME` | (OS default) | CLI / daemon layout | Resolves every `~/.agent` path (registry, socket, daemon log). Override in tests/CI sandboxes. An empty value counts as unset. On Windows only, `USERPROFILE` is used when `HOME` is unset or empty. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | unset | dream cycle | API key for the opt-in LLM-assisted dream cycle. See [LLM credentials](#llm-credentials). |
 | `SOURCE_DATE_EPOCH` | unset (wall clock) | `dreamd dream` (in-process cycle and `--dry`; not a cycle proxied to the daemon) | Integer unix timestamp that pins the dream-cycle clock, for reproducible fixtures. A non-integer value is an error, not a fallback. |

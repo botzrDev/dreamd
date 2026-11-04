@@ -254,12 +254,12 @@ CLI surfaces that are, or were, reserved. BZR-1244 deleted the items with no pro
 
 `dreamd_core::observability::init_tracing` installs the process-wide `tracing` subscriber once, at the top of `cli::run()` before subcommand dispatch — the facade and its macro callsites already exist crate-wide, so this baseline is what makes them emit. Up to two layers:
 
-- **Console → stderr, always.** stdout is reserved for the MCP JSON-RPC channel (`rmcp::transport::stdio`), so logs must never write to it. Pretty human-readable text when stderr is a TTY, JSON when it is not (CI, service-managed daemon); TTY detection uses `std::io::IsTerminal`, not the `atty` crate.
+- **Console → stderr, always.** stdout is reserved for the MCP JSON-RPC channel (`rmcp::transport::stdio`), so logs must never write to it. Human-readable text whether or not stderr is a terminal, with ANSI colour only on a terminal (`std::io::IsTerminal`, not the `atty` crate). `DREAMD_LOG_FORMAT=json` prints one JSON object per line instead (BZR-1470).
 - **File → `~/.agent/dreamd.log`, JSON always — `dreamd watch` only.** Every other subcommand (including `mcp`) passes no log path and is console-only; the gate is `cli::wants_daemon_log` (AILAB-184). Written through a non-blocking `tracing-appender`; the returned `WorkerGuard` is bound as `_log_guard` in `run()` and held until the process exits — dropping it early discards buffered file logs. The file is truncated at each daemon start; there is no rotation (WEG-379, not shipped). The path resolves via `DaemonHome::log_file()`, never hardcoded.
 
 HTTP requests get one INFO `http` span and one `http request` event each, with a generated `x-request-id` (AILAB-189); see [`docs/observability.md`](./docs/observability.md).
 
-Log level comes from `DREAMD_LOG` (standard `EnvFilter` syntax, default `info`), owned here rather than by the config loader. `init_tracing` uses `try_init` (idempotent) and degrades to console-only — returning `None` — when the log directory is not writable.
+Each layer has its own filter, from `DREAMD_LOG` (standard `EnvFilter` syntax), owned here rather than by the config loader. When it is unset, empty or invalid, dreamd's own targets log at `info`, every other target (tantivy, rmcp, hyper, …) at `warn`, and the per-request `http request` line goes to `dreamd.log` only, so `dreamd watch`'s console shows its start and stop lines and warnings. A set `DREAMD_LOG` replaces both defaults: `DREAMD_LOG=info` brings library INFO and the request lines back to the console. `init_tracing` uses `try_init` (idempotent) and degrades to console-only — returning `None` — when the log directory is not writable.
 
 ### 11. Portable-memory substrate: canonical natural language, never model-internal representations
 

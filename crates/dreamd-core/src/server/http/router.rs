@@ -142,11 +142,16 @@ pub(crate) fn request_trace_fields<B>(req: &axum::http::Request<B>) -> RequestTr
 /// Open one **INFO** span per request.
 ///
 /// `TraceLayer`'s `DefaultMakeSpan` would never emit here: it opens at DEBUG,
-/// and `DREAMD_LOG` defaults to `info` (`observability::init_tracing`), so a
-/// stock `TraceLayer::new_for_http()` mounts a layer that is silent in every
-/// default install. Hence the hand-rolled `MakeSpan`. `status_code` and
+/// and no default filter (`observability::init_tracing`) lets DEBUG through,
+/// so a stock `TraceLayer::new_for_http()` mounts a layer that is silent in
+/// every default install. Hence the hand-rolled `MakeSpan`. `status_code` and
 /// `latency_ms` are declared [`tracing::field::Empty`] and filled in by
 /// [`http_on_response`] once the response exists.
+///
+/// The span and its `http request` event are INFO. By default they land in
+/// `~/.agent/dreamd.log` only, because the console's default filter holds this
+/// module to WARN; `DREAMD_LOG=info` brings them to the console too
+/// (BZR-1470).
 #[cfg(unix)]
 fn http_make_span<B>(req: &axum::http::Request<B>) -> tracing::Span {
     let f = request_trace_fields(req);
@@ -187,7 +192,7 @@ fn http_make_span<B>(req: &axum::http::Request<B>) -> tracing::Span {
 /// span on its own. A span reaches the log only by decorating an event that
 /// happens inside it, and the only other event on this path is `TraceLayer`'s
 /// default `on_request`, which is DEBUG and so silent under the default
-/// `DREAMD_LOG=info`. Recording onto the span and stopping there would have
+/// filters. Recording onto the span and stopping there would have
 /// produced an INFO span that is correct in every field and logs nothing.
 ///
 /// Still deliberately *not* `DefaultOnResponse::new().level(Level::INFO)`: that
