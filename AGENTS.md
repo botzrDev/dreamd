@@ -444,7 +444,17 @@ Status on 2026-11-03 (`origin/main` `da34a3d`):
 
 Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
 
-**Milestone 1.2.2 polish** (added to the paired loop 2026-11-03, user decision). The findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The paired loop ends when BZR-1473 lands.
+**Milestone 1.2.2 patch** (Linear, target 2026-11-10; decided by Austin 2026-11-04). It ships the BZR-1469 setup-hint fix (item 28 below) on its own, so the Show HN on Wed 2026-11-11 08:00 America/Chicago meets `npx -y dreamd-mcp watch`. It goes ahead of BZR-1470; 1470 resumes after the handoff.
+
+33. **BZR-1516** — 1.2.2 release prep (hitl). Spec: `assignments/release-1.2.2.v2.md`.
+    - **Branch:** `release/v1.2.2`, cut from tag `v1.2.1` (`042d9d2`), in the worktree `/home/botzr/development/dreamd-release-1.2.2`. Austin's instruction overrides the loop's no-`worktree add` rule for this release only.
+    - **What it holds:** only BZR-1469's hunks of `47f8c94`, which are the 9 code, test, shim and doc paths plus one hunk each of `GUIDE.md`, `docs/troubleshooting.md` and `packages/dreamd-mcp/README.md`. These are staged and uncommitted. On `v1.2.1` every code path equals `47f8c94`, except `setup.rs`, which lacks BZR-1468's 21 lines.
+    - **What stays out:** BZR-1467, 1468 and 1470, the 16 docs outside the ticket, and the post-sign-off doc edits.
+    - **Getting 1.2.2 onto `main`** (Austin's decision): one separate staged change, made after the release build. It bumps `main`, fills the shas and moves the BZR-1469 bullet under `[1.2.2]`. The fill PR is not merged and no `--admin` merge is used, so tag `v1.2.2` stays off `main`.
+    - **npm** is published from `chore/mcp-manifest-v1.2.2` (the tag plus the fill), not from `main`, because `main`'s package README describes BZR-1467 and 1468.
+    - Tag and publish stay human.
+
+**Milestone 1.3** (Linear; renamed from "1.2.2 polish" on 2026-11-04, and ships after the Show HN). Added to the paired loop 2026-11-03 as a user decision. It holds the findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. BZR-1469 moved to "1.2.2 patch". Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The paired loop ends when BZR-1519 lands (Austin added it after BZR-1473 on 2026-11-04).
 
 26. **BZR-1467** — on `main` (`6db64aa`). The autobiography start check compares bytes instead of asking git for status (drift entry `autobiography-check-is-content-not-git-status`):
     - `LESSONS.md` is dreamd's when it is absent, equals HEAD's blob, or matches `state.json`'s new `autobiography_baseline` hash;
@@ -514,12 +524,23 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H6: no test reaches `watch_spawn_failed_line`'s launcher argument (PM mutant P1 survives).
 
     Spec: `assignments/BZR-1469.v2.md` (Amendments 1–2).
-29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469.
+29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469. Austin committed its r0 tree as `40425a9` on 2026-11-04, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`); base stays `47f8c94`. Paused for BZR-1516.
 30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
 31. **BZR-1472** — the dream commit message does not name the cited event, and the event is pinned without notice. No blocker; runs after 1471.
 32. **BZR-1473** — `forget --dry-run` prints `removed=true`, which reads as if the event was removed. No blocker; runs after 1472.
+34. **BZR-1519** — the daemon socket: a version handshake on connect, a socket-path override, and per-user docs. It is BZR-1474's follow-up, and runs after 1473 (Austin, 2026-11-04). The acceptance criteria are on the ticket.
+    - **Pre-flight facts (2026-11-04, `40425a9`):**
+      - The ticket names a new `DREAMD_SOCKET`. The tree already has `DREAMD_SOCK`. Clients honor it through `client::resolve_daemon_socket` (`client.rs:58`), and so do `status`, `doctor`, `archive`, `forget`, `setup`, `uninstall`, `update` and the `dream` proxy.
+      - `dreamd watch` does not honor it. It always binds `$HOME/.agent/dreamd.sock` (`docs/configuration.md:140-142`).
+      - `SECURITY.md` covers `DREAMD_SOCK` in its threat model.
+      - Nothing in the tree sends or checks a version on connect.
+    - **Decided (Austin, 2026-11-04; the ticket is updated):**
+      - Use the existing `DREAMD_SOCK`. `dreamd watch` resolves its bind path through `client::resolve_daemon_socket`, like every client. There is no new env var name.
+      - `SECURITY.md`'s threat model for a daemon binding a path set by env var, outside `~/.agent`, is in scope.
+      - Re-read the ticket when writing the spec.
+    - Out of scope: per-project sockets by default, a second env var name, and BZR-1247's topology.
 
-**Not in the loop:** **BZR-1474** (one daemon socket per user or per project) is a decision ticket for the user.
+**Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project). Austin decided on 2026-11-04 that one socket per user stays. BZR-1519 carries the follow-up work.
 
 **Milestone 2.0 removal**
 
