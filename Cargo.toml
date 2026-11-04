@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# 1.2.1. Patch: the Linux binary is static (no glibc floor) plus the 1.2.0 torture fixes. Recall is still BM25 × salience.
-version = "1.2.1"
+# 1.2.2. Patch: `dreamd setup` through the npm shim names `npx -y dreamd-mcp …` commands. Recall is still BM25 × salience.
+version = "1.2.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

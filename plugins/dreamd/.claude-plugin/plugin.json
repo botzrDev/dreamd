@@ -1,6 +1,6 @@
 {
   "name": "dreamd",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Agent memory you can trace, review and roll back. Every lesson cites its source, and a bad memory can be removed with a receipt. Local-first and open source.",
   "author": { "name": "botzrDev", "url": "https://github.com/botzrDev" },
   "homepage": "https://dreamd.dev",
@@ -10,6 +10,6 @@
   "privacyPolicyUrl": "https://dreamd.dev/privacy",
   "supportUrl": "https://github.com/botzrDev/dreamd/issues",
   "mcpServers": {
-    "dreamd": { "command": "npx", "args": ["-y", "dreamd-mcp@1.2.1"] }
+    "dreamd": { "command": "npx", "args": ["-y", "dreamd-mcp@1.2.2"] }
   }
 }
