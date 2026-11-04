@@ -14,8 +14,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **The dream cycle's git commit runs again, and a real edit still holds it** (BZR-1467). A cycle now makes its commit after a fresh setup, after appends, and after its own previous rewrite; before, every one of those skipped with `user_dirty_tree`. A change no dream cycle wrote, such as a hand edit, `dreamd forget` or `archive --force-unpin`, holds the commit until you commit that file. The first cycle after upgrading may skip once, with reason `no_baseline`. The commit holds only `LESSONS.md` and the episodic log: files you had staged stay staged and out of it, a gitignored `.agent/` that git does not track is not committed, a cycle that changes nothing makes no commit, a project inside a larger repo commits its own `.agent/` files, and a store with no `LESSONS.md` commits the log. `dreamd dream` prints why a commit was skipped and which files, `POST /api/v1/dream`'s 200 body has an `autobiography` object, and `dreamd doctor` names the files. `state.json` gains `autobiography_baseline`.
 - **Recall hits carry their id** (BZR-1468). Every hit from `search_nodes` and `GET /api/v1/recall` has an `id`, its first key. For an event it is the `evt_…` id that `dreamd forget` and `--without` take; for a lesson it is `lsn_` followed by the exemplar event's id. The `CLAUDE.md` block and the Cursor rule that `dreamd setup` writes asked the agent to quote an event id that no hit had; they now say "its id", and rerunning `dreamd setup` updates a block an earlier version wrote. The change adds one key: nothing is renamed or removed, and no tool or route takes a new argument.
-- **`dreamd setup` names commands that work, and lists everything it wrote** (BZR-1469). Under `npx -y dreamd-mcp setup`, the hints name `npx -y dreamd-mcp watch`, `npx -y dreamd-mcp doctor` and `npx -y dreamd-mcp init --uninstall-project`, because an npx install puts no `dreamd` on `PATH`; a `dreamd` binary still names `dreamd …`. The success card now lists the registry entry, the `.gitignore` line and the habit files (the `CLAUDE.md` block and the Cursor rule) next to the store and the MCP files, and marks a store or registry entry that was already there. `Undo:` is always printed, with a line for each of these, and names deleting `.agent/` only when that run created it. The npx shim sets `DREAMD_LAUNCHER=npx` for the binary it runs.
 - **Console logs are readable text, and library INFO lines no longer print by default** (BZR-1470). Logs on stderr are text even when stderr is not a terminal, such as under a service manager or a redirect; they used to be JSON there. Colour is still used only on a terminal. With `DREAMD_LOG` unset, INFO lines from libraries such as tantivy and rmcp no longer print: dreamd's own lines stay at INFO and other targets at WARN, on the console and in `~/.agent/dreamd.log`. `dreamd watch` prints its start and stop lines and any warnings, and its per-request `http request` lines go to `~/.agent/dreamd.log` only. `DREAMD_LOG` set to any valid value replaces these defaults for both, so `DREAMD_LOG=info` brings back library INFO and the request lines on the console; an empty or invalid value now gets the defaults, where it used to mean `info`. `DREAMD_LOG_FORMAT=json` prints the console's lines as JSON. `~/.agent/dreamd.log` is still JSON.
+
+## [1.2.2] - 2026-11-04
+
+A patch release with one fix: `dreamd setup` run through `npx -y dreamd-mcp` now names commands that work under npx. Recall is still BM25 × salience.
+
+### Fixed
+
+- **`dreamd setup` names commands that work, and lists everything it wrote** (BZR-1469). Under `npx -y dreamd-mcp setup`, the hints name `npx -y dreamd-mcp watch`, `npx -y dreamd-mcp doctor` and `npx -y dreamd-mcp init --uninstall-project`, because an npx install puts no `dreamd` on `PATH`; a `dreamd` binary still names `dreamd …`. The success card now lists the registry entry, the `.gitignore` line and the habit files (the `CLAUDE.md` block and the Cursor rule) next to the store and the MCP files, and marks a store or registry entry that was already there. `Undo:` is always printed, with a line for each of these, and names deleting `.agent/` only when that run created it. The npx shim sets `DREAMD_LAUNCHER=npx` for the binary it runs.
 
 ## [1.2.1] - 2026-11-03
 
@@ -356,7 +363,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/botzrDev/dreamd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/botzrDev/dreamd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/botzrDev/dreamd/compare/v1.0.1...v1.2.0
 [1.0.1]: https://github.com/botzrDev/dreamd/compare/v1.0.0...v1.0.1

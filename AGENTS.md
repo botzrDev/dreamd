@@ -122,7 +122,7 @@ Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle
 
 Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
 
-On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag and publish stay human.
+On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag `v1.2.2` is `d581785` (2026-11-04, Latest; cut from `v1.2.1`, and not an ancestor of `main`). npm `dreamd-mcp` is `1.2.2` on both `latest` and `next`, and the MCP registry's latest is 1.2.2 (checked 2026-11-04). `main` took the 1.2.2 version from one separate commit, not from a merge of the release branches, which Austin chose to delete once `main` had 1.2.2. Tag and publish stay human.
 
 Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, animated GIF, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
 
@@ -448,6 +448,12 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - **Getting 1.2.2 onto `main`** (Austin's decision): one separate staged change, made after the release build. It bumps `main`, fills the shas and moves the BZR-1469 bullet under `[1.2.2]`. The fill PR is not merged and no `--admin` merge is used, so tag `v1.2.2` stays off `main`.
     - **npm** is published from `chore/mcp-manifest-v1.2.2` (the tag plus the fill), not from `main`, because `main`'s package README describes BZR-1467 and 1468.
     - Tag and publish stay human.
+    - **Released 2026-11-04.** BZR-1516 is Done, and its Linear comment is the release record:
+      - tag `v1.2.2` (lightweight) is `d581785`, on `fd78011` (the BZR-1469 cherry-pick) over `v1.2.1`;
+      - the GitHub release was published 16:50:45Z and is Latest. `release.yml` run 41867571203 built all four targets, and its "Open PR" step failed as on 1.2.1;
+      - npm `dreamd-mcp@1.2.2` was published at 17:04:19Z from `01fc2ba` (`d581785` plus the manifest fill; shasum `4cb03539…`). `latest` and `next` are 1.2.2, and the MCP registry's 1.2.2 is latest (17:14:02Z);
+      - a live-download npx run in four clean containers, and the public `npx -y dreamd-mcp` afterwards, printed `start it with: npx -y dreamd-mcp watch`. Report: `assignments/reports/release-1.2.2.verify.r0.md`;
+      - Austin decided the same day to delete `release/v1.2.2`, `chore/mcp-manifest-v1.2.2` and the release worktree once `main` had 1.2.2. The tags stay.
 
 **Milestone 1.3** (Linear; renamed from "1.2.2 polish" on 2026-11-04, and ships after the Show HN). Added to the paired loop 2026-11-03 as a user decision. It holds the findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. BZR-1469 moved to "1.2.2 patch". Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The paired loop ends when BZR-1519 lands (Austin added it after BZR-1473 on 2026-11-04).
 
@@ -519,7 +525,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H6: no test reaches `watch_spawn_failed_line`'s launcher argument (PM mutant P1 survives).
 
     Spec: `assignments/BZR-1469.v2.md` (Amendments 1–2).
-29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469. Austin committed its r0 tree as `40425a9` on 2026-11-04, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`); base stays `47f8c94`. Paused for BZR-1516.
+29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469. Austin committed its r0 tree as `40425a9` on 2026-11-04, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`); base stays `47f8c94`. VERIFY r0 (`assignments/reports/BZR-1470.verify.r0.md`): every row passed except PM-only mutants P4 (`init_tracing` ignores `DREAMD_LOG_FORMAT`) and P6 (`watch` ignores `DREAMD_LOG`), which survive 1,416 / 0 / 0, and a stale `service.rs:137-138` rustdoc. Spec Amendment 2 is r1: test 13 plus the rustdoc, with mutation rows M16 and M17.
 30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
 31. **BZR-1472** — the dream commit message does not name the cited event, and the event is pinned without notice. No blocker; runs after 1471.
 32. **BZR-1473** — `forget --dry-run` prints `removed=true`, which reads as if the event was removed. No blocker; runs after 1472.
@@ -1605,6 +1611,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - At VERIFY, mutate the call site as well as the callee: swap a `warn` arm for `panic!`, drop a constant from an expression, skip one input class.
   - Same family as `an-ordering-test-must-fail-the-step-it-orders` and `mutate-each-check-of-a-compound-guard-alone`.
 - **Recurred on BZR-1469.** The spec moved the spawn-failure copy into a pure helper so it could be tested (test 8), but left the call site's `req.launcher` argument untested. PM mutant P1, which passes `Launcher::Binary` there, survived every suite. No test can make `spawn_watch` fail, so it was held as H6 instead of adding a spawner seam. When a spec splits copy into a helper because the caller is unreachable, it says so in §11 from the start.
+- **Recurred on BZR-1470.** §3.1 said `init_tracing` reads `DREAMD_LOG_FORMAT`, and that `DREAMD_LOG` replaces both defaults for `watch`. Every §5 row mutated `build_subscriber` or the filter constants, which the unit tests call directly. Two PM mutants, P4 (ignore `DREAMD_LOG_FORMAT`) and P6 (the file-path call passes `None` for `dreamd_log`), survived 1,416 / 0 / 0. Test 12 covered `DREAMD_LOG` only on the console-only path `mcp` uses. When a pure builder is split out for unit tests, the spec also needs one integration test per env input, through the binary, on each caller's path.
 - **Cross-refs:** `an-ordering-test-must-fail-the-step-it-orders`, `mutate-each-check-of-a-compound-guard-alone`, `mutation-must-get-past-the-backstop`
 
 ### error-text-names-its-crate-by-grep-not-by-guess
