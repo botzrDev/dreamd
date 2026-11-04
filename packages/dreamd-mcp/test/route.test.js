@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
-const { DREAMD_SUBCOMMANDS, resolveDreamdArgs, topLevelFlag } = require('../bin/dreamd-mcp.js');
+const { DREAMD_SUBCOMMANDS, resolveDreamdArgs, topLevelFlag, childEnv } = require('../bin/dreamd-mcp.js');
 
 test('bare invocation -> dreamd mcp (IDE MCP server)', () => {
   assert.deepStrictEqual(resolveDreamdArgs([]), ['mcp']);
@@ -141,4 +141,14 @@ test('no top-level flag for bare invocation or a subcommand', () => {
 test('a flag AFTER a subcommand is not a top-level flag (routes to the binary)', () => {
   assert.strictEqual(topLevelFlag(['init', '--help']), null);
   assert.strictEqual(topLevelFlag(['version', '--help']), null);
+});
+
+// BZR-1469 test 15: the binary learns it was launched through npx, and keeps
+// the rest of the caller's environment.
+test('childEnv sets DREAMD_LAUNCHER=npx and keeps the rest', () => {
+  const input = { PATH: '/x', DREAMD_LAUNCHER: 'other' };
+  const env = childEnv(input);
+  assert.strictEqual(env.PATH, '/x');
+  assert.strictEqual(env.DREAMD_LAUNCHER, 'npx');
+  assert.deepStrictEqual(input, { PATH: '/x', DREAMD_LAUNCHER: 'other' }, 'the input is unchanged');
 });

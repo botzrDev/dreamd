@@ -22,9 +22,9 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dreamd_core::{AgentRoot, DaemonHome};
+use dreamd_core::{AgentRoot, DaemonHome, GITIGNORE_SNIPPET};
 
-use super::init::{self, find_project_root, InitError};
+use super::init::{self, find_project_root, InitError, InitOutcome};
 use super::setup_mcp::{self, Action, McpError, TargetPlan};
 
 /// Floating-pin MCP server block printed as copy-paste guidance. `npx -y`
@@ -94,6 +94,34 @@ impl std::fmt::Display for Harness {
             Self::None => "none",
         };
         f.write_str(s)
+    }
+}
+
+/// How the user started dreamd, which decides the command a hint names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Launcher {
+    /// A `dreamd` binary the user runs directly.
+    #[default]
+    Binary,
+    /// The `npx dreamd-mcp` shim, which puts no `dreamd` on PATH.
+    Npx,
+}
+
+impl Launcher {
+    /// `DREAMD_LAUNCHER`'s value. Only the exact string `npx` means npx.
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some("npx") => Launcher::Npx,
+            _ => Launcher::Binary,
+        }
+    }
+
+    /// The command line for `args`, e.g. `watch` or `init --uninstall-project`.
+    pub fn command(self, args: &str) -> String {
+        match self {
+            Launcher::Binary => format!("dreamd {args}"),
+            Launcher::Npx => format!("npx -y dreamd-mcp {args}"),
+        }
     }
 }
 
@@ -184,6 +212,9 @@ pub struct SetupRequest<'a> {
     /// Which prompts remain after the explicitly-typed flags claim their own.
     /// Ignored when `yes` is set.
     pub interactive: Interactive,
+    /// How dreamd was launched, which decides the command every hint names.
+    /// `cli.rs` reads it from `DREAMD_LAUNCHER`.
+    pub launcher: Launcher,
 }
 
 /// `dreamd setup` entry point. Order: resolve project root → prompt (TTY, no
@@ -285,9 +316,9 @@ pub fn run(
     } else {
         // Reuse init verbatim (non-quiet): the scaffold lines and the first-run
         // privacy disclosure are exactly what a first-run user needs to see.
-        init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
+        let init_outcome = init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
         let wired = wire_mcp(req, &project_root, out, err)?;
-        install_habit(&project_root, req.harness)?;
+        let habits = install_habit(&project_root, req.harness)?;
         // After the config is on disk, and before `watch` takes the log: a
         // sentence typed here is appended through the coordinator, then the
         // card tells them the words to ask next. `--yes` never reads stdin.
@@ -314,8 +345,17 @@ pub fn run(
             }
         };
         let daemon_live = start_watch_and_probe(req, &project_root, err)?;
-        report_doctor(req.cwd, out)?;
-        write_success_card(&wired, req.harness, daemon_live, lesson.as_ref(), out)?;
+        report_doctor(req.cwd, req.launcher, out)?;
+        let card = Card {
+            init: init_outcome,
+            wired: &wired,
+            habits: &habits,
+            harness: req.harness,
+            daemon_live,
+            lesson: lesson.as_ref(),
+            launcher: req.launcher,
+        };
+        write_success_card(&card, out)?;
     }
 
     Ok(())
@@ -620,6 +660,15 @@ fn daemon_is_live(daemon_home: &Path) -> bool {
     dreamd_core::daemon_client::tcp_daemon_is_live(&DaemonHome::new(daemon_home).server_json())
 }
 
+/// The line `start_watch_and_probe` prints when the background spawn fails.
+/// Pure, so the command it names is testable.
+fn watch_spawn_failed_line(launcher: Launcher, e: &std::io::Error) -> String {
+    format!(
+        "dreamd: could not start the daemon in the background ({e}) \u{2014} run `{}` yourself.",
+        launcher.command("watch")
+    )
+}
+
 /// Start the daemon when asked, then report whether one is actually listening.
 ///
 /// The card reports the probe, not the request: a spawn that failed, a daemon
@@ -648,10 +697,7 @@ fn start_watch_and_probe(
     if let Err(e) = spawn_watch(project_root) {
         // Advisory only. The scaffold and the MCP wiring already succeeded, and
         // the card will honestly say `not running`.
-        writeln!(
-            err,
-            "dreamd: could not start the daemon in the background ({e}) \u{2014} run `dreamd watch` yourself."
-        )?;
+        writeln!(err, "{}", watch_spawn_failed_line(req.launcher, &e))?;
         return Ok(daemon_is_live(req.daemon_home));
     }
 
@@ -673,7 +719,7 @@ fn start_watch_and_probe(
 ///
 /// Doctor's own report is long enough to bury the success card, so it is
 /// captured and summarised rather than printed.
-fn report_doctor(cwd: &Path, out: &mut dyn Write) -> std::io::Result<()> {
+fn report_doctor(cwd: &Path, launcher: Launcher, out: &mut dyn Write) -> std::io::Result<()> {
     let Ok(config) = dreamd_core::config::load_config(cwd) else {
         return Ok(());
     };
@@ -711,7 +757,8 @@ fn report_doctor(cwd: &Path, out: &mut dyn Write) -> std::io::Result<()> {
         Ok(true) => writeln!(out, "doctor: all checks passed"),
         Ok(false) => writeln!(
             out,
-            "doctor: warnings found \u{2014} run `dreamd doctor` for detail"
+            "doctor: warnings found \u{2014} run `{}` for detail",
+            launcher.command("doctor")
         ),
         // A diagnostic that cannot run is not a setup failure.
         Err(_) => Ok(()),
@@ -724,49 +771,106 @@ fn write_card_row(out: &mut dyn Write, label: &str, value: &str) -> std::io::Res
     writeln!(out, "{CARD_GUTTER}{label:<CARD_LABEL_WIDTH$}{value}")
 }
 
+/// The registry path as the card shows it: the tilde form `init` prints,
+/// whatever the resolved daemon home is.
+const REGISTRY_TILDE: &str = "~/.agent/registry.toml";
+
+/// The habit labels [`install_habit`] returns, in the order it writes them.
+const HABIT_CLAUDE: &str = "CLAUDE.md";
+const HABIT_CURSOR: &str = ".cursor/rules/dreamd-recall.mdc";
+
+/// Left margin of every `Undo:` line, aligned under the `Next:` copy.
+const UNDO_INDENT: &str = "        ";
+
+/// Everything the success card reports. Pure data, so the copy is testable
+/// without a filesystem or a socket.
+struct Card<'a> {
+    init: InitOutcome,
+    wired: &'a [&'static str],
+    habits: &'a [&'static str],
+    harness: Harness,
+    daemon_live: bool,
+    lesson: Option<&'a RecordedLesson>,
+    launcher: Launcher,
+}
+
+fn write_undo_line(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
+    writeln!(out, "{UNDO_INDENT}{line}")
+}
+
 /// The success card — fixed copy, printed once, at the end of a real
 /// (non-dry-run) setup. Tests assert it whole.
 ///
-/// Pure by construction: the wired labels, the harness, and daemon liveness are
-/// all passed in, so the copy is unit-testable without touching a filesystem or
-/// a socket. `wired` empty means nothing was written for the user (`--harness
-/// none`, `--no-write-mcp`, or wizard choice 4), which swaps the `wired` rows
-/// and the `Undo:` block for the copy-paste MCP block.
-fn write_success_card(
-    wired: &[&'static str],
-    harness: Harness,
-    daemon_live: bool,
-    lesson: Option<&RecordedLesson>,
-    out: &mut dyn Write,
-) -> std::io::Result<()> {
+/// Pure by construction: everything it reports is in `card`, so the copy is
+/// unit-testable without touching a filesystem or a socket. Each row is one
+/// thing dreamd owns in this project after the run (the store, the registry
+/// entry, the `.gitignore` line, each MCP file, each habit file, the daemon),
+/// and a row marks what was already there. `wired` empty means no MCP config
+/// was written for the user (`--harness none`, `--no-write-mcp`, or wizard
+/// choice 4), which swaps the `wired` rows for the copy-paste MCP block.
+///
+/// `Undo:` is always printed, because every outcome leaves the project
+/// registered. It names deleting `.agent/` only when this run created it.
+fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<()> {
+    let scaffolded = card.init == InitOutcome::Scaffolded;
+    let gitignore_entry = GITIGNORE_SNIPPET.trim_end();
+    let has_claude_habit = card.habits.contains(&HABIT_CLAUDE);
+    let has_cursor_habit = card.habits.contains(&HABIT_CURSOR);
+
     // Blank line first: the card must not run into init's scaffold output.
     writeln!(out)?;
     writeln!(out, "\u{2713} dreamd is set up.")?;
     writeln!(out)?;
 
-    write_card_row(out, "scaffolded", ".agent/")?;
-    for label in wired {
+    if scaffolded {
+        write_card_row(out, "scaffolded", ".agent/")?;
+    } else {
+        write_card_row(out, "store", ".agent/  (already there)")?;
+    }
+    if card.init == InitOutcome::AlreadyInitialized {
+        write_card_row(
+            out,
+            "registered",
+            &format!("{REGISTRY_TILDE}  (already there)"),
+        )?;
+    } else {
+        write_card_row(out, "registered", REGISTRY_TILDE)?;
+    }
+    if scaffolded {
+        write_card_row(
+            out,
+            "gitignore",
+            &format!(".gitignore  (+ {gitignore_entry})"),
+        )?;
+    }
+    for label in card.wired {
         write_card_row(
             out,
             "wired",
             &format!("{label}  (dreamd \u{2192} npx -y dreamd-mcp)"),
         )?;
     }
-    write_card_row(
-        out,
-        "daemon",
-        if daemon_live {
-            "running"
-        } else {
-            "not running \u{2014} start it with: dreamd watch"
-        },
-    )?;
+    if has_claude_habit {
+        write_card_row(out, "habit", &format!("{HABIT_CLAUDE}  (dreamd block)"))?;
+    }
+    if has_cursor_habit {
+        write_card_row(out, "habit", HABIT_CURSOR)?;
+    }
+    let daemon = if card.daemon_live {
+        "running".to_string()
+    } else {
+        format!(
+            "not running \u{2014} start it with: {}",
+            card.launcher.command("watch")
+        )
+    };
+    write_card_row(out, "daemon", &daemon)?;
     writeln!(out)?;
 
-    if wired.is_empty() {
+    if card.wired.is_empty() {
         // Same rule as `write_next_steps`: name the files the chosen harness
         // reads, or fall back to a generic phrase when there are none.
-        let targets = harness.config_targets();
+        let targets = card.harness.config_targets();
         let where_to = if targets.is_empty() {
             "your harness MCP config".to_string()
         } else {
@@ -779,10 +883,10 @@ fn write_success_card(
         writeln!(
             out,
             "  Next: reload {}, then ask your agent:",
-            harness.display_name()
+            card.harness.display_name()
         )?;
     }
-    if let Some(lesson) = lesson {
+    if let Some(lesson) = card.lesson {
         // Their words, not the generic verify sentence: the next search has
         // to share tokens with the line that was just stored.
         writeln!(out, "        {}", lesson.sentence)?;
@@ -807,16 +911,50 @@ fn write_success_card(
         writeln!(out, "        You should see it call search_nodes.")?;
     }
 
-    if !wired.is_empty() {
-        writeln!(out)?;
-        writeln!(
+    writeln!(out)?;
+    writeln!(out, "  Undo:")?;
+    if !card.wired.is_empty() {
+        write_undo_line(
             out,
-            "  Undo: remove the \"dreamd\" block from {}.",
-            wired.join(" and ")
+            &format!(
+                "Remove the \"dreamd\" block from {}.",
+                card.wired.join(" and ")
+            ),
         )?;
-        writeln!(
+    }
+    if has_claude_habit {
+        write_undo_line(
             out,
-            "        Re-run with --no-write-mcp to skip config writes entirely."
+            &format!(
+                "Remove the dreamd block ({CLAUDE_BLOCK_START} to {CLAUDE_BLOCK_END}) from {HABIT_CLAUDE}."
+            ),
+        )?;
+    }
+    if has_cursor_habit {
+        write_undo_line(out, &format!("Delete {HABIT_CURSOR}."))?;
+    }
+    if scaffolded {
+        write_undo_line(
+            out,
+            &format!("Remove the {gitignore_entry} line from .gitignore."),
+        )?;
+    }
+    write_undo_line(
+        out,
+        &format!(
+            "Run `{}` to remove the registry entry.",
+            card.launcher.command("init --uninstall-project")
+        ),
+    )?;
+    if scaffolded {
+        // D2: only a store this run created is named for deletion. A rerun
+        // must never suggest deleting the memory that was already there.
+        write_undo_line(out, "Delete .agent/ last: it holds this project's memory.")?;
+    }
+    if !card.wired.is_empty() {
+        write_undo_line(
+            out,
+            "Re-run with --no-write-mcp to skip config writes entirely.",
         )?;
     }
     // npx users never pass through GitHub; this is the one place the CLI
@@ -839,7 +977,8 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
     writeln!(out, "next steps:")?;
     writeln!(
         out,
-        "  1. start the shared daemon (one serialized writer): dreamd watch"
+        "  1. start the shared daemon (one serialized writer): {}",
+        req.launcher.command("watch")
     )?;
     if req.start_watch {
         // Only reachable under `--dry-run`, which starts nothing by definition;
@@ -958,23 +1097,29 @@ fn write_habit_plan(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
 
 /// Write the habit files for `harness`. Claude gets a marked `CLAUDE.md` block;
 /// Cursor gets the always-on rule. `--harness none` writes neither.
-fn install_habit(project_root: &Path, harness: Harness) -> std::io::Result<()> {
+///
+/// Returns the labels it wrote, in this order: [`HABIT_CLAUDE`], then
+/// [`HABIT_CURSOR`]. The success card lists them and names their undo.
+fn install_habit(project_root: &Path, harness: Harness) -> std::io::Result<Vec<&'static str>> {
     let (claude, cursor) = habit_targets(harness);
+    let mut written = Vec::with_capacity(2);
     if claude {
-        let path = project_root.join("CLAUDE.md");
+        let path = project_root.join(HABIT_CLAUDE);
         let existing = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
         std::fs::write(&path, merge_claude_md(&existing))?;
+        written.push(HABIT_CLAUDE);
     }
     if cursor {
         let dir = project_root.join(".cursor").join("rules");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("dreamd-recall.mdc"), CURSOR_RECALL_RULE)?;
+        written.push(HABIT_CURSOR);
     }
-    Ok(())
+    Ok(written)
 }
 
 fn write_first_lesson_prompt(err: &mut dyn Write) -> std::io::Result<()> {
@@ -1350,61 +1495,321 @@ mod tests {
         );
     }
 
-    /// Render the card into a String. Pure — no filesystem, no daemon.
-    fn card(wired: &[&'static str], harness: Harness, daemon_live: bool) -> String {
+    /// Render a card into a String. Pure — no filesystem, no daemon.
+    fn render(card: &Card<'_>) -> String {
         let mut out = Vec::new();
-        write_success_card(wired, harness, daemon_live, None, &mut out)
-            .expect("card writing must not fail on an in-memory io");
+        write_success_card(card, &mut out).expect("card writing must not fail on an in-memory io");
         String::from_utf8(out).expect("card copy is utf-8")
+    }
+
+    /// A card with every input named, and no lesson.
+    fn card_with(
+        init: InitOutcome,
+        launcher: Launcher,
+        harness: Harness,
+        wired: &[&'static str],
+        habits: &[&'static str],
+        daemon_live: bool,
+    ) -> String {
+        render(&Card {
+            init,
+            wired,
+            habits,
+            harness,
+            daemon_live,
+            lesson: None,
+            launcher,
+        })
+    }
+
+    /// The habit labels `install_habit` returns for `harness`.
+    fn habits_for(harness: Harness) -> &'static [&'static str] {
+        match harness {
+            Harness::Claude => &[HABIT_CLAUDE],
+            Harness::Cursor => &[HABIT_CURSOR],
+            Harness::Both => &[HABIT_CLAUDE, HABIT_CURSOR],
+            Harness::None => &[],
+        }
+    }
+
+    /// A first run's card: a new store, a `dreamd` binary, and the habit
+    /// files `harness` owns.
+    fn card(wired: &[&'static str], harness: Harness, daemon_live: bool) -> String {
+        card_with(
+            InitOutcome::Scaffolded,
+            Launcher::Binary,
+            harness,
+            wired,
+            habits_for(harness),
+            daemon_live,
+        )
     }
 
     /// The card is fixed copy, so it is asserted whole — the same
     /// way the two prompts are. Substring checks let blank-line layout and the
     /// `Next:`/`Undo:` indentation drift without a single test going red; this
     /// is the assertion that makes any card edit deliberate.
+    ///
+    /// BZR-1469 test 1: a first run under a `dreamd` binary lists everything
+    /// it wrote, and Undo names each of them, `.agent/` last.
     #[test]
     fn wired_card_copy_is_frozen() {
         assert_eq!(
-            card(&[".mcp.json"], Harness::Claude, false),
-            "\n\u{2713} dreamd is set up.\n\
-             \n  \
-             scaffolded   .agent/\n  \
-             wired        .mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n  \
-             daemon       not running \u{2014} start it with: dreamd watch\n\
-             \n  \
-             Next: reload Claude Code, then ask your agent:\n        \
-             \"What has dreamd remembered about this codebase?\"\n        \
-             You should see it call search_nodes.\n\
-             \n  \
-             Undo: remove the \"dreamd\" block from .mcp.json.\n        \
-             Re-run with --no-write-mcp to skip config writes entirely.\n\
-             \n  \
-             Source, docs, issues: https://github.com/botzrDev/dreamd\n",
+            card_with(
+                InitOutcome::Scaffolded,
+                Launcher::Binary,
+                Harness::Claude,
+                &[".mcp.json"],
+                &[HABIT_CLAUDE],
+                false,
+            ),
+            concat!(
+                "\n",
+                "\u{2713} dreamd is set up.\n",
+                "\n",
+                "  scaffolded   .agent/\n",
+                "  registered   ~/.agent/registry.toml\n",
+                "  gitignore    .gitignore  (+ /.agent/.dreamd/)\n",
+                "  wired        .mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n",
+                "  habit        CLAUDE.md  (dreamd block)\n",
+                "  daemon       not running \u{2014} start it with: dreamd watch\n",
+                "\n",
+                "  Next: reload Claude Code, then ask your agent:\n",
+                "        \"What has dreamd remembered about this codebase?\"\n",
+                "        You should see it call search_nodes.\n",
+                "\n",
+                "  Undo:\n",
+                "        Remove the \"dreamd\" block from .mcp.json.\n",
+                "        Remove the dreamd block (<!-- dreamd:start --> to <!-- dreamd:end -->) from CLAUDE.md.\n",
+                "        Remove the /.agent/.dreamd/ line from .gitignore.\n",
+                "        Run `dreamd init --uninstall-project` to remove the registry entry.\n",
+                "        Delete .agent/ last: it holds this project's memory.\n",
+                "        Re-run with --no-write-mcp to skip config writes entirely.\n",
+                "\n",
+                "  Source, docs, issues: https://github.com/botzrDev/dreamd\n",
+            ),
             "the success card copy is fixed"
         );
     }
 
-    /// The `--no-write-mcp` shape: a harness was chosen but nothing was written,
-    /// so the `wired` rows and the `Undo:` block give way to the copy-paste MCP
-    /// block naming the file that harness reads.
+    /// The `--no-write-mcp` shape: a harness was chosen but no MCP config was
+    /// written, so the `wired` rows give way to the copy-paste MCP block naming
+    /// the file that harness reads. Undo is still printed, without the MCP
+    /// lines, because the habit, the `.gitignore` line, the registry entry and
+    /// the store were all written (BZR-1469 test 2).
     #[test]
     fn skipped_card_copy_is_frozen() {
         assert_eq!(
-            card(&[], Harness::Claude, false),
-            "\n\u{2713} dreamd is set up.\n\
-             \n  \
-             scaffolded   .agent/\n  \
-             daemon       not running \u{2014} start it with: dreamd watch\n\
-             \n  \
-             Next: add the dreamd MCP server to .mcp.json:\n          \
-             {\"mcpServers\":{\"dreamd\":{\"command\":\"npx\",\"args\":[\"-y\",\"dreamd-mcp\"]}}}\n        \
-             then reload your harness and ask your agent:\n        \
-             \"What has dreamd remembered about this codebase?\"\n        \
-             You should see it call search_nodes.\n\
-             \n  \
-             Source, docs, issues: https://github.com/botzrDev/dreamd\n",
+            card_with(
+                InitOutcome::Scaffolded,
+                Launcher::Binary,
+                Harness::Claude,
+                &[],
+                &[HABIT_CLAUDE],
+                false,
+            ),
+            concat!(
+                "\n",
+                "\u{2713} dreamd is set up.\n",
+                "\n",
+                "  scaffolded   .agent/\n",
+                "  registered   ~/.agent/registry.toml\n",
+                "  gitignore    .gitignore  (+ /.agent/.dreamd/)\n",
+                "  habit        CLAUDE.md  (dreamd block)\n",
+                "  daemon       not running \u{2014} start it with: dreamd watch\n",
+                "\n",
+                "  Next: add the dreamd MCP server to .mcp.json:\n",
+                "          {\"mcpServers\":{\"dreamd\":{\"command\":\"npx\",\"args\":[\"-y\",\"dreamd-mcp\"]}}}\n",
+                "        then reload your harness and ask your agent:\n",
+                "        \"What has dreamd remembered about this codebase?\"\n",
+                "        You should see it call search_nodes.\n",
+                "\n",
+                "  Undo:\n",
+                "        Remove the dreamd block (<!-- dreamd:start --> to <!-- dreamd:end -->) from CLAUDE.md.\n",
+                "        Remove the /.agent/.dreamd/ line from .gitignore.\n",
+                "        Run `dreamd init --uninstall-project` to remove the registry entry.\n",
+                "        Delete .agent/ last: it holds this project's memory.\n",
+                "\n",
+                "  Source, docs, issues: https://github.com/botzrDev/dreamd\n",
+            ),
             "the success card copy is fixed"
         );
+    }
+
+    /// BZR-1469 test 3: under the npx shim every command the card names is
+    /// the npx form (spec §3.5, byte for byte).
+    #[test]
+    fn npx_card_copy_is_frozen() {
+        assert_eq!(
+            card_with(
+                InitOutcome::Scaffolded,
+                Launcher::Npx,
+                Harness::Both,
+                &[".mcp.json", ".cursor/mcp.json"],
+                &[HABIT_CLAUDE, HABIT_CURSOR],
+                false,
+            ),
+            concat!(
+                "\n",
+                "\u{2713} dreamd is set up.\n",
+                "\n",
+                "  scaffolded   .agent/\n",
+                "  registered   ~/.agent/registry.toml\n",
+                "  gitignore    .gitignore  (+ /.agent/.dreamd/)\n",
+                "  wired        .mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n",
+                "  wired        .cursor/mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n",
+                "  habit        CLAUDE.md  (dreamd block)\n",
+                "  habit        .cursor/rules/dreamd-recall.mdc\n",
+                "  daemon       not running \u{2014} start it with: npx -y dreamd-mcp watch\n",
+                "\n",
+                "  Next: reload Claude Code and Cursor, then ask your agent:\n",
+                "        \"What has dreamd remembered about this codebase?\"\n",
+                "        You should see it call search_nodes.\n",
+                "\n",
+                "  Undo:\n",
+                "        Remove the \"dreamd\" block from .mcp.json and .cursor/mcp.json.\n",
+                "        Remove the dreamd block (<!-- dreamd:start --> to <!-- dreamd:end -->) from CLAUDE.md.\n",
+                "        Delete .cursor/rules/dreamd-recall.mdc.\n",
+                "        Remove the /.agent/.dreamd/ line from .gitignore.\n",
+                "        Run `npx -y dreamd-mcp init --uninstall-project` to remove the registry entry.\n",
+                "        Delete .agent/ last: it holds this project's memory.\n",
+                "        Re-run with --no-write-mcp to skip config writes entirely.\n",
+                "\n",
+                "  Source, docs, issues: https://github.com/botzrDev/dreamd\n",
+            ),
+            "the npx success card copy is fixed"
+        );
+    }
+
+    /// BZR-1469 test 4: a rerun marks the store and the entry as already
+    /// there, and its Undo never suggests deleting `.agent/` (D2).
+    #[test]
+    fn rerun_card_leaves_the_store_out_of_undo() {
+        let rendered = card_with(
+            InitOutcome::AlreadyInitialized,
+            Launcher::Binary,
+            Harness::Claude,
+            &[".mcp.json"],
+            &[HABIT_CLAUDE],
+            false,
+        );
+        assert!(
+            rendered.contains("  store        .agent/  (already there)\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("  registered   ~/.agent/registry.toml  (already there)\n"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered
+                .lines()
+                .any(|l| l.starts_with("  scaffolded") || l.starts_with("  gitignore")),
+            "a rerun created no store and added no .gitignore line; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Delete .agent/"),
+            "a rerun must never suggest deleting the memory; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("from .gitignore"),
+            "a rerun added no .gitignore line to undo; got: {rendered}"
+        );
+        assert!(
+            rendered
+                .contains("Run `dreamd init --uninstall-project` to remove the registry entry."),
+            "{rendered}"
+        );
+    }
+
+    /// BZR-1469 test 5: a store that was there but unregistered gets a new
+    /// entry, so only the store is marked, and Undo is printed with nothing
+    /// wired.
+    #[test]
+    fn registered_card_marks_only_the_store() {
+        let rendered = card_with(
+            InitOutcome::Registered,
+            Launcher::Binary,
+            Harness::Claude,
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            rendered.contains("  store        .agent/  (already there)\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("  registered   ~/.agent/registry.toml\n"),
+            "this run added the entry, so it is not marked; got: {rendered}"
+        );
+        assert!(
+            rendered
+                .contains("Run `dreamd init --uninstall-project` to remove the registry entry."),
+            "Undo is printed even with nothing wired; got: {rendered}"
+        );
+        assert!(!rendered.contains("Delete .agent/"), "{rendered}");
+        assert!(!rendered.contains("  gitignore"), "{rendered}");
+    }
+
+    fn next_steps(launcher: Launcher) -> String {
+        let dir = Path::new("/nonexistent/bzr1469");
+        let req = SetupRequest {
+            cwd: dir,
+            daemon_home: dir,
+            harness: Harness::Claude,
+            write_mcp: true,
+            force: false,
+            start_watch: false,
+            dry_run: true,
+            yes: true,
+            interactive: Interactive::default(),
+            launcher,
+        };
+        let mut out = Vec::new();
+        write_next_steps(&req, &mut out).expect("next steps on an in-memory io");
+        String::from_utf8(out).expect("next steps are utf-8")
+    }
+
+    /// BZR-1469 test 6: the dry-run next steps name the launcher's command.
+    #[test]
+    fn next_steps_name_the_launcher_command() {
+        let npx = next_steps(Launcher::Npx);
+        assert!(npx.contains(": npx -y dreamd-mcp watch"), "{npx}");
+        assert!(!npx.contains(": dreamd watch"), "{npx}");
+        let binary = next_steps(Launcher::Binary);
+        assert!(binary.contains(": dreamd watch\n"), "{binary}");
+    }
+
+    /// BZR-1469 test 7: only the exact value `npx` means npx.
+    #[test]
+    fn launcher_is_npx_only_for_the_exact_value() {
+        for value in [None, Some(""), Some("NPX"), Some("npx "), Some("1")] {
+            assert_eq!(
+                Launcher::from_env_value(value),
+                Launcher::Binary,
+                "{value:?} is not npx"
+            );
+        }
+        assert_eq!(Launcher::from_env_value(Some("npx")), Launcher::Npx);
+        assert_eq!(Launcher::Npx.command("watch"), "npx -y dreamd-mcp watch");
+        assert_eq!(
+            Launcher::Binary.command("init --uninstall-project"),
+            "dreamd init --uninstall-project"
+        );
+    }
+
+    /// BZR-1469 test 8: the spawn-failure hint names the launcher's command.
+    #[test]
+    fn watch_spawn_failure_line_names_the_launcher() {
+        let e = std::io::Error::other("boom");
+        let npx = watch_spawn_failed_line(Launcher::Npx, &e);
+        assert!(
+            npx.ends_with("run `npx -y dreamd-mcp watch` yourself."),
+            "{npx}"
+        );
+        let binary = watch_spawn_failed_line(Launcher::Binary, &e);
+        assert!(binary.ends_with("run `dreamd watch` yourself."), "{binary}");
     }
 
     #[test]
@@ -1420,7 +1825,7 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "  Undo: remove the \"dreamd\" block from .mcp.json and .cursor/mcp.json."
+                "  Undo:\n        Remove the \"dreamd\" block from .mcp.json and .cursor/mcp.json.\n"
             ),
             "Undo must name every file setup touched; got: {rendered}"
         );
@@ -1466,12 +1871,31 @@ mod tests {
         CARD_GUTTER.len() + label_len + padding
     }
 
+    /// Every label lands its value on one column. `store` never shares a
+    /// card with `scaffolded`, so it is checked on a second, rerun card.
     #[test]
     fn card_rows_share_one_value_column() {
-        let rendered = card(&[".mcp.json"], Harness::Claude, false);
-        let columns: Vec<usize> = ["  scaffolded", "  wired", "  daemon"]
+        let first_run = card(&[".mcp.json"], Harness::Claude, false);
+        let rerun = card_with(
+            InitOutcome::AlreadyInitialized,
+            Launcher::Binary,
+            Harness::Claude,
+            &[".mcp.json"],
+            &[HABIT_CLAUDE],
+            false,
+        );
+        let rows = [
+            (&first_run, "  scaffolded"),
+            (&first_run, "  registered"),
+            (&first_run, "  gitignore"),
+            (&first_run, "  wired"),
+            (&first_run, "  habit"),
+            (&first_run, "  daemon"),
+            (&rerun, "  store"),
+        ];
+        let columns: Vec<usize> = rows
             .iter()
-            .map(|prefix| {
+            .map(|(rendered, prefix)| {
                 let line = rendered
                     .lines()
                     .find(|l| l.starts_with(prefix))
@@ -1481,8 +1905,8 @@ mod tests {
             .collect();
         assert_eq!(
             columns,
-            vec![CARD_VALUE_COLUMN; 3],
-            "scaffolded/wired/daemon values must align; got: {rendered}"
+            vec![CARD_VALUE_COLUMN; rows.len()],
+            "every row's value must align; got: {first_run}{rerun}"
         );
     }
 
@@ -1521,16 +1945,15 @@ mod tests {
             sentence: "axum handlers need IntoResponse".to_string(),
             event_id: "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
         };
-        let mut out = Vec::new();
-        write_success_card(
-            &[".mcp.json"],
-            Harness::Claude,
-            false,
-            Some(&lesson),
-            &mut out,
-        )
-        .unwrap();
-        let rendered = String::from_utf8(out).unwrap();
+        let rendered = render(&Card {
+            init: InitOutcome::Scaffolded,
+            wired: &[".mcp.json"],
+            habits: &[HABIT_CLAUDE],
+            harness: Harness::Claude,
+            daemon_live: false,
+            lesson: Some(&lesson),
+            launcher: Launcher::Binary,
+        });
         assert!(
             rendered.contains("axum handlers need IntoResponse"),
             "{rendered}"
@@ -1580,6 +2003,7 @@ mod tests {
             dry_run: false,
             yes: true,
             interactive: Interactive::default(),
+            launcher: Launcher::Binary,
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1601,7 +2025,11 @@ mod tests {
     #[test]
     fn install_habit_writes_the_files_the_harness_owns() {
         let dir = tempfile::tempdir().unwrap();
-        install_habit(dir.path(), Harness::Both).unwrap();
+        assert_eq!(
+            install_habit(dir.path(), Harness::Both).unwrap(),
+            vec![HABIT_CLAUDE, HABIT_CURSOR],
+            "the labels it wrote, in order"
+        );
         let rule =
             std::fs::read_to_string(dir.path().join(".cursor/rules/dreamd-recall.mdc")).unwrap();
         assert!(rule.contains("alwaysApply: true"), "{rule}");
@@ -1611,7 +2039,9 @@ mod tests {
         assert!(claude.contains("claude-code"), "{claude}");
 
         let only = tempfile::tempdir().unwrap();
-        install_habit(only.path(), Harness::None).unwrap();
+        assert!(install_habit(only.path(), Harness::None)
+            .unwrap()
+            .is_empty());
         assert!(!only.path().join("CLAUDE.md").exists());
         assert!(!only.path().join(".cursor/rules/dreamd-recall.mdc").exists());
     }

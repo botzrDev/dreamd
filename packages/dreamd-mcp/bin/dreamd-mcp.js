@@ -3,8 +3,9 @@
 
 // dreamd-mcp — npx download/verify/exec shim for the native `dreamd` binary.
 // Flow: resolve platform → cache hit or GitHub release download → sha256 verify
-// → exec. Env overrides: DREAMD_BIN (+ DREAMD_BIN_ALLOW_UNVERIFIED). Exports
-// below are for unit tests only; IDEs spawn this file as the MCP entrypoint.
+// → exec. Env overrides: DREAMD_BIN (+ DREAMD_BIN_ALLOW_UNVERIFIED). The shim
+// sets DREAMD_LAUNCHER=npx for the binary it runs. Exports below are for unit
+// tests only; IDEs spawn this file as the MCP entrypoint.
 
 const https = require('https');
 const fs = require('fs');
@@ -73,6 +74,13 @@ const DREAMD_SUBCOMMANDS = new Set([
 // `dreamd mcp` so IDEs spawning `npx dreamd-mcp` get the MCP server over stdio.
 function resolveDreamdArgs(args) {
   return DREAMD_SUBCOMMANDS.has(args[0]) ? args : ['mcp', ...args];
+}
+
+// The environment the shim runs `dreamd` with. `DREAMD_LAUNCHER=npx` tells
+// `dreamd setup` to print `npx -y dreamd-mcp <command>` in its hints, because
+// an npx install puts no `dreamd` on PATH (BZR-1469).
+function childEnv(env) {
+  return { ...env, DREAMD_LAUNCHER: 'npx' };
 }
 
 // Leading top-level flags the shim answers itself (no binary download). Only the
@@ -283,7 +291,7 @@ async function main() {
       '[dreamd-mcp] WARNING: DREAMD_BIN set — skipping sha256 verification. ' +
       'Use only for local development builds.\n',
     );
-    execFileSync(process.env.DREAMD_BIN, dreamdArgs, { stdio: 'inherit' });
+    execFileSync(process.env.DREAMD_BIN, dreamdArgs, { stdio: 'inherit', env: childEnv(process.env) });
     return;
   }
 
@@ -331,7 +339,7 @@ async function main() {
   // Verify sha256 before every exec (not just on download)
   verifyBinary(binaryPath, binaryEntry.sha256);
 
-  execFileSync(binaryPath, dreamdArgs, { stdio: 'inherit' });
+  execFileSync(binaryPath, dreamdArgs, { stdio: 'inherit', env: childEnv(process.env) });
 }
 
 if (require.main === module) {
@@ -349,6 +357,7 @@ if (require.main === module) {
 module.exports = {
   DREAMD_SUBCOMMANDS,
   resolveDreamdArgs,
+  childEnv,
   topLevelFlag,
   isAllowedRedirectHost,
   validateRedirect,

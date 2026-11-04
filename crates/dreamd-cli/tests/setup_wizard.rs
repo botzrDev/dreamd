@@ -36,9 +36,8 @@ fn project_and_home() -> (tempfile::TempDir, tempfile::TempDir) {
 /// close the pipe, and wait. Closing stdin is what proves the `--yes` path can
 /// never block: a reader on this handle would see EOF, not a hang.
 ///
-/// `DREAMD_SOCK` is cleared for the same reason as in [`run_setup`]: a dev box
-/// exporting it would point the daemon probe at a real, running daemon instead
-/// of the temp `HOME`.
+/// `DREAMD_SOCK` and `DREAMD_LAUNCHER` are cleared for the same reasons as in
+/// [`run_setup`].
 fn run_setup_with_stdin(project: &Path, home: &Path, args: &[&str], stdin_payload: &str) -> Output {
     let mut child = Command::new(dreamd_bin())
         .arg("setup")
@@ -46,6 +45,7 @@ fn run_setup_with_stdin(project: &Path, home: &Path, args: &[&str], stdin_payloa
         .current_dir(project)
         .env("HOME", home)
         .env_remove("DREAMD_SOCK")
+        .env_remove("DREAMD_LAUNCHER")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -64,15 +64,30 @@ fn run_setup_with_stdin(project: &Path, home: &Path, args: &[&str], stdin_payloa
 /// Run `dreamd setup` non-interactively (`Command::output` gives the child a
 /// null, non-TTY stdin). `DREAMD_SOCK` is cleared so the daemon probe resolves
 /// off the temp `HOME` and can never see a real daemon on the dev box.
+/// `DREAMD_LAUNCHER` is cleared so a developer's shell cannot change which
+/// command the hints name.
 fn run_setup(project: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(dreamd_bin())
-        .arg("setup")
+    run_setup_with_env(project, home, args, &[])
+}
+
+/// [`run_setup`] plus `extra` environment variables, set after the clears.
+fn run_setup_with_env(
+    project: &Path,
+    home: &Path,
+    args: &[&str],
+    extra: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(dreamd_bin());
+    cmd.arg("setup")
         .args(args)
         .current_dir(project)
         .env("HOME", home)
         .env_remove("DREAMD_SOCK")
-        .output()
-        .expect("run dreamd setup")
+        .env_remove("DREAMD_LAUNCHER");
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("run dreamd setup")
 }
 
 fn stdout_of(out: &Output) -> String {
@@ -289,8 +304,11 @@ fn success_card_reports_daemon_not_running() {
     );
 }
 
+/// BZR-1469 test 14. With no MCP config written, the card has no `wired` row
+/// and no MCP undo lines. Undo is still printed, because the registry entry
+/// was written.
 #[test]
-fn skipped_wiring_card_omits_wired_and_undo() {
+fn skipped_wiring_card_omits_wired_rows_and_the_mcp_undo() {
     let (project, home) = project_and_home();
 
     let out = run_setup(
@@ -306,8 +324,16 @@ fn skipped_wiring_card_omits_wired_and_undo() {
         "nothing was wired, so the card must have no `wired` row; got: {stdout}"
     );
     assert!(
-        !stdout.contains("Undo:"),
-        "there is nothing to undo when no config was written; got: {stdout}"
+        !stdout.contains("Remove the \"dreamd\" block"),
+        "no MCP config was written, so Undo names none; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--no-write-mcp to skip"),
+        "the re-run hint is only for a run that wrote MCP config; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("to remove the registry entry."),
+        "the registry entry was written, so Undo names it; got: {stdout}"
     );
     assert!(
         stdout
@@ -389,5 +415,152 @@ fn dry_run_prints_plan_not_success_card() {
     assert!(
         !stdout.contains("\u{2713} dreamd is set up."),
         "a plan is not a completed setup; got: {stdout}"
+    );
+}
+
+/// BZR-1469 test 10: under the npx shim (`DREAMD_LAUNCHER=npx`), the card
+/// names the npx form of every command.
+#[test]
+fn npx_launch_names_npx_commands() {
+    let (project, home) = project_and_home();
+
+    let out = run_setup_with_env(
+        project.path(),
+        home.path(),
+        &["--yes", "--harness", "both"],
+        &[("DREAMD_LAUNCHER", "npx")],
+    );
+
+    assert_ok(&out);
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("start it with: npx -y dreamd-mcp watch"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Run `npx -y dreamd-mcp init --uninstall-project` to remove the registry entry."
+        ),
+        "got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("start it with: dreamd watch"),
+        "no `dreamd` is on PATH under npx; got: {stdout}"
+    );
+}
+
+/// BZR-1469 test 11: a `dreamd` binary run with no `DREAMD_LAUNCHER` names
+/// `dreamd …`.
+#[test]
+fn binary_launch_names_dreamd_commands() {
+    let (project, home) = project_and_home();
+
+    let out = run_setup(project.path(), home.path(), &["--yes", "--harness", "both"]);
+
+    assert_ok(&out);
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("start it with: dreamd watch"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Run `dreamd init --uninstall-project` "),
+        "got: {stdout}"
+    );
+    assert!(!stdout.contains("npx -y dreamd-mcp watch"), "got: {stdout}");
+    assert!(!stdout.contains("npx -y dreamd-mcp init"), "got: {stdout}");
+}
+
+/// BZR-1469 test 12: the card lists every file setup wrote, and a rerun
+/// marks the store as already there and never suggests deleting it.
+#[test]
+fn card_names_every_file_setup_wrote() {
+    let (project, home) = project_and_home();
+    let args = ["--yes", "--harness", "both"];
+
+    let first = run_setup(project.path(), home.path(), &args);
+    assert_ok(&first);
+    let stdout = stdout_of(&first);
+    for row in [
+        "  registered   ~/.agent/registry.toml\n",
+        "  gitignore    .gitignore  (+ /.agent/.dreamd/)\n",
+        "  wired        .mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n",
+        "  wired        .cursor/mcp.json  (dreamd \u{2192} npx -y dreamd-mcp)\n",
+        "  habit        CLAUDE.md  (dreamd block)\n",
+        "  habit        .cursor/rules/dreamd-recall.mdc\n",
+        "Delete .agent/ last: it holds this project's memory.",
+    ] {
+        assert!(
+            stdout.contains(row),
+            "first run must print {row:?}; got: {stdout}"
+        );
+    }
+
+    let claude = std::fs::read_to_string(project.path().join("CLAUDE.md")).expect("CLAUDE.md");
+    assert!(claude.contains("<!-- dreamd:start -->"), "{claude}");
+    assert!(
+        project
+            .path()
+            .join(".cursor/rules/dreamd-recall.mdc")
+            .is_file(),
+        "the Cursor rule must be on disk"
+    );
+    let gitignore = std::fs::read_to_string(project.path().join(".gitignore")).expect(".gitignore");
+    assert!(gitignore.contains("/.agent/.dreamd/"), "{gitignore}");
+    let registry =
+        std::fs::read_to_string(home.path().join(".agent/registry.toml")).expect("registry.toml");
+    let canonical = std::fs::canonicalize(project.path()).expect("canonical project root");
+    assert!(
+        registry.contains(canonical.to_string_lossy().as_ref()),
+        "the registry must hold {}; got: {registry}",
+        canonical.display()
+    );
+
+    let second = run_setup(project.path(), home.path(), &args);
+    assert_ok(&second);
+    let stdout = stdout_of(&second);
+    assert!(
+        stdout.contains("  store        .agent/  (already there)"),
+        "got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Delete .agent/"),
+        "a rerun must never suggest deleting the memory; got: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.starts_with("  gitignore")),
+        "a rerun added no .gitignore line; got: {stdout}"
+    );
+}
+
+/// BZR-1469 test 13: doctor's warning names the npx command under the shim.
+/// The store is damaged the way `doctor_warnings_do_not_change_exit_code`
+/// damages it.
+#[test]
+fn doctor_warning_names_the_npx_doctor_command() {
+    let (project, home) = project_and_home();
+
+    let clean = run_setup(
+        project.path(),
+        home.path(),
+        &["--yes", "--harness", "claude"],
+    );
+    assert_ok(&clean);
+    std::fs::remove_dir_all(project.path().join(".agent").join("working"))
+        .expect("remove the scaffolded working/ dir");
+
+    let out = run_setup_with_env(
+        project.path(),
+        home.path(),
+        &["--yes", "--harness", "claude"],
+        &[("DREAMD_LAUNCHER", "npx")],
+    );
+
+    assert_ok(&out);
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout
+            .contains("doctor: warnings found \u{2014} run `npx -y dreamd-mcp doctor` for detail"),
+        "got: {stdout}"
     );
 }

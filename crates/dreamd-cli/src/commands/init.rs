@@ -51,6 +51,17 @@ impl std::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
+/// What [`run`] did, for callers that report it (`dreamd setup`'s card).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitOutcome {
+    /// Created `.agent/`, registered it, and appended `.gitignore`.
+    Scaffolded,
+    /// `.agent/` was already there; added its missing registry entry.
+    Registered,
+    /// `.agent/` was already there and registered; changed nothing.
+    AlreadyInitialized,
+}
+
 #[derive(Serialize)]
 struct State {
     schema_version: &'static str,
@@ -63,11 +74,12 @@ struct State {
 /// the daemon home registry (`~/.agent/registry.toml`).
 ///
 /// Idempotent. If `.agent/` already exists and the project is registered,
-/// prints the rerun message and returns `Ok(())` without touching the store.
-/// If `.agent/` exists but the registry has no entry, registers it, prints
-/// one line, and does not rewrite anything under `.agent/`. Staging a new
-/// store is done in a temp dir; the final rename is atomic within a single
-/// filesystem.
+/// prints the rerun message and returns [`InitOutcome::AlreadyInitialized`]
+/// without touching the store. If `.agent/` exists but the registry has no
+/// entry, registers it, prints one line, does not rewrite anything under
+/// `.agent/`, and returns [`InitOutcome::Registered`]. Otherwise it scaffolds
+/// and returns [`InitOutcome::Scaffolded`]. Staging a new store is done in a
+/// temp dir; the final rename is atomic within a single filesystem.
 ///
 /// Returns [`InitError::NoProjectRoot`] if no sentinel (`.git/`,
 /// `Cargo.toml`, etc.) is found walking up from `cwd`.
@@ -77,7 +89,7 @@ pub fn run(
     quiet: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
-) -> Result<(), InitError> {
+) -> Result<InitOutcome, InitError> {
     let project_root = match find_project_root(cwd) {
         Some(r) => r,
         None => {
@@ -102,7 +114,12 @@ pub fn run(
         } else {
             writeln!(out, "{}", if quiet { RERUN_MSG_QUIET } else { RERUN_MSG })?;
         }
-        return Ok(());
+        let outcome = if added {
+            InitOutcome::Registered
+        } else {
+            InitOutcome::AlreadyInitialized
+        };
+        return Ok(outcome);
     }
 
     // Stage the entire scaffold inside a tmp directory so that any failure
@@ -141,7 +158,7 @@ pub fn run(
         writeln!(out, "{DR413_DISCLOSURE}")?;
     }
 
-    Ok(())
+    Ok(InitOutcome::Scaffolded)
 }
 
 /// Remove the current project's entry from `~/.agent/registry.toml`.
@@ -551,5 +568,46 @@ mod tests {
         assert!(quiet_out.is_empty(), "quiet re-register prints nothing");
         assert_eq!(fs::read(&jsonl).unwrap(), before);
         assert_eq!(registered_roots(&daemon_home).len(), 1);
+    }
+
+    /// BZR-1469 test 9: `run` says which of its three paths it took, so
+    /// `dreamd setup`'s card can tell a new store from one that was there.
+    #[cfg(unix)]
+    #[test]
+    fn run_reports_what_it_did() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        fs::write(project.path().join("Cargo.toml"), b"[package]\n").expect("sentinel");
+        let home = tempfile::tempdir().expect("daemon home tempdir");
+        let daemon_home = DaemonHome::new(home.path().join("agent-home"));
+        let init = || {
+            run(
+                project.path(),
+                &daemon_home,
+                true,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .expect("init")
+        };
+
+        assert_eq!(init(), InitOutcome::Scaffolded, "a new store");
+        assert_eq!(
+            init(),
+            InitOutcome::AlreadyInitialized,
+            "the store and its entry are both there"
+        );
+        uninstall_project(
+            project.path(),
+            &daemon_home,
+            true,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .expect("uninstall");
+        assert_eq!(
+            init(),
+            InitOutcome::Registered,
+            "the store is there and its entry was not"
+        );
     }
 }

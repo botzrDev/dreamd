@@ -1017,7 +1017,7 @@ fn run_init(args: InitArgs) -> ExitCode {
     let result = if args.uninstall_project {
         commands::init::uninstall_project(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
     } else {
-        commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err)
+        commands::init::run(&cwd, &daemon_home, args.quiet, &mut out, &mut err).map(|_| ())
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1370,6 +1370,9 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
         dry_run: args.dry_run,
         yes: args.yes,
         interactive,
+        launcher: commands::setup::Launcher::from_env_value(
+            std::env::var("DREAMD_LAUNCHER").ok().as_deref(),
+        ),
     };
     match commands::setup::run(&req, &mut out, &mut err) {
         Ok(()) => ExitCode::SUCCESS,

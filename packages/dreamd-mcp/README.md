@@ -141,6 +141,8 @@ done
 
 Set `DREAMD_BIN=/path/to/dreamd` to use a local build instead of the cached release binary. This skips SHA-256 verification, so you must also set `DREAMD_BIN_ALLOW_UNVERIFIED=1`; `DREAMD_BIN` on its own is refused. Never point production MCP configs at an unverified binary.
 
+The shim runs the binary, the cached release one or `DREAMD_BIN`, with `DREAMD_LAUNCHER=npx` set, so `dreamd setup`'s hints name the npx form (`npx -y dreamd-mcp watch`).
+
 ```sh
 cargo install --path crates/dreamd-cli
 export DREAMD_BIN=~/.cargo/bin/dreamd
