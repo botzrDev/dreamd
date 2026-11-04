@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **The README shows `blame` and `forget` at work, and its audit loop runs under npx.** A recording near the top (`docs/assets/blame-forget.gif`, tape in `docs/assets/blame-forget.tape`) shows `blame` finding the event behind a bad answer, `forget` removing it with a receipt, and the same query coming back without it. The audit loop now names `npx -y dreamd-mcp watch` and `npx -y dreamd-mcp doctor --repair`, which work without a `dreamd` on `PATH`. The "Where dreamd fits" section is removed.
+
 ### Fixed
 
 - **The dream cycle's git commit runs again, and a real edit still holds it** (BZR-1467). A cycle now makes its commit after a fresh setup, after appends, and after its own previous rewrite; before, every one of those skipped with `user_dirty_tree`. A change no dream cycle wrote, such as a hand edit, `dreamd forget` or `archive --force-unpin`, holds the commit until you commit that file. The first cycle after upgrading may skip once, with reason `no_baseline`. The commit holds only `LESSONS.md` and the episodic log: files you had staged stay staged and out of it, a gitignored `.agent/` that git does not track is not committed, a cycle that changes nothing makes no commit, a project inside a larger repo commits its own `.agent/` files, and a store with no `LESSONS.md` commits the log. `dreamd dream` prints why a commit was skipped and which files, `POST /api/v1/dream`'s 200 body has an `autobiography` object, and `dreamd doctor` names the files. `state.json` gains `autobiography_baseline`.

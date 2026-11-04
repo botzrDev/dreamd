@@ -16,20 +16,15 @@ of truth — plain JSONL and Markdown you can cat, grep, git diff, and hand-edit
 **The one job dreamd is hired for:** memory continuity across tools. Not a second brain,
 not an ambient capture product, not a Python framework SDK.
 
-**Where it fits (2026-09-26).** dreamd is the Linux-hosted proof of one pillar of **dreamOS**,
-*the first computer you can hand your keys to*, whose kernel is momo (charter: momo
-`docs/rfc/RFC-009`, amended by RFC-011, **accepted** 2026-09-26, Linear BZR-1075; local docs
-issue BZR-1077): memory as plain files a person owns, with provenance — *the Memory*, in the
-product's words. RFC-011 also names the rule the ledger grows toward — every effect traceable
-to the data that caused it; no datum causes an effect above its own trust label — as a
-design that needs its own spec before any code. It changes nothing shipped: no trust label
-exists, `source_harness` is caller-asserted, `docs/provenance.md` is format only (BZR-154)
-and records derivation, not trust. **Constraints that stand:** do not claim momo
-`MemoryRegion` objects (the BZR-827 rule below); do not document a trust label, taint, or
-"the Memory" as if it shipped; the momo repo is private, and while the product name
-dreamOS and its one-sentence destination may appear in this repository's docs as a pointer
-(ruled 2026-09-26 on BZR-1075, RFC-011 A0), announcing, previewing or marketing the product
-before its v1 stays forbidden — a pointer, never a launch.
+**Trust labels are direction, not shipped.** The provenance ledger is the substrate a future
+trust label would ride on (every effect traceable to the data that caused it; no datum
+causes an effect above its own trust label), a design that needs its own spec before any
+code. It changes nothing shipped: no trust label exists, `source_harness` is caller-asserted,
+`docs/provenance.md` is format only (BZR-154) and records derivation, not trust.
+**Constraints that stand:** do not claim momo `MemoryRegion` objects (the BZR-827 rule below);
+do not document a trust label, taint, or "the Memory" as if it shipped; do not describe a larger product,
+kernel or sibling repository that dreamd belongs to in this repository's docs, README or
+llms files (ruled 2026-11-04).
 
 ---
 

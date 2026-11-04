@@ -16,6 +16,10 @@ npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
 npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 ```
 
+![dreamd blame finds the memory behind a bad answer, dreamd forget removes it and writes a receipt, and the same query no longer returns it](docs/assets/blame-forget.gif)
+
+Recorded live on dreamd 1.2.0, sped up 1.5x: `blame` finds the event behind a bad answer, `forget` removes it with a receipt, and the same query comes back without it. Tape: [docs/assets/blame-forget.tape](docs/assets/blame-forget.tape).
+
 Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
 
 If you want agent memory you can trace and undo, star the repo to follow releases. When a memory goes wrong, an issue with the `blame` output helps us fix it.
@@ -55,7 +59,7 @@ npx -y dreamd-mcp blame "deploy without tests" --explain
 cat .agent/semantic/LESSONS.md
 npx -y dreamd-mcp doctor --provenance
 
-# 3. Preview, then remove the bad event (stop `dreamd watch` first; forget refuses while it runs)
+# 3. Preview, then remove the bad event (stop the daemon, `npx -y dreamd-mcp watch`, first; forget refuses while it runs)
 npx -y dreamd-mcp forget evt_... --dry-run
 npx -y dreamd-mcp forget evt_... --proof forget-receipt.json
 
@@ -65,7 +69,7 @@ git diff .agent/
 
 After a `forget`, `doctor --provenance` reports the removed event's old ledger edges as orphans and exits 1. That is expected: the ledger is append-only, so it keeps the record that the event once existed.
 
-To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit with the daemon stopped, then run `dreamd doctor --repair` to rebuild the recall index.
+To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit with the daemon stopped, then run `npx -y dreamd-mcp doctor --repair` to rebuild the recall index.
 
 ---
 
@@ -243,12 +247,6 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 Linux, macOS and Windows. Windows serves over loopback TCP. See [docs/windows.md](./docs/windows.md).
 
 The prebuilt Linux x86_64 binary is one static build with no glibc requirement, checked on Ubuntu 20.04, Ubuntu 22.04, Debian 12 and Alpine 3.20. Linux arm64 has no prebuilt binary.
-
----
-
-## Where dreamd fits
-
-dreamd is one of three sibling repositories that make one product, **dreamOS**: *the first computer you can hand your keys to*. It acts on your behalf, it is structurally incapable of doing what you did not allow, and it can prove what it did. The kernel under it is **momo**; the sandbox beside it is `aegis`. momo's charter (RFC-009, amended by RFC-011, accepted 2026-09-26) records dreamd as the Linux-hosted proof of one of the product's pillars: memory as plain files a person owns, with provenance. The same amendment names the rule the provenance ledger grows toward: *every effect can be traced to the data that caused it, and no datum can cause an effect above its own trust label*. Nothing shipped implements a trust label yet. The momo repository is private until the kernel's first public release, and dreamOS is not announced or marketed before its v1; this paragraph is a pointer, not a launch.
 
 ---
 
