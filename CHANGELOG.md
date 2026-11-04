@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-04
+
+A patch release with one fix: `dreamd setup` run through `npx -y dreamd-mcp` now names commands that work under npx. Recall is still BM25 × salience.
+
+### Fixed
+
+- **`dreamd setup` names commands that work, and lists everything it wrote** (BZR-1469). Under `npx -y dreamd-mcp setup`, the hints name `npx -y dreamd-mcp watch`, `npx -y dreamd-mcp doctor` and `npx -y dreamd-mcp init --uninstall-project`, because an npx install puts no `dreamd` on `PATH`; a `dreamd` binary still names `dreamd …`. The success card now lists the registry entry, the `.gitignore` line and the habit files (the `CLAUDE.md` block and the Cursor rule) next to the store and the MCP files, and marks a store or registry entry that was already there. `Undo:` is always printed, with a line for each of these, and names deleting `.agent/` only when that run created it. The npx shim sets `DREAMD_LAUNCHER=npx` for the binary it runs.
+
 ## [1.2.1] - 2026-11-03
 
 A patch release. The Linux binary is now static, so `npx dreamd-mcp` runs on Linux older than Ubuntu 24.04 and on Alpine, and the findings from the 1.2.0 torture session are fixed. Recall is still BM25 × salience.
@@ -345,7 +353,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/botzrDev/dreamd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/botzrDev/dreamd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/botzrDev/dreamd/compare/v1.0.1...v1.2.0
 [1.0.1]: https://github.com/botzrDev/dreamd/compare/v1.0.0...v1.0.1

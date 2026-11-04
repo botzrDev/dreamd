@@ -80,6 +80,11 @@ BM25 × salience.
 - **Fixes from the 1.2.0 torture session**, listed in
   [`CHANGELOG.md`](CHANGELOG.md).
 
+## Shipped — v1.2.2
+
+- **`dreamd setup` hints that work under npx.** Through `npx -y dreamd-mcp setup` the
+  hints name `npx -y dreamd-mcp …`, and the card lists everything setup wrote.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.2.1-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.2.2-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -186,6 +186,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.2.2** (2026-11-04) | `dreamd setup` through npx names `npx -y dreamd-mcp …` commands, and its card lists everything it wrote with an Undo line for each |
 | **v1.2.1** (2026-11-03) | Static Linux binary with no glibc requirement (runs on Ubuntu 20.04 and 22.04, Debian 12 and Alpine); fixes from the 1.2.0 torture session; the npm shim forwards every `dreamd` command |
 | **v1.2.0** (2026-10-29) | Windows dream cycle and Tantivy index; audit fixes (writer lock, atomic dream cycle, faithful log rewrites, index coverage); deprecates `dreamd memory` branch commands, `vectors enable` and `dream --auto` for removal in 2.0. No 1.1.0 tag |
 | **v1.0.1** (2026-10-21) | Dependency security fixes |
@@ -219,7 +220,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.2.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.2.2** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
