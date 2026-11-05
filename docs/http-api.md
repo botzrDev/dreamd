@@ -1,6 +1,6 @@
 # HTTP API reference
 
-dreamd exposes a small REST API. The transport depends on the platform. On Unix it is a **Unix domain socket** at `~/.agent/dreamd.sock` (clients may override with `DREAMD_SOCK`; `dreamd watch` always binds `$HOME/.agent/dreamd.sock`), and there is no TCP listener. On Windows there is no peer credential to read off a socket, so `dreamd watch` listens on **loopback TCP** instead — `127.0.0.1` on an OS-chosen ephemeral port, published in `~/.agent/server.json` (AILAB-192). Loopback by default: `dreamd watch --insecure` (with `--bind`) is the only way to listen beyond localhost, it exists only on the TCP listener, and `server.json` still names a loopback host (AILAB-197).
+dreamd exposes a small REST API. The transport depends on the platform. On Unix it is a **Unix domain socket**, one per user, at `~/.agent/dreamd.sock` unless `DREAMD_SOCK` names another absolute path; `dreamd watch` and every client resolve it the same way. There is no TCP listener. On Windows there is no peer credential to read off a socket, so `dreamd watch` listens on **loopback TCP** instead — `127.0.0.1` on an OS-chosen ephemeral port, published in `~/.agent/server.json` (AILAB-192). Loopback by default: `dreamd watch --insecure` (with `--bind`) is the only way to listen beyond localhost, it exists only on the TCP listener, and `server.json` still names a loopback host (AILAB-197).
 
 All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header. Authentication is whatever the transport can prove: on Unix the daemon enforces **peer UID matching** via `SO_PEERCRED` / `getpeereid` — only the user who started the daemon may connect — and on Windows it enforces an `Authorization: Bearer` token read from `~/.agent/auth.json`. The two are mutually exclusive; neither platform mounts both.
 
@@ -14,7 +14,7 @@ All routes live under `/api/v1`. Every request requires an `X-Agent-Root` header
 
 | Property | Value |
 |---|---|
-| Socket path | `~/.agent/dreamd.sock` (or `$DREAMD_SOCK`) |
+| Socket path | `~/.agent/dreamd.sock`, or `$DREAMD_SOCK` when set. `dreamd watch` binds it and clients connect to it. One per user; `X-Agent-Root` picks the project |
 | Permissions | `0600` (owner read/write only) |
 | Protocol | HTTP/1.1 over UDS |
 | Host header | Use `localhost` (required by HTTP clients; not used for routing) |
@@ -68,7 +68,7 @@ curl.exe -H "X-Agent-Root: $proj" -H "Authorization: Bearer $tok" `
 
 Requests pass through two middleware layers (outermost first). The outer one is the platform's authentication layer — `peer_uid_middleware` on Unix, `bearer_auth_middleware` on Windows — and the inner one, `agent_root_middleware`, is the same on both.
 
-**Request ID.** Every response from a request that passed the authentication layer carries an `x-request-id` header. If the request sent its own `x-request-id` the daemon echoes that value; otherwise it generates a UUID. The same id is the `request_id` field on that request's `http request` line in `~/.agent/dreamd.log`. A request rejected by the authentication layer (`403` / `401`) gets no `x-request-id`.
+**Request ID.** Every response from a request that passed the authentication layer and the version check carries an `x-request-id` header. If the request sent its own `x-request-id` the daemon echoes that value; otherwise it generates a UUID. The same id is the `request_id` field on that request's `http request` line in `~/.agent/dreamd.log`. A request rejected by the authentication layer (`403` / `401`) or by the version check (`426`) gets no `x-request-id` and no `http request` line.
 
 ### `peer_uid_middleware` (Unix only)
 
@@ -93,6 +93,18 @@ Compares the `Authorization` header against the token in `~/.agent/auth.json`. T
 | `auth.json` missing, unreadable, or malformed | `401 Unauthorized` | `{"error":"…"}` |
 
 The verdict is always **401, never 403**: `403` is the Unix peer-UID answer and that layer is not mounted on Windows. Rejection happens outermost, before the tracing layer, so a rejected caller never reaches a handler; the daemon logs a reason category only (`missing_authorization`, `malformed_authorization`, `no_auth_file`, `unreadable_auth_file`, `token_mismatch`) and never the presented credential or the file's contents.
+
+### `version_middleware`
+
+The version check (BZR-1519). It runs after the authentication layer and before `agent_root_middleware`. A dreamd client sends `x-dreamd-version` with its own version on every request. The versions are compared as strings.
+
+| Condition | Status | Body |
+|---|---|---|
+| No `x-dreamd-version` header (curl, or a client from a release without this check) | Pass through | |
+| Header equal to the daemon's version | Pass through | |
+| Any other value, empty included | `426 Upgrade Required` | `` {"error":"version mismatch: client <client>, daemon <daemon>. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."} `` |
+
+Every response from this layer and the layers inside it, the `426` included, carries `x-dreamd-version` with the daemon's version. A `403` / `401` from the authentication layer does not. A dreamd client treats a `426`, a different version, or a missing header on any status but `401` and `403` as a version mismatch, and prints the sentence instead of the response.
 
 ### `agent_root_middleware`
 
@@ -601,6 +613,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |
+| `-32603` | `` version mismatch: client …, daemon …. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version. `` | Daemon mode only: the daemon runs another dreamd version. `daemon unknown` in place of a version means it sent none |
 | `-32603` | `coordinator unavailable: no agent root found` | In-process only: `append_node` with no `.agent/` store at or above the working directory. Run `dreamd init` |
 
 ---

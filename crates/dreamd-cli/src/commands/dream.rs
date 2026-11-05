@@ -477,8 +477,12 @@ mod tests {
                 assert!(n > 0, "client closed before the request ended");
                 request.extend_from_slice(&buf[..n]);
             }
+            // The daemon states its version (BZR-1519); without it the proxy
+            // reports a daemon of unknown version.
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{BODY}",
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{}: {}\r\ncontent-length: {}\r\n\r\n{BODY}",
+                dreamd_core::daemon_client::VERSION_HEADER,
+                env!("CARGO_PKG_VERSION"),
                 BODY.len()
             );
             stream.write_all(response.as_bytes()).unwrap();

@@ -660,7 +660,8 @@ is served over a Unix domain socket created with `0600` permissions
 router layer (`build_router` in `server/http/router.rs`, WEG-72 / DR-407) —
 rejects with 403 any peer whose uid does not match the daemon owner's,
 including a peer whose uid cannot be determined at all. The uid is read via
-`SO_PEERCRED` on Linux and `getpeereid` on macOS. **Unix `dreamd watch` has no
+`SO_PEERCRED` on Linux and `getpeereid` on macOS. The socket is one per user,
+at `~/.agent/dreamd.sock` unless `DREAMD_SOCK` is set. **Unix `dreamd watch` has no
 TCP listener** (`--bind` / `--insecure` exit 2 there). Two listeners are TCP,
 and both default to loopback and refuse a non-loopback address without
 `--insecure`: Windows `dreamd watch` (`127.0.0.1` on an ephemeral port, with a

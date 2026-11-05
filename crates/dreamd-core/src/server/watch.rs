@@ -1,8 +1,9 @@
 //! Foreground daemon: `dreamd watch` (WEG-88).
 //!
 //! Two transports, one router (AILAB-192). Unix serves the `/api/v1` surface
-//! over `~/.agent/dreamd.sock` and authenticates callers by peer UID
-//! (`SO_PEERCRED`). Off Unix there is neither a UDS nor a peer credential, so the
+//! over `~/.agent/dreamd.sock`, or the absolute path in `DREAMD_SOCK`
+//! (BZR-1519), and authenticates callers by peer UID (`SO_PEERCRED`). Off Unix
+//! there is neither a UDS nor a peer credential, so the
 //! *same* router is served over a loopback TCP listener: the port is published in
 //! `~/.agent/server.json` and the auth is the `Authorization: Bearer` token that
 //! `dreamd service install` (AILAB-203) minted into `~/.agent/auth.json`. Nothing
@@ -45,8 +46,8 @@
 //!
 //! ## Signal handling
 //!
-//! Unix blocks until SIGINT (`ctrl_c`) or SIGTERM, then unlinks
-//! `~/.agent/dreamd.sock`. The loopback arm blocks on `ctrl_c` alone —
+//! Unix blocks until SIGINT (`ctrl_c`) or SIGTERM, then unlinks the socket it
+//! bound. The loopback arm blocks on `ctrl_c` alone —
 //! `tokio::signal::unix` and its `SignalKind` do not exist off Unix, so there is
 //! no SIGTERM to wait for — and unlinks `~/.agent/server.json` instead of the
 //! socket. Both then drain the boot coordinator and the primary index, bounded
@@ -134,6 +135,11 @@ pub enum WatchError {
          binds ~/.agent/dreamd.sock and has no TCP listener"
     )]
     TcpFlagsOnUnix,
+    /// `DREAMD_SOCK` is set to a relative path (Unix, BZR-1519). Refused before
+    /// the project writer lock is taken, so nothing binds and nothing in the
+    /// store changes. A start failure, exit 1.
+    #[error("DREAMD_SOCK is not an absolute path: {}", .0.display())]
+    RelativeSockPath(std::path::PathBuf),
 }
 
 /// Listener options for [`run_watch`]: `dreamd watch --bind <ADDR>` and
@@ -179,13 +185,26 @@ pub async fn run_watch(cwd: &Path, listen: WatchListen) -> Result<(), WatchError
     }
 }
 
-/// Boot a per-project daemon in the foreground, binding `~/.agent/dreamd.sock`,
-/// and block until SIGINT/SIGTERM. The Unix half of [`run_watch`].
+/// The Unix arm's error for a home directory that cannot be determined: the
+/// socket path's fallback and the registry both hang off it.
+#[cfg(unix)]
+fn no_home_error() -> WatchError {
+    WatchError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "could not determine home directory",
+    ))
+}
+
+/// Boot a per-project daemon in the foreground, binding the socket
+/// `daemon_client::resolve_daemon_socket` names (`$DREAMD_SOCK` when it is
+/// absolute, else `~/.agent/dreamd.sock`), and block until SIGINT/SIGTERM. The
+/// Unix half of [`run_watch`].
 ///
-/// The sequence is: discover AgentRoot → load config + WEG-66 guard →
-/// project writer lock (which runs WAL recovery) → open the index → boot
-/// Supervisor → compose AppState → bind socket → serve until a shutdown signal
-/// (SIGINT/SIGTERM), then unlink the socket, drain, and release the lock.
+/// The sequence is: discover AgentRoot → load config + WEG-66 guard → resolve
+/// the socket path (a relative `DREAMD_SOCK` stops here) → project writer lock
+/// (which runs WAL recovery) → open the index → boot Supervisor → compose
+/// AppState → bind socket → serve until a shutdown signal (SIGINT/SIGTERM),
+/// then unlink the socket, drain, and release the lock.
 #[cfg(unix)]
 async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // 1. Discover project root from cwd.
@@ -198,6 +217,20 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     if config.dream_cycle_mode == DreamCycleMode::Auto {
         return Err(WatchError::DreamMode(AUTO_MODE_UNSUPPORTED.into()));
     }
+
+    // 2.4. Resolve the socket path the way every client does (BZR-1519):
+    //      `$DREAMD_SOCK` when it is absolute, else `~/.agent/dreamd.sock`. A
+    //      relative value is refused here, before the writer lock, so a bad
+    //      environment changes nothing in the store.
+    let sock_path = match crate::daemon_client::resolve_daemon_socket() {
+        Ok(path) => path,
+        Err(crate::daemon_client::SockPathError::RelativeSockPath(path)) => {
+            return Err(WatchError::RelativeSockPath(path));
+        }
+        Err(crate::daemon_client::SockPathError::NoHome) => {
+            return Err(no_home_error());
+        }
+    };
 
     // 2.5. Take the project writer lock. It resets a stale `in_progress` and
     //      recovers any stale dream-cycle WAL before indexes or coordinators
@@ -224,12 +257,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 
     // 4. Compose AppState. daemon_uid is this process's UID — peer_uid_middleware
     //    (WEG-72) rejects any connection whose peer UID differs.
-    let home = crate::layout::home_dir().ok_or_else(|| {
-        WatchError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "could not determine home directory",
-        ))
-    })?;
+    let home = crate::layout::home_dir().ok_or_else(no_home_error)?;
     let daemon_home = DaemonHome::new(home.join(".agent"));
     let registry_path = daemon_home.registry_toml();
     let daemon_uid = nix::unistd::Uid::current().as_raw();
@@ -248,7 +276,8 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     let router = build_router(state);
 
     // 5. Bind socket + serve. bind_api_socket handles stale-socket recovery.
-    let sock_path = daemon_home.socket_path();
+    //    `sock_path` is the path resolved in step 2.4; it is the one logged
+    //    and unlinked below.
     let listener = bind_api_socket(&sock_path)?;
 
     tracing::info!(

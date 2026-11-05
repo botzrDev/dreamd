@@ -64,10 +64,11 @@ DREAMD_LOG_FORMAT=json dreamd watch  # console lines as JSON
 1. `npx dreamd-mcp` not installed / wrong package name (`dreamd-mcp`, not scoped)
 2. No `.agent/` in the project — server boots empty backend
 3. Daemon expected but not running (Remote / daemon proxy)
-4. Wrong `DREAMD_SOCK` override pointing at a dead path (`dreamd watch` itself ignores `DREAMD_SOCK` and always binds `$HOME/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1
+4. A `DREAMD_SOCK` the daemon was not started with. `dreamd watch` and every client resolve it the same way, so the daemon and the MCP client need the same value, or neither sets it (then both use `~/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1, and `dreamd watch` exits 1 the same way
 5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
 6. Native Windows — the npx shim has no Windows binary and exits 1. Build `dreamd` and start `dreamd watch` first (see [windows.md](./windows.md))
-7. A resumed Claude Code session from another folder. Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
+7. A daemon of another dreamd version. The tool call fails with `version mismatch: client …, daemon …` (or `daemon unknown` for a daemon from a release without this check). Stop that daemon and start this binary with `dreamd watch`, or point `DREAMD_SOCK` at a daemon of this version
+8. A resumed Claude Code session from another folder. Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
 
 **Fix:**
 

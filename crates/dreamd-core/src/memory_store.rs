@@ -563,6 +563,7 @@ fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> MemorySto
 }
 
 /// Map a transport failure to the stage that failed. Never includes a token.
+/// A version mismatch is the sentence alone (BZR-1519): it names its own fix.
 fn map_transport_error(e: crate::daemon_client::DaemonTransportError) -> MemoryStoreError {
     use crate::daemon_client::DaemonTransportError;
     let stage = match e {
@@ -570,6 +571,7 @@ fn map_transport_error(e: crate::daemon_client::DaemonTransportError) -> MemoryS
         DaemonTransportError::Handshake(_) => "handshake",
         DaemonTransportError::Send(_) => "request",
         DaemonTransportError::ReadBody(_) => "response read",
+        DaemonTransportError::VersionMismatch(msg) => return MemoryStoreError::internal(msg),
     };
     MemoryStoreError::internal(format!("daemon {stage} failed: {e:?}"))
 }
@@ -809,6 +811,23 @@ mod tests {
                 r#"daemon error 500 Internal Server Error: {"error":"recall failed: x"}"#
                     .to_string()
             )
+        );
+    }
+
+    /// BZR-1519: a version mismatch reaches the MCP caller as the sentence
+    /// alone. The other transport stages keep their stage prefix.
+    #[test]
+    fn map_transport_error_passes_a_version_mismatch_through() {
+        use crate::daemon_client::{version_mismatch_message, DaemonTransportError};
+
+        let sentence = version_mismatch_message("1.3.0", "1.2.2");
+        assert_eq!(
+            map_transport_error(DaemonTransportError::VersionMismatch(sentence.clone())),
+            MemoryStoreError::Internal(sentence)
+        );
+        assert_eq!(
+            map_transport_error(DaemonTransportError::Handshake("eof".to_string())),
+            MemoryStoreError::Internal(r#"daemon handshake failed: Handshake("eof")"#.to_string())
         );
     }
 

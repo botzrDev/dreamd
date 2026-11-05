@@ -95,11 +95,11 @@ On every append — `POST /api/v1/learn` and MCP `append_node` alike — a patte
 
 ## Environment variables
 
-The MCP shim and client honor two overrides. Both assume a trusted local environment; a process that can set environment variables for your user can redirect dreamd traffic.
+The MCP shim, the clients and `dreamd watch` honor two overrides. Both assume a trusted local environment; a process that can set environment variables for your user can redirect dreamd traffic.
 
 | Variable | Effect | Risk |
 |---|---|---|
-| `DREAMD_SOCK` | Overrides the Unix socket path used by MCP Phase 2 to reach the daemon (default `~/.agent/dreamd.sock`). | Redirects MCP traffic to an attacker-controlled socket that impersonates the daemon API. |
+| `DREAMD_SOCK` | Overrides the Unix socket path (default `~/.agent/dreamd.sock`). Clients connect to it, and `dreamd watch` binds it, including a path outside `~/.agent`. The socket is still created `0600`, and the peer-UID check is unchanged. Must be absolute; `dreamd watch` exits 1 on a relative value. | On a client: redirects MCP and CLI traffic to an attacker-controlled socket that impersonates the daemon API. On the daemon: a process that can set the daemon's environment (a shell profile, a service manager's environment) chooses where it binds. |
 | `DREAMD_BIN` | Skips hash verification and runs the specified binary instead of the shim-downloaded release artifact. Refused unless `DREAMD_BIN_ALLOW_UNVERIFIED=1` is also set to confirm the bypass. | Runs arbitrary code with the privileges of the MCP server process. Intended for local development only. |
 
 Do not set these in shared shells, CI secrets, or harness configs you did not author. The reference implementation does not read them from project config files.

@@ -198,6 +198,77 @@ async fn missing_x_agent_root_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// BZR-1519: the version handshake, through the real layer stack. A
+/// different version is 426 naming both versions and the `dreamd watch` fix,
+/// before `agent_root_middleware` runs. The same version and no header at all
+/// are served: here they reach today's missing-`X-Agent-Root` 400. Every
+/// response the version layer returns carries the daemon's version, and auth
+/// still runs first.
+#[tokio::test]
+async fn version_mismatch_header_returns_426_naming_both_versions() {
+    const DAEMON: &str = env!("CARGO_PKG_VERSION");
+    let (_dir, router) = test_router();
+    let request = |version: Option<&str>| {
+        let mut builder = Request::builder().method("GET").uri("/api/v1/health");
+        if let Some(v) = version {
+            builder = builder.header(crate::daemon_client::VERSION_HEADER, v);
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+    let daemon_header = |resp: &axum::response::Response| {
+        resp.headers()
+            .get(crate::daemon_client::VERSION_HEADER)
+            .map(|v| v.to_str().unwrap().to_owned())
+    };
+
+    for client in ["0.0.0", ""] {
+        let resp = router
+            .clone()
+            .into_service()
+            .oneshot(with_peer_uid(request(Some(client))))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED, "{client:?}");
+        assert_ne!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(daemon_header(&resp).as_deref(), Some(DAEMON), "{client:?}");
+        let body = body_json(resp).await;
+        let error = body["error"].as_str().expect("error string");
+        assert_eq!(
+            error,
+            crate::daemon_client::version_mismatch_message(client, DAEMON)
+        );
+        if client == "0.0.0" {
+            assert_eq!(
+                error,
+                format!(
+                    "version mismatch: client 0.0.0, daemon {DAEMON}. Stop the other daemon \
+                     and start this one with `dreamd watch`, or point DREAMD_SOCK at a \
+                     daemon of this version."
+                )
+            );
+        }
+    }
+
+    for client in [Some(DAEMON), None] {
+        let resp = router
+            .clone()
+            .into_service()
+            .oneshot(with_peer_uid(request(client)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{client:?}");
+        assert_eq!(daemon_header(&resp).as_deref(), Some(DAEMON), "{client:?}");
+    }
+
+    // Auth is still the outermost layer: no peer UID is 403, not 426.
+    let resp = router
+        .into_service()
+        .oneshot(request(Some("0.0.0")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn unregistered_agent_root_returns_404() {
     let (_dir, router) = test_router();

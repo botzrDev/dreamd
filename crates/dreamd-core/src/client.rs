@@ -144,6 +144,12 @@ pub async fn proxy_dream_cycle(
     let (status, body) = match send_one(sock_path, req).await {
         Ok(pair) => pair,
         Err(DaemonTransportError::Unreachable) => return Ok(DreamProxyOutcome::NotReachable),
+        // A daemon answered, so this is an error, never `NotReachable`:
+        // running the cycle in-process would race that daemon's coordinator.
+        // The sentence is printed as is (BZR-1519).
+        Err(DaemonTransportError::VersionMismatch(msg)) => {
+            return Err(DreamProxyError::Transport(msg))
+        }
         Err(e) => return Err(DreamProxyError::Transport(format!("{e:?}"))),
     };
     map_dream_status(status.as_u16(), &body)
@@ -296,6 +302,10 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .status(200)
+                            .header(
+                                crate::daemon_client::VERSION_HEADER,
+                                env!("CARGO_PKG_VERSION"),
+                            )
                             .body(Full::new(Bytes::from_static(b"{\"status\":\"ok\"}")))
                             .unwrap(),
                     )
@@ -400,5 +410,47 @@ mod tests {
             req.share_personal.as_deref(),
             Some(SHARE_PERSONAL_HEADER_VALUE)
         );
+    }
+
+    /// BZR-1519: a daemon of another version is a proxy error carrying the
+    /// daemon's sentence as is. It is not `NotReachable`, which would run the
+    /// cycle in-process beside that daemon.
+    #[tokio::test]
+    async fn proxy_dream_cycle_version_mismatch_is_an_error_not_in_process() {
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        const SENTENCE: &str = "version mismatch: client 1.0.0, daemon 0.0.0. from the daemon";
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let svc = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+                let body = serde_json::json!({ "error": SENTENCE }).to_string();
+                Ok::<_, std::convert::Infallible>(
+                    hyper::Response::builder()
+                        .status(426)
+                        .header(crate::daemon_client::VERSION_HEADER, "0.0.0")
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap(),
+                )
+            });
+            let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), svc)
+                .await;
+        });
+
+        match proxy_dream_cycle(&sock_path, Path::new("/x"), false, false).await {
+            Err(DreamProxyError::Transport(msg)) => {
+                assert_eq!(msg, SENTENCE);
+                assert_eq!(
+                    DreamProxyError::Transport(msg).to_string(),
+                    format!("daemon proxy: {SENTENCE}")
+                );
+            }
+            other => panic!("expected Transport(sentence), got {other:?}"),
+        }
     }
 }

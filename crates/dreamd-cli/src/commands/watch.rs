@@ -6,8 +6,10 @@
 //! signal. Only the transport differs, and that difference lives entirely in
 //! core (AILAB-192):
 //!
-//! - **Unix** binds `~/.agent/dreamd.sock` and authenticates callers by peer
-//!   UID (`SO_PEERCRED`); it blocks until SIGINT or SIGTERM.
+//! - **Unix** binds `~/.agent/dreamd.sock`, or the absolute path in
+//!   `DREAMD_SOCK` (resolved as every client resolves it, BZR-1519), and
+//!   authenticates callers by peer UID (`SO_PEERCRED`); it blocks until SIGINT
+//!   or SIGTERM. A relative `DREAMD_SOCK` is a start failure (exit 1).
 //! - **Off Unix** there is no UDS and no `SO_PEERCRED`, so `watch` binds
 //!   loopback TCP on `127.0.0.1:0`, publishes the bound port to
 //!   `~/.agent/server.json` for clients to discover, and requires a bearer
@@ -123,7 +125,9 @@ pub(crate) fn parse_bind(raw: &str) -> Option<SocketAddr> {
 ///
 /// Everything else explicitly includes [`WatchError::Bind`] — a non-loopback
 /// address without `--insecure` is a valid invocation the daemon refuses at
-/// start — and [`WatchError::AuthToken`], a missing or
+/// start — [`WatchError::RelativeSockPath`], a relative `DREAMD_SOCK` the
+/// daemon refuses before it takes the writer lock (BZR-1519), and
+/// [`WatchError::AuthToken`], a missing or
 /// malformed `~/.agent/auth.json` on a loopback-TCP target. That is an operator
 /// *setup* error to be fixed with `dreamd service install`, not a malformed
 /// invocation, so it exits 1 like every other start failure.
@@ -225,6 +229,18 @@ mod tests {
         assert!(matches!(err, WatchError::Bind(_)), "{err:?}");
         assert!(err.to_string().contains("--insecure"), "{err}");
         assert_eq!(exit_code_for(&err), 1);
+    }
+
+    /// BZR-1519: a relative `DREAMD_SOCK` is a start failure, exit 1, and the
+    /// line names the variable and the path.
+    #[test]
+    fn relative_dreamd_sock_exits_1() {
+        let err = WatchError::RelativeSockPath(std::path::PathBuf::from("relative.sock"));
+        assert_eq!(exit_code_for(&err), 1);
+        assert_eq!(
+            err.to_string(),
+            "DREAMD_SOCK is not an absolute path: relative.sock"
+        );
     }
 
     /// `--bind` / `--insecure` on Unix configure a listener that does not

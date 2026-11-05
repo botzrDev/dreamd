@@ -21,7 +21,7 @@
 //! - **UDS (`#[cfg(unix)]`)** — [`resolve_daemon_socket`] resolves
 //!   `$DREAMD_SOCK` / `~/.agent/dreamd.sock`, [`send_one`] drives one request
 //!   over it. Authentication is the peer UID the server reads off the socket,
-//!   so nothing is sent in the request.
+//!   so no credential is sent in the request.
 //! - **Loopback TCP (cfg-free)** — [`read_server_json`] / [`resolve_daemon_tcp`]
 //!   read the ephemeral address the daemon published at
 //!   [`DaemonHome::server_json`], refusing anything that is not loopback;
@@ -30,6 +30,10 @@
 //!   `Authorization: Bearer` attached; [`tcp_endpoint_is_live`] /
 //!   [`tcp_daemon_is_live`] are the synchronous liveness probes the CLI's
 //!   `status` and `archive` guards use.
+//!
+//! Both transports run the version handshake (BZR-1519): the request carries
+//! [`VERSION_HEADER`] with this binary's version, and a daemon of another
+//! version, or one that states none, is [`DaemonTransportError::VersionMismatch`].
 //!
 //! The token never leaves this module except as the 64-hex string in that one
 //! header: [`AuthToken`] has a hand-written [`Debug`] that redacts, and no
@@ -66,19 +70,118 @@ use crate::layout::DaemonHome;
 /// body" are the same four stages over a socket or over TCP, and a caller's
 /// mapping to an exit code or an MCP error should not have to care which one
 /// it got.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DaemonTransportError {
     /// Connect failed with `NotFound`/`ConnectionRefused` — no daemon is
     /// listening. The dream proxy maps this to `NotReachable` (run in-process).
+    #[error("no daemon is listening")]
     Unreachable,
     /// Any other connect failure; carries the OS error message.
+    #[error("connect failed: {0}")]
     Connect(String),
-    /// The HTTP/1 handshake on a fresh connection failed.
+    /// The HTTP/1 handshake on a fresh connection failed. An HTTP handshake,
+    /// not the product version check ([`Self::VersionMismatch`]).
+    #[error("handshake failed: {0}")]
     Handshake(String),
     /// Sending the request failed, or the request could not be built.
+    #[error("send failed: {0}")]
     Send(String),
     /// Reading the response body failed.
+    #[error("read body failed: {0}")]
     ReadBody(String),
+    /// The daemon runs a different dreamd version, or sent no version
+    /// (BZR-1519). Carries the sentence the user sees: the daemon's 426
+    /// `error` string, [`version_mismatch_message`], or
+    /// [`version_unknown_message`]. Not `Unreachable`: a daemon answered, so
+    /// the dream proxy must not run the cycle in-process beside it.
+    #[error("{0}")]
+    VersionMismatch(String),
+}
+
+/// The header both sides stamp with their `CARGO_PKG_VERSION` (BZR-1519).
+///
+/// A client sends it on every request through [`send_one`] /
+/// [`send_one_tcp`]; the daemon sets it on every response the router's
+/// version layer produces. The two versions are compared as strings, never
+/// parsed as semver.
+pub const VERSION_HEADER: &str = "x-dreamd-version";
+
+/// The sentence for a daemon whose version differs from this client's.
+///
+/// The daemon puts it in its 426 body, and a client builds it itself when the
+/// response header differs but the body carries no `error` string.
+pub fn version_mismatch_message(client: &str, daemon: &str) -> String {
+    format!(
+        "version mismatch: client {client}, daemon {daemon}. \
+         Stop the other daemon and start this one with `dreamd watch`, \
+         or point DREAMD_SOCK at a daemon of this version."
+    )
+}
+
+/// The sentence for a daemon that answered without [`VERSION_HEADER`]: a
+/// daemon from before the handshake (BZR-1519).
+pub fn version_unknown_message(client: &str) -> String {
+    format!(
+        "version mismatch: client {client}, daemon unknown. \
+         The daemon sent no version. Stop it and start this binary with `dreamd watch`."
+    )
+}
+
+/// This binary's version, the one value both sides of the handshake send.
+const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Stamp [`VERSION_HEADER`] on an outbound request, replacing any value the
+/// caller set, so the daemon always compares this binary's version.
+fn stamp_version(req: &mut hyper::Request<Full<Bytes>>) {
+    req.headers_mut().insert(
+        VERSION_HEADER,
+        hyper::header::HeaderValue::from_static(THIS_VERSION),
+    );
+}
+
+/// The daemon's non-empty `error` string, read through `Value` because a
+/// derived struct would also accept a JSON array.
+fn error_string(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let msg = value.get("error")?.as_str()?;
+    (!msg.is_empty()).then(|| msg.to_owned())
+}
+
+/// The client half of the handshake (BZR-1519): decide from the response
+/// whether the daemon runs this binary's version.
+///
+/// - 426, or a header that is present and differs → `VersionMismatch` with the
+///   body's `error` string, or [`version_mismatch_message`] when there is none;
+/// - 401 or 403 → `Ok`. The auth layer is outside the version layer, so it
+///   answers before any version is stamped, and its verdict is the one to show;
+/// - no header → `VersionMismatch(`[`version_unknown_message`]`)`;
+/// - the same version → `Ok`.
+fn check_daemon_version(
+    status: hyper::StatusCode,
+    daemon: Option<&hyper::header::HeaderValue>,
+    body: &[u8],
+) -> Result<(), DaemonTransportError> {
+    let daemon = daemon.map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    let differs = daemon.as_deref().is_some_and(|d| d != THIS_VERSION);
+    if status == hyper::StatusCode::UPGRADE_REQUIRED || differs {
+        let msg = error_string(body).unwrap_or_else(|| match daemon.as_deref() {
+            Some(d) => version_mismatch_message(THIS_VERSION, d),
+            None => version_unknown_message(THIS_VERSION),
+        });
+        return Err(DaemonTransportError::VersionMismatch(msg));
+    }
+    if matches!(
+        status,
+        hyper::StatusCode::UNAUTHORIZED | hyper::StatusCode::FORBIDDEN
+    ) {
+        return Ok(());
+    }
+    match daemon {
+        Some(_) => Ok(()),
+        None => Err(DaemonTransportError::VersionMismatch(
+            version_unknown_message(THIS_VERSION),
+        )),
+    }
 }
 
 /// Socket-path resolution failure.
@@ -120,15 +223,21 @@ pub fn resolve_daemon_socket() -> Result<PathBuf, SockPathError> {
 /// runs until the stream closes. Connect `NotFound`/`ConnectionRefused` →
 /// `Unreachable`; all other stage failures carry the underlying message.
 ///
+/// The request carries [`VERSION_HEADER`], and a response from a daemon of
+/// another version, or of no stated version, is
+/// [`DaemonTransportError::VersionMismatch`] (BZR-1519).
+///
 /// Unix-only (AILAB-192): `tokio::net::UnixStream` does not exist off Unix. The
 /// loopback-TCP sibling mirrors this function stage for stage.
 #[cfg(unix)]
 pub async fn send_one(
     sock_path: &Path,
-    req: hyper::Request<Full<Bytes>>,
+    mut req: hyper::Request<Full<Bytes>>,
 ) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
     use hyper::client::conn::http1;
     use hyper_util::rt::TokioIo;
+
+    stamp_version(&mut req);
 
     let stream = match tokio::net::UnixStream::connect(sock_path).await {
         Ok(s) => s,
@@ -157,11 +266,13 @@ pub async fn send_one(
         .await
         .map_err(|e| DaemonTransportError::Send(e.to_string()))?;
     let status = resp.status();
+    let daemon = resp.headers().get(VERSION_HEADER).cloned();
     let body = resp
         .collect()
         .await
         .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
         .to_bytes();
+    check_daemon_version(status, daemon.as_ref(), &body)?;
     Ok((status, body))
 }
 
@@ -509,6 +620,8 @@ pub fn tcp_daemon_is_live(server_json: &Path) -> bool {
 /// overwrites any header a caller had already set, so a stale credential from
 /// a rebuilt request cannot win.
 ///
+/// The version handshake is the same as [`send_one`]'s (BZR-1519).
+///
 /// # Errors
 ///
 /// [`DaemonTransportError::Unreachable`] when the connect fails with
@@ -517,7 +630,8 @@ pub fn tcp_daemon_is_live(server_json: &Path) -> bool {
 /// not live" regardless of transport). Otherwise the variant naming the stage
 /// that failed, carrying that stage's message: `Connect`, `Handshake`, `Send`
 /// (also used for the by-construction-impossible case of a credential that is
-/// not a legal header value), or `ReadBody`.
+/// not a legal header value), or `ReadBody`. `VersionMismatch` when the daemon
+/// runs another version or sent none.
 pub async fn send_one_tcp(
     endpoint: &DaemonEndpoint,
     token: &AuthToken,
@@ -561,17 +675,20 @@ pub async fn send_one_tcp(
 
     req.headers_mut()
         .insert(hyper::header::AUTHORIZATION, credential);
+    stamp_version(&mut req);
 
     let resp = sender
         .send_request(req)
         .await
         .map_err(|e| DaemonTransportError::Send(e.to_string()))?;
     let status = resp.status();
+    let daemon = resp.headers().get(VERSION_HEADER).cloned();
     let body = resp
         .collect()
         .await
         .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
         .to_bytes();
+    check_daemon_version(status, daemon.as_ref(), &body)?;
     Ok((status, body))
 }
 
@@ -629,7 +746,8 @@ mod tests {
         let sock_path = dir.path().join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+        let (req_tx, mut req_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, String, Option<String>)>();
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
@@ -639,10 +757,16 @@ mod tests {
                 async move {
                     let method = req.method().to_string();
                     let uri = req.uri().to_string();
-                    let _ = req_tx.send((method, uri));
+                    let version = req
+                        .headers()
+                        .get(VERSION_HEADER)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let _ = req_tx.send((method, uri, version));
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .status(200)
+                            .header(VERSION_HEADER, env!("CARGO_PKG_VERSION"))
                             .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
                             .unwrap(),
                     )
@@ -663,9 +787,183 @@ mod tests {
         assert_eq!(status, hyper::StatusCode::OK);
         assert_eq!(body.as_ref(), b"{\"ok\":true}");
 
-        let (method, uri) = req_rx.recv().await.expect("request captured");
+        let (method, uri, version) = req_rx.recv().await.expect("request captured");
         assert_eq!(method, "POST");
         assert_eq!(uri, "/api/v1/dream");
+        assert_eq!(
+            version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "send_one must stamp this binary's version"
+        );
+    }
+
+    /// A one-connection UDS daemon that answers `status`, `body` and, when
+    /// given, `version` in [`VERSION_HEADER`]. The receiver yields the
+    /// version header the request carried.
+    async fn canned_daemon(
+        status: u16,
+        version: Option<&'static str>,
+        body: &'static [u8],
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    ) {
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+        let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let seen_tx = seen_tx.clone();
+                async move {
+                    let _ = seen_tx.send(
+                        req.headers()
+                            .get(VERSION_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    let mut resp = hyper::Response::builder().status(status);
+                    if let Some(v) = version {
+                        resp = resp.header(VERSION_HEADER, v);
+                    }
+                    Ok::<_, std::convert::Infallible>(
+                        resp.body(Full::new(Bytes::from_static(body))).unwrap(),
+                    )
+                }
+            });
+            let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), svc)
+                .await;
+        });
+        (dir, sock_path, seen_rx)
+    }
+
+    /// A request with a caller-supplied version, which the transport replaces.
+    fn request_with_a_stale_version() -> hyper::Request<Full<Bytes>> {
+        hyper::Request::builder()
+            .method(hyper::Method::GET)
+            .uri("/api/v1/health")
+            .header(hyper::header::HOST, "localhost")
+            .header(VERSION_HEADER, "0.0.0")
+            .body(Full::new(Bytes::new()))
+            .expect("request")
+    }
+
+    /// BZR-1519: a daemon that answers without a version is a daemon from
+    /// before the handshake, never a success.
+    #[tokio::test]
+    async fn send_one_version_mismatch_for_a_daemon_with_no_version() {
+        let (_dir, sock, mut seen) = canned_daemon(200, None, b"{\"ok\":true}").await;
+        let err = send_one(&sock, request_with_a_stale_version())
+            .await
+            .expect_err("no version header");
+        match err {
+            DaemonTransportError::VersionMismatch(msg) => {
+                assert_eq!(msg, version_unknown_message(env!("CARGO_PKG_VERSION")));
+                assert!(msg.contains("daemon unknown"), "{msg}");
+                assert!(msg.contains("`dreamd watch`"), "{msg}");
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            seen.recv().await.expect("request captured").as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "a caller-supplied version must be overwritten"
+        );
+    }
+
+    /// BZR-1519: a daemon's 426 sentence reaches the caller unchanged.
+    #[tokio::test]
+    async fn send_one_version_mismatch_passes_a_426_body_through() {
+        let (_dir, sock, _seen) = canned_daemon(
+            426,
+            Some("0.0.0"),
+            b"{\"error\":\"version mismatch: client 9.9.9, daemon 0.0.0. from the daemon\"}",
+        )
+        .await;
+        let err = send_one(&sock, request_with_a_stale_version())
+            .await
+            .expect_err("426");
+        match err {
+            DaemonTransportError::VersionMismatch(msg) => assert_eq!(
+                msg,
+                "version mismatch: client 9.9.9, daemon 0.0.0. from the daemon"
+            ),
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    /// BZR-1519: a different version header with no `error` string in the
+    /// body still names both versions.
+    #[tokio::test]
+    async fn send_one_version_mismatch_names_both_versions_without_a_body() {
+        let (_dir, sock, _seen) = canned_daemon(200, Some("0.0.0"), b"").await;
+        let err = send_one(&sock, request_with_a_stale_version())
+            .await
+            .expect_err("different version");
+        match err {
+            DaemonTransportError::VersionMismatch(msg) => assert_eq!(
+                msg,
+                version_mismatch_message(env!("CARGO_PKG_VERSION"), "0.0.0")
+            ),
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    /// BZR-1519: a 426 with no header and no body is the unknown-daemon
+    /// sentence, not a success.
+    #[tokio::test]
+    async fn send_one_version_mismatch_for_a_bare_426() {
+        let (_dir, sock, _seen) = canned_daemon(426, None, b"").await;
+        let err = send_one(&sock, request_with_a_stale_version())
+            .await
+            .expect_err("bare 426");
+        assert!(
+            matches!(
+                &err,
+                DaemonTransportError::VersionMismatch(msg)
+                    if *msg == version_unknown_message(env!("CARGO_PKG_VERSION"))
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// BZR-1519: the same version returns `(status, body)` unchanged, for a
+    /// status the caller maps as well as for 200.
+    #[tokio::test]
+    async fn send_one_version_mismatch_none_for_an_equal_header() {
+        let (_dir, sock, _seen) = canned_daemon(
+            404,
+            Some(env!("CARGO_PKG_VERSION")),
+            b"{\"error\":\"agent root not registered\"}",
+        )
+        .await;
+        let (status, body) = send_one(&sock, request_with_a_stale_version())
+            .await
+            .expect("same version");
+        assert_eq!(status, hyper::StatusCode::NOT_FOUND);
+        assert_eq!(body.as_ref(), b"{\"error\":\"agent root not registered\"}");
+    }
+
+    /// The auth layer is outside the version layer, so a 401 or 403 carries
+    /// no version. Its verdict reaches the caller instead of "daemon unknown".
+    #[tokio::test]
+    async fn send_one_version_mismatch_none_for_an_auth_rejection() {
+        for status in [401, 403] {
+            let (_dir, sock, _seen) =
+                canned_daemon(status, None, b"{\"error\":\"forbidden: peer UID\"}").await;
+            let (got, body) = send_one(&sock, request_with_a_stale_version())
+                .await
+                .unwrap_or_else(|e| panic!("{status}: {e:?}"));
+            assert_eq!(got.as_u16(), status);
+            assert_eq!(body.as_ref(), b"{\"error\":\"forbidden: peer UID\"}");
+        }
     }
 }
 
@@ -1078,6 +1376,7 @@ mod tcp_tests {
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .status(200)
+                            .header(VERSION_HEADER, env!("CARGO_PKG_VERSION"))
                             .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
                             .unwrap(),
                     )
@@ -1143,6 +1442,7 @@ mod tcp_tests {
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .status(200)
+                            .header(VERSION_HEADER, env!("CARGO_PKG_VERSION"))
                             .body(Full::new(Bytes::new()))
                             .unwrap(),
                     )
@@ -1172,6 +1472,70 @@ mod tcp_tests {
             seen,
             vec![format!("Bearer {}", token.as_hex())],
             "insert must replace a stale credential, not append beside it"
+        );
+    }
+
+    /// BZR-1519: the TCP transport runs the same handshake. It stamps this
+    /// binary's version, and a daemon that states none is a mismatch.
+    #[tokio::test]
+    async fn send_one_tcp_version_mismatch_for_a_daemon_with_no_version() {
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let seen_tx = seen_tx.clone();
+                async move {
+                    let _ = seen_tx.send(
+                        req.headers()
+                            .get(VERSION_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(200)
+                            .body(Full::new(Bytes::from_static(b"{\"ok\":true}")))
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), svc)
+                .await;
+        });
+
+        let endpoint = DaemonEndpoint {
+            host: loopback(),
+            port: addr.port(),
+        };
+        let req = hyper::Request::builder()
+            .method(hyper::Method::GET)
+            .uri("/api/v1/health")
+            .header(hyper::header::HOST, "localhost")
+            .body(Full::new(Bytes::new()))
+            .expect("request");
+        let err = send_one_tcp(&endpoint, &AuthToken([0x5a_u8; 32]), req)
+            .await
+            .expect_err("no version header");
+        assert!(
+            matches!(
+                &err,
+                DaemonTransportError::VersionMismatch(msg)
+                    if *msg == version_unknown_message(env!("CARGO_PKG_VERSION"))
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(
+            seen_rx.recv().await.expect("request captured").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
         );
     }
 }

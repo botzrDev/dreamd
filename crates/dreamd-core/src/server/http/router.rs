@@ -11,6 +11,7 @@ use super::handlers::{
     get_health, get_preferences, get_recall, get_salience, post_dream, post_learn, post_migrate,
 };
 use super::state::AppState;
+use crate::daemon_client::{version_mismatch_message, VERSION_HEADER};
 
 /// Peer UID injected at connection-accept time by `serve_uds`.
 /// Extracted by `peer_uid_middleware` to enforce daemon-owner-only access.
@@ -19,8 +20,9 @@ use super::state::AppState;
 pub struct PeerUid(pub u32);
 
 /// Build the `/api/v1` router with `X-Agent-Root` validation middleware, the
-/// request-trace stack (AILAB-189), and exactly one auth layer as the outermost
-/// one: `peer_uid_middleware` (WEG-72) on Unix, or
+/// request-trace stack (AILAB-189), the version handshake
+/// (`version_middleware`, BZR-1519), and exactly one auth layer as the
+/// outermost one: `peer_uid_middleware` (WEG-72) on Unix, or
 /// [`bearer_auth_middleware`] (AILAB-192) everywhere else. The two arms are
 /// mutually exclusive — no target mounts both, and none mounts neither.
 pub fn build_router(state: AppState) -> axum::Router {
@@ -61,7 +63,11 @@ pub fn build_router(state: AppState) -> axum::Router {
                 .on_response(http_on_response),
         )
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        // The version handshake (BZR-1519), inside auth and outside the trace
+        // stack: a caller that fails auth learns no version, and a 426 never
+        // reaches `agent_root_middleware` or a handler.
+        .layer(axum::middleware::from_fn(version_middleware));
 
     // `peer_uid_middleware` stays the outermost layer on Unix: auth runs before
     // everything else, tracing included. The trade is that a rejected peer
@@ -214,6 +220,40 @@ fn http_on_response<B>(
     // `latency_ms=0` on nearly every request and carry no information.
     span.record("latency_ms", latency.as_secs_f64() * 1000.0);
     tracing::info!(parent: span, "http request");
+}
+
+/// The daemon half of the version handshake (BZR-1519).
+///
+/// - no [`VERSION_HEADER`] on the request (curl, an older client): served;
+/// - a header equal to this binary's `CARGO_PKG_VERSION`: served;
+/// - any other value, empty included: **426** with
+///   `{"error": version_mismatch_message(client, daemon)}`, and the handler
+///   does not run.
+///
+/// Every response this layer returns carries the daemon's version in
+/// [`VERSION_HEADER`]. The versions are compared as strings.
+pub async fn version_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    const DAEMON: &str = env!("CARGO_PKG_VERSION");
+    let client = req
+        .headers()
+        .get(VERSION_HEADER)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    let mut resp = match client {
+        Some(client) if client != DAEMON => (
+            StatusCode::UPGRADE_REQUIRED,
+            axum::Json(serde_json::json!({
+                "error": version_mismatch_message(&client, DAEMON)
+            })),
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    };
+    resp.headers_mut()
+        .insert(VERSION_HEADER, axum::http::HeaderValue::from_static(DAEMON));
+    resp
 }
 
 /// Validate `X-Agent-Root` and resolve the project via `registry.toml`.

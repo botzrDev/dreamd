@@ -126,7 +126,7 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 
 | Variable | Default | Used by | Purpose |
 |---|---|---|---|
-| `DREAMD_SOCK` | `~/.agent/dreamd.sock` | MCP client, `dreamd dream` proxy, and every command that probes the daemon (`status`, `doctor`, `archive`, `forget`, `setup`, `uninstall`, `update`; not `memory checkout`, which always looks at `~/.agent/dreamd.sock`) | Override Unix socket path for **clients** connecting to the daemon. Must be an absolute path. **`dreamd watch` ignores this** and always binds `$HOME/.agent/dreamd.sock`. Unix only. |
+| `DREAMD_SOCK` | `~/.agent/dreamd.sock` | `dreamd watch` (the path it binds), the MCP client, the `dreamd dream` proxy, and every command that probes the daemon (`status`, `doctor`, `archive`, `forget`, `setup`, `uninstall`, `update`; not `memory checkout`, which looks only at `~/.agent/dreamd.sock`) | Override the Unix socket path. `dreamd watch` and every client resolve it the same way, so a daemon started with it and a client run with it meet at that path. Must be an absolute path. Unix only. |
 | `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. Requires `DREAMD_BIN_ALLOW_UNVERIFIED=1` or the shim exits 1. Skips SHA-256 verification. |
 | `DREAMD_BIN_ALLOW_UNVERIFIED` | unset | `npx dreamd-mcp` shim only | Must be `1` alongside `DREAMD_BIN` to accept an unverified local binary. |
 | `DREAMD_LAUNCHER` | unset | `dreamd setup` | The `npx dreamd-mcp` shim sets it to `npx` when it runs the binary. When the value is exactly `npx`, setup's hints print `npx -y dreamd-mcp <command>` instead of `dreamd <command>`. Not meant to be set by hand. |
@@ -139,17 +139,26 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 
 ### `DREAMD_SOCK`
 
-**Clients** (MCP, `dreamd dream` when proxying, `status`, `doctor`, `archive`, `forget`, …) honor this variable. **`dreamd watch` does not** — it always binds `$HOME/.agent/dreamd.sock`. Setting `DREAMD_SOCK` and then running `watch` leaves clients pointing at a socket the daemon never created.
+There is one daemon socket per user, at `~/.agent/dreamd.sock` by default. One `dreamd watch` serves every project the user has registered: each request names its project in `X-Agent-Root`, and the daemon looks it up in `~/.agent/registry.toml`.
 
-The value must be absolute. With a relative path `dreamd mcp` exits 1 (`DREAMD_SOCK is not an absolute path: …`); the one-shot commands treat it as "no daemon address" — `dreamd status` reports `daemon: not running`, and `dreamd dream` runs in-process instead of proxying.
+`dreamd watch` and every client (MCP, `dreamd dream` when proxying, `status`, `doctor`, `archive`, `forget`, …) resolve `DREAMD_SOCK` the same way: the variable's value when it is set, else `~/.agent/dreamd.sock`. Use it when one user needs a second daemon, for example a release binary and a development build side by side. Start that daemon and its clients with the same value. `dreamd memory checkout` looks only at `~/.agent/dreamd.sock`.
+
+The value must be absolute. With a relative path, `dreamd watch` and `dreamd mcp` exit 1 (`DREAMD_SOCK is not an absolute path: …`). The one-shot commands treat it as "no daemon address": `dreamd status` reports `daemon: not running`, and `dreamd dream` runs in-process instead of proxying.
 
 ```bash
-# Client override only — the daemon must already be listening at this path
+# A second daemon, and a client that talks to it
+DREAMD_SOCK=/tmp/my-dreamd.sock dreamd watch &
 export DREAMD_SOCK=/tmp/my-dreamd.sock
 npx -y dreamd-mcp              # connects here
 ```
 
-To run a daemon on a non-default path, change `$HOME` (which relocates the whole daemon home, including the socket).
+A client and a daemon of different dreamd versions refuse each other. The client prints, for example:
+
+```text
+version mismatch: client 1.3.1, daemon 1.3.0. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version.
+```
+
+A daemon from a release without this check sends no version, so the client prints `daemon unknown` in its place. The fix is the same: stop that daemon and start this binary with `dreamd watch`.
 
 ### `DREAMD_BIN`
 
