@@ -30,7 +30,8 @@ use super::super::state::AppState;
 ///   other value, means the personal layer is excluded, which is the default.
 ///
 /// # Responses
-/// * `200` — `{"status":"ok"}`, plus `"autobiography":{…}` when the phase ran (BZR-1467)
+/// * `200` — `{"status":"ok"}`, plus `"autobiography":{…}` when the phase ran (BZR-1467),
+///   and `"notices":[…]` when the cycle has a copy, a missing key, or pinned events to report
 /// * `409` — `{"error":"dream cycle in progress"}`: a cycle is open in the
 ///   project's coordinator, or `state.json` says `in_progress`
 /// * `403` — peer UID mismatch ([`peer_uid_middleware`](crate::server::http::peer_uid_middleware))
@@ -154,6 +155,14 @@ pub(crate) async fn post_dream(
         if let Ok(report) = serde_json::to_value(AutobiographyReport::from(outcome)) {
             body["autobiography"] = report;
         }
+    }
+    let notices = dream_cycle::cycle_notices(
+        &AgentRoot::new(&entry.root),
+        no_llm,
+        crate::llm::resolve_llm_credentials().is_some(),
+    );
+    if !notices.is_empty() {
+        body["notices"] = serde_json::json!(notices);
     }
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
 }

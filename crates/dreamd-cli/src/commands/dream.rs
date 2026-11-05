@@ -145,6 +145,14 @@ pub fn run(
         out,
         "dream cycle complete ({decayed_count} events decayed, {kept_count} kept)",
     )?;
+    let root = dreamd_core::layout::AgentRoot::new(project_root);
+    for line in dream_cycle::cycle_notices(
+        &root,
+        no_llm,
+        dreamd_core::llm::resolve_llm_credentials().is_some(),
+    ) {
+        writeln!(out, "{line}")?;
+    }
     let report = result.autobiography.as_ref().map(AutobiographyReport::from);
     write_notice(out, report.as_ref())?;
     Ok(())
@@ -190,8 +198,14 @@ fn try_proxy_to_daemon(
         ))
         .map_err(|e| DreamCliError::DaemonProxy(e.to_string()))?;
     match outcome {
-        DreamProxyOutcome::Ran(report) => {
+        DreamProxyOutcome::Ran {
+            autobiography: report,
+            notices,
+        } => {
             writeln!(out, "dream cycle complete (via daemon)")?;
+            for line in &notices {
+                writeln!(out, "{line}")?;
+            }
             write_notice(out, report.as_ref())?;
             Ok(Some(()))
         }

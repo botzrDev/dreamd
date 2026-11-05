@@ -29,6 +29,14 @@ The bake-off design note is a private Linear document. It is not in this reposit
 
 `scripts/benchmark/longmemeval/` runs dreamd through LongMemEval's retrieval protocol next to the paper's `flat-bm25` row; see its [README](./longmemeval/README.md) and the notes in [`docs/evals/external-benchmarks.md`](../../docs/evals/external-benchmarks.md).
 
+## Recall-quality gate
+
+`python3 scripts/benchmark/recall_gate.py` runs three falsifiers against `target/debug/dreamd` (`DREAMD_BIN` overrides that path). Build the binary first: `cargo build -p dreamd --bin dreamd`.
+
+Each row prints `pass` when the current ranker does not show that miss, and `fail` when it does. Exit 1 means at least one row failed. Exit 2 means the harness broke. The rows are a single bag query versus two anchors, a fat `skill_action` parent versus one specific child, and recall after `dream --no-llm` versus stuffing the log, including a lesson that is a copy of the representative event.
+
+A run on 2026-11-05 printed `single_anchor=fail hub_drown=fail consolidation=pass`. What those two failures earn is in [`context/planning/recall-gate-2026-11-05.md`](../../context/planning/recall-gate-2026-11-05.md).
+
 ## Coding recall oracle
 
 `python3 scripts/benchmark/coding_oracle.py --check` checks the frozen fixture and does not start a daemon. `python3 scripts/benchmark/coding_oracle.py` prints the live score. The published counts are in the repository [README](../../README.md) under Coding recall oracle.

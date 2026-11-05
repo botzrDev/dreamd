@@ -155,7 +155,7 @@ Removes one event from the live episodic log, pinned or not, and updates the les
 
 ```text
 $ dreamd forget --dry-run evt_01M3YEGYSZVX7594HBPM64XHR6
-dry-run removed=true lesson=unlinked
+would_remove=true lesson=unlinked
 $ dreamd forget --proof receipt.json evt_01M3YEGYSZVX7594HBPM64XHR6
 removed=true lesson=unlinked proof=receipt.json
 ```

@@ -379,7 +379,7 @@ No request body.
 
 | Status | Body | When |
 |---|---|---|
-| `200 OK` | `{"status":"ok","autobiography":{…}}` | Cycle completed. `autobiography` is described below |
+| `200 OK` | `{"status":"ok","autobiography":{…},"notices":[…]}` | Cycle completed. `autobiography` and `notices` are described below |
 | `409 Conflict` | `{"error":"dream cycle in progress"}` | A cycle is open in the project's coordinator, or `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
 | `400 Bad Request` | `{"error":"…"}` | Missing `X-Agent-Root` |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
@@ -401,6 +401,8 @@ The 200 body's `autobiography` object reports the git autobiography commit (BZR-
 ```
 
 The key is absent when the autobiography phase did not run or failed (a failure is logged at ERROR, and the cycle still succeeds). A daemon before 1.2.2 answers `{"status":"ok"}`. Key order is not part of the contract.
+
+`notices` is an array of strings, present only when it is non-empty. A deterministic lesson says it is a copy of the representative event, not a summary. When the caller did not send `x-dreamd-no-llm: 1` and the daemon has no API key, one line says how to set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.config/dreamd/secrets.toml`. When the lesson cites events, one line names the ids that were pinned.
 
 #### curl example
 

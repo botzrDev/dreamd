@@ -9,7 +9,8 @@
 //! command refuses while the daemon probes live, with the same probe as
 //! `dreamd archive`, and then takes the project writer lock, which refuses
 //! every other writer (an in-process `dreamd mcp`, a daemon the probe cannot
-//! see). `--dry-run` writes nothing, does not probe and takes no lock.
+//! see). `--dry-run` writes nothing, does not probe and takes no lock. Its
+//! stdout says `would_remove=`, never `removed=`.
 //!
 //! **Index:** after a removal, when `.agent/.dreamd/index` already exists, the
 //! command opens it, prunes this one event id and re-indexes the lesson layer.
@@ -137,7 +138,7 @@ pub fn run(
         let report = forget::preview(&root, &event_id)?;
         writeln!(
             out,
-            "dry-run removed={} lesson={}",
+            "would_remove={} lesson={}",
             report.removed,
             report.lesson.as_str()
         )?;
@@ -329,7 +330,11 @@ mod tests {
         let (r, out, err) = run_capture(tmp.path(), None, &evt_id('A'), true, None);
 
         r.unwrap();
-        assert_eq!(out, "dry-run removed=true lesson=untouched\n");
+        assert_eq!(out, "would_remove=true lesson=untouched\n");
+        assert!(
+            !out.contains("removed="),
+            "dry-run must not say the event was removed: {out}"
+        );
         assert!(err.contains("dreamd: dry run; nothing written"), "{err}");
         assert_eq!(fs::read(&jsonl).unwrap(), before);
         assert!(!root.wal_path().exists());

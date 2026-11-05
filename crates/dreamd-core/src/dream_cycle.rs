@@ -123,6 +123,53 @@ pub struct PostPhaseOptions<'a> {
     pub index: IndexBackend,
 }
 
+/// The line `dreamd dream` prints when the lesson body is the exemplar's text.
+#[must_use]
+pub fn copy_notice(exemplar_id: &str) -> String {
+    format!(
+        "lesson: copy of {exemplar_id}, the representative event in this cluster, not a summary of the others"
+    )
+}
+
+/// How to turn the model path on. Printed only when the caller did not pass
+/// `--no-llm` and dreamd has no key it will use.
+pub const NO_API_KEY_NOTICE: &str = "no API key, so this cycle did not call a model. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add anthropic_api_key or openai_api_key to ~/.config/dreamd/secrets.toml, to compose a summary. `dreamd dream --no-llm` chooses this copy on purpose.";
+
+/// The line that names every event this cycle pinned.
+#[must_use]
+pub fn pin_notice(citations: &[String]) -> String {
+    format!(
+        "pinned: {} (these events stay in the log; decay skips a pinned event)",
+        citations.join(" ")
+    )
+}
+
+/// Lines for `dreamd dream` and `POST /api/v1/dream`'s `notices` array.
+///
+/// A deterministic lesson says it is a copy of its exemplar. The no-key line
+/// is added only when the caller allowed a model and none is configured.
+/// Any lesson that cites events says those events were pinned. An absent or
+/// unreadable `LESSONS.md` yields nothing.
+#[must_use]
+pub fn cycle_notices(agent_root: &AgentRoot, no_llm: bool, has_credentials: bool) -> Vec<String> {
+    let Ok(file) = crate::lessons::read_lessons_file(&agent_root.lessons_md()) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if file.prompt_version == consolidation::DETERMINISTIC_PROMPT_ID {
+        if let Some(id) = file.lessons.first().map(|lesson| lesson.id.as_str()) {
+            lines.push(copy_notice(id));
+        }
+        if !no_llm && !has_credentials {
+            lines.push(NO_API_KEY_NOTICE.to_string());
+        }
+    }
+    if !file.citations.is_empty() {
+        lines.push(pin_notice(&file.citations));
+    }
+    lines
+}
+
 /// Derive `YYYY-MM-DD` from a caller-supplied unix timestamp.
 #[must_use]
 pub fn cycle_date_from_now_sec(now_sec: i64) -> String {
@@ -1219,6 +1266,48 @@ mod tests {
         assert_eq!(cycle_date_from_now_sec(0), "1970-01-01");
         // 2025-05-13T12:00:00Z — the fixture clock used throughout this module.
         assert_eq!(cycle_date_from_now_sec(NOW_SEC), "2025-05-13");
+    }
+
+    #[test]
+    fn cycle_notices_label_a_copy_a_missing_key_and_the_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        fs::create_dir_all(root.semantic_dir()).unwrap();
+        let file = crate::lessons::LessonsFile {
+            last_updated: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            prompt_version: consolidation::DETERMINISTIC_PROMPT_ID.to_string(),
+            cluster_key: "rust::eh".to_string(),
+            citations: vec!["evt_b".to_string(), "evt_a".to_string()],
+            lessons: vec![crate::lessons::Lesson {
+                id: "evt_b".to_string(),
+                content: "the representative event".to_string(),
+                pinned: false,
+            }],
+        };
+        crate::lessons::write_lessons_file(&root.lessons_md(), &file).unwrap();
+
+        let with_key = cycle_notices(&root, false, true);
+        assert_eq!(
+            with_key,
+            vec![copy_notice("evt_b"), pin_notice(&file.citations)]
+        );
+        assert!(!with_key.iter().any(|l| l.contains("no API key")));
+
+        let no_key = cycle_notices(&root, false, false);
+        assert_eq!(
+            no_key,
+            vec![
+                copy_notice("evt_b"),
+                NO_API_KEY_NOTICE.to_string(),
+                pin_notice(&file.citations),
+            ]
+        );
+
+        let asked = cycle_notices(&root, true, false);
+        assert_eq!(
+            asked,
+            vec![copy_notice("evt_b"), pin_notice(&file.citations)]
+        );
     }
 
     /// BZR-172 seam: the sequencer guards, dispatches exactly once, and runs

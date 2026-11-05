@@ -19,9 +19,13 @@ pub use crate::dream_cycle::{
 /// to the in-process cycle (both are race-free — no coordinator owns this JSONL).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DreamProxyOutcome {
-    /// Daemon ran the cycle (HTTP 200). Carries the body's `autobiography`
-    /// report; `None` from a daemon before 1.2.2 or any body without a valid object.
-    Ran(Option<AutobiographyReport>),
+    /// Daemon ran the cycle (HTTP 200). `autobiography` is absent from a
+    /// daemon before 1.2.2 or any body without a valid object. `notices` is
+    /// the body's string array, empty when the key is absent.
+    Ran {
+        autobiography: Option<AutobiographyReport>,
+        notices: Vec<String>,
+    },
     /// No live daemon: socket absent or connection refused. → run in-process.
     NotReachable,
     /// HTTP 404 — daemon up but this project isn't registered with it. → run in-process.
@@ -68,7 +72,10 @@ pub(crate) fn map_dream_status(
     body: &Bytes,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
     match status {
-        200 => Ok(DreamProxyOutcome::Ran(parse_autobiography(body))),
+        200 => Ok(DreamProxyOutcome::Ran {
+            autobiography: parse_autobiography(body),
+            notices: parse_notices(body),
+        }),
         404 => Ok(DreamProxyOutcome::ProjectNotRegistered),
         409 => Ok(DreamProxyOutcome::InProgress),
         other => Err(DreamProxyError::DaemonError {
@@ -81,6 +88,20 @@ pub(crate) fn map_dream_status(
 /// The 200 body's `autobiography` report (BZR-1467). The `is_object` filter is
 /// load-bearing: serde's internally tagged visitor also accepts a sequence whose
 /// first element is the tag, so `["unchanged"]` would otherwise parse.
+fn parse_notices(body: &Bytes) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    v.get("notices")
+        .and_then(|n| n.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_autobiography(body: &Bytes) -> Option<AutobiographyReport> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let report = v.get("autobiography").filter(|a| a.is_object())?;
@@ -147,7 +168,10 @@ mod tests {
         let empty = Bytes::new();
         assert_eq!(
             map_dream_status(200, &empty).unwrap(),
-            DreamProxyOutcome::Ran(None)
+            DreamProxyOutcome::Ran {
+                autobiography: None,
+                notices: Vec::new(),
+            }
         );
         assert_eq!(
             map_dream_status(404, &empty).unwrap(),
@@ -175,10 +199,13 @@ mod tests {
         );
         assert_eq!(
             map_dream_status(200, &skipped).unwrap(),
-            DreamProxyOutcome::Ran(Some(AutobiographyReport::Skipped {
-                reason: "user_dirty_tree".to_string(),
-                files: vec![".agent/semantic/LESSONS.md".to_string()],
-            }))
+            DreamProxyOutcome::Ran {
+                autobiography: Some(AutobiographyReport::Skipped {
+                    reason: "user_dirty_tree".to_string(),
+                    files: vec![".agent/semantic/LESSONS.md".to_string()],
+                }),
+                notices: Vec::new(),
+            }
         );
         for body in [
             &br#"{"status":"ok"}"#[..],
@@ -188,10 +215,27 @@ mod tests {
         ] {
             assert_eq!(
                 map_dream_status(200, &Bytes::copy_from_slice(body)).unwrap(),
-                DreamProxyOutcome::Ran(None),
+                DreamProxyOutcome::Ran {
+                    autobiography: None,
+                    notices: Vec::new(),
+                },
                 "body {:?}",
                 String::from_utf8_lossy(body)
             );
+        }
+    }
+
+    #[test]
+    fn map_dream_status_reads_notices() {
+        let body = Bytes::from_static(br#"{"status":"ok","notices":["pinned: evt_a","nope",1]}"#);
+        match map_dream_status(200, &body).unwrap() {
+            DreamProxyOutcome::Ran { notices, .. } => {
+                assert_eq!(
+                    notices,
+                    vec!["pinned: evt_a".to_string(), "nope".to_string()]
+                );
+            }
+            other => panic!("expected Ran, got {other:?}"),
         }
     }
 
@@ -273,7 +317,13 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_round_trips_over_uds() {
         let (outcome, req) = round_trip(false, false).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
+        assert_eq!(
+            outcome,
+            DreamProxyOutcome::Ran {
+                autobiography: None,
+                notices: Vec::new(),
+            }
+        );
         assert_eq!(req.method, "POST");
         assert_eq!(req.uri, "/api/v1/dream");
         assert_eq!(req.agent_root.as_deref(), Some("/some/project/root"));
@@ -294,7 +344,13 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_sends_no_llm_header_when_set() {
         let (outcome, req) = round_trip(true, false).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
+        assert_eq!(
+            outcome,
+            DreamProxyOutcome::Ran {
+                autobiography: None,
+                notices: Vec::new(),
+            }
+        );
         assert_eq!(req.uri, "/api/v1/dream", "--no-llm must not skip the proxy");
         assert_eq!(
             req.no_llm.as_deref(),
@@ -313,7 +369,13 @@ mod tests {
     #[tokio::test]
     async fn proxy_dream_cycle_sends_share_personal_header_when_set() {
         let (outcome, req) = round_trip(false, true).await;
-        assert_eq!(outcome, DreamProxyOutcome::Ran(None));
+        assert_eq!(
+            outcome,
+            DreamProxyOutcome::Ran {
+                autobiography: None,
+                notices: Vec::new(),
+            }
+        );
         assert_eq!(
             req.uri, "/api/v1/dream",
             "--share-personal must not skip the proxy"

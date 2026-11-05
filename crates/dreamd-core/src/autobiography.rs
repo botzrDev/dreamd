@@ -4,7 +4,8 @@
 //! `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl` to
 //! the user's outer project git repo with a fixed identity
 //! (`dreamd <noreply@dreamd.dev>`) and a fixed message shape
-//! (`dreamd: cycle YYYY-MM-DD`).
+//! (`dreamd: cycle YYYY-MM-DD`, plus `cited:` and `pinned:` when the
+//! cycle's `LESSONS.md` names events).
 //!
 //! Behavior is best-effort: every failure path returns a typed outcome or
 //! error, but neither the HTTP handler (WEG-70) nor the CLI (WEG-64) treats
@@ -379,6 +380,26 @@ pub fn record_baseline(
     Ok(())
 }
 
+/// Git commit subject, and the cited and pinned ids when this cycle named any.
+///
+/// An unreadable `LESSONS.md` (or one with no `citations`) keeps the subject
+/// alone, which is the message a cycle that promoted nothing has always used.
+pub fn commit_message(cycle_date: &str, citations: &[String]) -> String {
+    if citations.is_empty() {
+        return format!("dreamd: cycle {cycle_date}");
+    }
+    let ids = citations.join(" ");
+    format!("dreamd: cycle {cycle_date}\n\ncited: {ids}\npinned: {ids}")
+}
+
+/// Citations on the cycle's `LESSONS.md`, or none when the file is absent or
+/// not a lesson file (a hand-written stub still commits).
+fn lesson_citations(agent_root: &AgentRoot) -> Vec<String> {
+    crate::lessons::read_lessons_file(&agent_root.lessons_md())
+        .map(|file| file.citations)
+        .unwrap_or_default()
+}
+
 /// The one text for the WARN and the CLI (D9). `files` joined with ", ".
 pub fn skip_message(reason: &str, files: &[String]) -> String {
     let names = files.join(", ");
@@ -530,7 +551,7 @@ pub fn commit_cycle(
     // 5. Commit on top of HEAD (no parent on an unborn branch).
     let tree = repo.find_tree(tree_id)?;
     let sig = Signature::now(COMMITTER_NAME, COMMITTER_EMAIL)?;
-    let msg = format!("dreamd: cycle {cycle_date}");
+    let msg = commit_message(cycle_date, &lesson_citations(agent_root));
     let parents: Vec<&git2::Commit<'_>> = head.iter().collect();
     let oid = repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
     repo_index.write()?;
@@ -1377,6 +1398,46 @@ mod tests {
         let start = check_dirty_at_cycle_start(&project, Some(&baseline)).unwrap();
         assert_eq!(start.log.as_deref(), Some(Path::new(&nested_log)));
         assert_eq!(start.lessons, None);
+    }
+
+    #[test]
+    fn commit_message_names_cited_events_and_the_pin() {
+        assert_eq!(
+            commit_message("2026-05-26", &[]),
+            "dreamd: cycle 2026-05-26"
+        );
+        let cited = vec!["evt_b".to_string(), "evt_a".to_string()];
+        assert_eq!(
+            commit_message("2026-05-26", &cited),
+            "dreamd: cycle 2026-05-26\n\ncited: evt_b evt_a\npinned: evt_b evt_a"
+        );
+    }
+
+    #[test]
+    fn commit_cycle_message_comes_from_the_lesson_file() {
+        let dir = TempDir::new().unwrap();
+        let repo = init_repo_with_files(&dir);
+        make_initial_commit(&repo, &dir);
+        let agent_root = AgentRoot::new(dir.path());
+        let file = crate::lessons::LessonsFile {
+            last_updated: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            prompt_version: crate::consolidation::DETERMINISTIC_PROMPT_ID.to_string(),
+            cluster_key: "rust::eh".to_string(),
+            citations: vec!["evt_b".to_string(), "evt_a".to_string()],
+            lessons: vec![crate::lessons::Lesson {
+                id: "evt_b".to_string(),
+                content: "copy".to_string(),
+                pinned: false,
+            }],
+        };
+        crate::lessons::write_lessons_file(&agent_root.lessons_md(), &file).unwrap();
+
+        let outcome = commit_cycle(&agent_root, "2026-05-26", &StartCheck::default()).unwrap();
+        let oid = committed(outcome);
+        assert_eq!(
+            repo.find_commit(oid).unwrap().message().unwrap(),
+            commit_message("2026-05-26", &file.citations)
+        );
     }
 
     /// Test 15: the notice text and the report's wire form, byte for byte.

@@ -152,17 +152,20 @@ struct Watch {
 
 impl Watch {
     /// Spawn `dreamd watch` with both output streams redirected to one file
-    /// inside `home`, so stderr is not a terminal.
-    fn spawn(project: &Path, home: &Path) -> Self {
+    /// inside `home`, so stderr is not a terminal. `env` is applied after
+    /// `dreamd()` clears `DREAMD_LOG` and `DREAMD_LOG_FORMAT`.
+    fn spawn(project: &Path, home: &Path, env: &[(&str, &str)]) -> Self {
         let console = home.join("watch.console");
         let out = std::fs::File::create(&console).expect("create console file");
         let err = out.try_clone().expect("clone console file handle");
-        let child = dreamd(project, home)
-            .arg("watch")
+        let mut cmd = dreamd(project, home);
+        cmd.arg("watch")
             .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .expect("spawn dreamd watch");
+            .stderr(Stdio::from(err));
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let child = cmd.spawn().expect("spawn dreamd watch");
         Self { child, console }
     }
 
@@ -227,7 +230,7 @@ fn watch_console_shows_status_and_the_file_keeps_requests() {
     let socket = store.home.path().join(".agent").join("dreamd.sock");
     let daemon_log = store.home.path().join(".agent").join("dreamd.log");
 
-    let mut watch = Watch::spawn(store.project.path(), store.home.path());
+    let mut watch = Watch::spawn(store.project.path(), store.home.path(), &[]);
     wait_for_live_socket(&mut watch, &socket);
 
     for i in 0..3 {
@@ -269,6 +272,60 @@ fn watch_console_shows_status_and_the_file_keeps_requests() {
         !console.lines().any(|l| l.starts_with('{')),
         "console must be text off a terminal:\n{console}"
     );
+}
+
+/// `DREAMD_LOG` and `DREAMD_LOG_FORMAT` reach the subscriber `watch` installs
+/// (BZR-1470 test 13). The file-path call is the one this process uses.
+#[test]
+fn watch_honours_dreamd_log_and_log_format() {
+    let store = seed();
+    let project = std::fs::canonicalize(store.project.path()).expect("canonical project");
+    let socket = store.home.path().join(".agent").join("dreamd.sock");
+
+    let mut watch = Watch::spawn(
+        store.project.path(),
+        store.home.path(),
+        &[("DREAMD_LOG", "info"), ("DREAMD_LOG_FORMAT", "json")],
+    );
+    wait_for_live_socket(&mut watch, &socket);
+
+    for i in 0..3 {
+        let response = get_health(&socket, &project);
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "request {i} must answer 200; got:\n{response}\nconsole:\n{}",
+            watch.console()
+        );
+    }
+
+    let deadline = Instant::now() + TIMEOUT;
+    let console = loop {
+        let console = watch.console();
+        let requests = console
+            .lines()
+            .filter(|l| l.contains("http request"))
+            .count();
+        if requests >= 3 {
+            break console;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "console has {requests} `http request` line(s) after {TIMEOUT:?}, want 3:\n{console}"
+        );
+        std::thread::sleep(POLL);
+    };
+
+    assert!(
+        console
+            .lines()
+            .any(|l| l.contains("dreamd watch: serving on")),
+        "console must show the start line:\n{console}"
+    );
+    for line in console.lines().filter(|l| !l.is_empty()) {
+        let v: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("console line is not JSON ({e}): {line}"));
+        assert!(v.is_object(), "console line is not a JSON object: {line}");
+    }
 }
 
 // ── blame ───────────────────────────────────────────────────────────────────

@@ -135,7 +135,7 @@
 //!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
 //!   in `cli.rs` never grants it to `service`. The supervised `watch` still
 //!   gets the file layer, and its stderr additionally lands in the user
-//!   journal on Linux (JSON when stderr is not a TTY).
+//!   journal on Linux (text; JSON with `DREAMD_LOG_FORMAT=json`).
 //!
 //! Hosts with no backend at all (Linux without a reachable systemd --user
 //! manager: containers, most CI runners) get [`ServiceError::NoSystemd`] and

@@ -260,7 +260,7 @@ dreamd memory diff <older-ref> <newer-ref>
 Remove one event (stop the daemon first — `forget` refuses while it is running):
 
 ```bash
-dreamd forget evt_… --dry-run                  # prints `dry-run removed=true lesson=…`; writes nothing
+dreamd forget evt_… --dry-run                  # prints `would_remove=true lesson=…`; writes nothing
 dreamd forget evt_… --proof forget-receipt.json
 dreamd doctor --provenance
 ```
