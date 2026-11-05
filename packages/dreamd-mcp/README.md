@@ -175,6 +175,14 @@ Publishing is deliberately not automated; no workflow holds registry credentials
 - [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md): on-disk `.agent/` contract
 - [docs/troubleshooting.md](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md): common failures
 
+## Support dreamd
+
+dreamd is open source under Apache-2.0 and built by a small team. Sponsorship funds its core maintenance. You can sponsor dreamd on:
+
+- [GitHub Sponsors](https://github.com/sponsors/botzrDev)
+- [Patreon](https://www.patreon.com/c/dreamd_dev)
+- [Ko-fi](https://ko-fi.com/dreamd_dev)
+
 ## License
 
 Apache-2.0

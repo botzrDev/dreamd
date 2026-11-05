@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **`npm fund` lists dreamd's sponsor links, and both READMEs say how to support dreamd.** The `dreamd-mcp` package now has a `funding` field naming GitHub Sponsors, Patreon and Ko-fi, so `npm fund` lists them in a project that installs the package. The repository README and the package README have a "Support dreamd" section with the same three links.
+
 ### Changed
 
 - **The README shows `blame` and `forget` at work, and its audit loop runs under npx.** A recording near the top (`docs/assets/blame-forget.gif`, tape in `docs/assets/blame-forget.tape`) shows `blame` finding the event behind a bad answer, `forget` removing it with a receipt, and the same query coming back without it. The audit loop now names `npx -y dreamd-mcp watch` and `npx -y dreamd-mcp doctor --repair`, which work without a `dreamd` on `PATH`. The "Where dreamd fits" section is removed.
