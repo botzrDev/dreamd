@@ -183,6 +183,8 @@ dreamd is open source under Apache-2.0 and built by a small team. Sponsorship fu
 - [Patreon](https://www.patreon.com/c/dreamd_dev)
 - [Ko-fi](https://ko-fi.com/dreamd_dev)
 
+Sponsors are listed in the [repository README](https://github.com/botzrDev/dreamd#sponsors).
+
 ## License
 
 Apache-2.0

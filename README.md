@@ -278,6 +278,22 @@ dreamd is open source under Apache-2.0 and built by a small team. Sponsorship fu
 - [Patreon](https://www.patreon.com/c/dreamd_dev)
 - [Ko-fi](https://ko-fi.com/dreamd_dev)
 
+### Sponsors
+
+Company sponsors ($250 a month) are listed by logo and Backers ($25 a month) by name on [GitHub Sponsors](https://github.com/sponsors/botzrDev).
+
+**Company**
+
+None yet.
+
+<!-- Company: <a href="URL"><img src="docs/assets/sponsors/NAME.png" alt="NAME" height="48"></a> -->
+
+**Backers**
+
+None yet.
+
+<!-- Backers: [Name](https://github.com/USERNAME), comma-separated -->
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md) (do not open a public issue for vulnerabilities).

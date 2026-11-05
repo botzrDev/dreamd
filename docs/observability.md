@@ -23,7 +23,7 @@ Each entry in `citations` is:
 |---|---|
 | `id` | Event id (`RecallResult::event_id`); may be empty for pre-WEG-45 docs |
 | `score` | Final ranking score: BM25 × salience |
-| `bm25_component` | Raw Tantivy BM25 score before the salience multiply |
+| `bm25_component` | The BM25 value that was multiplied by salience. For a hit promoted because it has every query token the top hit lacks (BZR-1522), it is the hit's BM25 for the whole query plus the top hit's BM25 plus 1. For every other hit it is Tantivy's BM25 score for the whole query |
 | `salience_component` | Query-time salience multiplier |
 | `layer` | Memory layer: `episodic` or `semantic` — the same token as the paired `results[].source` |
 | `snippet` | Full stored learning text, no truncation |

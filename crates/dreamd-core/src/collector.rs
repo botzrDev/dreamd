@@ -281,10 +281,23 @@ impl Collector for SalienceCollector {
 /// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is private to
 /// this module on [`ScoredDoc`], so hydration must stay inside it.
 fn hydrate_scored(
-    searcher: tantivy::Searcher,
+    searcher: &tantivy::Searcher,
     fields: &SchemaFields,
     top_docs: Vec<ScoredDoc>,
 ) -> tantivy::Result<Vec<RecallResult>> {
+    Ok(hydrate_addressed(searcher, fields, top_docs)?
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect())
+}
+
+/// [`hydrate_scored`], keeping each result's [`DocAddress`] so
+/// [`rank_missing_tokens`] can tell documents apart across searches.
+fn hydrate_addressed(
+    searcher: &tantivy::Searcher,
+    fields: &SchemaFields,
+    top_docs: Vec<ScoredDoc>,
+) -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
     let mut results = Vec::with_capacity(top_docs.len());
     for scored in top_docs {
         // `searcher.doc` is generic over `D: DocumentDeserialize`;
@@ -315,25 +328,28 @@ fn hydrate_scored(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        results.push(RecallResult {
-            score: scored.score.0,
-            bm25: scored.bm25,
-            salience: scored.salience,
-            content,
-            timestamp_sec: scored.timestamp_sec,
-            pain: scored.pain,
-            importance: scored.importance,
-            recurrence: scored.recurrence,
-            layer: layer_val,
-            skill_action,
-            source_harness,
-            event_id,
-        });
+        results.push((
+            scored.doc_address,
+            RecallResult {
+                score: scored.score.0,
+                bm25: scored.bm25,
+                salience: scored.salience,
+                content,
+                timestamp_sec: scored.timestamp_sec,
+                pain: scored.pain,
+                importance: scored.importance,
+                recurrence: scored.recurrence,
+                layer: layer_val,
+                skill_action,
+                source_harness,
+                event_id,
+            },
+        ));
     }
 
     results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.1.score
+            .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(results)
@@ -370,6 +386,10 @@ pub fn recall(
 /// and `MustNot` clauses add no score, so every remaining hit scores as it
 /// does in [`recall`] (BZR-1243). The index is not modified. An empty
 /// exclusion searches the unchanged query, so it is exactly [`recall`].
+///
+/// A plain multi-word query whose top hit lacks a query token that another
+/// hit's content has is re-ranked by [`rank_missing_tokens`] (BZR-1522).
+/// Every other query returns the one search above, scores included.
 pub fn recall_excluding(
     reader: &RecallReader,
     fields: &SchemaFields,
@@ -380,15 +400,154 @@ pub fn recall_excluding(
 ) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
     let recurrence = reader.recurrence(&searcher)?;
-
     let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
-    let bm25_query = query_parser.parse_query(query_text)?;
 
-    let final_query = exclude(bm25_query, fields, exclusion);
+    // One parsed query, the exclusion's `MustNot` clauses, and the salience
+    // collector. The bag and every token search go through it.
+    let search = |text: &str, limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
+        let final_query = exclude(query_parser.parse_query(text)?, fields, exclusion);
+        let collector = SalienceCollector::new(limit, now_sec, Arc::clone(&recurrence));
+        let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
+        hydrate_addressed(&searcher, fields, top_docs)
+    };
 
-    let collector = SalienceCollector::new(k, now_sec, recurrence);
-    let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
-    hydrate_scored(searcher, fields, top_docs)
+    let bag = search(query_text, k)?;
+    rank_missing_tokens(bag, query_text, k, search)
+}
+
+/// The query's tokens when it is plain: two or more whitespace-separated
+/// pieces, each `[A-Za-z0-9_]+`. Lowercased, first occurrence kept. `None`
+/// for one piece or for any other character (BZR-1522).
+fn plain_tokens(query_text: &str) -> Option<Vec<String>> {
+    let pieces: Vec<&str> = query_text.split_whitespace().collect();
+    let plain = pieces.len() >= 2
+        && pieces.iter().all(|piece| {
+            piece
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        });
+    if !plain {
+        return None;
+    }
+    let mut tokens: Vec<String> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let token = piece.to_ascii_lowercase();
+        if !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    Some(tokens)
+}
+
+/// `true` when `content`, split on every character that is not ASCII
+/// alphanumeric or `_` and lowercased, yields `token`. `trust` does not have
+/// `rust`.
+fn content_has(content: &str, token: &str) -> bool {
+    content
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|piece| piece.eq_ignore_ascii_case(token))
+}
+
+/// BZR-1522: rank the event that holds the query tokens the bag's top hit lacks.
+///
+/// `bag` is the one-query result, sorted as [`recall`] returns it. It comes
+/// back untouched unless the query is plain ([`plain_tokens`]), the top hit's
+/// content lacks at least one token, and a search for a missing token finds
+/// a hit with another `event_id` whose content has every missing token
+/// (Amendment 1). Then the bag and those hits are rescored:
+///
+/// * a hit with another `event_id` than the top hit, whose content has
+///   every missing token, gets `bm25 = bag_bm25 + top.bm25 + 1.0`;
+/// * every other hit keeps its bag BM25;
+/// * `bag_bm25` is the hit's score for the whole query, from a bag re-run
+///   with room for the token hits, and `0` for a hit outside it;
+/// * `score = bm25 * salience`, with the salience the collector computed.
+///
+/// The result is sorted by score descending, then `event_id` ascending, and
+/// cut to `k`. `salience()` and recurrence are not touched, so `--explain`'s
+/// product still equals the score.
+fn rank_missing_tokens(
+    bag: Vec<(DocAddress, RecallResult)>,
+    query_text: &str,
+    k: usize,
+    search: impl Fn(&str, usize) -> tantivy::Result<Vec<(DocAddress, RecallResult)>>,
+) -> tantivy::Result<Vec<RecallResult>> {
+    let untouched =
+        |bag: Vec<(DocAddress, RecallResult)>| bag.into_iter().map(|(_, result)| result).collect();
+
+    let Some(tokens) = plain_tokens(query_text) else {
+        return Ok(untouched(bag));
+    };
+    let Some((_, top)) = bag.first() else {
+        return Ok(untouched(bag));
+    };
+    let missing: Vec<String> = tokens
+        .into_iter()
+        .filter(|token| !content_has(&top.content, token))
+        .collect();
+    if missing.is_empty() {
+        return Ok(untouched(bag));
+    }
+
+    let top_event_id = top.event_id.clone();
+    let top_bm25 = top.bm25;
+    let promoted = |hit: &RecallResult| {
+        hit.event_id != top_event_id && missing.iter().all(|token| content_has(&hit.content, token))
+    };
+
+    let mut token_hits: Vec<(DocAddress, RecallResult)> = Vec::new();
+    for token in &missing {
+        for (address, hit) in search(token, k)? {
+            if promoted(&hit) && !token_hits.iter().any(|(seen, _)| *seen == address) {
+                token_hits.push((address, hit));
+            }
+        }
+    }
+    if token_hits.is_empty() {
+        return Ok(untouched(bag));
+    }
+
+    let mut union = bag;
+    let bag_len = union.len();
+    for (address, hit) in token_hits.iter().cloned() {
+        if !union.iter().any(|(seen, _)| *seen == address) {
+            union.push((address, hit));
+        }
+    }
+
+    // A hit found only by a token search may still sit inside a wider bag.
+    let wide = if union.len() > bag_len {
+        search(query_text, k + token_hits.len())?
+    } else {
+        union[..bag_len].to_vec()
+    };
+    let bag_bm25 = |address: DocAddress| {
+        wide.iter()
+            .find(|(seen, _)| *seen == address)
+            .map_or(0.0, |(_, hit)| hit.bm25)
+    };
+
+    let mut ranked: Vec<RecallResult> = union
+        .into_iter()
+        .map(|(address, mut hit)| {
+            let bm25 = bag_bm25(address);
+            hit.bm25 = if promoted(&hit) {
+                bm25 + top_bm25 + 1.0
+            } else {
+                bm25
+            };
+            hit.score = hit.bm25 * hit.salience;
+            hit
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.event_id.cmp(&b.event_id))
+    });
+    ranked.truncate(k);
+    Ok(ranked)
 }
 
 /// `base` with `exclusion`'s `MustNot` clauses; `base` itself when the
@@ -445,7 +604,7 @@ pub fn score_by_salience(
     let recurrence = reader.recurrence(&searcher)?;
     let collector = SalienceCollector::new(n, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&AllQuery, &collector)?;
-    hydrate_scored(searcher, fields, top_docs)
+    hydrate_scored(&searcher, fields, top_docs)
 }
 
 #[cfg(test)]
@@ -484,6 +643,91 @@ mod tests {
         writer.commit().expect("commit");
         let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
         (index, fields, reader)
+    }
+
+    /// `scripts/benchmark/recall_gate.py` `single_anchor` (BZR-1522): the two
+    /// events share a timestamp, pain 6 and importance 6. The queue event
+    /// lacks `redis`; the redis event has it and must rank first.
+    #[test]
+    fn single_anchor_bag_query_ranks_the_event_with_the_missing_token() {
+        const REDIS: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5F01";
+        const QUEUE: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5F02";
+        const QUERY: &str = "redis worker queue overflow";
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        let ts = (NOW_SEC - DAY_SECS) as u64;
+        for (id, skill_action, content) in [
+            (REDIS, "rust::redis::worker", "redis worker rejects a job"),
+            (
+                QUEUE,
+                "rust::worker::queue",
+                "worker queue overflow worker queue overflow worker queue overflow",
+            ),
+        ] {
+            writer
+                .add_document(doc!(
+                    fields.content => content,
+                    fields.timestamp_sec => ts,
+                    fields.pain => 6.0_f64,
+                    fields.importance => 6.0_f64,
+                    fields.layer => Layer::Episodic.as_str(),
+                    fields.last_updated_sec => ts,
+                    fields.cited_event_count => 0_u64,
+                    fields.event_id => id,
+                    fields.skill_action => skill_action,
+                    fields.source_harness => "recall_gate",
+                ))
+                .expect("add doc");
+        }
+        writer.commit().expect("commit");
+        let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
+
+        // Tantivy's BM25 for the whole query, which is the bag.
+        let searcher = reader.searcher();
+        let query = QueryParser::for_index(&index, vec![fields.content])
+            .parse_query(QUERY)
+            .expect("parse");
+        let mut bag_bm25 = std::collections::HashMap::new();
+        for (score, address) in searcher
+            .search(
+                &query,
+                &tantivy::collector::TopDocs::with_limit(5).order_by_score(),
+            )
+            .expect("bag search")
+        {
+            let doc: TantivyDocument = searcher.doc(address).expect("doc");
+            let id = doc
+                .get_first(fields.event_id)
+                .and_then(|v| v.as_str())
+                .expect("id");
+            bag_bm25.insert(id.to_string(), score as f64);
+        }
+        assert!(
+            bag_bm25[QUEUE] > bag_bm25[REDIS],
+            "the bag alone ranks the queue event first: {bag_bm25:?}"
+        );
+
+        let results = recall(&reader, &fields, QUERY, 5, NOW_SEC).unwrap();
+        for r in &results {
+            eprintln!(
+                "{} bm25={} salience={} score={}",
+                r.event_id, r.bm25, r.salience, r.score
+            );
+        }
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].event_id, REDIS, "redis event must be rank 1");
+        let (redis, queue) = (&results[0], &results[1]);
+        assert_eq!(queue.event_id, QUEUE);
+        assert_eq!(redis.salience, queue.salience, "the gate ties on salience");
+        assert_eq!(
+            queue.bm25, bag_bm25[QUEUE],
+            "the top hit keeps its bag BM25"
+        );
+        assert_eq!(redis.bm25, bag_bm25[REDIS] + bag_bm25[QUEUE] + 1.0);
+        for r in &results {
+            assert_eq!(r.score, r.bm25 * r.salience, "score stays bm25 * salience");
+        }
     }
 
     #[test]

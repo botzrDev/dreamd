@@ -54,7 +54,7 @@ const DECOMPOSITION_TOL: f64 = 1e-9;
 
 #[derive(Deserialize)]
 struct FixtureRecord {
-    #[allow(dead_code)] // present in the JSONL but not asserted on here
+    /// Indexed only by [`build_index_from_fixture_with_ids`] (BZR-1522).
     id: String,
     timestamp: DateTime<Utc>,
     pain: f64,
@@ -80,24 +80,38 @@ fn load_fixture() -> Vec<FixtureRecord> {
 /// key is a `::` prefix of another, so that is the count of records sharing
 /// the key (demo-corpus/README.md "Recurrence note").
 fn build_index_from_fixture(records: &[FixtureRecord]) -> (Index, SchemaFields, RecallReader) {
+    build_index(records, false)
+}
+
+/// [`build_index_from_fixture`] with each record's JSONL `id` as its
+/// `event_id`, the way production indexes an event (BZR-1522 Amendment 1).
+fn build_index_from_fixture_with_ids(
+    records: &[FixtureRecord],
+) -> (Index, SchemaFields, RecallReader) {
+    build_index(records, true)
+}
+
+fn build_index(records: &[FixtureRecord], with_ids: bool) -> (Index, SchemaFields, RecallReader) {
     let (schema, fields) = build_schema();
     let index = Index::create_in_ram(schema);
 
     let mut writer = index.writer(15_000_000).expect("index writer");
     for r in records {
         let ts = r.timestamp.timestamp() as u64;
-        writer
-            .add_document(doc!(
-                fields.content => r.content.clone(),
-                fields.timestamp_sec => ts,
-                fields.pain => r.pain,
-                fields.importance => r.importance,
-                fields.layer => Layer::Episodic.as_str(),
-                fields.last_updated_sec => ts,
-                fields.cited_event_count => 0u64,
-                fields.skill_action => r.skill_action.clone(),
-            ))
-            .expect("add doc");
+        let mut document = doc!(
+            fields.content => r.content.clone(),
+            fields.timestamp_sec => ts,
+            fields.pain => r.pain,
+            fields.importance => r.importance,
+            fields.layer => Layer::Episodic.as_str(),
+            fields.last_updated_sec => ts,
+            fields.cited_event_count => 0u64,
+            fields.skill_action => r.skill_action.clone(),
+        );
+        if with_ids {
+            document.add_text(fields.event_id, &r.id);
+        }
+        writer.add_document(document).expect("add doc");
     }
     writer.commit().expect("commit");
     let reader = RecallReader::open(&index, ReloadPolicy::OnCommitWithDelay).expect("reader");
@@ -275,4 +289,50 @@ fn recall_results_are_score_descending() {
             pair[1].score,
         );
     }
+}
+
+/// BZR-1522 Amendment 1. E1, the top hit, has `rust` and lacks `error` and
+/// `handling`. E2 and E3 have `error`, and no record has `handling`, so no
+/// event holds every missing token and the query stays on the one-query
+/// path. The documents carry their real ids: with no ids, an empty id equals
+/// the top hit's and nothing could be promoted, which proves nothing.
+#[test]
+fn query_a_with_event_ids_stays_on_the_one_query_path() {
+    const E1_ID: &str = "evt_01JR05311200XYZX0Y1Z2A3B4C";
+    const E2_ID: &str = "evt_01JR05291100XYZW9X0Y1Z2A3B";
+    const E3_ID: &str = "evt_01JR05250900XYZT7V8W9X0Y1Z";
+    let records = load_fixture();
+    let (_idx, fields, reader) = build_index_from_fixture_with_ids(&records);
+
+    let results =
+        recall(&reader, &fields, "rust error handling", 3, NOW_SEC).expect("recall Query A");
+
+    let ids: Vec<&str> = results.iter().map(|r| r.event_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [E1_ID, E2_ID, E3_ID],
+        "Query A with ids: E1, then E2, then E3"
+    );
+    assert_eq!(results[0].timestamp_sec, E1_TS);
+    assert_eq!(results[1].timestamp_sec, E2_TS);
+    assert_eq!(results[2].timestamp_sec, E3_TS);
+
+    // `bm25` is Tantivy's score for the whole query: no hit was promoted.
+    let bm25_map = bm25_by_content(&reader, &fields, "rust error handling", records.len());
+    for r in &results {
+        assert_eq!(
+            r.bm25, bm25_map[&r.content],
+            "{}: bm25 must be the one-query Tantivy score",
+            r.event_id
+        );
+        assert!(
+            (r.score - r.bm25 * r.salience).abs() < DECOMPOSITION_TOL,
+            "{}: score {} != bm25 {} * salience {}",
+            r.event_id,
+            r.score,
+            r.bm25,
+            r.salience
+        );
+    }
+    assert_decomposition_identity(&results, &bm25_map, "Query A with ids");
 }
