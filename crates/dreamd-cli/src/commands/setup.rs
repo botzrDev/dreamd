@@ -346,6 +346,10 @@ pub fn run(
         };
         let daemon_live = start_watch_and_probe(req, &project_root, err)?;
         report_doctor(req.cwd, req.launcher, out)?;
+        let home = DaemonHome::new(req.daemon_home);
+        // Once per daemon home. A second project, and a rerun of this one,
+        // keep the source line and do not ask again.
+        let ask_star = !star_already_asked(&home);
         let card = Card {
             init: init_outcome,
             wired: &wired,
@@ -354,8 +358,9 @@ pub fn run(
             daemon_live,
             lesson: lesson.as_ref(),
             launcher: req.launcher,
+            ask_star,
         };
-        write_success_card(&card, out)?;
+        write_card_and_mark(&card, out, &home)?;
     }
 
     Ok(())
@@ -792,6 +797,9 @@ struct Card<'a> {
     daemon_live: bool,
     lesson: Option<&'a RecordedLesson>,
     launcher: Launcher,
+    /// Print the one star line under the source line. The caller sets this
+    /// from the daemon home; the card itself does not look at the filesystem.
+    ask_star: bool,
 }
 
 fn write_undo_line(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
@@ -958,12 +966,69 @@ fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<(
         )?;
     }
     // npx users never pass through GitHub; this is the one place the CLI
-    // names where the source lives. Information only, no ask.
+    // names where the source lives. The star line is the one ask, and only
+    // the first setup that reaches this card for this user prints it.
     writeln!(out)?;
     writeln!(
         out,
         "  Source, docs, issues: https://github.com/botzrDev/dreamd"
     )?;
+    if card.ask_star {
+        writeln!(out, "{STAR_LINE}")?;
+    }
+    Ok(())
+}
+
+/// The one ask, printed under the source line.
+const STAR_LINE: &str = "  A star there helps others find it.";
+
+/// Body of `~/.agent/star-asked`. Presence of the file is the flag; the line
+/// says what it is for someone who reads the daemon home.
+const STAR_ASKED_BODY: &str = "The setup success card has asked for a GitHub star.\n";
+
+/// Whether this user has already been shown the star line.
+///
+/// A file at [`DaemonHome::star_asked`] suppresses the ask. So does a path
+/// that exists and is not a file: setup leaves that path alone.
+fn star_already_asked(home: &DaemonHome) -> bool {
+    home.star_asked().exists()
+}
+
+/// Record that the star line was shown.
+///
+/// Called only after the card write succeeds. A failure here is ignored by
+/// the caller: the line was already printed, and the next setup asks again.
+/// An existing path, file or not, is left as it is.
+fn mark_star_asked(home: &DaemonHome) -> std::io::Result<()> {
+    let path = home.star_asked();
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    dreamd_core::io::write_atomic(&path, STAR_ASKED_BODY.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Print the card, then record the ask. The marker is written only when the
+/// card write returns [`Ok`], so a failed print does not suppress the next one.
+fn write_card_and_mark(
+    card: &Card<'_>,
+    out: &mut dyn Write,
+    home: &DaemonHome,
+) -> std::io::Result<()> {
+    write_success_card(card, out)?;
+    if card.ask_star {
+        let _ = mark_star_asked(home);
+    }
     Ok(())
 }
 
@@ -1529,6 +1594,7 @@ mod tests {
         wired: &[&'static str],
         habits: &[&'static str],
         daemon_live: bool,
+        ask_star: bool,
     ) -> String {
         render(&Card {
             init,
@@ -1538,6 +1604,7 @@ mod tests {
             daemon_live,
             lesson: None,
             launcher,
+            ask_star,
         })
     }
 
@@ -1561,6 +1628,7 @@ mod tests {
             wired,
             habits_for(harness),
             daemon_live,
+            false,
         )
     }
 
@@ -1580,6 +1648,7 @@ mod tests {
                 Harness::Claude,
                 &[".mcp.json"],
                 &[HABIT_CLAUDE],
+                false,
                 false,
             ),
             concat!(
@@ -1626,6 +1695,7 @@ mod tests {
                 &[],
                 &[HABIT_CLAUDE],
                 false,
+                false,
             ),
             concat!(
                 "\n",
@@ -1667,6 +1737,7 @@ mod tests {
                 &[".mcp.json", ".cursor/mcp.json"],
                 &[HABIT_CLAUDE, HABIT_CURSOR],
                 false,
+                false,
             ),
             concat!(
                 "\n",
@@ -1700,6 +1771,40 @@ mod tests {
         );
     }
 
+    /// The star line is one extra line under the source line, and only when
+    /// the caller asks. The rest of the card is the frozen first-run copy.
+    #[test]
+    fn star_line_is_one_extra_line_when_asked() {
+        let without = card_with(
+            InitOutcome::Scaffolded,
+            Launcher::Binary,
+            Harness::Claude,
+            &[".mcp.json"],
+            &[HABIT_CLAUDE],
+            false,
+            false,
+        );
+        let with = card_with(
+            InitOutcome::Scaffolded,
+            Launcher::Binary,
+            Harness::Claude,
+            &[".mcp.json"],
+            &[HABIT_CLAUDE],
+            false,
+            true,
+        );
+        assert_eq!(
+            with,
+            format!("{without}  A star there helps others find it.\n"),
+            "the star line is the only addition"
+        );
+        assert!(
+            without.ends_with("  Source, docs, issues: https://github.com/botzrDev/dreamd\n"),
+            "{without}"
+        );
+        assert!(!without.contains("A star there"), "{without}");
+    }
+
     /// BZR-1469 test 4: a rerun marks the store and the entry as already
     /// there, and its Undo never suggests deleting `.agent/` (D2).
     #[test]
@@ -1710,6 +1815,7 @@ mod tests {
             Harness::Claude,
             &[".mcp.json"],
             &[HABIT_CLAUDE],
+            false,
             false,
         );
         assert!(
@@ -1752,6 +1858,7 @@ mod tests {
             Harness::Claude,
             &[],
             &[],
+            false,
             false,
         );
         assert!(
@@ -1902,6 +2009,7 @@ mod tests {
             &[".mcp.json"],
             &[HABIT_CLAUDE],
             false,
+            false,
         );
         let rows = [
             (&first_run, "  scaffolded"),
@@ -1972,6 +2080,7 @@ mod tests {
             daemon_live: false,
             lesson: Some(&lesson),
             launcher: Launcher::Binary,
+            ask_star: false,
         });
         assert!(
             rendered.contains("axum handlers need IntoResponse"),
@@ -2082,5 +2191,88 @@ mod tests {
         assert!(log.contains("setup::first_lesson"), "{log}");
         assert!(log.contains("\"source_harness\":\"setup\""), "{log}");
         assert!(log.ends_with('\n'));
+    }
+
+    #[test]
+    fn star_ask_is_once_per_daemon_home() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = DaemonHome::new(home_dir.path());
+        assert!(!star_already_asked(&home));
+
+        let card = star_card(true);
+        let mut out = Vec::new();
+        write_card_and_mark(&card, &mut out, &home).unwrap();
+        let first = String::from_utf8(out).unwrap();
+        assert!(
+            first.ends_with("  A star there helps others find it.\n"),
+            "{first}"
+        );
+        let path = home.star_asked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), STAR_ASKED_BODY);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "star-asked is 0600");
+        }
+
+        assert!(star_already_asked(&home));
+        let again = star_card(false);
+        let mut out = Vec::new();
+        write_card_and_mark(&again, &mut out, &home).unwrap();
+        let second = String::from_utf8(out).unwrap();
+        assert!(
+            second.ends_with("  Source, docs, issues: https://github.com/botzrDev/dreamd\n"),
+            "{second}"
+        );
+        assert!(!second.contains("A star there"), "{second}");
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(!star_already_asked(&home));
+    }
+
+    #[test]
+    fn a_non_file_at_star_asked_is_left_alone() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = DaemonHome::new(home_dir.path());
+        std::fs::create_dir(home.star_asked()).unwrap();
+        assert!(star_already_asked(&home));
+        mark_star_asked(&home).unwrap();
+        assert!(home.star_asked().is_dir());
+    }
+
+    #[test]
+    fn a_failed_card_write_does_not_mark_the_star() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = DaemonHome::new(home_dir.path());
+        let card = star_card(true);
+        let err = write_card_and_mark(&card, &mut FailWrite, &home).unwrap_err();
+        assert!(!home.star_asked().exists(), "{err}");
+    }
+
+    fn star_card(ask_star: bool) -> Card<'static> {
+        Card {
+            init: InitOutcome::Scaffolded,
+            wired: &[],
+            habits: &[],
+            harness: Harness::None,
+            daemon_live: false,
+            lesson: None,
+            launcher: Launcher::Binary,
+            ask_star,
+        }
+    }
+
+    /// A writer that fails on the first byte, so the card write never returns Ok.
+    struct FailWrite;
+
+    impl std::io::Write for FailWrite {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("card failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

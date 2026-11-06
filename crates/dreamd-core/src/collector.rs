@@ -1243,15 +1243,15 @@ mod tests {
         let docs: [(&str, &str, f64, Layer); 11] = [
             ("evt_adotx", "a.x", 9.45, Layer::Episodic),
             ("evt_acolonb", "a:b", 9.33, Layer::Episodic),
-            ("evt_a", "a", 5.98, Layer::Episodic),
+            ("evt_a", "a", 8.37, Layer::Episodic),
             ("evt_a_bc", "a::bc", 9.10, Layer::Episodic),
-            ("evt_a_b", "a::b", 7.24, Layer::Episodic),
-            ("lsn_evt_a_b", "a::b", 7.15, Layer::Semantic),
+            ("evt_a_b", "a::b", 8.39, Layer::Episodic),
+            ("lsn_evt_a_b", "a::b", 8.29, Layer::Semantic),
             ("evt_a_b_c", "a::b::c", 8.74, Layer::Episodic),
             ("evt_ab", "ab", 8.62, Layer::Episodic),
-            ("evt_go", "go", 6.86, Layer::Episodic),
+            ("evt_go", "go", 7.95, Layer::Episodic),
             ("evt_go_x", "go::x", 8.39, Layer::Episodic),
-            ("lsn_evt_go", "go", 6.67, Layer::Semantic),
+            ("lsn_evt_go", "go", 7.73, Layer::Semantic),
         ];
         let entries: Vec<(&str, &str, &str, i64, f64, Layer)> = docs
             .iter()
@@ -1292,6 +1292,111 @@ mod tests {
                     .collect();
             let got = recall_excluding(&reader, &fields, "quokka", 4, exclusion, NOW_SEC).unwrap();
             assert_eq!(hits(&got), hits(&reference), "exclusion {exclusion:?}");
+        }
+    }
+
+    /// BZR-1523 test 6: both contents have 7 tokens and one match per query
+    /// term, so BM25 ties, and pain 7 beats pain 6 at any hub size.
+    #[test]
+    fn hub_parent_does_not_drown_a_more_painful_child() {
+        for parents in [8_usize, 40, 500] {
+            let parent_ids: Vec<String> = (0..parents).map(|i| format!("evt_hub_{i}")).collect();
+            let mut entries: Vec<(&str, &str, &str, i64, f64, Layer)> = parent_ids
+                .iter()
+                .map(|id| {
+                    (
+                        "extractor order in the generic handler HUB",
+                        id.as_str(),
+                        "rust::http",
+                        NOW_SEC - DAY_SECS,
+                        6.0,
+                        Layer::Episodic,
+                    )
+                })
+                .collect();
+            entries.push((
+                "extractor order for the json body NEEDLE",
+                "evt_needle",
+                "rust::http::extractor",
+                NOW_SEC - DAY_SECS,
+                7.0,
+                Layer::Episodic,
+            ));
+            let (_idx, fields, reader) = build_exclusion_index(&entries);
+            let hits = recall(&reader, &fields, "extractor order", parents + 1, NOW_SEC).unwrap();
+            assert_eq!(hits.len(), parents + 1, "{parents} parents");
+            assert_eq!(hits[0].event_id, "evt_needle", "{parents} parents");
+            assert_eq!(hits[0].recurrence, 1, "{parents} parents");
+            assert_eq!(hits[1].recurrence, parents as u64 + 1, "{parents} parents");
+        }
+    }
+
+    /// BZR-1523 test 7: a parent that matches no query term does not come back,
+    /// whatever its recurrence.
+    #[test]
+    fn a_query_only_the_child_matches_returns_only_the_child() {
+        let parent_ids: Vec<String> = (0..40).map(|i| format!("evt_hub_{i}")).collect();
+        let mut entries: Vec<(&str, &str, &str, i64, f64, Layer)> = parent_ids
+            .iter()
+            .map(|id| {
+                (
+                    "generic handler HUB",
+                    id.as_str(),
+                    "rust::http",
+                    NOW_SEC - DAY_SECS,
+                    6.0,
+                    Layer::Episodic,
+                )
+            })
+            .collect();
+        entries.push((
+            "extractor order for the json body NEEDLE",
+            "evt_needle",
+            "rust::http::extractor",
+            NOW_SEC - DAY_SECS,
+            7.0,
+            Layer::Episodic,
+        ));
+        let (_idx, fields, reader) = build_exclusion_index(&entries);
+        let hits = recall(&reader, &fields, "extractor order", 10, NOW_SEC).unwrap();
+        assert_eq!(ids(&hits), vec!["evt_needle"]);
+    }
+
+    /// BZR-1523 test 8: `d` keeps recurrence as a tie-breaker. Ten events beat a
+    /// one-off at equal pain, and still beat one half a point more painful.
+    #[test]
+    fn recurrence_still_breaks_a_close_call() {
+        for one_off_pain in [6.0, 6.5] {
+            let recurring_ids: Vec<String> = (0..10).map(|i| format!("evt_recur_{i}")).collect();
+            let mut entries: Vec<(&str, &str, &str, i64, f64, Layer)> = recurring_ids
+                .iter()
+                .map(|id| {
+                    (
+                        "retry the flaky socket RECUR",
+                        id.as_str(),
+                        "go::often",
+                        NOW_SEC - DAY_SECS,
+                        6.0,
+                        Layer::Episodic,
+                    )
+                })
+                .collect();
+            entries.push((
+                "retry the flaky socket ONEOFF",
+                "evt_oneoff",
+                "go::once",
+                NOW_SEC - DAY_SECS,
+                one_off_pain,
+                Layer::Episodic,
+            ));
+            let (_idx, fields, reader) = build_exclusion_index(&entries);
+            let hits = recall(&reader, &fields, "flaky socket", 11, NOW_SEC).unwrap();
+            assert_eq!(hits.len(), 11, "one-off pain {one_off_pain}");
+            assert_eq!(hits[0].recurrence, 10, "one-off pain {one_off_pain}");
+            assert_eq!(
+                hits[10].event_id, "evt_oneoff",
+                "one-off pain {one_off_pain}"
+            );
         }
     }
 }

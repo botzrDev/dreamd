@@ -148,6 +148,7 @@ Recall ranks episodes and lessons with BM25 × salience (age decay, pain, import
 | `<project>/.agent/.dreamd/` | Local index, daemon state, config template, provenance ledger | No (gitignored by `init`) |
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
+| `~/.agent/star-asked` | Set after setup has asked for a GitHub star, once per user | No |
 
 `setup` scaffolds the store by calling `init`, then writes the harness MCP config. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall`. On a tty it waits for `y`; pass `--yes` in a script. Without a tty and without `--yes` it exits 2 and changes nothing. Project `.agent/` stores are left in place. `npx -y` is npx's flag, not dreamd's `--yes`. `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
 
@@ -228,7 +229,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 | Layer | Status |
 |---|---|
-| `SPEC.md` v0.1 | Shipped |
+| `SPEC.md` v0.2 | Shipped |
 | Reference implementation (daemon, HTTP API, dream cycle, Tantivy recall) | Shipped |
 | MCP server (`dreamd mcp` + `npx dreamd-mcp` shim) | Shipped on npm |
 | Provenance ledger, `forget`, `blame` | Shipped (unsigned) |

@@ -14,7 +14,8 @@
 //! BZR-1237: [`salience`] clamps its inputs before the formula runs. Age is
 //! floored at 0, and pain and importance are held to `0.0..=10.0`. A record
 //! that skipped ingress validation (a hand edit, a merged log) cannot score
-//! above `1 + ln(1 + recurrence)`. The clamp leaves the formula's shape alone.
+//! above `1 + ln(1 + d(recurrence))`, which is at most `1 + ln(2.5)`. The clamp
+//! leaves the formula's shape alone.
 //!
 //! [`RecurrenceContext`] centralizes per-phase recurrence policy. Per SPEC.md,
 //! `recurrence` is not an event field — each consumer derives the `u64` fed
@@ -118,13 +119,29 @@ pub fn clamp_score(score: f64) -> f64 {
     }
 }
 
+/// The recurrence the formula feeds its log term: `d(0) = 0`, and
+/// `d(r) = 1.5 - 0.5 / r` for `r >= 1` (BZR-1523).
+///
+/// `d` never falls as the count rises and never passes 1.5. `d(1) = 1`, so a
+/// one-off event scores as it did before this term, and recurrence adds at most
+/// 13.2% over a one-off, however many events share the key. Recurrence is a
+/// subtree count, so without `d` a parent key with many events under it
+/// outweighs a more painful child.
+#[must_use]
+pub fn dampen_recurrence(recurrence: u64) -> f64 {
+    if recurrence == 0 {
+        0.0
+    } else {
+        1.5 - 0.5 / recurrence as f64
+    }
+}
+
 /// Compute the salience score for an episodic record at query time.
 ///
 /// `now` and `ts` are unix epoch seconds. A `ts` after `now` counts as age 0
 /// ([`age_secs`]), and `pain` and `importance` are clamped to `0.0..=10.0`
-/// ([`clamp_score`]), so the result lies in `[0, 1 + ln(1 + recurrence)]` for
-/// every input. `recurrence` is cast to `f64` before `ln` so a recurrence of 0
-/// evaluates to `ln(1.0) == 0.0` (no panic, no `NaN`).
+/// ([`clamp_score`]), so the result lies in `[0, 1 + ln(1 + d(recurrence))]` for
+/// every input, which is at most `1 + ln(2.5)` ([`dampen_recurrence`]).
 pub fn salience(now: i64, ts: i64, pain: f64, importance: f64, recurrence: u64) -> f64 {
     let age_days = age_days(now, ts);
     let pain = clamp_score(pain);
@@ -132,12 +149,12 @@ pub fn salience(now: i64, ts: i64, pain: f64, importance: f64, recurrence: u64) 
     (-age_days / 14.0).exp()
         * (pain / 10.0)
         * (importance / 10.0)
-        * (1.0 + (1.0 + recurrence as f64).ln())
+        * (1.0 + (1.0 + dampen_recurrence(recurrence)).ln())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{salience, salience_with_context, RecurrenceContext};
+    use super::{dampen_recurrence, salience, salience_with_context, RecurrenceContext};
 
     const NOW: i64 = 1_700_000_000;
     const DAY: i64 = 86_400;
@@ -184,10 +201,33 @@ mod tests {
     fn spot_check_with_recurrence() {
         // age_days = 0 → decay = 1.0
         // pain/10 = 0.5, importance/10 = 0.7
-        // recurrence = 9 → 1 + ln(10)
+        // recurrence = 9 → d = 1.5 - 0.5 / 9 → 1 + ln(1 + d)
         let s = salience(NOW, NOW, 5.0, 7.0, 9);
-        let expected = 1.0 * 0.5 * 0.7 * (1.0 + 10.0_f64.ln());
+        let d: f64 = 1.5 - 0.5 / 9.0;
+        let expected = 1.0 * 0.5 * 0.7 * (1.0 + (1.0 + d).ln());
         assert!((s - expected).abs() < 1e-12, "expected {expected}, got {s}");
+    }
+
+    /// BZR-1523 test 1: the values the docs publish.
+    #[test]
+    fn dampen_recurrence_pins_the_published_points() {
+        assert_eq!(dampen_recurrence(0), 0.0);
+        assert_eq!(dampen_recurrence(1), 1.0);
+        assert_eq!(dampen_recurrence(2), 1.25);
+        assert_eq!(dampen_recurrence(4), 1.375);
+        assert_eq!(dampen_recurrence(10), 1.45);
+        assert_eq!(dampen_recurrence(u64::MAX), 1.5);
+    }
+
+    /// BZR-1523 test 2: an event with no recurrence, and a one-off, score
+    /// exactly as they did before the term.
+    #[test]
+    fn zero_and_one_recurrence_score_as_before_the_term() {
+        assert_eq!(salience(NOW, NOW, 5.0, 7.0, 0), 0.5 * 0.7 * 1.0);
+        assert_eq!(
+            salience(NOW, NOW, 5.0, 7.0, 1),
+            0.5 * 0.7 * (1.0 + 2.0_f64.ln())
+        );
     }
 
     #[test]

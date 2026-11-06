@@ -106,7 +106,7 @@ It stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` processes, removes t
 | `--all-npx` | Wipe the **entire** `~/.npm/_npx` (every npx-cached package, not just dreamd), after a warning |
 | `--quiet` / `-q` | Suppress non-essential output |
 
-Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, every project's `.agent/` store, and the login service (remove that with `dreamd service uninstall`). To wipe a project's store, delete `.agent/` and re-run `npx -y dreamd-mcp init` ([troubleshooting](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)); back it up first if it has value.
+Left in place: `~/.agent/registry.toml`, `~/.agent/dreamd.log`, `~/.agent/star-asked`, every project's `.agent/` store, and the login service (remove that with `dreamd service uninstall`). To wipe a project's store, delete `.agent/` and re-run `npx -y dreamd-mcp init` ([troubleshooting](https://github.com/botzrDev/dreamd/blob/main/docs/troubleshooting.md#how-do-i-reset-or-clear-memory)); back it up first if it has value.
 
 **Then remove the client config entry.** `uninstall` does not edit harness configs. Delete the `dreamd` block from `.mcp.json`, Cursor settings or Cline `cline_mcp_settings.json` and reload the client, or the harness respawns dreamd next session.
 

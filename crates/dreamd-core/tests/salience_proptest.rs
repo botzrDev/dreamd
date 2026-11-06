@@ -10,11 +10,14 @@
 //! - No `NaN` / `Infinity` for valid inputs.
 //! - Edge cases: zero pain/importance → score 0; recurrence 0 → ln factor 1.
 //! - Bounded for every input, including `i64` extremes, `NaN` and infinities:
-//!   salience lies in `[0, 1 + ln(1 + recurrence)]` (BZR-1237).
+//!   salience lies in `[0, 1 + ln(1 + d(recurrence))]`, at most `1 + ln(2.5)`
+//!   (BZR-1237, BZR-1523).
 //! - A timestamp after `now` scores as `now` (BZR-1237).
 //! - Pain or importance above 10 scores as 10; below 0 scores as 0 (BZR-1237).
+//! - `d` is monotonic, stays in `0.0..=1.5`, and never passes the count
+//!   (BZR-1523).
 
-use dreamd_core::salience::salience;
+use dreamd_core::salience::{dampen_recurrence, salience};
 use proptest::prelude::*;
 
 const NOW: i64 = 1_700_000_000;
@@ -205,8 +208,9 @@ proptest! {
         prop_assert!(s.is_finite(), "expected finite score, got {s}");
     }
 
-    /// BZR-1237: every input, including `i64` extremes, `NaN` and infinities,
-    /// scores in `[0, 1 + ln(1 + recurrence)]`.
+    /// BZR-1237, BZR-1523: every input, including `i64` extremes, `NaN` and
+    /// infinities, scores in `[0, 1 + ln(1 + d(recurrence))]`, and that bound is
+    /// at most `1 + ln(2.5)`.
     #[test]
     fn salience_is_bounded_for_all_inputs(
         now in any::<i64>(),
@@ -216,11 +220,27 @@ proptest! {
         recurrence in any::<u64>(),
     ) {
         let s = salience(now, ts, pain, importance, recurrence);
-        let max = 1.0 + (1.0 + recurrence as f64).ln();
+        let max = 1.0 + (1.0 + dampen_recurrence(recurrence)).ln();
+        prop_assert!(max <= 1.0 + 2.5_f64.ln(), "bound {max} for {recurrence}");
         prop_assert!(
             (0.0..=max).contains(&s),
             "salience({now}, {ts}, {pain}, {importance}, {recurrence}) = {s}, outside [0, {max}]"
         );
+    }
+
+    /// BZR-1523: `d` never falls as the count rises, stays in `0.0..=1.5`, and
+    /// never passes the count. Half the draws are small, because a uniform
+    /// `u64` almost never draws 0.
+    #[test]
+    fn dampen_recurrence_is_monotonic_and_stays_in_range(
+        a in prop_oneof![0_u64..64, any::<u64>()],
+        b in prop_oneof![0_u64..64, any::<u64>()],
+    ) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let (d_lo, d_hi) = (dampen_recurrence(lo), dampen_recurrence(hi));
+        prop_assert!(d_lo <= d_hi, "d({lo}) = {d_lo} > d({hi}) = {d_hi}");
+        prop_assert!((0.0..=1.5).contains(&d_hi), "d({hi}) = {d_hi}");
+        prop_assert!(d_lo <= lo as f64, "d({lo}) = {d_lo}");
     }
 
     /// BZR-1237: a timestamp after `now` scores as if it were written at `now`.

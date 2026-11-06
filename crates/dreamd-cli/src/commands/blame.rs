@@ -87,7 +87,11 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
                 f.importance_factor
             ));
             out.push_str(&format!(
-                "  (1 + ln(1+recurrence)) = {:.6}\n",
+                "  d(recurrence)          = {:.6}\n",
+                f.dampened_recurrence
+            ));
+            out.push_str(&format!(
+                "  (1 + ln(1+d))          = {:.6}\n",
                 f.recurrence_factor
             ));
             out.push_str(&format!(
@@ -103,8 +107,9 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
 
 /// Render `results` as one compact JSON array plus a trailing newline. No
 /// markdown on this path. Each object carries the same eight table fields;
-/// `--explain` adds the `ExplainFactors` fields (plus the raw, undivided
-/// `pain` / `importance` / `recurrence` the table never shows).
+/// `--explain` adds the `ExplainFactors` fields, the undivided `pain` and
+/// `importance`, and `recurrence`, which is the dampened value the formula used,
+/// the same meaning as `citations[].recurrence`. The table shows none of these.
 pub fn render_json(results: &[RecallResult], now_sec: i64, explain: bool) -> String {
     let arr: Vec<serde_json::Value> = results
         .iter()
@@ -126,7 +131,10 @@ pub fn render_json(results: &[RecallResult], now_sec: i64, explain: bool) -> Str
                 map.insert("age_days".to_string(), serde_json::json!(f.age_days));
                 map.insert("pain".to_string(), serde_json::json!(r.pain));
                 map.insert("importance".to_string(), serde_json::json!(r.importance));
-                map.insert("recurrence".to_string(), serde_json::json!(r.recurrence));
+                map.insert(
+                    "recurrence".to_string(),
+                    serde_json::json!(f.dampened_recurrence),
+                );
                 map.insert("decay".to_string(), serde_json::json!(f.decay));
                 map.insert("pain_factor".to_string(), serde_json::json!(f.pain_factor));
                 map.insert(
@@ -396,7 +404,7 @@ mod tests {
         assert!(close(&hit["salience_product"], f.salience_product));
         assert!(close(&hit["pain"], results[0].pain));
         assert!(close(&hit["importance"], results[0].importance));
-        assert_eq!(hit["recurrence"], results[0].recurrence);
+        assert_eq!(hit["recurrence"].as_f64(), Some(4.0 / 3.0));
     }
 
     /// BZR-1303: stored content holding NUL, ESC, U+001F, DEL, a tab and a `|`.
@@ -483,6 +491,14 @@ mod tests {
         assert!(out.contains("evt_01ARZ3NDEKTSV4RRFFQ69G5FAE"));
         assert!(out.contains("exp(-age_days/14)"));
         assert!(out.contains("score = bm25"));
+        assert!(
+            out.contains("  d(recurrence)          = 1.333333\n"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("  (1 + ln(1+d))          = 1.847298\n"),
+            "got: {out}"
+        );
     }
 
     #[test]

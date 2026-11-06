@@ -220,9 +220,9 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
   "results": [
     {
       "id": "evt_01J1Z7Q8K4M2N6P3R5S7T9V0WX",
-      "score": 0.99,
+      "score": 0.77,
       "bm25": 1.8,
-      "salience": 0.55,
+      "salience": 0.43,
       "source": "episodic",
       "content": "Route handlers must return impl IntoResponse…",
       "metadata": {
@@ -248,7 +248,7 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 | `content` | Matched text |
 | `metadata.timestamp_sec` | Unix seconds: the event's timestamp, or for a lesson the time it was consolidated |
 | `metadata.pain`, `metadata.importance` | Stored `0.0`–`10.0` scores |
-| `metadata.recurrence` | Live episodic events whose `skill_action` equals the hit's or extends it with `::`, computed from the index per searcher (see below) |
+| `metadata.recurrence` | The raw count: live episodic events whose `skill_action` equals the hit's or extends it with `::`, computed from the index per searcher (see below). The formula applies `d` to it |
 | `metadata.skill_action` | Hierarchical cluster key of the matched learning (e.g. `rust::error_handling::axum_rejection`) |
 | `metadata.source_harness` | Harness that authored the learning (e.g. `"cursor"`, `"claude-code"`) — makes recall cross-harness-attributable |
 
@@ -257,7 +257,10 @@ An event's `id` is what `dreamd forget`, `dreamd recall --without` and `exclude=
 **Score formula** (computed at query time, not stored):
 
 ```
-BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + recurrence))
+BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + d(recurrence)))
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 `salience` is everything after the `BM25 ×`. The `14` is an e-folding time constant in days, not a half-life.
@@ -272,15 +275,15 @@ BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + r
   "citations": [
     {
       "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      "score": 0.99,
+      "score": 0.77,
       "bm25_component": 1.8,
-      "salience_component": 0.55,
+      "salience_component": 0.43,
       "layer": "episodic",
       "snippet": "Route handlers must return impl IntoResponse…",
       "age_days": 12.4,
       "pain": 7.0,
       "importance": 8.0,
-      "recurrence": 3
+      "recurrence": 1.3333333333333333
     }
   ]
 }
@@ -566,7 +569,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ## Recurrence and the sidecar
 
-`metadata.recurrence` in recall results is computed from the index, once per searcher: the number of live episodic events whose `skill_action` equals the hit's or extends it with `::`, all-time. An event counts itself, so it is at least 1. A lesson hit gets the count of its `cluster_key`. A new event raises the count of every event in its key's subtree at the next index commit.
+`metadata.recurrence` in recall results is computed from the index, once per searcher: the number of live episodic events whose `skill_action` equals the hit's or extends it with `::`, all-time. An event counts itself, so it is at least 1. A lesson hit gets the count of its `cluster_key`. A new event raises the count of every event in its key's subtree at the next index commit. `citations[].recurrence` is `d` of this count.
 
 `.agent/semantic/recurrence_counts.json` is the dream cycle's promotion report: windowed counts at the deepest qualifying prefix. Recall does not read it; `dreamd doctor --cluster-health` and the provenance `recurrence` edges do.
 

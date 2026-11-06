@@ -54,7 +54,7 @@ impl RecallIngress {
             age_days: crate::salience::age_days(now_sec, r.timestamp_sec as i64),
             pain: r.pain,
             importance: r.importance,
-            recurrence: r.recurrence,
+            recurrence: crate::salience::dampen_recurrence(r.recurrence),
         }
     }
 
@@ -245,7 +245,8 @@ mod tests {
         assert_eq!(c["age_days"].as_f64().unwrap(), expected_age_days);
         assert_eq!(c["pain"].as_f64().unwrap(), 7.0);
         assert_eq!(c["importance"].as_f64().unwrap(), 8.0);
-        assert_eq!(c["recurrence"].as_u64().unwrap(), 2);
+        assert_eq!(c["recurrence"].as_f64(), Some(1.25));
+        assert_eq!(results[0]["metadata"]["recurrence"].as_u64(), Some(2));
         assert_eq!(c["bm25_component"].as_f64().unwrap(), 0.8);
         assert_eq!(c["salience_component"].as_f64().unwrap(), 1.2);
         assert_eq!(

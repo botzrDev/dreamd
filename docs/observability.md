@@ -30,7 +30,7 @@ Each entry in `citations` is:
 | `age_days` | `(now - timestamp) / 86400`, floored at 0: the age the salience formula uses |
 | `pain` | Stored subjective friction score. Ingest keeps it in 0.0–10.0; a hand-edited line can lie outside that. This field is the stored number, not divided by 10 |
 | `importance` | Stored long-term relevance score. Same range rule as `pain`: the stored number, not divided by 10 |
-| `recurrence` | Live episodic events whose `skill_action` equals the hit's or extends it with `::`, counted from the index per searcher. An event counts itself; a lesson gets its `cluster_key`'s count |
+| `recurrence` | The dampened value the formula used, `d(r)` of the count, a fractional number. The count `r` is the live episodic events whose `skill_action` equals the hit's or extends it with `::`, counted from the index per searcher. An event counts itself; a lesson gets its `cluster_key`'s count. `results[].metadata.recurrence` in the same response is the count |
 
 `layer` names the Tantivy document layer a hit was indexed under —
 `episodic` (raw events) or `semantic` (dream-cycle-consolidated lessons). It
@@ -41,7 +41,10 @@ salience end to end. There is no trust label on a citation — `layer` and
 ## Salience formula
 
 ```
-BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + recurrence))
+BM25 × exp(-age_days / 14) × (pain / 10) × (importance / 10) × (1 + ln(1 + d(recurrence)))
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 The `14` in `exp(-age_days / 14)` is an **e-folding time constant** (the
@@ -86,7 +89,8 @@ the markdown table. Each object carries `id`, `timestamp`, `skill_action`,
 `content` (same 80-character truncation), `bm25`, `salience`, `total`, and
 `layer`. With `--explain`, each object also gains `age_days`, `pain`,
 `importance`, `recurrence`, `decay`, `pain_factor`, `importance_factor`,
-`recurrence_factor`, and `salience_product`.
+`recurrence_factor`, and `salience_product`. `recurrence` is the dampened value
+the formula used, `d` of the count, the same meaning as `citations[].recurrence`.
 
 `dreamd blame` does not change the `dreamd recall` columns or its default
 `-k` of 10.
@@ -123,7 +127,8 @@ Both surfaces report the same distribution over every episodic document in
 the project index:
 
 - **Score.** Each document is scored with `salience()` —
-  `exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`.
+  `exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`,
+  where `d(0) = 0` and `d(r) = 1.5 - 0.5 / r`.
   There is no query, so there is no BM25 term.
 - **Excluded.** Lesson documents (`event_id` starting with `lsn_`) are derived
   from events, not events, and are not counted.

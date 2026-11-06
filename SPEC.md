@@ -1,6 +1,6 @@
 # `.agent/` — Portable Memory for AI Coding Agents
 
-**Status:** v0.1 · 2026-10-02
+**Status:** v0.2 · 2026-11-06
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
@@ -56,7 +56,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.1. |
+| `schema_version` | string | Exactly `"1.0.0"` for this revision of the schema. The SPEC version and `schema_version` evolve independently; the SPEC is currently v0.2. |
 | `id` | string | MUST be lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
 | `source_harness` | string | Writers SHOULD send a lowercase ASCII identifier matching `[a-z0-9_-]+`. These names are reserved for their owners by convention: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. The reference implementation stores the string it is given. It does not check the pattern and it does not map a name to an owner. |
@@ -94,13 +94,16 @@ Implementations MAY adopt any rubric provided it is documented in the implementa
 Recall ranks results by:
 
 ```
-salience    = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + recurrence))
+salience    = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + d(recurrence)))
 final_score = bm25 * salience
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 The factor-by-factor derivation and lineage of this formula live in [`docs/salience.md`](docs/salience.md).
 
-`bm25` is the standard full-text relevance score for the query against `content`. `age_days` is derived from `timestamp` at query time; salience MUST NOT be pre-computed and stored, because the decay term changes continuously. `recurrence` is the number of live events whose `skill_action` equals the candidate's or extends it with `::`.¹
+`bm25` is the standard full-text relevance score for the query against `content`. `age_days` is derived from `timestamp` at query time; salience MUST NOT be pre-computed and stored, because the decay term changes continuously. `recurrence` is the number of live events whose `skill_action` equals the candidate's or extends it with `::`.¹ `d` saturates, so recurrence adds at most 13.2% over a one-off event, however many events share the key.
 
 ## Dream cycle
 
@@ -160,9 +163,11 @@ Implementations that maintain derived indexes MUST tolerate out-of-band edits to
 
 ## Versioning
 
-This SPEC is **v0.1**, the first stable spec revision for the `.agent/` on-disk contract.
+This SPEC is **v0.2**. v0.1 was the first stable spec revision for the `.agent/` on-disk contract.
 
-**Frozen for v0.1:** folder layout, episodic node schema (`schema_version` `"1.0.0"`), salience formula, and dream-cycle output shape. Breaking changes to any of these require SPEC v0.2+ and a documented migration path.
+**Frozen for v0.2:** folder layout, episodic node schema (`schema_version` `"1.0.0"`), salience formula, and dream-cycle output shape. Breaking changes to any of these require SPEC v0.3+ and a documented migration path.
+
+**Migration from v0.1.** v0.2 changes one thing: the salience formula applies `d` to `recurrence`. Nothing on disk changes. `schema_version` stays `"1.0.0"`, and a v0.1 `.agent/` folder is a valid v0.2 folder with no rewrite. Salience is computed at query time, so scores and order change at the next recall.
 
 **May evolve in patch releases without a schema bump:** implementation-defined dream-cycle thresholds (promotion, decay, pruning), and informative pain/importance rubrics — provided existing `.agent/` folders remain readable by conformant readers.
 
@@ -178,4 +183,4 @@ SPEC **v1.0** is the long-term stability promise: after v1.0, `schema_version` f
 
 ---
 
-¹ The shape — exponential decay, multiplicative pain × importance, log-scaled recurrence — follows the activation function in [ACT-R](http://act-r.psy.cmu.edu/about/) and the memory-stream retrieval used in [Park et al., *Generative Agents* (2023)](https://arxiv.org/abs/2304.03442).
+¹ The shape — exponential decay, multiplicative pain × importance, log-scaled recurrence — follows the activation function in [ACT-R](http://act-r.psy.cmu.edu/about/) and the memory-stream retrieval used in [Park et al., *Generative Agents* (2023)](https://arxiv.org/abs/2304.03442). The saturating `d` is dreamd's own.

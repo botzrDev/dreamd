@@ -34,7 +34,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 
 ## Memory branches, provenance, and forgetting
 
-Shipped commands. Both format pages describe trees under the gitignored `.agent/.dreamd/`, outside the v0.1 `SPEC.md` contract.
+Shipped commands. Both format pages describe trees under the gitignored `.agent/.dreamd/`, outside the v0.2 `SPEC.md` contract.
 
 | Document | Audience | Purpose |
 |---|---|---|

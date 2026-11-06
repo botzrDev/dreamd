@@ -39,9 +39,9 @@ const E1_TS: u64 = 1_780_228_800; // 2026-05-31T12:00:00Z, evt_01JR05311200... (
 const E2_TS: u64 = 1_780_052_400; // 2026-05-29T11:00:00Z, evt_01JR05291100... (tokio_select_branches)
 const E3_TS: u64 = 1_779_699_600; // 2026-05-25T09:00:00Z, evt_01JR05250900... (thiserror_derive)
 
-const E1_SALIENCE: f64 = 1.8323;
-const E2_SALIENCE: f64 = 0.8716;
-const E3_SALIENCE: f64 = 0.3876;
+const E1_SALIENCE: f64 = 1.3095;
+const E2_SALIENCE: f64 = 0.6747;
+const E3_SALIENCE: f64 = 0.3345;
 
 /// EXPECTED.md §Note on rounding: 4-dp values vs faithful f64 diverge
 /// by up to ±5e-4 for E1–E3; tolerance band is 1e-3.

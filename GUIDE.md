@@ -102,8 +102,11 @@ curl --unix-socket ~/.agent/dreamd.sock \
 **What just happened:** Tantivy ran BM25 over `content`, then the salience collector reweighted each hit:
 
 ```
-salience = exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))
+salience = exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))
 final_score = bm25 × salience
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 > See [docs/salience.md](./docs/salience.md) for the factor-by-factor derivation.

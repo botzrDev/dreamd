@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::Path;
 
 use dreamd_core::collector::RecallExclusion;
-use dreamd_core::salience::clamp_score;
+use dreamd_core::salience::{clamp_score, dampen_recurrence};
 use dreamd_core::server::INDEX_DIR_NAME;
 use dreamd_core::{AgentRoot, LayoutError, RecallReader, RecallResult};
 use tantivy::{Index, ReloadPolicy};
@@ -82,9 +82,12 @@ pub struct ExplainFactors {
     pub pain_factor: f64,
     /// `importance / 10`, importance clamped to 0–10
     pub importance_factor: f64,
-    /// `1 + ln(1 + recurrence)`
+    /// `d(recurrence)` ([`dampen_recurrence`]): the value the next factor uses.
+    /// It is not a factor itself. The raw count is `RecallResult::recurrence`.
+    pub dampened_recurrence: f64,
+    /// `1 + ln(1 + d(recurrence))`
     pub recurrence_factor: f64,
-    /// Product of the four factors above (= `salience`).
+    /// `decay × pain_factor × importance_factor × recurrence_factor` (= `salience`).
     pub salience_product: f64,
     /// `bm25 × salience` (= `score`).
     pub score: f64,
@@ -117,7 +120,8 @@ pub fn explain_factors(r: &RecallResult, now_sec: i64) -> ExplainFactors {
     let decay = (-age_days / 14.0).exp();
     let pain_factor = clamp_score(r.pain) / 10.0;
     let importance_factor = clamp_score(r.importance) / 10.0;
-    let recurrence_factor = 1.0 + (1.0 + r.recurrence as f64).ln();
+    let dampened_recurrence = dampen_recurrence(r.recurrence);
+    let recurrence_factor = 1.0 + (1.0 + dampened_recurrence).ln();
     let salience_product = decay * pain_factor * importance_factor * recurrence_factor;
     let score = r.bm25 * salience_product;
     ExplainFactors {
@@ -125,6 +129,7 @@ pub fn explain_factors(r: &RecallResult, now_sec: i64) -> ExplainFactors {
         decay,
         pain_factor,
         importance_factor,
+        dampened_recurrence,
         recurrence_factor,
         salience_product,
         score,
@@ -233,7 +238,11 @@ pub fn render_report(results: &[RecallResult], now_sec: i64, explain: bool) -> S
                 f.importance_factor
             ));
             out.push_str(&format!(
-                "  (1 + ln(1+recurrence)) = {:.6}\n",
+                "  d(recurrence)          = {:.6}\n",
+                f.dampened_recurrence
+            ));
+            out.push_str(&format!(
+                "  (1 + ln(1+d))          = {:.6}\n",
                 f.recurrence_factor
             ));
             out.push_str(&format!(
@@ -686,7 +695,7 @@ mod tests {
             "explain shows importance/10 (only here)"
         );
         assert!(
-            out.contains("(1 + ln(1+recurrence))"),
+            out.contains("(1 + ln(1+d))"),
             "explain shows the recurrence factor"
         );
         assert!(
@@ -696,6 +705,34 @@ mod tests {
         assert!(
             out.contains("score = bm25"),
             "explain shows score = bm25 × salience"
+        );
+    }
+
+    /// BZR-1523 test 12: the table's `recurrence` column stays the count, and the
+    /// factor block shows `d` of it.
+    #[test]
+    fn table_keeps_the_count_and_explain_shows_the_dampened_value() {
+        let r = result(
+            "axum error handling",
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAJ",
+            NOW_SEC - DAY,
+            8.0,
+            9.0,
+            3,
+            1.5,
+        );
+        let f = explain_factors(&r, NOW_SEC);
+        assert_eq!(f.dampened_recurrence, dampen_recurrence(3));
+
+        let out = render_report(&[r], NOW_SEC, true);
+        assert!(out.contains("| 3 | axum error handling |"), "got: {out}");
+        assert!(
+            out.contains("  d(recurrence)          = 1.333333\n"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("  (1 + ln(1+d))          = 1.847298\n"),
+            "got: {out}"
         );
     }
 

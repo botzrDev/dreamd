@@ -35,7 +35,7 @@ The bake-off design note is a private Linear document. It is not in this reposit
 
 Each row prints `pass` when the current ranker does not show that miss, and `fail` when it does. Exit 1 means at least one row failed. Exit 2 means the harness broke. The rows are a single bag query versus two anchors, a fat `skill_action` parent versus one specific child, and recall after `dream --no-llm` versus stuffing the log, including a lesson that is a copy of the representative event.
 
-A run on 2026-11-05 printed `single_anchor=fail hub_drown=fail consolidation=pass`. What those two failures earn is in [`context/planning/recall-gate-2026-11-05.md`](../../context/planning/recall-gate-2026-11-05.md).
+A run on 2026-11-05 printed `single_anchor=fail hub_drown=fail consolidation=pass`. What those two failures earn is in [`context/planning/recall-gate-2026-11-05.md`](../../context/planning/recall-gate-2026-11-05.md). Since BZR-1523 it prints `single_anchor=pass hub_drown=pass consolidation=pass` and exits 0.
 
 ## Coding recall oracle
 

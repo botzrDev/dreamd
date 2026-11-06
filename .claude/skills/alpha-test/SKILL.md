@@ -76,7 +76,8 @@ The sandbox is deleted on exit. To inspect logs, temporarily comment out
 The plumbing suite can't see a ranking regression — with unique payloads there's
 only ever one match. The quality suite closes that gap through the exact MCP
 surface a real harness uses. Recall order is `score = bm25 × salience`, where
-`salience = exp(−age_days/14) × (pain/10) × (importance/10) × (1 + ln(1+recurrence))`.
+`salience = exp(−age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`,
+where `d(0) = 0` and `d(r) = 1.5 - 0.5 / r`.
 
 **`quality-suite.sh` — deterministic golden gate (`14 passed, 0 failed`):**
 

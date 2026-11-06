@@ -324,9 +324,10 @@ pub fn resolve_home_from_vars(
 }
 
 /// Global daemon home at `~/.agent/`. Holds the unix socket, project registry,
-/// auth token, the published loopback address (AILAB-192), and log file. Must be
-/// a separate directory from any project's `.agent/` store — co-locating them
-/// would let a project's git history leak the auth token.
+/// auth token, the published loopback address (AILAB-192), the log file, and
+/// the one-time setup star notice. Must be a separate directory from any
+/// project's `.agent/` store — co-locating them would let a project's git
+/// history leak the auth token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DaemonHome {
     home: PathBuf,
@@ -388,6 +389,13 @@ impl DaemonHome {
     /// `~/.agent/dreamd.log` — daemon log.
     pub fn log_file(&self) -> PathBuf {
         self.home.join("dreamd.log")
+    }
+
+    /// `~/.agent/star-asked` — present after `dreamd setup` has printed its
+    /// one-time star line. The file is a notice, not memory. Deleting it
+    /// asks again on the next setup.
+    pub fn star_asked(&self) -> PathBuf {
+        self.home.join("star-asked")
     }
 }
 
@@ -511,6 +519,7 @@ mod tests {
         // the daemon home — never in a project store.
         assert_eq!(h.server_json(), PathBuf::from("/home/u/.agent/server.json"));
         assert_eq!(h.log_file(), PathBuf::from("/home/u/.agent/dreamd.log"));
+        assert_eq!(h.star_asked(), PathBuf::from("/home/u/.agent/star-asked"),);
     }
 
     #[test]

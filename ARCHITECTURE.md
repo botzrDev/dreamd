@@ -144,8 +144,11 @@ Concurrent third-party writers to the JSONL are not supported.
 Storing the score would force daily re-indexing as `age_days` drifts. Tantivy schema fields, all eleven: `content` (`TEXT | STORED`); fastfields `timestamp_sec`, `pain`, `importance`, `recurrence`, `last_updated_sec`, `cited_event_count`; `STRING | STORED` `layer`, `event_id`, `skill_action`, `source_harness`. `skill_action` and `source_harness` are hydrated into recall `metadata`. `last_updated_sec` is on the schema for lesson documents; salience does not read it. The `recurrence` and `cited_event_count` fields are written as 0 and read by nothing. Recall's `recurrence` comes from a table built once per searcher (`recurrence.rs`) from the `skill_action` terms: the number of alive episodic docs whose key equals the candidate's or extends it with `::`. A lesson gets the count of its `cluster_key`. The full flag table is in [docs/architecture/tantivy-migration.md](docs/architecture/tantivy-migration.md). A custom collector computes:
 
 ```
-salience = exp(-age_days / 14.0) * (pain / 10.0) * (importance / 10.0) * (1.0 + ln(1.0 + recurrence))
+salience = exp(-age_days / 14.0) * (pain / 10.0) * (importance / 10.0) * (1.0 + ln(1.0 + d(recurrence)))
 final_score = bm25 * salience
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 Indexing is incremental (5-second commit cadence), never a nightly rebuild.

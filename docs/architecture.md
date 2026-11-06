@@ -234,12 +234,12 @@ removes any need for a nightly re-index pass. The formula
 FR-4.2:
 
 ```rust
-(-age_days / 14.0).exp() * (pain / 10.0) * (importance / 10.0) * (1.0 + (1.0 + recurrence as f64).ln())
+(-age_days / 14.0).exp() * (pain / 10.0) * (importance / 10.0) * (1.0 + (1.0 + dampen_recurrence(recurrence)).ln())
 ```
 
 Read left to right: exponential recency decay (a 14-day e-folding constant —
 see [Decay](#decay); **not** a half-life), times normalised pain, times
-normalised importance, times a logarithmic recurrence boost.
+normalised importance, times a recurrence boost that saturates.
 
 The ranking score is **BM25 × salience — a product, not a weighted sum**
 (`collector.rs` module doc). `RecallResult` carries `bm25` (the raw,
@@ -640,9 +640,9 @@ before upgrading. The endpoint list — `learn`, `recall`, `preferences`,
 in [`http-api.md`](http-api.md) and is not duplicated here.
 
 **The on-disk contract is the other promise.**
-[`../SPEC.md`](../SPEC.md) v0.1 freezes folder layout, the episodic node schema
+[`../SPEC.md`](../SPEC.md) v0.2 freezes folder layout, the episodic node schema
 (`schema_version` `"1.0.0"`), the salience formula, and the dream-cycle output
-shape. Breaking any of those requires SPEC v0.2+ and a documented migration
+shape. Breaking any of those requires SPEC v0.3+ and a documented migration
 path (`SPEC.md` §Versioning). That freeze says nothing about the HTTP API; SPEC
 places transport (stdio, HTTP, Unix socket, MCP) out of scope. The durable
 artifact is the contract; the socket is an implementation detail of one reader

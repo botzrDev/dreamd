@@ -137,6 +137,9 @@ bytes, p99 1,291, 619 turns over 3,000 bytes.
   - Index build p50 0.21 s per ~250-doc store; query p50 4 ms; the whole
     470-question run takes under a minute with 8 workers.
 
+  These rows were measured before SPEC v0.2 saturated recurrence (BZR-1523).
+  `dreamd/session` is the row that term affects, and it has not been re-run.
+
   What this means for the product (founder calls, not harness work):
   - The salience formula is tuned for coding lessons that rot in weeks. On
     a personal-facts benchmark with month-long histories, recency at query

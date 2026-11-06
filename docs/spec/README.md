@@ -25,7 +25,7 @@ and a second implementation is the point.
 
 ## Related
 
-- [`../../SPEC.md`](../../SPEC.md) — the contract itself (v0.1).
+- [`../../SPEC.md`](../../SPEC.md) — the contract itself (v0.2).
 - [`../adapters.md`](../adapters.md) — how to wire a specific harness (MCP-first
   or documentation-first).
 - [`../http-api.md`](../http-api.md) — dreamd's `/api/v1/*` surface.

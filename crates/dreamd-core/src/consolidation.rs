@@ -1244,4 +1244,24 @@ mod tests {
         let output = ClusterOutput::default();
         assert!(output.promoted.is_empty());
     }
+
+    /// BZR-1523 test 10: a cycle ranks clusters with the dampened term, so three
+    /// painful events beat ten mild ones. The raw count would pick `rust::large`.
+    #[test]
+    fn top_cluster_uses_the_dampened_recurrence() {
+        let event = |id: u32, key: &str, pain: f32| {
+            let mut e = make_event_at(id, key, NOW_SEC - 86_400);
+            e.pain = pain;
+            e.importance = 8.0;
+            e
+        };
+        let events: Vec<AgentLearning> = (0..3)
+            .map(|id| event(id, "rust::small", 8.0))
+            .chain((3..13).map(|id| event(id, "rust::large", 2.0)))
+            .collect();
+
+        let selected = select_lesson(&compute_promoted_clusters(&events, NOW_SEC), NOW_SEC)
+            .expect("both clusters promote");
+        assert_eq!(selected.cluster_key, "rust::small");
+    }
 }

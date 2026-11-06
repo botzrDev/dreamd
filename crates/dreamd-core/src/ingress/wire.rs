@@ -170,9 +170,10 @@ pub struct CitationJson {
     /// The stored importance score, before the formula clamps it to 0.0..=10.0
     /// and divides it by 10.
     pub importance: f64,
-    /// Alive episodic docs whose `skill_action` equals this hit's or extends it
-    /// with `::`, computed per searcher (`crate::recurrence`).
-    pub recurrence: u64,
+    /// The dampened value the salience formula used
+    /// ([`crate::salience::dampen_recurrence`]), a fractional number. The raw
+    /// count is the paired `results[].metadata.recurrence`.
+    pub recurrence: f64,
 }
 
 #[cfg(test)]

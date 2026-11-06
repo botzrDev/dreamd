@@ -6,7 +6,10 @@ queries, on the index produced by `dreamd-core::index::build_schema`
 Salience uses the formula from ARCHITECTURE.md decision #2:
 
 ```
-salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + recurrence))
+salience = exp(-age_days / 14) * (pain / 10) * (importance / 10) * (1 + ln(1 + d(recurrence)))
+
+d(0) = 0
+d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 `final_score = bm25 * salience` is what the recall API actually ranks
@@ -38,9 +41,9 @@ E2 and E3 mix in via salience-and-BM25 contributions from neighbouring
 
 | rank | id                              | skill_action                              | timestamp              | age_days | pain | importance | recurrence | salience | note                                              |
 | ---- | ------------------------------- | ----------------------------------------- | ---------------------- | -------- | ---- | ---------- | ---------- | -------- | ------------------------------------------------- |
-| 1    | evt_01JR05311200XYZX0Y1Z2A3B4C  | rust::error_handling::result_vs_panic     | 2026-05-31T12:00:00Z   | 2        | 9.0  | 9.0        | 4          | 1.8323   | freshest entry, max pain×importance; dominates    |
-| 2    | evt_01JR05291100XYZW9X0Y1Z2A3B  | rust::async::tokio_select_branches        | 2026-05-29T11:00:00Z   | 4        | 7.5  | 6.5        | 3          | 0.8716   | matches BM25 via "error path"; very recent        |
-| 3    | evt_01JR05250900XYZT7V8W9X0Y1Z  | rust::error_handling::thiserror_derive    | 2026-05-25T09:00:00Z   | 8        | 6.0  | 5.5        | 2          | 0.3876   | strong BM25 (multiple `error` tokens), age 8d     |
+| 1    | evt_01JR05311200XYZX0Y1Z2A3B4C  | rust::error_handling::result_vs_panic     | 2026-05-31T12:00:00Z   | 2        | 9.0  | 9.0        | 4          | 1.3095   | freshest entry, max pain×importance; dominates    |
+| 2    | evt_01JR05291100XYZW9X0Y1Z2A3B  | rust::async::tokio_select_branches        | 2026-05-29T11:00:00Z   | 4        | 7.5  | 6.5        | 3          | 0.6747   | matches BM25 via "error path"; very recent        |
+| 3    | evt_01JR05250900XYZT7V8W9X0Y1Z  | rust::error_handling::thiserror_derive    | 2026-05-25T09:00:00Z   | 8        | 6.0  | 5.5        | 2          | 0.3345   | strong BM25 (multiple `error` tokens), age 8d     |
 
 ## Query B: `error handling rust`
 
@@ -53,23 +56,25 @@ ordering, but tests should treat that as fixture-stable not API-pinned.
 
 | rank | id                              | skill_action                              | timestamp              | age_days | pain | importance | recurrence | salience | note                                                |
 | ---- | ------------------------------- | ----------------------------------------- | ---------------------- | -------- | ---- | ---------- | ---------- | -------- | --------------------------------------------------- |
-| 1    | evt_01JR05311200XYZX0Y1Z2A3B4C  | rust::error_handling::result_vs_panic     | 2026-05-31T12:00:00Z   | 2        | 9.0  | 9.0        | 4          | 1.8323   | salience dominates here; BM25 swap unlikely         |
-| 2    | evt_01JR05291100XYZW9X0Y1Z2A3B  | rust::async::tokio_select_branches        | 2026-05-29T11:00:00Z   | 4        | 7.5  | 6.5        | 3          | 0.8716   | salience-only #2; BM25 of "error path" is modest    |
-| 3    | evt_01JR05250900XYZT7V8W9X0Y1Z  | rust::error_handling::thiserror_derive    | 2026-05-25T09:00:00Z   | 8        | 6.0  | 5.5        | 2          | 0.3876   | salience-only #3; high BM25 keeps the slot stable   |
+| 1    | evt_01JR05311200XYZX0Y1Z2A3B4C  | rust::error_handling::result_vs_panic     | 2026-05-31T12:00:00Z   | 2        | 9.0  | 9.0        | 4          | 1.3095   | salience dominates here; BM25 swap unlikely         |
+| 2    | evt_01JR05291100XYZW9X0Y1Z2A3B  | rust::async::tokio_select_branches        | 2026-05-29T11:00:00Z   | 4        | 7.5  | 6.5        | 3          | 0.6747   | salience-only #2; BM25 of "error path" is modest    |
+| 3    | evt_01JR05250900XYZT7V8W9X0Y1Z  | rust::error_handling::thiserror_derive    | 2026-05-25T09:00:00Z   | 8        | 6.0  | 5.5        | 2          | 0.3345   | salience-only #3; high BM25 keeps the slot stable   |
 
 ## Below the cut
 
 E4 is the closest non-podium entry. Salience-strong (in-cluster recurrence
-factor of 2.6094) but old:
+factor of 1.8650) but old:
 
 | id                              | skill_action                              | timestamp              | age_days | pain | importance | recurrence | salience |
 | ------------------------------- | ----------------------------------------- | ---------------------- | -------- | ---- | ---------- | ---------- | -------- |
-| evt_01JR05081200XYZK0M1N2P3Q4R  | rust::error_handling::result_vs_panic     | 2026-05-08T12:00:00Z   | 25       | 6.5  | 7.0        | 4          | 0.1991   |
+| evt_01JR05081200XYZK0M1N2P3Q4R  | rust::error_handling::result_vs_panic     | 2026-05-08T12:00:00Z   | 25       | 6.5  | 7.0        | 4          | 0.1423   |
 
-E4's `final_score` is ≈ 0.24 vs E3's ≈ 0.73 — a ~3× gap, comfortably
+E4's `final_score` is ≈ 0.17 against E3's ≈ 0.63 — a ~3.7× gap, comfortably
 stable against pain/importance jitter at this corpus size.
 
 ## Audit notes (2026-05-16 amendment)
+
+The salience figures in these notes were computed before SPEC v0.2's `d`. The reasoning holds; the tables above have the current values.
 
 The originally-authored EXPECTED.md asserted a top-3 of E20, E15, E10
 (all `result_vs_panic`). Two implementation realities forced this

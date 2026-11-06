@@ -1355,8 +1355,8 @@ fn finish_uninstall(
 ///
 /// The one `remove_dir_all` in this module, and it is reached only through
 /// [`confirm_purge`]. `daemon_home` is `$HOME/.agent` (the registry, the
-/// socket, `dreamd.log`, and where present `server.json`, `auth.json` and
-/// `models/`), never
+/// socket, `dreamd.log`, `star-asked`, and where present `server.json`,
+/// `auth.json` and `models/`), never
 /// a project root: nothing here discovers an
 /// [`AgentRoot`] or joins `.agent` onto a cwd, so a per-project
 /// `<repo>/.agent/` store cannot be reached from this path. An already-absent
