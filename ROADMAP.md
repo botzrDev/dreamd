@@ -86,10 +86,18 @@ BM25 × salience.
 - **`dreamd setup` hints that work under npx.** Through `npx -y dreamd-mcp setup` the
   hints name `npx -y dreamd-mcp …`, and the card lists everything setup wrote.
 
+## Shipped — v1.3.0
+
+- **Recall ranking.** A multi-word query ranks the event that has the words its
+  top hit lacks, and a fat `skill_action` parent no longer outweighs a more
+  painful child (`SPEC.md` v0.2).
+- **Recall hits carry their `id`**, and the dream cycle's git commit runs again
+  and names the events it cited and pinned.
+- **A client and a daemon of different versions say so**, and name the commands
+  that fix it.
+
 ## Next
 
-- **1.3.0** is on `main` and not yet published. The `[Unreleased]` section of
-  `CHANGELOG.md` lists what it holds.
 - **More harness adapters**, including OpenCode.
 - Hardening and hot-fixes from launch feedback.
 

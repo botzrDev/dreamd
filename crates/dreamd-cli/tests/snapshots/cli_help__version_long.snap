@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: render_long()
 ---
-dreamd 1.2.2
+dreamd 1.3.0
   commit:  [sha]
   built:   [date]
   target:  [target]

@@ -47,8 +47,8 @@ GitHub release's windows-x86_64.tar.gz when that release has one, does watch and
 learn over loopback TCP with a bearer token. The dream cycle and the Tantivy
 index run there too; see docs/windows.md. Node >= 18 required.
 
-Version note: this describes 1.2.2, published on GitHub as `v1.2.2` and on npm
-as `dreamd-mcp` 1.2.2. `blame`, `salience-drift`, `memory`, `forget`,
+Version note: this describes 1.3.0, published on GitHub as `v1.3.0` and on npm
+as `dreamd-mcp` 1.3.0. `blame`, `salience-drift`, `memory`, `forget`,
 `recall --without`, `doctor --provenance`, and `explain=1` are in that version.
 
 ### From source (requires Rust stable)
@@ -211,7 +211,7 @@ into an LLM-assisted dream cycle (API key in the environment or
 `.agent/personal/` is excluded from that request unless you pass
 `--share-personal` on that call.
 
-## Current scope (v1.2.2)
+## Current scope (v1.3.0)
 
 IN: BM25 lexical recall (including `LESSONS.md` as a Tantivy document layer —
 not embeddings), Linux + macOS full daemon, Windows watch+learn, opt-in LLM

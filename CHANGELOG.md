@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-07
+
+A minor release. Recall ranks better: a multi-word query ranks the event that has the words its top hit lacks, and recurrence saturates (`SPEC.md` v0.2), so a fat `skill_action` parent no longer outweighs a more painful child. Recall hits carry their `id`, the dream cycle's git commit runs again, and a client and a daemon of different versions say so. Recall is still BM25 × salience. No store migration or index rebuild is needed.
+
+**Upgrading from 1.2.x.** A 1.3.0 client refuses a daemon of another version, and a 1.2.x daemon sends no version. A `dreamd watch` that 1.2.x `setup` started keeps running after npx moves to 1.3.0, so every MCP tool call fails with `version mismatch: client 1.3.0, daemon unknown` until that daemon stops. Run `npx -y dreamd-mcp update`, which stops the `dreamd mcp` and `dreamd watch` processes under your home and clears the binary cache. Then run `npx -y dreamd-mcp watch` and reload your MCP harness. If a `dreamd service` unit runs the daemon, run `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`. With a cargo-installed `dreamd`, stop the old daemon and run `dreamd watch`.
+
 ### Added
 
 - **`dreamd setup` asks for a GitHub star once per user.** The first successful setup prints `A star there helps others find it.` under the source line, then writes `~/.agent/star-asked`. A later setup, including one in another project, keeps the source line and does not ask again. Deleting that file asks on the next setup. `dreamd init` and `setup --dry-run` do not ask. `dreamd uninstall` leaves the file in place; `dreamd service uninstall --purge` removes it with the rest of the daemon home.
@@ -374,7 +380,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/botzrDev/dreamd/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/botzrDev/dreamd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/botzrDev/dreamd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/botzrDev/dreamd/compare/v1.0.1...v1.2.0

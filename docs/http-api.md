@@ -415,7 +415,7 @@ The 200 body's `autobiography` object reports the git autobiography commit (BZR-
 {"status":"ok","autobiography":{"outcome":"skipped","reason":"user_dirty_tree","files":[".agent/semantic/LESSONS.md"]}}
 ```
 
-The key is absent when the autobiography phase did not run or failed (a failure is logged at ERROR, and the cycle still succeeds). A daemon before 1.2.2 answers `{"status":"ok"}`. Key order is not part of the contract.
+The key is absent when the autobiography phase did not run or failed (a failure is logged at ERROR, and the cycle still succeeds). A daemon before 1.3.0 answers `{"status":"ok"}`. Key order is not part of the contract.
 
 `notices` is an array of strings, present only when it is non-empty. A deterministic lesson says it is a copy of the representative event, not a summary. When the caller did not send `x-dreamd-no-llm: 1` and the daemon has no API key, one line says how to set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.config/dreamd/secrets.toml`. When the lesson cites events, one line names the ids that were pinned.
 

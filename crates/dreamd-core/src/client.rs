@@ -20,7 +20,7 @@ pub use crate::dream_cycle::{
 #[derive(Debug, PartialEq, Eq)]
 pub enum DreamProxyOutcome {
     /// Daemon ran the cycle (HTTP 200). `autobiography` is absent from a
-    /// daemon before 1.2.2 or any body without a valid object. `notices` is
+    /// daemon before 1.3.0 or any body without a valid object. `notices` is
     /// the body's string array, empty when the key is absent.
     Ran {
         autobiography: Option<AutobiographyReport>,

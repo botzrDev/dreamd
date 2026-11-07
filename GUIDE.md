@@ -12,7 +12,7 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
-This guide describes `main`, which is ahead of the published npm package. `npx -y dreamd-mcp` installs 1.2.2 (`latest` and `next`), and the note near the top of the [README](./README.md) lists where 1.2.2 differs. If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. The 1.2.0 npm shim did not forward `status`, `recall`, `score`, `archive` and `migrate`; from 1.2.1 every command here runs as `npx -y dreamd-mcp <cmd>`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
+This guide describes dreamd 1.3.0. If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. The 1.2.0 npm shim did not forward `status`, `recall`, `score`, `archive` and `migrate`; from 1.2.1 every command here runs as `npx -y dreamd-mcp <cmd>`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
 
 ```bash
 # npm (no Rust required)

@@ -70,7 +70,7 @@ pub struct AutobiographyBaseline {
 #[serde(default)]
 pub struct DaemonState {
     /// What the last cycle left in the tracked files (BZR-1467). Absent until
-    /// the first cycle under 1.2.2 records one.
+    /// the first cycle under 1.3.0 records one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autobiography_baseline: Option<AutobiographyBaseline>,
     pub daemon_version: String,

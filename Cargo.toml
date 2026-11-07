@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# 1.2.2. Patch: `dreamd setup` through the npm shim names `npx -y dreamd-mcp …` commands. Recall is still BM25 × salience.
-version = "1.2.2"
+# 1.3.0. Minor: recall ranking (multi-word queries; saturating recurrence, SPEC v0.2), recall hit ids, the dream cycle's git commit, and a client/daemon version handshake. Recall is still BM25 × salience.
+version = "1.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.2.2-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.3.0-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -19,16 +19,6 @@ npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 ![dreamd blame finds the memory behind a bad answer, dreamd forget removes it and writes a receipt, and the same query no longer returns it](docs/assets/blame-forget.gif)
 
 Recorded live on dreamd 1.2.0, sped up 1.5x: `blame` finds the event behind a bad answer, `forget` removes it with a receipt, and the same query comes back without it. Tape: [docs/assets/blame-forget.tape](docs/assets/blame-forget.tape).
-
-> **`main` is ahead of npm.** `npx -y dreamd-mcp` installs 1.2.2. This README and [GUIDE.md](./GUIDE.md) describe 1.3.0, which is not published yet. On 1.2.2:
->
-> - A dream cycle usually skips its git commit (`user_dirty_tree`), so there may be no `dreamd: cycle` commit to review or revert.
-> - Recall hits have no `id`. `blame` prints it.
-> - `forget --dry-run` prints `dry-run removed=`, not `would_remove=`.
-> - Ranking uses `SPEC.md` v0.1's recurrence term, and a multi-word query does not promote the event that has the words its top hit lacks.
-> - `dreamd watch` ignores `DREAMD_SOCK`.
->
-> [CHANGELOG.md](./CHANGELOG.md) lists the rest under `[Unreleased]`.
 
 Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
 
@@ -201,6 +191,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.3.0** (2026-11-07) | Recall ranks the event that has a multi-word query's missing words, and a fat `skill_action` parent no longer outweighs a more painful child (`SPEC.md` v0.2); recall hits carry their `id`; the dream cycle's git commit runs again; a client and a daemon of different versions say so |
 | **v1.2.2** (2026-11-04) | `dreamd setup` through npx names `npx -y dreamd-mcp …` commands, and its card lists everything it wrote with an Undo line for each |
 | **v1.2.1** (2026-11-03) | Static Linux binary with no glibc requirement (runs on Ubuntu 20.04 and 22.04, Debian 12 and Alpine); fixes from the 1.2.0 torture session; the npm shim forwards every `dreamd` command |
 | **v1.2.0** (2026-10-29) | Windows dream cycle and Tantivy index; audit fixes (writer lock, atomic dream cycle, faithful log rewrites, index coverage); deprecates `dreamd memory` branch commands, `vectors enable` and `dream --auto` for removal in 2.0. No 1.1.0 tag |
@@ -235,7 +226,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.2.2** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.3.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
