@@ -13,11 +13,10 @@
 >
 > AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
 >
-> Where it fits: dreamd is the Linux-hosted proof, in the dreamOS charter (momo
-> RFC-011, accepted 2026-09-26), of memory as plain files a person owns, with
-> provenance. No trust label ships today; see ROADMAP.md, "Direction".
+> Memory is plain files a person owns, with provenance. No trust label ships
+> today; see ROADMAP.md, "Direction".
 >
-> Version: 1.0.0 (GitHub release `v1.0.0` and npm `dreamd-mcp` 1.0.0). Recall is
+> Version: 1.2.2 (GitHub release `v1.2.2` and npm `dreamd-mcp` 1.2.2). Recall is
 > lexical BM25 × salience — no vector or hybrid recall.
 
 ## Documentation

@@ -252,6 +252,10 @@ formula above are enforced by a `proptest` suite in
 nightly CI sets `PROPTEST_CASES=1024`). Valid ranges: `age_days` ∈ \[0, 10000\],
 `pain` / `importance` ∈ \[0, 10\], `recurrence` ∈ \[0, `u64::MAX`/2\]. Edge
 cases: `pain=0` or `importance=0` → score 0; `recurrence=0` → ln factor 1.
+The suite also checks that salience stays within its bound for every `f64`,
+NaN and infinities included, that a future timestamp scores as written now,
+that an out-of-range score counts as its bound (BZR-1237), and that `d` is
+monotonic and at most 1.5 (BZR-1523).
 
 Full derivation and lineage: [`salience.md`](salience.md).
 

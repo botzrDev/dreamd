@@ -88,6 +88,8 @@ BM25 × salience.
 
 ## Next
 
+- **1.3.0** is on `main` and not yet published. The `[Unreleased]` section of
+  `CHANGELOG.md` lists what it holds.
 - **More harness adapters**, including OpenCode.
 - Hardening and hot-fixes from launch feedback.
 
@@ -121,11 +123,8 @@ ledger is the substrate a **trust label** would live on: a scalar on every
 fragment saying where it came from and how far it may be trusted, joined on
 derivation, so that whatever releases an effect can refuse one built on data
 below its label. That rule — *every effect traceable to the data that caused
-it; no datum causes an effect above its own trust label* — is recorded as a
-design in the dreamOS charter in the momo kernel repository (RFC-011,
-accepted 2026-09-26), where dreamd is the Linux-hosted proof of memory a
-person owns — *the Memory*. It needs its own
-spec before any code and is not on the roadmap list above. Today `source_harness`
+it; no datum causes an effect above its own trust label* — is a design that
+needs its own spec before any code and is not on the roadmap list above. Today `source_harness`
 is caller-asserted and nothing verifies it.
 
 ## Principles that won't change

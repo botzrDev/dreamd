@@ -20,6 +20,16 @@ npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 
 Recorded live on dreamd 1.2.0, sped up 1.5x: `blame` finds the event behind a bad answer, `forget` removes it with a receipt, and the same query comes back without it. Tape: [docs/assets/blame-forget.tape](docs/assets/blame-forget.tape).
 
+> **`main` is ahead of npm.** `npx -y dreamd-mcp` installs 1.2.2. This README and [GUIDE.md](./GUIDE.md) describe 1.3.0, which is not published yet. On 1.2.2:
+>
+> - A dream cycle usually skips its git commit (`user_dirty_tree`), so there may be no `dreamd: cycle` commit to review or revert.
+> - Recall hits have no `id`. `blame` prints it.
+> - `forget --dry-run` prints `dry-run removed=`, not `would_remove=`.
+> - Ranking uses `SPEC.md` v0.1's recurrence term, and a multi-word query does not promote the event that has the words its top hit lacks.
+> - `dreamd watch` ignores `DREAMD_SOCK`.
+>
+> [CHANGELOG.md](./CHANGELOG.md) lists the rest under `[Unreleased]`.
+
 Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
 
 If you want agent memory you can trace and undo, star the repo to follow releases. When a memory goes wrong, an issue with the `blame` output helps us fix it.

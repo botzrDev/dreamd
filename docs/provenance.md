@@ -16,7 +16,7 @@ This page specifies how dreamd records which derived artifacts each episodic eve
 | Forget receipt (`forget-receipt/1.0`) | Written by `dreamd forget --proof`. It is a different, unsigned file, described under [Commands](#commands) below. |
 | Ledger repair | Not implemented. No command rewrites or truncates complete ledger lines. |
 
-**Why this format also matters beyond forgetting (future).** The ledger records which derived artifacts each event feeds. The same edges are the substrate a trust label would ride on: a scalar per event saying where it came from and how far to trust it, joined along these edges on derivation, so that whatever releases an effect can refuse one built on data below its label. That rule is recorded as direction in the dreamOS charter in the momo kernel repository (RFC-011, accepted 2026-09-26; see `ROADMAP.md`, "Direction — provenance and trust"). This page specifies no label, no join rule, and no consumer of one; a trust label MUST NOT be inferred from any field defined here.
+**Why this format also matters beyond forgetting (future).** The ledger records which derived artifacts each event feeds. The same edges are the substrate a trust label would ride on: a scalar per event saying where it came from and how far to trust it, joined along these edges on derivation, so that whatever releases an effect can refuse one built on data below its label. That rule is direction, not shipped (see `ROADMAP.md`, "Direction — provenance and trust"). This page specifies no label, no join rule, and no consumer of one; a trust label MUST NOT be inferred from any field defined here.
 
 Conformance keywords (MUST, SHOULD, MAY, MUST NOT) are used per [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), same as [`SPEC.md`](../SPEC.md).
 

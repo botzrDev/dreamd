@@ -45,10 +45,10 @@ Supported: Linux x86_64, macOS x86_64/aarch64 (the prebuilt binaries the npm shi
 downloads). The shim has no Windows binary. A dreamd.exe from source, or from a
 GitHub release's windows-x86_64.tar.gz when that release has one, does watch and
 learn over loopback TCP with a bearer token. The dream cycle and the Tantivy
-index need Unix atomic writes. Node >= 18 required.
+index run there too; see docs/windows.md. Node >= 18 required.
 
-Version note: this describes 1.0.0, published on GitHub as `v1.0.0` and on npm
-as `dreamd-mcp` 1.0.0. `blame`, `salience-drift`, `memory`, `forget`,
+Version note: this describes 1.2.2, published on GitHub as `v1.2.2` and on npm
+as `dreamd-mcp` 1.2.2. `blame`, `salience-drift`, `memory`, `forget`,
 `recall --without`, `doctor --provenance`, and `explain=1` are in that version.
 
 ### From source (requires Rust stable)
@@ -211,16 +211,16 @@ into an LLM-assisted dream cycle (API key in the environment or
 `.agent/personal/` is excluded from that request unless you pass
 `--share-personal` on that call.
 
-## Current scope (v1.0.0)
+## Current scope (v1.2.2)
 
 IN: BM25 lexical recall (including `LESSONS.md` as a Tantivy document layer —
 not embeddings), Linux + macOS full daemon, Windows watch+learn, opt-in LLM
 dream cycle, `dreamd service`, npm `dreamd-mcp`, memory branches
-(`dreamd memory …`), provenance ledger recording + `dreamd doctor --provenance`
+(`dreamd memory …`, deprecated, removed in 2.0), provenance ledger recording + `dreamd doctor --provenance`
 (unsigned, no trust label), `dreamd forget` (receipt, not a signed proof),
 `dreamd blame`, `recall --without`, `salience-drift`, `explain=1` citations.
 NOT: vector/embedding or hybrid recall (the optional `vectors` cargo feature only
-downloads a model), Windows atomic writes (dream cycle + index), Homebrew,
+downloads a model), a power-loss proof of the Windows directory flush, Homebrew,
 auto dream cycle, signed proofs, sync/CRDT.
 
 ## Key links

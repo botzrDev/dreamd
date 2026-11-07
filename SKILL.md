@@ -171,7 +171,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 | Mistake                                                 | Fix                                                                                 |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | Skipping `notifications/initialized`                    | Send it after `initialize`, per the MCP lifecycle                                   |
-| Treating an empty `search_nodes` just after `append_node` as a timing miss | The search commits pending appends and waits at most one second. Empty after that means the query did not match |
+| Treating an empty `search_nodes` just after `append_node` as a timing miss | The search commits pending appends and waits at most one second. Empty after that usually means the query did not match. Under heavy disk load the commit can take longer, so search once more before concluding |
 | Using slashes in `skill_action` (`rust/borrow-checker`) | Use `::` (`rust::borrow_checker`) — slashes are rejected                            |
 | Omitting `source_harness`                               | Required field; omitting causes a deserialization error                             |
 | No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |

@@ -13,10 +13,9 @@ d(r) = 1.5 - 0.5 / r    for r >= 1
 ```
 
 `final_score = bm25 * salience` is what the recall API actually ranks
-on. Both BM25 *and* salience pull weight in the top-3 — salience alone
-would predict three entries from the `rust::error_handling::result_vs_panic`
-cluster, but two of those entries (E15, E10) are dominated on the joint
-score by fresher, BM25-stronger competitors from other clusters.
+on. The top-3 comes from three clusters. The other two entries from the
+`rust::error_handling::result_vs_panic` cluster that this file once listed
+miss the cut: E15 has no BM25 match, and E10 is 25 days old.
 
 **Labels.** This file uses two label schemes. In the tables and in "E1–E3",
 `E1`, `E2`, `E3` are the rank-1, rank-2, rank-3 rows (the constants `E1_TS` …
@@ -124,5 +123,6 @@ that way when it builds its in-RAM index — see README §Recurrence note.
 Cluster sizes: 4 / 2 / 2 / 3 / 2 / 2 / 2 / 2 / 1.
 
 These tables hold for that test's index and that clock. A live `dreamd recall`
-over this corpus uses the current time and the recurrence counts a dream cycle
-has written, so it will not reproduce these salience values.
+over this corpus uses the current time, so it will not reproduce these salience
+values. Its recurrence is the all-time subtree count, which also counts any key
+that extends the row's with `::`.

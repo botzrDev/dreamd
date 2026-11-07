@@ -79,8 +79,9 @@ The MCP server exposes `search_nodes` and `append_node`. These names match the A
 reference memory server intentionally. Do not rename them.
 
 **Salience is computed at query time.**
-`BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`
-This is computed on recall. Age, pain and importance come from Tantivy fastfields. `recurrence` is the all-time subtree count, which `recurrence::RecurrenceWarmer` derives per searcher generation (BZR-1242). The salience score itself is never stored.
+`BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`, where `d(0) = 0` and `d(r) = 1.5 - 0.5 / r` (`salience::dampen_recurrence`, BZR-1523, SPEC v0.2).
+This is computed on recall. Age, pain and importance come from Tantivy fastfields. `recurrence` is the all-time subtree count, which `recurrence::RecurrenceWarmer` derives per searcher generation (BZR-1242). The salience score and `d` are never stored.
+`citations[].recurrence` and `blame --explain --json`'s `recurrence` show `d`. `results[].metadata.recurrence` and the `recall` and `score` tables show the count.
 `salience()` clamps its inputs first (BZR-1237): `salience::age_secs` floors the age at 0,
 and `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
 
@@ -124,7 +125,7 @@ Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `L
 
 On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag `v1.2.2` is `d581785` (2026-11-04, Latest; cut from `v1.2.1`, and not an ancestor of `main`). npm `dreamd-mcp` is `1.2.2` on both `latest` and `next`, and the MCP registry's latest is 1.2.2 (checked 2026-11-04). `main` took the 1.2.2 version from one separate commit, not from a merge of the release branches, which Austin chose to delete once `main` had 1.2.2. Tag and publish stay human.
 
-Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, animated GIF, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
+Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
 
 The optional `vectors` feature downloads a model and does not rank. BZR-1244 deleted `rrf`, so there is no fusion code. Forget, memory branches, and the in-RAM latency page are shipped. Do not describe vector recall or hybrid retrieval as shipped. `v1.0.0` is a published tag; `v0.2.0-alpha.1` was never tagged.
 
@@ -138,9 +139,9 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-10-24
+**Last updated:** 2026-11-06
 
-**Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.26; no DB
+**Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.27; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
 **Static-check command:** `cargo check --workspace`
 **Lint command:** `cargo clippy --workspace --all-targets --all-features -- -D warnings` (also `cargo fmt --all -- --check`)
@@ -239,7 +240,7 @@ Locked 2026-10-24:
    - `recall --explain`, `blame --explain` and its JSON, the recall table's `age_days` column, and `citations[].age_days` show the clamped age and factors. `citations[].pain` and `importance` stay the stored values;
    - library: new `salience::age_secs`, `age_days` and `clamp_score`.
 
-   Docs left for BZR-1238: `docs/architecture.md:255-260` does not mention the three new properties, and `docs/observability.md:31-32` still say "Stored 0.0–10.0". Spec: `assignments/BZR-1237.v2.md`.
+   The two docs left for BZR-1238 are settled, though that ticket closed without them: `docs/observability.md` no longer says "Stored 0.0–10.0", and `docs/architecture.md` names the new properties (2026-11-06). Spec: `assignments/BZR-1237.v2.md`.
 9. **BZR-1239** — on `main` (`22da460`). A dream cycle and `forget::cascade` stage every output, then commit them with one redo WAL:
    - `stage::Stage` (`read` / `put` / `unlink` / `redo`) holds the outputs under `.agent/.dreamd/stage/<kind>-<now>/`. Every phase reads through the stage, so later phases see earlier staged output.
    - `wal::begin_cycle(root, kind, now)` returns the stage and refuses while a WAL is pending. `commit_cycle(stage, ledger, now)` fsyncs the stage and writes `{"schema_version":"1.0","format":"redo/1","renames":[…],"unlinks":[…]}` (the commit point). It then runs `roll_forward` and removes the stage dir.
@@ -263,10 +264,10 @@ Locked 2026-10-24:
    - a roll-forward at recovery sets the status to `complete` but leaves `last_dream_cycle_at` as it was;
    - library: `wal::begin_cycle(root, kind, now) -> Stage`, `commit_cycle(stage, ledger, now)`, `recover_if_needed(root, ledger)` and `recover_on_startup(root, ledger)`; `apply_pin_unpin`, `select_lesson_or_retire`, `write_selected_lesson` and `run_decay_pruner` take a `&mut Stage`; `run_deterministic_dream_cycle(root, ledger, now)`. New: `stage::Stage`, `wal::{RedoWal, RedoRename, CycleKind, REDO_FORMAT}`, `RecoveryOutcome::RolledForward`, `WalError::{Pending, UnknownFormat, BadRedoPath, Provenance}`, `consolidation::stage_cluster_engine`, `lessons::parse_lessons_file`, `snapshot::stage_autosnap`, `AgentRoot::stage_dir`. Removed: `wal::guarded_replace`, `GuardedReplaceKind`, `append_intent`, `episodic::rewrite_guarded`. BZR-1240 replaces several of these again; write the CHANGELOG against the 1.1.0 tree, not this list.
 
-   Left for later tickets:
-   - BZR-1238: `docs/architecture/durability.md:33` says the phases "replace the file by atomic rename".
-   - BZR-1245: a crash before the commit point leaves an unreferenced autosnap object under `branches/objects/`.
-   - BZR-1244: on Windows, `io::write_atomic_with_hook` may have no non-test caller left.
+   Left for later tickets, all settled by 2026-11-06:
+   - `docs/architecture/durability.md` says the commit replaces the file, since BZR-1241.
+   - BZR-1245's `retention::collect_objects` removes an unreferenced autosnap object after a one-hour grace.
+   - `io::write_atomic_with_hook` keeps its non-test caller, `write_atomic`.
 
    Spec: `assignments/BZR-1239.v2.md`. Amendment 1 moved the stage removal into `commit_cycle` and fixed the crash-sweep oracle.
 10. **BZR-1240** — on `main` (`1953ef5`). A dream cycle, the deterministic cycle and `forget::cascade` each read the log and `LESSONS.md` once, plan every output with a pure function, stage the plan, and commit it:
@@ -455,7 +456,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
       - a live-download npx run in four clean containers, and the public `npx -y dreamd-mcp` afterwards, printed `start it with: npx -y dreamd-mcp watch`. Report: `assignments/reports/release-1.2.2.verify.r0.md`;
       - Austin decided the same day to delete `release/v1.2.2`, `chore/mcp-manifest-v1.2.2` and the release worktree once `main` had 1.2.2. The tags stay.
 
-**Milestone 1.3** (Linear; renamed from "1.2.2 polish" on 2026-11-04, and ships after the Show HN). Added to the paired loop 2026-11-03 as a user decision. It holds the findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. BZR-1469 moved to "1.2.2 patch". Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The paired loop ends when BZR-1519 lands (Austin added it after BZR-1473 on 2026-11-04).
+**Milestone 1.3** (Linear; renamed from "1.2.2 polish" on 2026-11-04, and ships after the Show HN). Added to the paired loop 2026-11-03 as a user decision. It holds the findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. BZR-1469 moved to "1.2.2 patch". Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The automated paired loop ended when BZR-1519 landed (Austin added it after BZR-1473 on 2026-11-04). BZR-1522, 1523 and 1524 joined the milestone after that; BZR-1523 ran as a manual `/paired-dev-loop`.
 
 26. **BZR-1467** — on `main` (`6db64aa`). The autobiography start check compares bytes instead of asking git for status (drift entry `autobiography-check-is-content-not-git-status`):
     - `LESSONS.md` is dreamd's when it is absent, equals HEAD's blob, or matches `state.json`'s new `autobiography_baseline` hash;
@@ -525,23 +526,46 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H6: no test reaches `watch_spawn_failed_line`'s launcher argument (PM mutant P1 survives).
 
     Spec: `assignments/BZR-1469.v2.md` (Amendments 1–2).
-29. **BZR-1470** — raw JSON INFO logs flood `watch` and print before `blame`'s table. Blocked by 1469. Austin committed its r0 tree as `40425a9` on 2026-11-04, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`); base stays `47f8c94`. VERIFY r0 (`assignments/reports/BZR-1470.verify.r0.md`): every row passed except PM-only mutants P4 (`init_tracing` ignores `DREAMD_LOG_FORMAT`) and P6 (`watch` ignores `DREAMD_LOG`), which survive 1,416 / 0 / 0, and a stale `service.rs:137-138` rustdoc. Spec Amendment 2 is r1: test 13 plus the rustdoc, with mutation rows M16 and M17.
-30. **BZR-1471** — the no-API-key fallback to `--no-llm` is silent, and its lesson copies one event instead of summarizing. No blocker; runs after 1470.
-31. **BZR-1472** — the dream commit message does not name the cited event, and the event is pinned without notice. No blocker; runs after 1471.
-32. **BZR-1473** — `forget --dry-run` prints `removed=true`, which reads as if the event was removed. No blocker; runs after 1472.
-34. **BZR-1519** — the daemon socket: a version handshake on connect, a socket-path override, and per-user docs. It is BZR-1474's follow-up, and runs after 1473 (Austin, 2026-11-04). The acceptance criteria are on the ticket.
-    - **Pre-flight facts (2026-11-04, `40425a9`):**
-      - The ticket names a new `DREAMD_SOCKET`. The tree already has `DREAMD_SOCK`. Clients honor it through `client::resolve_daemon_socket` (`client.rs:58`), and so do `status`, `doctor`, `archive`, `forget`, `setup`, `uninstall`, `update` and the `dream` proxy.
-      - `dreamd watch` does not honor it. It always binds `$HOME/.agent/dreamd.sock` (`docs/configuration.md:140-142`).
-      - `SECURITY.md` covers `DREAMD_SOCK` in its threat model.
-      - Nothing in the tree sends or checks a version on connect.
-    - **Decided (Austin, 2026-11-04; the ticket is updated):**
-      - Use the existing `DREAMD_SOCK`. `dreamd watch` resolves its bind path through `client::resolve_daemon_socket`, like every client. There is no new env var name.
-      - `SECURITY.md`'s threat model for a daemon binding a path set by env var, outside `~/.agent`, is in scope.
-      - Re-read the ticket when writing the spec.
+29. **BZR-1470** — on `main` (r0 `40425a9`, r1 `c0c0b4e`). The console is text everywhere, coloured only on a terminal, and `DREAMD_LOG_FORMAT=json` switches it to JSON. `watch`'s console shows its start and stop lines and warnings; per-request lines go to `~/.agent/dreamd.log`. Library targets stay at `warn` unless `DREAMD_LOG` is set. Austin committed r0 before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`), and the base stayed `47f8c94`. VERIFY r0 (`assignments/reports/BZR-1470.verify.r0.md`) passed every row except PM-only mutants P4 (`init_tracing` ignores `DREAMD_LOG_FORMAT`) and P6 (`watch` ignores `DREAMD_LOG`), which survived 1,416 / 0 / 0, and a stale `service.rs:137-138` rustdoc. r1 (Amendment 2) is test 13 plus the rustdoc. No r1 verify report is on file. Spec: `assignments/BZR-1470.v2.md`.
+30. **BZR-1471** — on `main` (`c0c0b4e`). A missing API key is reported on the cycle, and a deterministic lesson says it is a copy of the representative event.
+31. **BZR-1472** — on `main` (`c0c0b4e`). A dream cycle's git commit message names the cited event ids and the pins.
+32. **BZR-1473** — on `main` (`c0c0b4e`). `forget --dry-run` prints `would_remove=` and writes nothing.
+
+    Items 30–32 have no v2 spec or report on file. The record is each ticket's Linear comment and its `CHANGELOG.md` bullet.
+34. **BZR-1519** — on `main` (`ae95a93`). BZR-1474's follow-up (Austin, 2026-11-04):
+    - `dreamd watch` resolves its bind path through `client::resolve_daemon_socket`, like every client, so it honours the existing `DREAMD_SOCK`. The ticket's first name, `DREAMD_SOCKET`, did not ship.
+    - A client and a daemon of different versions get a `426` that names both versions. A 401 or 403 is returned as that status.
+    - `docs/configuration.md`, `docs/architecture.md` and `docs/troubleshooting.md` say the socket is per user. `SECURITY.md` covers a daemon binding a path outside `~/.agent`.
     - Out of scope: per-project sockets by default, a second env var name, and BZR-1247's topology.
 
-**Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project). Austin decided on 2026-11-04 that one socket per user stays. BZR-1519 carries the follow-up work.
+    No report is on file. Spec: `assignments/BZR-1519.v2.md`.
+
+35. **BZR-1522** — on `main` (`8a2343a`). When a plain multi-word query's top hit is missing a token that another event's content has, that other event is ranked above it. Every other query stays on the one-query path, scores included. `recall_excluding`'s rustdoc links the private `rank_missing_tokens`, which is the one `cargo doc` warning on `main`. No report is on file. Spec: `assignments/BZR-1522.v2.md`.
+36. **BZR-1523** — on `main` (`ff3c571`, a commit shared with the `dreamd setup` GitHub star prompt; its message does not name the ticket). Recall's recurrence saturates:
+    - `salience::dampen_recurrence` is `d(0) = 0`, `d(r) = 1.5 - 0.5 / r`. `salience()` applies it before the log term, and `explain_factors` calls it too. It is monotonic and at most 1.5, and `d(1) = 1`, so a one-off scores as before and recurrence adds at most 13.2%.
+    - Austin chose the term on 2026-11-06, because ordinary dampening cannot pass the gate (drift entry `a-ranking-gate-is-an-inequality-compute-it-first`). `SPEC.md` moved to v0.2, numbered separately from the product.
+    - `citations[].recurrence` (now `f64`), `blame --explain --json`'s `recurrence` and `--explain`'s new `d(recurrence)` line show the dampened value. `RecallResult`, `metadata.recurrence` and the `recall` and `score` tables keep the count.
+    - `salience()` is shared, so a dream cycle's top cluster can change, and `salience-drift`, `GET /api/v1/observability/salience` and `memory diff` score with the term. Decay passes 0, so it is unchanged.
+
+    PM verification:
+    - Workspace 1444 / 0 / 0 and all features 1448 / 0 / 0, each with the star change's 4 tests.
+    - Red-first on `8a2343a`: `hub_parent_does_not_drown_a_more_painful_child` and `top_cluster_uses_the_dampened_recurrence` fail.
+    - Gate `single_anchor=pass hub_drown=pass consolidation=pass`, oracle 12 of 12, quality suite 14 / 0, M1–M18 fail as named. Stripped `dreamd` is 21,964,000 bytes.
+    - Base and head benches, alternating, show no regression. Head's `recall` ran about 11% faster at 10k and 100k in both runs. This change does not explain that, so do not cite it.
+    - All 32 paths at LANDED match the signed-off hashes (`assignments/reports/BZR-1523.verify.r0.md`).
+
+    Limits:
+    - No real store has a fat cluster, and LongMemEval was not re-run (`docs/evals/external-benchmarks.md` says so).
+    - A parent still ranks first at equal pain, importance, age and BM25.
+    - At a large hub a child wins only if it beats the parent by more than 13.2% on pain × importance × recency × BM25. Pain 7 against 6 wins; 6.5 against 6 loses.
+
+    Two stale passages in `tests/fixtures/demo-corpus/EXPECTED.md`, found during this ticket, were fixed on 2026-11-06 with no ticket: its last paragraph on live recurrence, and its intro's claim about the `result_vs_panic` cluster.
+
+    The CHANGELOG `[Unreleased]` → `### Changed` bullet is in the commit. Spec: `assignments/BZR-1523.v2.md` (Amendment 1).
+37. **BZR-1524** — 1.3.0 release prep (hitl). Todo; BZR-1523 was its blocker. Tag and publish stay human. Its `SPEC.md` criterion now means v0.2, because BZR-1523 amended the formula. The spec is not written.
+    - **Docs ahead of npm (Austin, 2026-11-06):** 1.3.0 stays after the Show HN, so the README carries a "`main` is ahead of npm" note listing where 1.2.2 differs, and `GUIDE.md`'s version line points at it. The note's list must stay true while `main` moves. This ticket removes the note and sets the version line back to the published release.
+
+**Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
 
 **Milestone 2.0 removal**
 
@@ -559,7 +583,7 @@ Locked 2026-09-24 for the finish race. Re-checked against `origin/main` (`2e3418
 
 **Do not start a ticket until every ticket above it in this list has landed.** One ticket at a time.
 
-An empty backlog query on `dreamd-eng` is that move. Milestone progress there is not evidence a v0.2 ticket shipped. The dreamd-eng description body still says RFC-011 is proposed; the project summary, BZR-1075, and the "Where it fits" section above record it **accepted** (2026-09-26). BZR-1077 (the local docs pointer) is Done, commit `312983b`.
+An empty backlog query on `dreamd-eng` is that move. Milestone progress there is not evidence a v0.2 ticket shipped. The dreamd-eng description body still says RFC-011 is proposed; the project summary and BZR-1075 record it **accepted** (2026-09-26). BZR-1077 (the local docs pointer) is Done, commit `312983b`.
 
 1. **BZR-187** — on `main` (`fe331bd`). `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Documented in `docs/http-api.md`. Does not call `MigrationRegistry` and does not `.bak` the store.
 2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
@@ -1179,12 +1203,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### actr-park-are-lineage-not-the-formula
 
-- **Rule:** Anderson 2007 (ACT-R) and Park et al. 2023 (Generative Agents) are **lineage** for the salience *shape*. They are not the formula. ACT-R base-level activation is a power law (`t^{-d}`); Park retrieval is a weighted **sum** of recency + importance + relevance. dreamd is a **product** `BM25 × exp(-age/14) × (pain/10) × (importance/10) × (1 + ln(1 + recurrence))`.
+- **Rule:** Anderson 2007 (ACT-R) and Park et al. 2023 (Generative Agents) are **lineage** for the salience *shape*. They are not the formula. ACT-R base-level activation is a power law (`t^{-d}`); Park retrieval is a weighted **sum** of recency + importance + relevance. dreamd is a **product** `BM25 × exp(-age/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`. The saturating `d(r)` is dreamd's own (BZR-1523), and it is not ACT-R's `d`.
 - **Why:** SPEC.md footnote ¹ already cites both. AILAB-180’s “defensible answer for engineers reading critically” fails if the page claims isomorphism. Linear also wrote `ln(1+recurrence)` without the leading `1 +`, which would zero a first occurrence.
 - **How to apply:**
   - Cite Anderson, *How Can the Human Mind Occur in the Physical Universe?* (2007) and Park et al., arXiv `2304.03442`.
   - Contrast the arithmetic in the same sections that cite them.
-  - Keep `1 + ln(1 + recurrence)` so recurrence `0` → factor `1.0`.
+  - Keep the leading `1 +` in `1 + ln(1 + d(recurrence))`, so recurrence `0` → factor `1.0`.
+  - On a page that has both, write "Anderson's `d`" every time. `docs/salience.md` defines `d(r)` above its ACT-R section.
 - **Cross-refs:** `salience-14-is-efolding-not-half-life`, `layer-semantic-is-not-embeddings`
 
 ### releasing-npm-is-human-passkey
@@ -1321,9 +1346,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### v1-is-the-version-bump-of-the-current-tree
 
-- **Rule:** Product 1.0.0 is the version bump in `assignments/v1.0.0.v2.md`. `SPEC.md` stays v0.1. Episodic `schema_version` stays `"1.0.0"`. Recall stays BM25 × salience. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`.
+- **Rule:** Product 1.0.0 is the version bump in `assignments/v1.0.0.v2.md`. `SPEC.md` stayed v0.1 for it; BZR-1523 later moved it to v0.2 because that ticket changed the formula. Episodic `schema_version` stays `"1.0.0"`. Recall stays BM25 × salience. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`.
 - **Why:** On 2026-10-01 the finish list was empty and `context/planning/future-directions.md` still described identity, hypergraph, CRDT, and cryptographic deletion as later phases. The user chose to ship 1.0 from the tree on `main` (`2e34181`) rather than finish that document. There is no `v0.2.0-alpha.1` tag. `2e34181` has no Actions run. `release.yml` marks a tag as a prerelease only when the name contains `-`, so `v1.0.0` publishes as stable. The release notes are only the `## [1.0.0]` block.
-- **How to apply:** The bump is `bb84721`. Tag `v1.0.0` is `dacd95d` (published 2026-10-02, stable). Manifest shas are filled (`42e8e62`). npm `dreamd-mcp` 1.0.0 is on `latest` and `next`. Do not queue the bump again. Do not implement Windows `write_atomic`, add rank fusion to recall (BZR-1244 deleted `rrf`), or bump `SPEC.md`. Do not `git tag`, `git push`, or `npm publish` from an agent session.
+- **How to apply:** The bump is `bb84721`. Tag `v1.0.0` is `dacd95d` (published 2026-10-02, stable). Manifest shas are filled (`42e8e62`). npm `dreamd-mcp` 1.0.0 is on `latest` and `next`. Do not queue the bump again. Do not implement Windows `write_atomic`, add rank fusion to recall (BZR-1244 deleted `rrf`), or bump `SPEC.md` as part of a product version bump. Do not `git tag`, `git push`, or `npm publish` from an agent session.
 - **Cross-refs:** `alpha-tag-is-the-version-bump-not-the-publish`, `changelog-historical-entries-stay-put`, `vectors-feature-stays-out-of-the-default-binary`, `remaining-build-order-2026-09-24`
 
 ### architecture-claims-false-until-dreamd-hardening
@@ -1435,7 +1460,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### report-back-paste-can-be-truncated
 
 - **Rule:** A pasted report-back can arrive cut off. Before signing off, check that the last numbered item of the spec's §5 arrived. Every spec's §5 ends by asking the dev to finish the report with the line `END OF REPORT`, so a cut is visible.
-- **Why:** BZR-1234's paste stopped at §4 grep 4c. BZR-1236's stopped inside the mutation table at M12, which lost M13–M17, the NFR-2 size, the §4 outputs and the list of spec mismatches. Both times the PM re-ran what it could and reported the rest as unverified.
+- **Why:** BZR-1234's paste stopped at §4 grep 4c. BZR-1236's stopped inside the mutation table at M12, which lost M13–M17, the NFR-2 size, the §4 outputs and the list of spec mismatches. Both times the PM re-ran what it could and reported the rest as unverified. BZR-1523's stopped at M17. The re-runs covered M17 and M18, but item 7 could only come from the dev, and it held the one thing no re-run could find: `d` meaning two things on `docs/salience.md`.
 - **How to apply:**
   - Put "End the report with the line `END OF REPORT`." last in §5.
   - The PM re-runs the §4 greps whatever the paste shows, because pasted output is not evidence.
@@ -1457,7 +1482,9 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:**
   - A property that must hold "for all inputs" draws floats from `prop::num::f64::ANY`, not `any::<f64>()`.
   - A failing proptest run writes `<test>.proptest-regressions` into the source tree. Delete it after red-first and mutation runs.
+  - A property over a `u64` with an edge at a small value mixes a small range in: `prop_oneof![0_u64..64, any::<u64>()]`.
 - **Why:**
+  - `any::<u64>()` is close to uniform, so it almost never draws 0. On BZR-1523 the first draft of the `dampen_recurrence` property used it, and it would not have failed a mutant that changes only `d(0)`.
   - In proptest 1.11.0, `any::<f64>()` is `POSITIVE | NEGATIVE | ZERO | SUBNORMAL | NORMAL`: never NaN, never infinity (`arbitrary/primitives.rs:25-26`). `f64::ANY` adds `INFINITE` and `QUIET_NAN`; NaN's weight is 1/30.
   - The regressions file uses `SourceParallel` persistence and is not gitignored. A stale one replays its seeds first on the next run.
   - Both showed up on BZR-1237: the dev flagged the regressions file, and the PM deleted it between mutation runs.
@@ -1686,3 +1713,27 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Leave the freshness bound to the BZR-1437 tests, and do not raise the 1 s bound to make a test pass.
   - A timing flake in an unrelated test (`weg12`) under the same load is not evidence against the diff: compare base and head, alternating, in one scratch copy.
 - **Cross-refs:** `weg12-direct-channel-not-http-hammer`, `mutation-must-get-past-the-backstop`
+
+### a-ranking-gate-is-an-inequality-compute-it-first
+
+- **Rule:** When a ticket changes a ranking term so a gate row passes, work out the row's inequality from its fixture and measure the candidates before the spec names a term. What the passing terms cost is a product decision, so it goes to the user.
+- **Why:** BZR-1523's AC asked for "a deterministic dampening". On the `hub_drown` fixture BM25 ties, so the child passes only if `F(41) / F(1) < 7/6`.
+  - `ln`, `sqrt`, `r^(1/4)` and `r^(1/6)` all fail.
+  - `r^(1/8)` and `r^(1/10)` pass at r=41 and flip back near r=55 and r=151.
+  - `min(r, 64/r)` leaves r=9 to r=38 drowned and breaks monotonicity.
+  - A term that holds at every hub size has to cap the boost below 16.7%. That makes recurrence close to a tie-breaker in every recall, which the AC never said.
+- **How to apply:**
+  - Test several hub sizes, not only the fixture's. BZR-1523's test 6 uses 8, 40 and 500 parents.
+  - Grep every caller of the shared function before saying what changes. `salience()` also ranks a dream cycle's clusters.
+  - Publish the cost and the case the fix does not cover. A parent still wins at equal pain, and a child 6.5 against 6 still loses at a large hub.
+  - The result can pass the gate and still be untested on real stores. Say so in the docs.
+- **Cross-refs:** `spec-test-expectations-follow-from-the-rule-text`, `every-stated-rule-in-section-3-gets-a-mutation-row`, `actr-park-are-lineage-not-the-formula`
+
+### a-public-docs-ruling-gets-a-tree-wide-grep
+
+- **Rule:** When a ruling removes a claim from the public docs, grep every tracked path for it on the day of the ruling, not only the file the ruling names. A link check compares against `git ls-files`, not the file system.
+- **Why:** The 2026-11-04 ruling removed the README's section on a larger product (`9c7aedb`). `ROADMAP.md`, `llms.txt`, `SECURITY.md` and `docs/provenance.md` kept the same text until 2026-11-06, and `AGENTS.md` still pointed at the deleted section. `scripts/benchmark/README.md` linked a gitignored file, which exists locally, so a file-system link check reported 0 broken. `llms.txt` and `llms-full.txt` said 1.0.0 through three releases, because `RELEASING.md`'s version list did not name them.
+- **How to apply:**
+  - `git grep -nEi '<terms>' -- . ':!CHANGELOG.md'`, and read each hit. A case-insensitive search for an ordinary phrase matches prose, so search for its distinctive terms.
+  - A version statement no test checks goes on `RELEASING.md`'s list the day it is added.
+- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `changelog-historical-entries-stay-put`
