@@ -562,8 +562,10 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     Two stale passages in `tests/fixtures/demo-corpus/EXPECTED.md`, found during this ticket, were fixed on 2026-11-06 with no ticket: its last paragraph on live recurrence, and its intro's claim about the `result_vs_panic` cluster.
 
     The CHANGELOG `[Unreleased]` → `### Changed` bullet is in the commit. Spec: `assignments/BZR-1523.v2.md` (Amendment 1).
-37. **BZR-1524** — 1.3.0 release prep (hitl). Todo; BZR-1523 was its blocker. Tag and publish stay human. Its `SPEC.md` criterion now means v0.2, because BZR-1523 amended the formula. The spec is not written.
+37. **BZR-1524** — 1.3.0 release prep (hitl). Todo; BZR-1531 blocks it (2026-11-07). Tag and publish stay human. Its `SPEC.md` criterion now means v0.2, because BZR-1523 amended the formula. The spec is not written.
     - **Docs ahead of npm (Austin, 2026-11-06):** 1.3.0 stays after the Show HN, so the README carries a "`main` is ahead of npm" note listing where 1.2.2 differs, and `GUIDE.md`'s version line points at it. The note's list must stay true while `main` moves. This ticket removes the note and sets the version line back to the published release.
+    - **Found in its pre-flight (2026-11-07), for its spec:** three version claims BZR-1467 wrote say 1.2.2 for work that ships in 1.3.0 (`docs/http-api.md:418`, `daemon_state.rs:73`, `client.rs:23`). The `[1.3.0]` notes need an "upgrading from 1.2.x" paragraph: a 1.2.x `watch` left running fails every MCP call of a 1.3.0 client (BZR-1531).
+38. **BZR-1531** — In Progress; it runs before BZR-1524. Under the npx shim, a version mismatch names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, then a harness reload, where it named `dreamd watch`, which npx users cannot run. Found in BZR-1524's pre-flight: a 1.2.2 `watch` that `setup` left running from `~/.cache/dreamd-mcp/1.2.2/` fails every 1.3.0 `search_nodes` and `append_node`. Austin chose on 2026-11-07 to fix the message before 1.3.0, rather than rely on release notes or a self-healing upgrade. Spec: `assignments/BZR-1531.v2.md`.
 
 **Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
 
@@ -859,6 +861,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** An anti-pattern allowlist that is `git diff --name-only | grep -vE '^(allowed files)$'` cannot see untracked files. A new module the spec *requires* will not appear, and a new file the spec *forbids* will not fail the gate.
 - **Why:** AILAB-167 report-back: `daemon_state.rs` was `??` and the allowlist line was empty of it. The only red hit was PM-side `AGENTS.md`. The spec's own file-scope grep was structurally blind to the ticket's main deliverable.
 - **How to apply:** Pair `git diff --name-only` with `git ls-files --others --exclude-standard` (or `git status --porcelain`). Do not treat an empty `git diff --name-only` allowlist as proof that only the listed paths changed.
+- **`git grep` has the same blind spot (BZR-1531).** It searches tracked files only. §6 grep 1 (`git grep -n 'enum Launcher'`) printed nothing instead of the new `launcher.rs:9`, and grep 3 missed the `LAUNCHER_ENV` const in that file. The dev caught both. Any spec grep that must see a file the ticket creates uses `git grep --untracked` or `grep -rn`, and its dry run on the base is not proof it can see that file.
 - **Cross-refs:** none
 
 ### init-is-a-create-only-statejson-writer
@@ -1398,11 +1401,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
   Recurred on BZR-1235, which stopped recovery from truncating a valid final record. The pre-flight grepped for doctor's "truncated on daemon open". It missed `scan`'s rustdoc in the same file, which said `clean_len` stops "so [`recover`] can truncate". The dev caught it.
   Recurred on BZR-1236, this time in test fixtures rather than docs: two MCP tests seeded the index without the log (`index-fixtures-must-write-the-log-first`).
+  Recurred on BZR-1531, in a file the spec ruled out of scope. PM call C2 stopped the client showing the daemon's 426 body, and §6 grep 6 listed `client.rs` as "not this ticket", because its production code only passes the sentence through. Its test `proxy_dream_cycle_version_mismatch_is_an_error_not_in_process` asserted that exact body, so it failed. The dev asked, and Austin approved a test-only change.
 - **How to apply:**
   - List the old behaviour's observable effects, then grep `docs/`, `examples/`, `README.md`, `GUIDE.md` and comments next to the changed call sites for each one.
   - Grep the tests too, for fixtures that only worked because of the old behaviour.
+  - Before a spec lists a file as "not this ticket", grep that file's tests for the old behaviour's output (here the fake body `from the daemon`). If you only need its production code unchanged, diff the production slice through the first `#[cfg(test)]` instead of the whole file.
   - A §4 grep scoped to one file (`state.rs`) does not prove a removed name is gone from its neighbours.
-- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`, `index-fixtures-must-write-the-log-first`
+- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`, `index-fixtures-must-write-the-log-first`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`
 
 ### banned-crate-grep-needs-a-word-boundary
 
@@ -1737,3 +1742,13 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - `git grep -nEi '<terms>' -- . ':!CHANGELOG.md'`, and read each hit. A case-insensitive search for an ordinary phrase matches prose, so search for its distinctive terms.
   - A version statement no test checks goes on `RELEASING.md`'s list the day it is added.
 - **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `changelog-historical-entries-stay-put`
+
+### match-ok-underscore-keeps-the-probe-connection-open
+
+- **Rule:** `match UnixStream::connect(p).await { Ok(_) => { … serve().await } }` does not close the connection. `Ok(_)` moves nothing out of the scrutinee, and the temporary `Result` lives until the whole `match` ends, so the stream stays open until `serve` returns. A fake daemon in a test must serve each connection on its own thread.
+- **Why:** BZR-1531's dev found it in `run_mcp_server` (`mcp/mod.rs:567`). The spec said `dreamd mcp`'s reachability probe "closes first". A fake daemon with one accept loop blocked reading the probe, and test 12 timed out at 30 s. The comment at `:569` says "The connect only probes reachability", but every daemon-mode `dreamd mcp` holds one idle connection to the daemon for its whole session. The daemon's `serve_connection` (`uds_server.rs:75`) has no timer, so nothing times it out. No ticket yet (2026-11-07).
+- **How to apply:**
+  - A fake daemon for an integration test: one thread per accepted connection, and a connection that closes before `\r\n\r\n` gets no answer (`tests/version_mismatch_launcher.rs`).
+  - To probe and drop, bind the value and drop it: `Ok(stream) => { drop(stream); … }`.
+  - Read a probe's scope from the code, not from its comment.
+- **Cross-refs:** `daemon-recall-tests-run-without-the-test-coordinator`

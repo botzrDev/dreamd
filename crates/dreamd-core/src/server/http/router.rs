@@ -12,6 +12,7 @@ use super::handlers::{
 };
 use super::state::AppState;
 use crate::daemon_client::{version_mismatch_message, VERSION_HEADER};
+use crate::launcher::Launcher;
 
 /// Peer UID injected at connection-accept time by `serve_uds`.
 /// Extracted by `peer_uid_middleware` to enforce daemon-owner-only access.
@@ -242,10 +243,11 @@ pub async fn version_middleware(
         .get(VERSION_HEADER)
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
     let mut resp = match client {
+        // The daemon cannot know the client's launcher; a dreamd client builds its own sentence.
         Some(client) if client != DAEMON => (
             StatusCode::UPGRADE_REQUIRED,
             axum::Json(serde_json::json!({
-                "error": version_mismatch_message(&client, DAEMON)
+                "error": version_mismatch_message(&client, DAEMON, Launcher::Binary)
             })),
         )
             .into_response(),

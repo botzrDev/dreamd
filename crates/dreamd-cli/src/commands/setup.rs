@@ -97,33 +97,9 @@ impl std::fmt::Display for Harness {
     }
 }
 
-/// How the user started dreamd, which decides the command a hint names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Launcher {
-    /// A `dreamd` binary the user runs directly.
-    #[default]
-    Binary,
-    /// The `npx dreamd-mcp` shim, which puts no `dreamd` on PATH.
-    Npx,
-}
-
-impl Launcher {
-    /// `DREAMD_LAUNCHER`'s value. Only the exact string `npx` means npx.
-    pub fn from_env_value(value: Option<&str>) -> Self {
-        match value {
-            Some("npx") => Launcher::Npx,
-            _ => Launcher::Binary,
-        }
-    }
-
-    /// The command line for `args`, e.g. `watch` or `init --uninstall-project`.
-    pub fn command(self, args: &str) -> String {
-        match self {
-            Launcher::Binary => format!("dreamd {args}"),
-            Launcher::Npx => format!("npx -y dreamd-mcp {args}"),
-        }
-    }
-}
+// In dreamd-core so the daemon client's version-mismatch sentence can name the
+// launcher's commands too (BZR-1531).
+pub use dreamd_core::launcher::Launcher;
 
 /// Failure modes for `dreamd setup`. Mirrors [`InitError`] so the exit-code
 /// contract (`2` usage / `1` runtime) is unchanged from `dreamd init`.
@@ -1905,24 +1881,6 @@ mod tests {
         assert!(!npx.contains(": dreamd watch"), "{npx}");
         let binary = next_steps(Launcher::Binary);
         assert!(binary.contains(": dreamd watch\n"), "{binary}");
-    }
-
-    /// BZR-1469 test 7: only the exact value `npx` means npx.
-    #[test]
-    fn launcher_is_npx_only_for_the_exact_value() {
-        for value in [None, Some(""), Some("NPX"), Some("npx "), Some("1")] {
-            assert_eq!(
-                Launcher::from_env_value(value),
-                Launcher::Binary,
-                "{value:?} is not npx"
-            );
-        }
-        assert_eq!(Launcher::from_env_value(Some("npx")), Launcher::Npx);
-        assert_eq!(Launcher::Npx.command("watch"), "npx -y dreamd-mcp watch");
-        assert_eq!(
-            Launcher::Binary.command("init --uninstall-project"),
-            "dreamd init --uninstall-project"
-        );
     }
 
     /// BZR-1469 test 8: the spawn-failure hint names the launcher's command.

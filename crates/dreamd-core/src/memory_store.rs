@@ -819,8 +819,9 @@ mod tests {
     #[test]
     fn map_transport_error_passes_a_version_mismatch_through() {
         use crate::daemon_client::{version_mismatch_message, DaemonTransportError};
+        use crate::launcher::Launcher;
 
-        let sentence = version_mismatch_message("1.3.0", "1.2.2");
+        let sentence = version_mismatch_message("1.3.0", "1.2.2", Launcher::Binary);
         assert_eq!(
             map_transport_error(DaemonTransportError::VersionMismatch(sentence.clone())),
             MemoryStoreError::Internal(sentence)

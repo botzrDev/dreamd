@@ -104,7 +104,7 @@ The version check (BZR-1519). It runs after the authentication layer and before 
 | Header equal to the daemon's version | Pass through | |
 | Any other value, empty included | `426 Upgrade Required` | `` {"error":"version mismatch: client <client>, daemon <daemon>. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."} `` |
 
-Every response from this layer and the layers inside it, the `426` included, carries `x-dreamd-version` with the daemon's version. A `403` / `401` from the authentication layer does not. A dreamd client treats a `426`, a different version, or a missing header on any status but `401` and `403` as a version mismatch, and prints the sentence instead of the response.
+Every response from this layer and the layers inside it, the `426` included, carries `x-dreamd-version` with the daemon's version. A `403` / `401` from the authentication layer does not. A dreamd client treats a `426`, a different version, or a missing header on any status but `401` and `403` as a version mismatch. It builds its own sentence from the daemon's `x-dreamd-version` and does not show the `426` body. Under the npm shim (`DREAMD_LAUNCHER=npx`) that sentence names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`.
 
 ### `agent_root_middleware`
 
@@ -616,7 +616,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |
-| `-32603` | `` version mismatch: client …, daemon …. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version. `` | Daemon mode only: the daemon runs another dreamd version. `daemon unknown` in place of a version means it sent none |
+| `-32603` | `` version mismatch: client …, daemon …. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version. `` | Daemon mode only: the daemon runs another dreamd version. `daemon unknown` in place of a version means it sent none. Under the npm shim the fix names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, then a harness reload |
 | `-32603` | `coordinator unavailable: no agent root found` | In-process only: `append_node` with no `.agent/` store at or above the working directory. Run `dreamd init` |
 
 ---

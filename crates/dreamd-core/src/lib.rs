@@ -27,6 +27,7 @@ pub mod index;
 pub mod ingress;
 pub mod invariants;
 pub mod io;
+pub mod launcher;
 pub mod layout;
 pub mod lessons;
 pub mod llm;

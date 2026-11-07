@@ -75,7 +75,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
   http://localhost/api/v1/learn
 ```
 
-> **Socket path:** there is one daemon socket per user, at `~/.agent/dreamd.sock` by default, and the daemon routes each request to its project by `X-Agent-Root` through `~/.agent/registry.toml`. `dreamd watch` and every client resolve [`DREAMD_SOCK`](./docs/configuration.md#dreamd_sock) the same way, so set it on both when one user needs a second daemon. A client and a daemon of different versions refuse each other with `version mismatch: client …, daemon …` and the fix: stop the other daemon and start this one with `dreamd watch`.
+> **Socket path:** there is one daemon socket per user, at `~/.agent/dreamd.sock` by default, and the daemon routes each request to its project by `X-Agent-Root` through `~/.agent/registry.toml`. `dreamd watch` and every client resolve [`DREAMD_SOCK`](./docs/configuration.md#dreamd_sock) the same way, so set it on both when one user needs a second daemon. A client and a daemon of different versions refuse each other with `version mismatch: client …, daemon …` and the fix: stop the other daemon with `npx -y dreamd-mcp update`, start this one with `npx -y dreamd-mcp watch`, then reload your harness. A `dreamd` binary names `dreamd watch`.
 
 The response is `201` with the minted id: `{"id":"evt_…","timestamp":"…","deduplicated":false}`.
 

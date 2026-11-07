@@ -158,7 +158,13 @@ A client and a daemon of different dreamd versions refuse each other. The client
 version mismatch: client 1.3.1, daemon 1.3.0. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version.
 ```
 
-A daemon from a release without this check sends no version, so the client prints `daemon unknown` in its place. The fix is the same: stop that daemon and start this binary with `dreamd watch`.
+Under `npx -y dreamd-mcp`, the shim sets `DREAMD_LAUNCHER=npx`, and the client names commands that work there:
+
+```text
+version mismatch: client 1.3.1, daemon 1.3.0. Stop the other daemon with `npx -y dreamd-mcp update`, start this one with `npx -y dreamd-mcp watch`, then reload your MCP harness. Or point DREAMD_SOCK at a daemon of this version.
+```
+
+A daemon from a release without this check sends no version, so the client prints `daemon unknown` in its place. The fix is the same.
 
 ### `DREAMD_BIN`
 

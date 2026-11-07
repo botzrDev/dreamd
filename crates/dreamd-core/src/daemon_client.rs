@@ -48,6 +48,8 @@
 // - `Bytes` + `Full` are `send_one_tcp`'s request/response body types and
 //   `BodyExt` is what gives the response its `.collect()`.
 // - `DaemonHome` resolves `~/.agent/server.json` in `resolve_daemon_tcp`.
+// - `Launcher` is an argument of the two sentence functions and of
+//   `check_daemon_version`, which both halves call.
 //
 // Gating any of them would break the Windows build; leaving an import gated that
 // only the UDS half uses would be an `unused_imports` warning off Unix — which is
@@ -60,6 +62,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use serde::Deserialize;
 
+use crate::launcher::Launcher;
 use crate::layout::DaemonHome;
 
 /// A transport-stage failure talking to the daemon. Variant granularity lets
@@ -90,10 +93,11 @@ pub enum DaemonTransportError {
     #[error("read body failed: {0}")]
     ReadBody(String),
     /// The daemon runs a different dreamd version, or sent no version
-    /// (BZR-1519). Carries the sentence the user sees: the daemon's 426
-    /// `error` string, [`version_mismatch_message`], or
-    /// [`version_unknown_message`]. Not `Unreachable`: a daemon answered, so
-    /// the dream proxy must not run the cycle in-process beside it.
+    /// (BZR-1519). Carries the sentence the user sees, which the client builds
+    /// from the daemon's [`VERSION_HEADER`] and its own [`Launcher`]:
+    /// [`version_mismatch_message`] or [`version_unknown_message`]. A 426
+    /// body is never shown (BZR-1531). Not `Unreachable`: a daemon answered,
+    /// so the dream proxy must not run the cycle in-process beside it.
     #[error("{0}")]
     VersionMismatch(String),
 }
@@ -108,23 +112,45 @@ pub const VERSION_HEADER: &str = "x-dreamd-version";
 
 /// The sentence for a daemon whose version differs from this client's.
 ///
-/// The daemon puts it in its 426 body, and a client builds it itself when the
-/// response header differs but the body carries no `error` string.
-pub fn version_mismatch_message(client: &str, daemon: &str) -> String {
-    format!(
-        "version mismatch: client {client}, daemon {daemon}. \
-         Stop the other daemon and start this one with `dreamd watch`, \
-         or point DREAMD_SOCK at a daemon of this version."
-    )
+/// A client builds it from the daemon's [`VERSION_HEADER`], naming the
+/// commands that work for its `launcher` (BZR-1531). The daemon puts the
+/// [`Launcher::Binary`] form in its 426 body, for callers such as curl that
+/// do not build their own.
+pub fn version_mismatch_message(client: &str, daemon: &str, launcher: Launcher) -> String {
+    match launcher {
+        Launcher::Binary => format!(
+            "version mismatch: client {client}, daemon {daemon}. \
+             Stop the other daemon and start this one with `dreamd watch`, \
+             or point DREAMD_SOCK at a daemon of this version."
+        ),
+        Launcher::Npx => format!(
+            "version mismatch: client {client}, daemon {daemon}. \
+             Stop the other daemon with `{}`, start this one with `{}`, \
+             then reload your MCP harness. \
+             Or point DREAMD_SOCK at a daemon of this version.",
+            launcher.command("update"),
+            launcher.command("watch"),
+        ),
+    }
 }
 
 /// The sentence for a daemon that answered without [`VERSION_HEADER`]: a
-/// daemon from before the handshake (BZR-1519).
-pub fn version_unknown_message(client: &str) -> String {
-    format!(
-        "version mismatch: client {client}, daemon unknown. \
-         The daemon sent no version. Stop it and start this binary with `dreamd watch`."
-    )
+/// daemon from before the handshake (BZR-1519). It names the commands that
+/// work for `launcher` (BZR-1531).
+pub fn version_unknown_message(client: &str, launcher: Launcher) -> String {
+    match launcher {
+        Launcher::Binary => format!(
+            "version mismatch: client {client}, daemon unknown. \
+             The daemon sent no version. Stop it and start this binary with `dreamd watch`."
+        ),
+        Launcher::Npx => format!(
+            "version mismatch: client {client}, daemon unknown. \
+             The daemon sent no version. Stop it with `{}`, start this version with `{}`, \
+             then reload your MCP harness.",
+            launcher.command("update"),
+            launcher.command("watch"),
+        ),
+    }
 }
 
 /// This binary's version, the one value both sides of the handshake send.
@@ -139,19 +165,16 @@ fn stamp_version(req: &mut hyper::Request<Full<Bytes>>) {
     );
 }
 
-/// The daemon's non-empty `error` string, read through `Value` because a
-/// derived struct would also accept a JSON array.
-fn error_string(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let msg = value.get("error")?.as_str()?;
-    (!msg.is_empty()).then(|| msg.to_owned())
-}
-
 /// The client half of the handshake (BZR-1519): decide from the response
 /// whether the daemon runs this binary's version.
 ///
-/// - 426, or a header that is present and differs → `VersionMismatch` with the
-///   body's `error` string, or [`version_mismatch_message`] when there is none;
+/// The client builds the sentence itself, from the daemon's [`VERSION_HEADER`]
+/// and `launcher`, and never shows a 426 body: the daemon cannot know which
+/// commands work for this client (BZR-1531). The body is taken and not read.
+///
+/// - 426, or a header that is present and differs → `VersionMismatch` with
+///   [`version_mismatch_message`] when the header is present, else
+///   [`version_unknown_message`];
 /// - 401 or 403 → `Ok`. The auth layer is outside the version layer, so it
 ///   answers before any version is stamped, and its verdict is the one to show;
 /// - no header → `VersionMismatch(`[`version_unknown_message`]`)`;
@@ -159,15 +182,16 @@ fn error_string(body: &[u8]) -> Option<String> {
 fn check_daemon_version(
     status: hyper::StatusCode,
     daemon: Option<&hyper::header::HeaderValue>,
-    body: &[u8],
+    _body: &[u8],
+    launcher: Launcher,
 ) -> Result<(), DaemonTransportError> {
     let daemon = daemon.map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
     let differs = daemon.as_deref().is_some_and(|d| d != THIS_VERSION);
     if status == hyper::StatusCode::UPGRADE_REQUIRED || differs {
-        let msg = error_string(body).unwrap_or_else(|| match daemon.as_deref() {
-            Some(d) => version_mismatch_message(THIS_VERSION, d),
-            None => version_unknown_message(THIS_VERSION),
-        });
+        let msg = match daemon.as_deref() {
+            Some(d) => version_mismatch_message(THIS_VERSION, d, launcher),
+            None => version_unknown_message(THIS_VERSION, launcher),
+        };
         return Err(DaemonTransportError::VersionMismatch(msg));
     }
     if matches!(
@@ -179,7 +203,7 @@ fn check_daemon_version(
     match daemon {
         Some(_) => Ok(()),
         None => Err(DaemonTransportError::VersionMismatch(
-            version_unknown_message(THIS_VERSION),
+            version_unknown_message(THIS_VERSION, launcher),
         )),
     }
 }
@@ -272,7 +296,7 @@ pub async fn send_one(
         .await
         .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
         .to_bytes();
-    check_daemon_version(status, daemon.as_ref(), &body)?;
+    check_daemon_version(status, daemon.as_ref(), &body, Launcher::from_env())?;
     Ok((status, body))
 }
 
@@ -688,7 +712,7 @@ pub async fn send_one_tcp(
         .await
         .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
         .to_bytes();
-    check_daemon_version(status, daemon.as_ref(), &body)?;
+    check_daemon_version(status, daemon.as_ref(), &body, Launcher::from_env())?;
     Ok((status, body))
 }
 
@@ -865,9 +889,15 @@ mod tests {
             .expect_err("no version header");
         match err {
             DaemonTransportError::VersionMismatch(msg) => {
-                assert_eq!(msg, version_unknown_message(env!("CARGO_PKG_VERSION")));
+                assert_eq!(
+                    msg,
+                    version_unknown_message(env!("CARGO_PKG_VERSION"), Launcher::from_env())
+                );
                 assert!(msg.contains("daemon unknown"), "{msg}");
-                assert!(msg.contains("`dreamd watch`"), "{msg}");
+                assert!(
+                    msg.contains(&Launcher::from_env().command("watch")),
+                    "{msg}"
+                );
             }
             other => panic!("expected VersionMismatch, got {other:?}"),
         }
@@ -878,9 +908,10 @@ mod tests {
         );
     }
 
-    /// BZR-1519: a daemon's 426 sentence reaches the caller unchanged.
+    /// BZR-1531: the client builds its own sentence from the 426's version
+    /// header, for its own launcher, and never shows the daemon's body.
     #[tokio::test]
-    async fn send_one_version_mismatch_passes_a_426_body_through() {
+    async fn send_one_version_mismatch_ignores_the_426_body() {
         let (_dir, sock, _seen) = canned_daemon(
             426,
             Some("0.0.0"),
@@ -893,7 +924,7 @@ mod tests {
         match err {
             DaemonTransportError::VersionMismatch(msg) => assert_eq!(
                 msg,
-                "version mismatch: client 9.9.9, daemon 0.0.0. from the daemon"
+                version_mismatch_message(env!("CARGO_PKG_VERSION"), "0.0.0", Launcher::from_env())
             ),
             other => panic!("expected VersionMismatch, got {other:?}"),
         }
@@ -910,7 +941,7 @@ mod tests {
         match err {
             DaemonTransportError::VersionMismatch(msg) => assert_eq!(
                 msg,
-                version_mismatch_message(env!("CARGO_PKG_VERSION"), "0.0.0")
+                version_mismatch_message(env!("CARGO_PKG_VERSION"), "0.0.0", Launcher::from_env())
             ),
             other => panic!("expected VersionMismatch, got {other:?}"),
         }
@@ -928,7 +959,10 @@ mod tests {
             matches!(
                 &err,
                 DaemonTransportError::VersionMismatch(msg)
-                    if *msg == version_unknown_message(env!("CARGO_PKG_VERSION"))
+                    if *msg == version_unknown_message(
+                        env!("CARGO_PKG_VERSION"),
+                        Launcher::from_env(),
+                    )
             ),
             "got {err:?}"
         );
@@ -1529,7 +1563,10 @@ mod tcp_tests {
             matches!(
                 &err,
                 DaemonTransportError::VersionMismatch(msg)
-                    if *msg == version_unknown_message(env!("CARGO_PKG_VERSION"))
+                    if *msg == version_unknown_message(
+                        env!("CARGO_PKG_VERSION"),
+                        Launcher::from_env(),
+                    )
             ),
             "got {err:?}"
         );
@@ -1537,5 +1574,105 @@ mod tcp_tests {
             seen_rx.recv().await.expect("request captured").as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
+    }
+}
+
+// A third test module: the sentences and the pure handshake decision
+// (BZR-1531). Neither needs a socket, so the module is cfg-free and runs on
+// every target.
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    const UPDATE_NPX: &str = "`npx -y dreamd-mcp update`";
+
+    fn mismatch_text(r: Result<(), DaemonTransportError>) -> String {
+        match r {
+            Err(DaemonTransportError::VersionMismatch(msg)) => msg,
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    /// Test 2: a `dreamd` binary keeps BZR-1519's bytes.
+    #[test]
+    fn binary_sentences_keep_their_bytes() {
+        assert_eq!(
+            version_mismatch_message("1.3.0", "1.3.1", Launcher::Binary),
+            "version mismatch: client 1.3.0, daemon 1.3.1. Stop the other daemon and start \
+             this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."
+        );
+        assert_eq!(
+            version_unknown_message("1.3.0", Launcher::Binary),
+            "version mismatch: client 1.3.0, daemon unknown. The daemon sent no version. \
+             Stop it and start this binary with `dreamd watch`."
+        );
+    }
+
+    /// Test 3: under the npm shim both sentences name npx commands and a
+    /// harness reload.
+    #[test]
+    fn npx_sentences_name_npx_commands() {
+        assert_eq!(
+            version_mismatch_message("1.3.0", "1.3.1", Launcher::Npx),
+            "version mismatch: client 1.3.0, daemon 1.3.1. Stop the other daemon with \
+             `npx -y dreamd-mcp update`, start this one with `npx -y dreamd-mcp watch`, \
+             then reload your MCP harness. Or point DREAMD_SOCK at a daemon of this version."
+        );
+        assert_eq!(
+            version_unknown_message("1.3.0", Launcher::Npx),
+            "version mismatch: client 1.3.0, daemon unknown. The daemon sent no version. \
+             Stop it with `npx -y dreamd-mcp update`, start this version with \
+             `npx -y dreamd-mcp watch`, then reload your MCP harness."
+        );
+    }
+
+    /// Test 4: a 426 gives the client's own sentence for its launcher, built
+    /// from the header, whatever the body says.
+    #[test]
+    fn check_daemon_version_builds_its_own_sentence_for_a_426() {
+        let header = hyper::header::HeaderValue::from_static("0.0.0");
+        for launcher in [Launcher::Binary, Launcher::Npx] {
+            let msg = mismatch_text(check_daemon_version(
+                hyper::StatusCode::UPGRADE_REQUIRED,
+                Some(&header),
+                br#"{"error":"from the daemon"}"#,
+                launcher,
+            ));
+            assert_eq!(
+                msg,
+                version_mismatch_message(THIS_VERSION, "0.0.0", launcher),
+                "{launcher:?}"
+            );
+        }
+    }
+
+    /// Test 5: under npx a daemon with no version gets the npx sentence, and
+    /// an auth rejection is still the caller's to map.
+    #[test]
+    fn check_daemon_version_under_npx_for_no_version() {
+        for (status, body) in [
+            (hyper::StatusCode::OK, &br#"{"ok":true}"#[..]),
+            (hyper::StatusCode::UPGRADE_REQUIRED, &b""[..]),
+        ] {
+            let msg = mismatch_text(check_daemon_version(status, None, body, Launcher::Npx));
+            assert_eq!(
+                msg,
+                version_unknown_message(THIS_VERSION, Launcher::Npx),
+                "{status}"
+            );
+            assert!(msg.contains(UPDATE_NPX), "{status}: {msg}");
+        }
+        for status in [
+            hyper::StatusCode::UNAUTHORIZED,
+            hyper::StatusCode::FORBIDDEN,
+        ] {
+            let got = check_daemon_version(
+                status,
+                None,
+                br#"{"error":"forbidden: peer UID"}"#,
+                Launcher::Npx,
+            );
+            assert!(got.is_ok(), "{status}: {got:?}");
+        }
     }
 }

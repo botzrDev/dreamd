@@ -235,7 +235,11 @@ async fn version_mismatch_header_returns_426_naming_both_versions() {
         let error = body["error"].as_str().expect("error string");
         assert_eq!(
             error,
-            crate::daemon_client::version_mismatch_message(client, DAEMON)
+            crate::daemon_client::version_mismatch_message(
+                client,
+                DAEMON,
+                crate::launcher::Launcher::Binary
+            )
         );
         if client == "0.0.0" {
             assert_eq!(

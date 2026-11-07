@@ -413,14 +413,19 @@ mod tests {
     }
 
     /// BZR-1519: a daemon of another version is a proxy error carrying the
-    /// daemon's sentence as is. It is not `NotReachable`, which would run the
-    /// cycle in-process beside that daemon.
+    /// client's own sentence, not the daemon's 426 body (BZR-1531). It is not
+    /// `NotReachable`, which would run the cycle in-process beside that daemon.
     #[tokio::test]
     async fn proxy_dream_cycle_version_mismatch_is_an_error_not_in_process() {
         use hyper::service::service_fn;
         use hyper_util::rt::{TokioExecutor, TokioIo};
 
-        const SENTENCE: &str = "version mismatch: client 1.0.0, daemon 0.0.0. from the daemon";
+        const DAEMON_BODY: &str = "version mismatch: client 1.0.0, daemon 0.0.0. from the daemon";
+        let sentence = crate::daemon_client::version_mismatch_message(
+            env!("CARGO_PKG_VERSION"),
+            "0.0.0",
+            crate::launcher::Launcher::from_env(),
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock_path = dir.path().join("daemon.sock");
@@ -428,7 +433,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let svc = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
-                let body = serde_json::json!({ "error": SENTENCE }).to_string();
+                let body = serde_json::json!({ "error": DAEMON_BODY }).to_string();
                 Ok::<_, std::convert::Infallible>(
                     hyper::Response::builder()
                         .status(426)
@@ -444,10 +449,10 @@ mod tests {
 
         match proxy_dream_cycle(&sock_path, Path::new("/x"), false, false).await {
             Err(DreamProxyError::Transport(msg)) => {
-                assert_eq!(msg, SENTENCE);
+                assert_eq!(msg, sentence);
                 assert_eq!(
                     DreamProxyError::Transport(msg).to_string(),
-                    format!("daemon proxy: {SENTENCE}")
+                    format!("daemon proxy: {sentence}")
                 );
             }
             other => panic!("expected Transport(sentence), got {other:?}"),
