@@ -22,7 +22,7 @@ use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
 use crate::retention::AUTOSNAP_KEEP;
 use crate::snapshot::autosnap_ref_name;
-use crate::stage::{arm_crash, crash_fired};
+use crate::stage::{arm_crash, arm_error, crash_fired};
 use crate::test_support::{unique_tmpdir, DirGuard};
 use crate::wal;
 use crate::writer_lock::{WriterKind, WriterLock};
@@ -375,6 +375,9 @@ fn sweep(scenario: Scenario) -> (Vec<Point>, Image) {
         let err = result.expect_err("a fired crash must fail the run");
         assert!(err.contains("injected crash"), "k={k}: {err}");
         let wal_left = root.wal_path().exists();
+        // A crashed process cleans up nothing (BZR-1532): record this before recovery.
+        let status_at_crash = status(&root);
+        let stage_at_crash = root.stage_dir().exists();
         drop(lock);
         drop(acquire(&root));
 
@@ -386,6 +389,13 @@ fn sweep(scenario: Scenario) -> (Vec<Point>, Image) {
         );
         if wal_left {
             assert!(landed, "k={k}: a crash that left the WAL must roll forward");
+        }
+        if !landed {
+            assert_eq!(
+                status_at_crash, "in_progress",
+                "k={k}: a crashed process cleans up nothing"
+            );
+            assert!(stage_at_crash, "k={k}: a crashed process cleans up nothing");
         }
         assert_eq!(
             status(&root),
@@ -400,6 +410,118 @@ fn sweep(scenario: Scenario) -> (Vec<Point>, Image) {
         });
     }
     panic!("{scenario:?}: still crashing after {MAX_POINTS} points");
+}
+
+/// Inject one I/O error at each crash point and check the store in this
+/// process, with no recovery (BZR-1532).
+fn error_sweep(scenario: Scenario) {
+    let post = clean_post(scenario);
+    let mut failed = Vec::new();
+    let mut landed = Vec::new();
+    let mut landed_err = Vec::new();
+    for k in 0..MAX_POINTS {
+        let (root, _g) = seed(scenario);
+        let pre = image(&root);
+        let lock = acquire(&root);
+        arm_error(k);
+        let result = run(scenario, &root, &lock);
+        let fired = crash_fired();
+        arm_crash(None);
+
+        if !fired {
+            result.unwrap_or_else(|e| panic!("k={k}: no error fired, but the run failed: {e}"));
+            assert!(
+                !failed.is_empty(),
+                "{scenario:?}: no error point failed the cycle"
+            );
+            assert!(
+                !landed.is_empty(),
+                "{scenario:?}: no error point landed the cycle"
+            );
+            let max_failed = failed.iter().copied().max().unwrap();
+            let min_landed = landed.iter().copied().min().unwrap();
+            assert!(
+                max_failed < min_landed,
+                "{scenario:?}: a failed point {max_failed} follows a landed point {min_landed}"
+            );
+            assert_eq!(
+                landed_err.len(),
+                1,
+                "{scenario:?}: exactly one landed point returns Err, got {landed_err:?}"
+            );
+            assert_eq!(
+                landed_err[0],
+                k - 1,
+                "{scenario:?}: the landed error must be the last point"
+            );
+            println!(
+                "error_sweep {scenario:?}: final k = {k}, failed {failed:?}, landed {landed:?}, landed with an error {landed_err:?}"
+            );
+            return;
+        }
+
+        assert_settled(&root, &format!("k={k}"));
+        let after = image(&root);
+        if after == post {
+            assert_eq!(status(&root), "complete", "k={k}");
+            if let Err(err) = &result {
+                assert!(err.contains("injected error"), "k={k}: {err}");
+                landed_err.push(k);
+            }
+            landed.push(k);
+        } else {
+            assert!(
+                after == pre,
+                "k={k}: the store is neither pre- nor post-cycle"
+            );
+            assert_eq!(status(&root), "failed", "k={k}");
+            let err = result.expect_err("a fired error before the commit point fails the run");
+            assert!(err.contains("injected error"), "k={k}: {err}");
+            run(scenario, &root, &lock)
+                .unwrap_or_else(|e| panic!("k={k}: the retry run failed: {e}"));
+            assert!(
+                image(&root) == post,
+                "k={k}: the retry run must match the clean post image"
+            );
+            assert_eq!(status(&root), "complete", "k={k}");
+            failed.push(k);
+        }
+    }
+    panic!("{scenario:?}: still erroring after {MAX_POINTS} points");
+}
+
+fn obstructed(
+    scenario: Scenario,
+    obstruct: impl FnOnce(&AgentRoot),
+    clear: impl FnOnce(&AgentRoot),
+    expect: &str,
+) {
+    let post = clean_post(scenario);
+    let (root, _g) = seed(scenario);
+    // Acquire before the obstruction: recovery cannot remove a file at the stage path.
+    let lock = acquire(&root);
+    obstruct(&root);
+    let pre = image(&root);
+    let result = run(scenario, &root, &lock);
+
+    let err = result.expect_err("the obstruction fails the cycle");
+    assert!(err.contains(expect), "{err}");
+    assert_eq!(image(&root), pre, "nothing live changes");
+    assert_eq!(status(&root), "failed");
+    assert!(
+        !root.wal_path().exists(),
+        "the cycle never reached its commit point"
+    );
+    assert!(
+        !root.stage_dir().is_dir(),
+        "the stage root is not a directory"
+    );
+
+    clear(&root);
+    run(scenario, &root, &lock).expect("the cycle runs once the obstruction is gone");
+    assert_eq!(image(&root), post);
+    assert_eq!(status(&root), "complete");
+    assert_settled(&root, "after the obstruction is cleared");
 }
 
 #[test]
@@ -465,6 +587,111 @@ fn crash_sweep_forget_drops_a_citation() {
 #[test]
 fn crash_sweep_forget_unlinks_the_lesson() {
     sweep(Scenario::ForgetExemplar);
+}
+
+#[test]
+fn error_sweep_promoting_cycle() {
+    error_sweep(Scenario::Promoting);
+}
+
+#[test]
+fn error_sweep_promoting_cycle_prunes_a_snap_ref() {
+    error_sweep(Scenario::Pruning);
+}
+
+#[test]
+fn error_sweep_retiring_cycle() {
+    error_sweep(Scenario::Retiring);
+}
+
+#[test]
+fn error_sweep_forget_drops_a_citation() {
+    error_sweep(Scenario::ForgetCitation);
+}
+
+#[test]
+fn error_sweep_forget_unlinks_the_lesson() {
+    error_sweep(Scenario::ForgetExemplar);
+}
+
+#[test]
+fn a_stage_that_cannot_be_created_fails_the_cycle_in_process() {
+    obstructed(
+        Scenario::Promoting,
+        |root| {
+            fs::write(root.stage_dir(), b"not a directory").unwrap();
+        },
+        |root| {
+            fs::remove_file(root.stage_dir()).unwrap();
+        },
+        "Not a directory",
+    );
+}
+
+#[test]
+fn an_autosnap_that_cannot_be_written_fails_the_cycle_in_process() {
+    obstructed(
+        Scenario::Promoting,
+        |root| {
+            fs::create_dir_all(root.branches_dir()).unwrap();
+            fs::write(root.branches_objects_dir(), b"not a directory").unwrap();
+        },
+        |root| {
+            fs::remove_file(root.branches_objects_dir()).unwrap();
+        },
+        "snapshot:",
+    );
+}
+
+#[test]
+fn an_unreadable_lessons_md_fails_the_cycle_in_process() {
+    obstructed(
+        Scenario::Promoting,
+        |root| {
+            fs::create_dir_all(root.lessons_md()).unwrap();
+        },
+        |root| {
+            fs::remove_dir(root.lessons_md()).unwrap();
+        },
+        "Is a directory",
+    );
+}
+
+#[test]
+fn an_unreadable_decay_archive_fails_the_cycle_in_process() {
+    let saved = std::cell::RefCell::new(None);
+    obstructed(
+        Scenario::Promoting,
+        |root| {
+            let path = root.snapshot_file(&date());
+            *saved.borrow_mut() = Some(fs::read(&path).unwrap());
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        },
+        |root| {
+            let path = root.snapshot_file(&date());
+            fs::remove_dir(&path).unwrap();
+            fs::write(&path, saved.borrow_mut().take().unwrap()).unwrap();
+        },
+        "Is a directory",
+    );
+}
+
+#[test]
+fn an_unparsable_lessons_md_fails_forget_in_process() {
+    let saved = std::cell::RefCell::new(None);
+    obstructed(
+        Scenario::ForgetCitation,
+        |root| {
+            let path = root.lessons_md();
+            *saved.borrow_mut() = Some(fs::read(&path).unwrap());
+            fs::write(&path, b"\xff\xfe not utf-8").unwrap();
+        },
+        |root| {
+            fs::write(root.lessons_md(), saved.borrow_mut().take().unwrap()).unwrap();
+        },
+        "lessons:",
+    );
 }
 
 /// A crash during the cycle's roll-forward, then crashes during every

@@ -108,11 +108,12 @@ impl From<DreamCycleError> for ForgetError {
 /// is removed even when `pinned` is set. `now_sec` is caller-provided; this
 /// function reads no clock.
 ///
-/// A failure before the commit point returns the error and leaves only the
-/// stage, which the next writer to take the project lock wipes; a failure
-/// after it leaves the redo WAL, which that writer rolls forward. The caller
-/// must reopen any append fd it holds on the JSONL, because the commit
-/// replaces the file by rename.
+/// A failure before the commit point removes the stage and sets `state.json`
+/// to `failed` before the error returns (BZR-1532). A failure after it is
+/// retried once; if the retry fails too, the redo WAL stays, and the next
+/// writer to take the project lock rolls it forward. The caller must reopen
+/// any append fd it holds on the JSONL, because the commit replaces the file
+/// by rename.
 ///
 /// `ledger` is the project writer lock's appender (`WriterLock::ledger`).
 pub fn cascade(
@@ -135,19 +136,24 @@ pub fn cascade(
     }
 
     dream_cycle::ensure_not_in_progress(agent_root)?;
-    let mut stage = wal::begin_cycle(agent_root, CycleKind::Forget, now_sec)?;
-
-    // The log was read above; this is the one read of the prior lesson file.
-    let prior = stage
-        .read(&agent_root.lessons_md())
-        .map_err(ForgetError::Lessons)?;
-    let (plan, lesson) = plan::plan_forget(&raw, prior.as_deref(), id, now_sec)?;
-    stage
-        .apply_plan(&plan, &dream_cycle::cycle_date_from_now_sec(now_sec))
-        .map_err(WalError::Io)?;
-
-    // The commit appends the plan's ledger edges after the renames.
-    wal::commit_cycle(stage, ledger, now_sec)?;
+    let lesson = wal::stage_and_commit(
+        agent_root,
+        CycleKind::Forget,
+        now_sec,
+        ledger,
+        |stage| -> Result<LessonEffect, ForgetError> {
+            // The log was read above; this is the one read of the prior lesson file.
+            let prior = stage
+                .read(&agent_root.lessons_md())
+                .map_err(ForgetError::Lessons)?;
+            let (plan, lesson) = plan::plan_forget(&raw, prior.as_deref(), id, now_sec)?;
+            stage
+                .apply_plan(&plan, &dream_cycle::cycle_date_from_now_sec(now_sec))
+                .map_err(WalError::Io)?;
+            // The commit appends the plan's ledger edges after the renames.
+            Ok(lesson)
+        },
+    )?;
 
     Ok(ForgetReport {
         removed: true,

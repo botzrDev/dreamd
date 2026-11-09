@@ -456,8 +456,10 @@ impl MemoryCoordinator {
     /// open cycle until `CommitCycle`. No model call: the caller composes.
     ///
     /// Refused while another cycle's ticket is alive, and while `state.json`
-    /// says `in_progress` (a failed cycle keeps that until the next lock
-    /// acquisition, and a pending WAL comes with it).
+    /// says `in_progress`. A cycle that fails before its commit point sets
+    /// `failed` itself (BZR-1532), so in this process `in_progress` means a
+    /// commit whose roll-forward failed twice: its WAL waits for the next lock
+    /// acquisition.
     fn handle_prepare_cycle(&mut self, now_sec: i64) -> Result<PreparedCycle, CoordinatorError> {
         if self.ledger.is_none() {
             return Err(CoordinatorError::DreamCycle(
@@ -1710,6 +1712,38 @@ mod tests {
         assert!(
             second.is_ok(),
             "a dropped ticket frees the next prepare: {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_that_fails_before_its_commit_point_frees_the_next_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        std::fs::create_dir_all(root.lessons_md()).unwrap();
+        let (mut c, _tx, _lock) = open_coordinator(&root);
+
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        let err = c
+            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .expect_err("a directory at LESSONS.md fails the commit");
+        assert_eq!(
+            crate::wal::read_last_cycle_status(&root).unwrap(),
+            "failed",
+            "{err}"
+        );
+
+        std::fs::remove_dir(root.lessons_md()).unwrap();
+        let prepared = c
+            .handle_prepare_cycle(CYCLE_NOW_SEC + 1)
+            .expect("the next prepare runs");
+        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .expect("the next commit runs");
+        assert!(root.lessons_md().is_file(), "LESSONS.md is a file");
+        assert_eq!(
+            crate::wal::read_last_cycle_status(&root).unwrap(),
+            "complete"
         );
     }
 

@@ -1760,6 +1760,63 @@ async fn dream_reports_a_held_autobiography_commit() {
     );
 }
 
+/// BZR-1532: a cycle that fails before its commit point sets `failed`, so the
+/// next `POST /api/v1/dream` runs instead of answering 409.
+#[tokio::test]
+async fn dream_after_a_failed_cycle_runs_instead_of_409() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root_str);
+
+    let agent_root = AgentRoot::new(dir.path());
+    let jsonl_path = agent_root.episodic_jsonl();
+    std::fs::create_dir_all(jsonl_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(agent_root.dreamd_dir()).unwrap();
+    std::fs::write(
+        &jsonl_path,
+        b"{\"schema_version\":\"1.0.0\",\"id\":\"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"pain\":5.0,\"importance\":5.0,\"pinned\":false,\"skill_action\":\"rust.test\",\"source_harness\":\"test\",\"content\":\"test content\",\"recurrence\":0}\n",
+    )
+    .unwrap();
+
+    let state = make_real_state(dir.path(), registry_path);
+    std::fs::create_dir_all(agent_root.lessons_md()).unwrap();
+    let router = build_router(state);
+
+    let post = |router: &axum::Router| {
+        router.clone().oneshot(with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dream")
+                .header("x-agent-root", &root_str)
+                .header(
+                    crate::dream_cycle::NO_LLM_HEADER,
+                    crate::dream_cycle::NO_LLM_HEADER_VALUE,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        ))
+    };
+
+    let first = post(&router).await.unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let second = post(&router).await.unwrap();
+    assert_eq!(second.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    assert_eq!(
+        crate::wal::read_last_cycle_status(&agent_root).unwrap(),
+        "failed"
+    );
+    assert!(
+        !agent_root.stage_dir().exists(),
+        "the stage root is removed"
+    );
+
+    std::fs::remove_dir(agent_root.lessons_md()).unwrap();
+    let third = post(&router).await.unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+}
+
 /// 409 guard: state.json with "in_progress" → 409.
 #[tokio::test]
 async fn dream_in_progress_returns_409() {

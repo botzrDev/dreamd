@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed dream cycle no longer blocks the next one until `dreamd watch` restarts** (BZR-1532). A cycle in the daemon that failed before its commit point left `state.json` at `in_progress`. Every later `POST /api/v1/dream` for that project then got `409`. A dream cycle or `dreamd forget` that fails before its commit point now removes its stage and sets `failed` before it returns, and the next cycle runs. An error after the commit point is retried once in the same process. If the retry fails too, the next writer to take the project lock rolls the cycle forward, as before.
+
 ## [1.3.0] - 2026-11-07
 
 A minor release. Recall ranks better: a multi-word query ranks the event that has the words its top hit lacks, and recurrence saturates (`SPEC.md` v0.2), so a fat `skill_action` parent no longer outweighs a more painful child. Recall hits carry their `id`, the dream cycle's git commit runs again, and a client and a daemon of different versions say so. Recall is still BM25 × salience. No store migration or index rebuild is needed.

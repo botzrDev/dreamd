@@ -452,23 +452,29 @@ pub fn run_deterministic_dream_cycle(
 ) -> Result<(), LessonPhaseError> {
     let _span = tracing::debug_span!("dream_cycle_deterministic", now_sec).entered();
 
-    let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
-    let log = stage
-        .read(&agent_root.episodic_jsonl())
-        .map_err(WalError::Io)?;
-    let raw = episodic::raw_lines(&log.unwrap_or_default());
-    let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
-    let plan = crate::plan::plan_cycle(
-        &raw,
-        prior.as_deref(),
+    wal::stage_and_commit(
+        agent_root,
+        CycleKind::Dream,
         now_sec,
-        LessonBodySource::Deterministic,
-    )?;
-    stage
-        .apply_plan(&plan, &crate::dream_cycle::cycle_date_from_now_sec(now_sec))
-        .map_err(WalError::Io)?;
-    wal::commit_cycle(stage, ledger, now_sec)?;
-    Ok(())
+        ledger,
+        |stage| -> Result<(), LessonPhaseError> {
+            let log = stage
+                .read(&agent_root.episodic_jsonl())
+                .map_err(WalError::Io)?;
+            let raw = episodic::raw_lines(&log.unwrap_or_default());
+            let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
+            let plan = crate::plan::plan_cycle(
+                &raw,
+                prior.as_deref(),
+                now_sec,
+                LessonBodySource::Deterministic,
+            )?;
+            stage
+                .apply_plan(&plan, &crate::dream_cycle::cycle_date_from_now_sec(now_sec))
+                .map_err(WalError::Io)?;
+            Ok(())
+        },
+    )
 }
 
 /// Pick the cluster exemplar: highest salience, then pain, then importance,

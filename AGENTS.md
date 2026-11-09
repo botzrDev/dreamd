@@ -582,9 +582,20 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - `Launcher` moved to `dreamd_core::launcher` (`LAUNCHER_ENV`, `from_env`, `command`), and `setup.rs` re-exports it. The client builds its own sentence from the daemon's `x-dreamd-version` header and its launcher, and no longer shows the 426 body. The daemon's 426 body stays `Launcher::Binary`.
     - `client.rs` changed only in a test that pinned the old 426 body (Austin approved, Amendment 1).
     - PM verification: workspace 1452 / 0 / 0, all features 1456 / 0 / 0. M3, M4 and PM-only P1–P3 fail as named. In an e2e through the real shim against the v1.2.2 release binary, the npx sentence printed, and `update` then `watch` cleared it.
-    - Left as is: the `router.rs:229-231` rustdoc still shows the two-argument `version_mismatch_message`, and the `dreamd mcp` probe connection stays open for the whole session (drift entry `match-ok-underscore-keeps-the-probe-connection-open`). Neither has a ticket.
+    - Left as is: the `router.rs:229-231` rustdoc still shows the two-argument `version_mismatch_message`, and the `dreamd mcp` probe connection stays open for the whole session (drift entry `match-ok-underscore-keeps-the-probe-connection-open`). The probe connection is now BZR-1534; the rustdoc has no ticket.
 
     Spec: `assignments/BZR-1531.v2.md` (Amendment 1). Report: `assignments/reports/BZR-1531.verify.r0.md`.
+
+**Milestone 1.3.1 patch** (Linear, filed 2026-11-07 at Austin's call). The bugs come from the PM's triage of the v1.3.0 black-box torture (`assignments/reports/torture-1.3.0.triage.md`). The tester's own findings were withdrawn or minor. The tester also ran `pkill -f "dreamd watch"` with the real HOME and stopped Austin's systemd unit, so the re-run tester works inside a Docker container (`assignments/torture-1.3.0-container.prompt.md`). All three bugs are also in 1.2.2. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract.
+
+39. **BZR-1532**: a dream cycle in the daemon that fails before its commit point leaves `state.json` at `in_progress`. `dream_cycle::commit` relies on "the next writer" to set `failed`, but only `WriterLock::acquire` recovery does that, and the daemon takes the lock once. Every later `POST /api/v1/dream` for that project then gets `409` until `watch` restarts. `forget::cascade` shares `begin_cycle`.
+40. **BZR-1533**: the lesson end marker on a line of its own in event content either forges a second lesson block or fails every cycle:
+    - the forged block names any event id, which is then pinned and recalled as `lsn_<id>`;
+    - the failure's error blames `AGENT_LEARNINGS.jsonl`.
+
+    `render_lessons_file` writes bodies verbatim (`lessons.rs:74-75`). Whether to escape on render or reject at ingress is a spec decision.
+41. **BZR-1534**: every daemon-mode `dreamd mcp` holds its probe connection open (`mcp/mod.rs:567`, `Ok(_)`).
+42. **BZR-1535**: 1.3.1 release prep (hitl). It also waits for the container torture to be triaged.
 
 **Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
 

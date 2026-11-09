@@ -89,7 +89,7 @@ Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (da
 
 **Symptom:** Daemon killed during `dreamd dream` or `POST /api/v1/dream`; store may look inconsistent.
 
-**Cause:** a crash left `.dreamd/stage/` and/or `dream_in_progress.wal`.
+**Cause:** a crash left `.dreamd/stage/` and/or `dream_in_progress.wal`. A cycle that fails with an error, such as a `500` from `POST /api/v1/dream`, leaves neither: it sets `failed` before it returns, and the next cycle runs. Before 1.3.1 the daemon answered every later `POST /api/v1/dream` for that project with `409` until `dreamd watch` restarted.
 
 **Fix:** Restart the daemon or run any command that triggers WAL recovery:
 

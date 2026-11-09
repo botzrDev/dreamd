@@ -567,9 +567,13 @@ marker.
 `dream_cycle::compose` (the model, awaited before the stage opens), then
 `dream_cycle::commit`: `begin_cycle → autosnap ref → read of LESSONS.md → plan
 (consolidation + decay, the citation gate re-run) → apply_plan → commit_cycle`
-— one plan, one stage and one commit, not one per phase. A read, plan or stage
-error short-circuits through `?` *before* the commit point, leaving only the
-stage dir for the next writer to wipe.
+— one plan, one stage and one commit, not one per phase. `wal::stage_and_commit`
+runs the steps between `begin_cycle` and `commit_cycle` as one closure. An error
+in it, or in `commit_cycle` before the WAL is at its path, removes the stage and
+the WAL temp and sets `state.json` to `failed` in the same process (BZR-1532), so
+the next cycle runs without a restart. An error after the WAL is at its path is
+retried once with `roll_forward`; a second failure leaves the WAL for the next
+writer.
 
 **Recovery.** `wal::recover_if_needed(agent_root, ledger)` returns
 `RecoveryOutcome::{Clean, RolledForward { renamed, unlinked }, Recovered {
@@ -602,7 +606,9 @@ holder, a concurrent trigger is refused rather than queued. The daemon's guard
 is the coordinator's open cycle plus `state.json`, both checked inside
 `PrepareCycle`, so two triggers cannot both pass: the second gets
 `CoordinatorError::CycleInProgress` while the first one's ticket is alive or
-`state.json` says `in_progress`, and the HTTP layer maps that to 409.
+`state.json` says `in_progress`, and the HTTP layer maps that to 409. A cycle that
+fails before its commit point has already set `failed`, so it does not hold the
+guard (BZR-1532).
 `dream_cycle::ensure_not_in_progress` (the `state.json` half) also runs first in
 `run_guarded_cycle`, as an early check. The lock refuses a second process
 before it gets that far.
@@ -611,14 +617,18 @@ The crash sweep (`crash_sweep.rs`) pins all of this. It crashes a promoting
 cycle, a retiring cycle, and two forgets at every crash point in turn,
 recovers, and asserts the store is byte-for-byte pre-cycle (and `failed`) or
 post-cycle (and `complete`), never a mix. A crash that left the WAL must end
-post-cycle, and so must a crash inside each recovery's own roll-forward.
+post-cycle, and so must a crash inside each recovery's own roll-forward. Its
+error sweep injects one I/O error at each point instead, and checks the store in
+the same process, with no recovery: pre-cycle and `failed` before the commit
+point, post-cycle and `complete` after it (BZR-1532).
 
 **Two carve-outs that must not be overstated:**
 
 1. Recovery **rolls forward** a committed cycle (the WAL exists) to
-   `complete`. A crash before the commit point leaves only a stage directory,
-   which the next writer wipes; that cycle lands in `failed` and the next cycle
-   starts from the untouched store.
+   `complete`. A crash before the commit point leaves a stage directory, which
+   the next writer's recovery removes, and an error there is cleaned up by the
+   failing process itself (BZR-1532). Either way that cycle lands in `failed`
+   and the next cycle starts from the untouched store.
 2. **Tantivy index mutations are not WAL-protected** (`wal.rs` module doc;
    `ARCHITECTURE.md` §3). The "a reader never sees a mid-cycle store"
    invariant holds for the **durable** store — the JSONL, `LESSONS.md`, the

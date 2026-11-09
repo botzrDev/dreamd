@@ -390,40 +390,47 @@ pub fn commit(
 ) -> Result<DecayResult, DreamCycleError> {
     // One plan holds both filesystem phases' outputs, in one stage
     // (ARCHITECTURE.md §3).
-    // begin_cycle guards `.agent/` existence (WEG-281), refuses a pending WAL
-    // and sets state=in_progress; nothing live changes until commit_cycle
-    // writes the redo WAL, applies it and sets state=complete. A read, plan or
-    // stage error short-circuits via `?` before that commit point, leaving only
-    // the stage for the next writer to wipe (state=failed) — so no
-    // half-finished cycle is ever recorded "complete", and none is ever
-    // half-applied.
-    let mut stage = wal::begin_cycle(agent_root, CycleKind::Dream, now_sec)?;
-    // BZR-160 / BZR-1241: the pre-cycle image, taken at the commit, so it
-    // holds every record that landed while the model ran.
-    snapshot::stage_autosnap(&mut stage, now_sec)?;
-    // BZR-1245: the `snap-*` refs past the newest AUTOSNAP_KEEP are unlinked
-    // through the stage, so they go with this cycle's commit or not at all.
-    let staged = snapshot::autosnap_ref_name(now_sec)?;
-    match retention::plan_ref_prune(agent_root, &staged) {
-        Ok(names) => {
-            for name in names {
-                stage
-                    .unlink(&agent_root.branches_refs_dir().join(name))
-                    .map_err(WalError::Io)?;
+    // `wal::stage_and_commit` runs begin_cycle (it guards `.agent/` existence
+    // (WEG-281), refuses a pending WAL and sets state=in_progress), the closure
+    // below, then commit_cycle, which writes the redo WAL, applies it and sets
+    // state=complete. Nothing live changes before that commit point. An error
+    // before it removes the stage and sets state=failed in this process
+    // (BZR-1532), so the next cycle runs. No half-finished cycle is ever
+    // recorded "complete", and none is ever half-applied.
+    let plan = wal::stage_and_commit(
+        agent_root,
+        CycleKind::Dream,
+        now_sec,
+        ledger,
+        |stage| -> Result<plan::CyclePlan, DreamCycleError> {
+            // BZR-160 / BZR-1241: the pre-cycle image, taken at the commit, so it
+            // holds every record that landed while the model ran.
+            snapshot::stage_autosnap(stage, now_sec)?;
+            // BZR-1245: the `snap-*` refs past the newest AUTOSNAP_KEEP are unlinked
+            // through the stage, so they go with this cycle's commit or not at all.
+            let staged = snapshot::autosnap_ref_name(now_sec)?;
+            match retention::plan_ref_prune(agent_root, &staged) {
+                Ok(names) => {
+                    for name in names {
+                        stage
+                            .unlink(&agent_root.branches_refs_dir().join(name))
+                            .map_err(WalError::Io)?;
+                    }
+                }
+                Err(e) => retention::warn_skipped(&e, "autosnap retention skipped; no ref pruned"),
             }
-        }
-        Err(e) => retention::warn_skipped(&e, "autosnap retention skipped; no ref pruned"),
-    }
-    let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
-    let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, |selected| {
-        gate_at_commit(body, composed_for, selected)
-    })
-    .map_err(LessonPhaseError::from)?;
-    stage.apply_plan(&plan, cycle_date).map_err(WalError::Io)?;
-    // BZR-1240: the redo WAL carries the plan's ledger edges, and the commit
-    // appends them after the renames; a roll-forward appends them again, and
-    // the ledger skips an edge it already holds.
-    wal::commit_cycle(stage, ledger, now_sec)?;
+            let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
+            let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, |selected| {
+                gate_at_commit(body, composed_for, selected)
+            })
+            .map_err(LessonPhaseError::from)?;
+            stage.apply_plan(&plan, cycle_date).map_err(WalError::Io)?;
+            // BZR-1240: the redo WAL carries the plan's ledger edges, and the commit
+            // appends them after the renames; a roll-forward appends them again, and
+            // the ledger skips an edge it already holds.
+            Ok(plan)
+        },
+    )?;
     // BZR-1245: objects are not part of the commit. Collection is idempotent,
     // so whatever a crash or an error leaves, the next cycle collects. The
     // wall clock is read only for the grace cutoff.
@@ -2357,6 +2364,16 @@ mod tests {
             "the cycle never reached its commit point"
         );
         assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), log_before);
+        assert_eq!(
+            crate::daemon_state::read_daemon_state(&root)
+                .unwrap()
+                .last_dream_cycle_status,
+            "failed"
+        );
+        assert!(!root.stage_dir().exists(), "the stage root is removed");
+        fs::remove_dir(root.lessons_md()).unwrap();
+        consolidation::run_deterministic_dream_cycle(&root, lock.ledger(), NOW_SEC)
+            .expect("the cycle runs once LESSONS.md can be read");
     }
 
     // ── BZR-1241: the citation gate at commit ────────────────────────────────

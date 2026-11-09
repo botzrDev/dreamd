@@ -207,28 +207,109 @@ pub fn begin_cycle(
     // Status-only patch, deliberately (AILAB-167): a cycle that is starting has
     // not committed, so the previous cycle's `last_dream_cycle_at` must
     // survive.
-    update_daemon_state(agent_root, |s| {
+    // BZR-1532: once `in_progress` may be on disk, every error before the
+    // commit point sets `failed` in this process.
+    if let Err(e) = update_daemon_state(agent_root, |s| {
         s.last_dream_cycle_status = "in_progress".to_string()
-    })?;
-    Ok(Stage::create(agent_root, &format!("{kind}-{now_sec}"))?)
+    }) {
+        abort_uncommitted(agent_root);
+        return Err(e.into());
+    }
+    match Stage::create(agent_root, &format!("{kind}-{now_sec}")) {
+        Ok(stage) => Ok(stage),
+        Err(e) => {
+            abort_uncommitted(agent_root);
+            Err(e.into())
+        }
+    }
+}
+
+/// Begin a cycle, stage its outputs with `build`, and commit them
+/// ([`begin_cycle`], then `build`, then [`commit_cycle`]). An error from
+/// `build` ends the cycle in this process before it returns: the stage root
+/// is removed and the status set to `failed` (BZR-1532). Every production
+/// cycle goes through here.
+pub fn stage_and_commit<T, E>(
+    agent_root: &AgentRoot,
+    kind: CycleKind,
+    now_sec: i64,
+    ledger: &Ledger,
+    build: impl FnOnce(&mut Stage) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<WalError>,
+{
+    let mut stage = begin_cycle(agent_root, kind, now_sec)?;
+    let out = match build(&mut stage) {
+        Ok(out) => out,
+        Err(e) => {
+            abort_uncommitted(agent_root);
+            return Err(e);
+        }
+    };
+    commit_cycle(stage, ledger, now_sec)?;
+    Ok(out)
+}
+
+/// End a cycle that failed before its commit point, in the process that
+/// began it (BZR-1532). It does what the next writer's recovery would do
+/// with no WAL, then sets the status to `failed`:
+///
+/// 1. remove the WAL's temp file;
+/// 2. remove the stage root;
+/// 3. set `last_dream_cycle_status` to `failed`, leaving `last_dream_cycle_at`.
+///
+/// Each step runs even when an earlier one failed; a failure is logged at
+/// `warn`, and the caller returns its own error either way. Never called once
+/// the WAL is at its path. The caller holds the project writer lock, so no
+/// other cycle is staging.
+///
+/// Test builds: after an injected crash the process is dead, so nothing here
+/// runs, and the next writer's recovery handles the store (`crash_sweep.rs`).
+fn abort_uncommitted(agent_root: &AgentRoot) {
+    if crash_point().is_err() {
+        return;
+    }
+    match fs::remove_file(agent_root.wal_path().with_extension("tmp")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "could not remove a failed dream cycle's WAL temp"),
+    }
+    if let Err(e) = wipe_stage(agent_root) {
+        tracing::warn!(error = %e, "could not remove a failed dream cycle's stage");
+    }
+    if let Err(e) = update_daemon_state(agent_root, |s| {
+        s.last_dream_cycle_status = "failed".to_string()
+    }) {
+        tracing::warn!(error = %e, "could not set a failed dream cycle's status to failed");
+    }
 }
 
 /// Commit `stage`: fsync it, write the redo WAL (the commit point), apply it
 /// with `roll_forward`, then remove the stage directory.
 ///
+/// An error before the WAL is at its path removes the stage and sets `failed`
+/// in this process (BZR-1532). An error after that commit point is retried
+/// once with `roll_forward`; if the retry fails too, the WAL stays for the
+/// next writer.
+///
 /// `ledger` is the project writer lock's appender; the WAL's provenance edges
 /// are appended after the renames. `now_sec` stamps `last_dream_cycle_at`.
 pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), WalError> {
     let agent_root = stage.agent_root().clone();
-    sync_dir_if_present(stage.dir())?;
-    crash_point()?;
-
     let redo = stage.redo();
-    let json = serde_json::to_string_pretty(&redo)?;
-    write_atomic(&agent_root.wal_path(), json.as_bytes())?;
-    crash_point()?;
-
-    roll_forward(&agent_root, &redo, ledger, Some(now_sec))?;
+    let applied = match write_redo(&stage, &redo) {
+        Ok(()) => roll_forward(&agent_root, &redo, ledger, Some(now_sec)).map(drop),
+        // The commit point is the WAL at its path, not this call's result.
+        Err(e) if !agent_root.wal_path().exists() => {
+            abort_uncommitted(&agent_root);
+            return Err(e);
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(first) = applied {
+        retry_roll_forward(&agent_root, &redo, ledger, now_sec, first)?;
+    }
 
     remove_dir_all_if_present(stage.dir())?;
     match fs::remove_dir(agent_root.stage_dir()) {
@@ -242,6 +323,36 @@ pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), W
     }
     crash_point()?;
     Ok(())
+}
+
+/// Fsync the stage and write the redo WAL (the commit point).
+fn write_redo(stage: &Stage, redo: &RedoWal) -> Result<(), WalError> {
+    sync_dir_if_present(stage.dir())?;
+    crash_point()?;
+    let json = serde_json::to_string_pretty(redo)?;
+    write_atomic(&stage.agent_root().wal_path(), json.as_bytes())?;
+    crash_point()?;
+    Ok(())
+}
+
+/// BZR-1532: one more `roll_forward` after an error past the commit point.
+/// `roll_forward` is idempotent, so the retry finishes whatever the first
+/// attempt left. A second failure leaves the WAL for the next writer to take
+/// the project lock.
+///
+/// Test builds: after an injected crash the process is dead, so no retry runs.
+fn retry_roll_forward(
+    agent_root: &AgentRoot,
+    redo: &RedoWal,
+    ledger: &Ledger,
+    now_sec: i64,
+    first: WalError,
+) -> Result<(), WalError> {
+    if crash_point().is_err() {
+        return Err(first);
+    }
+    tracing::warn!(error = %first, "dream-cycle commit failed after its commit point; retrying the roll-forward once");
+    roll_forward(agent_root, redo, ledger, Some(now_sec)).map(drop)
 }
 
 /// Apply `redo`: the one code path for commit and recovery. Idempotent: a
@@ -640,7 +751,7 @@ pub fn read_cycle_started_at(agent_root: &AgentRoot) -> Result<Option<String>, W
 mod tests {
     use super::*;
     use crate::daemon_state::{read_daemon_state, AutobiographySkip};
-    use crate::stage::arm_crash;
+    use crate::stage::{arm_crash, arm_error, crash_fired};
     use crate::test_support::{unique_tmpdir, DirGuard};
     use std::fs;
 
@@ -700,6 +811,150 @@ mod tests {
         );
         assert_eq!(status(&root), "idle", "a refused begin sets no status");
         assert!(!root.stage_dir().exists(), "a refused begin stages nothing");
+    }
+
+    #[test]
+    fn a_build_error_discards_the_stage_and_sets_failed() {
+        let (root, _g) = setup_root("build-error");
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(root.episodic_jsonl(), b"live log\n").unwrap();
+        update_daemon_state(&root, |s| {
+            s.last_dream_cycle_status = "complete".to_string();
+            s.last_dream_cycle_at = Some("2026-05-01T00:00:00+00:00".to_string());
+        })
+        .unwrap();
+        fs::write(root.wal_path().with_extension("tmp"), b"{\"partial").unwrap();
+        let ledger = ledger(&root);
+
+        let err = stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            &ledger,
+            |stage| -> Result<(), WalError> {
+                stage
+                    .put(&root.episodic_jsonl(), b"staged\n")
+                    .map_err(WalError::Io)?;
+                Err(WalError::Io(io::Error::other("build failed")))
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("build failed"), "{err}");
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"live log\n");
+        assert!(!root.stage_dir().exists(), "the stage root is removed");
+        assert!(!root.wal_path().exists(), "no WAL");
+        assert!(
+            !root.wal_path().with_extension("tmp").exists(),
+            "the WAL temp is removed"
+        );
+        let state = read_daemon_state(&root).unwrap();
+        assert_eq!(state.last_dream_cycle_status, "failed");
+        assert_eq!(
+            state.last_dream_cycle_at.as_deref(),
+            Some("2026-05-01T00:00:00+00:00")
+        );
+
+        stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            &ledger,
+            |stage| -> Result<(), WalError> {
+                stage
+                    .put(&root.episodic_jsonl(), b"second\n")
+                    .map_err(WalError::Io)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"second\n");
+        assert_eq!(status(&root), "complete");
+    }
+
+    #[test]
+    fn abort_runs_every_step_when_an_earlier_one_fails() {
+        let (root, _g) = setup_root("abort-steps");
+        let tmp = root.wal_path().with_extension("tmp");
+        fs::create_dir(&tmp).unwrap();
+        fs::write(tmp.join("inside"), b"x").unwrap();
+
+        let err = stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            &ledger(&root),
+            |_stage| -> Result<(), WalError> {
+                Err(WalError::Io(io::Error::other("build failed")))
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("build failed"), "{err}");
+        assert!(!root.stage_dir().exists(), "the stage root is removed");
+        assert_eq!(status(&root), "failed");
+    }
+
+    #[test]
+    fn a_stage_that_cannot_be_created_sets_failed() {
+        let (root, _g) = setup_root("stage-file");
+        fs::write(root.stage_dir(), b"not a directory").unwrap();
+
+        let err = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap_err();
+
+        assert!(err.to_string().contains("Not a directory"), "{err}");
+        assert_eq!(status(&root), "failed");
+        assert!(!root.wal_path().exists());
+    }
+
+    #[test]
+    fn an_error_after_the_wal_write_is_retried_and_commits() {
+        let (root, _g) = setup_root("retry-commits");
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.episodic_jsonl(), b"staged\n").unwrap();
+
+        // Point 0 is the stage-dir fsync; point 1 is right after the WAL write.
+        arm_error(1);
+        let result = commit_cycle(stage, &ledger(&root), NOW_SEC);
+        let fired = crash_fired();
+        arm_crash(None);
+
+        assert!(fired, "the injected error must fire");
+        result.expect("the retry commits");
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"staged\n");
+        assert!(!root.wal_path().exists());
+        assert!(!root.stage_dir().exists());
+        assert_eq!(status(&root), "complete");
+    }
+
+    #[test]
+    fn a_second_failure_after_the_commit_point_leaves_the_wal_for_recovery() {
+        let (root, _g) = setup_root("retry-fails");
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(root.provenance_dir(), b"not a directory").unwrap();
+        let ledger = ledger(&root);
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.put(&root.episodic_jsonl(), b"staged\n").unwrap();
+        stage.record_edges(&[(
+            Kind::IndexDoc,
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+        )]);
+
+        let err = commit_cycle(stage, &ledger, NOW_SEC).unwrap_err();
+        assert!(root.wal_path().exists(), "the WAL stays: {err}");
+        assert_eq!(status(&root), "in_progress");
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"staged\n");
+
+        fs::remove_file(root.provenance_dir()).unwrap();
+        let outcome = recover_if_needed(&root, &ledger).unwrap();
+        assert!(
+            matches!(outcome, RecoveryOutcome::RolledForward { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(status(&root), "complete");
+        assert!(!root.wal_path().exists());
     }
 
     #[test]

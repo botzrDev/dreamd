@@ -4,8 +4,9 @@
 //! `.agent/.dreamd/stage/<kind>-<now_sec>/` and fsyncs it there. Nothing live
 //! changes while the cycle stages. [`crate::wal::commit_cycle`] then writes one
 //! redo WAL naming every rename and unlink (`Stage::redo`) — the commit point
-//! — and applies it. A crash before the commit point leaves only the stage
-//! directory, which the next writer to take the project lock wipes.
+//! — and applies it. An error before the commit point removes the stage in
+//! the same process ([`crate::wal::stage_and_commit`], BZR-1532); a crash
+//! there leaves the stage directory for the next writer's recovery.
 //!
 //! A cycle plans every output first ([`crate::plan`]) and stages the plan with
 //! [`Stage::apply_plan`], which also carries the plan's ledger edges into the
@@ -255,25 +256,41 @@ fn slash_joined(rel: &Path) -> String {
         .join("/")
 }
 
+/// What an armed `crash_point` does when its countdown reaches 0.
 #[cfg(test)]
-thread_local! {
-    static CRASH: std::cell::Cell<(Option<u32>, bool)> = const { std::cell::Cell::new((None, false)) };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// A process death: that call and every later one fail.
+    Crash,
+    /// One I/O error: that call fails, and later calls succeed (BZR-1532).
+    Error,
 }
 
-/// Test builds: fail the call that finds the countdown at 0, and every call
-/// after it. Release builds: always `Ok`.
+#[cfg(test)]
+thread_local! {
+    static CRASH: std::cell::Cell<(Option<u32>, Fault, bool)> =
+        const { std::cell::Cell::new((None, Fault::Crash, false)) };
+}
+
+/// Test builds: fail the call that finds the countdown at 0. A crash then
+/// fails every later call; an error fails only that one. Release builds:
+/// always `Ok`.
 #[cfg(test)]
 pub(crate) fn crash_point() -> io::Result<()> {
     CRASH.with(|c| match c.get() {
-        (Some(0), _) => {
-            c.set((Some(0), true));
+        (Some(0), Fault::Crash, _) => {
+            c.set((Some(0), Fault::Crash, true));
             Err(io::Error::other("injected crash"))
         }
-        (Some(n), fired) => {
-            c.set((Some(n - 1), fired));
+        (Some(0), Fault::Error, _) => {
+            c.set((None, Fault::Error, true));
+            Err(io::Error::other("injected error"))
+        }
+        (Some(n), fault, fired) => {
+            c.set((Some(n - 1), fault, fired));
             Ok(())
         }
-        (None, _) => Ok(()),
+        (None, _, _) => Ok(()),
     })
 }
 #[cfg(not(test))]
@@ -282,15 +299,20 @@ pub(crate) fn crash_point() -> io::Result<()> {
     Ok(())
 }
 
-/// `Some(k)`: the k-th `crash_point` call from now (0-based) fails. `None` disarms.
+/// `Some(k)`: the k-th `crash_point` call from now (0-based) crashes. `None` disarms.
 #[cfg(test)]
 pub(crate) fn arm_crash(after: Option<u32>) {
-    CRASH.with(|c| c.set((after, false)));
+    CRASH.with(|c| c.set((after, Fault::Crash, false)));
 }
-/// Whether a `crash_point` call has failed since the last `arm_crash`.
+/// The k-th `crash_point` call from now (0-based) returns one I/O error (BZR-1532).
+#[cfg(test)]
+pub(crate) fn arm_error(after: u32) {
+    CRASH.with(|c| c.set((Some(after), Fault::Error, false)));
+}
+/// Whether the armed crash or error has fired since the last `arm_crash` or `arm_error`.
 #[cfg(test)]
 pub(crate) fn crash_fired() -> bool {
-    CRASH.with(|c| c.get().1)
+    CRASH.with(|c| c.get().2)
 }
 
 #[cfg(all(test, unix))]
@@ -303,6 +325,25 @@ mod tests {
         let root = AgentRoot::new(&dir);
         fs::create_dir_all(root.semantic_dir()).unwrap();
         (root, DirGuard(dir))
+    }
+
+    #[test]
+    fn an_armed_error_fails_one_call_and_an_armed_crash_every_later_one() {
+        arm_error(1);
+        assert!(crash_point().is_ok());
+        let err = crash_point().unwrap_err();
+        assert!(err.to_string().contains("injected error"), "{err}");
+        assert!(crash_point().is_ok());
+        assert!(crash_fired());
+
+        arm_crash(Some(0));
+        let err = crash_point().unwrap_err();
+        assert!(err.to_string().contains("injected crash"), "{err}");
+        assert!(crash_point().is_err());
+
+        arm_crash(None);
+        assert!(crash_point().is_ok());
+        assert!(!crash_fired());
     }
 
     #[test]
