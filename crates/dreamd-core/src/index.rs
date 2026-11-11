@@ -115,7 +115,8 @@ pub struct SchemaFields {
     /// not filter on it. The indexer's whole-layer lesson replace deletes by
     /// this term.
     pub layer: Field,
-    /// `FAST` only -- Unix seconds of last cluster reconciliation (future use).
+    /// `FAST` only -- written (the event timestamp, or a lesson's
+    /// `last_updated`) and read by nothing on the recall path.
     pub last_updated_sec: Field,
     /// `FAST` only -- written as 0 and read by nothing (BZR-1242).
     pub cited_event_count: Field,

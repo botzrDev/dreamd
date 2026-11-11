@@ -161,7 +161,7 @@ stay non-breaking for downstream `match` consumers. Its variants today are
 
 ## Indexing and salience
 
-Tantivy 0.26.1 backs episodic recall. The schema is defined in
+Tantivy 0.27.0 backs episodic recall. The schema is defined in
 `dreamd-core::index::build_schema()` — eleven fields: one TEXT field
 (`content`), three FastFields for the salience inputs (`timestamp_sec`, `pain`,
 `importance`), three more FastFields that are not read on the recall path

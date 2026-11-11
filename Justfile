@@ -21,7 +21,7 @@ bench:
 release:
     #!/usr/bin/env bash
     set -euo pipefail
-    # NFR-2: CI fails above 20 MiB (20*1024*1024) and warns above 16 MiB.
+    # NFR-2: CI fails above 24 MB (24*1024*1024) and warns above 16 MB.
     # This recipe only *reports* the size — the enforcing gate lives in
     # .github/workflows/ci.yml, so a large binary does not fail `just release`.
     cargo build --release -p dreamd
@@ -33,7 +33,7 @@ release:
         *)      SIZE_BYTES=$(stat -c%s "$BINARY") ;;
     esac
     SIZE_MB=$(awk "BEGIN { printf \"%.2f\", ${SIZE_BYTES} / 1024 / 1024 }")
-    echo "Stripped ${BINARY}: ${SIZE_MB} MB (${SIZE_BYTES} bytes) — NFR-2 limit 20 MiB"
+    echo "Stripped ${BINARY}: ${SIZE_MB} MB (${SIZE_BYTES} bytes) — NFR-2 limit 24 MB"
 
 # Lint exactly as CI does: formatting check, then clippy with warnings denied.
 lint:

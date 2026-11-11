@@ -1,9 +1,11 @@
 # Tantivy migration plan (DR-209 / WEG-130)
 
 Forward-looking architect-side reference for the day dreamd bumps Tantivy across
-a major version. dreamd currently pins `tantivy = "0.26"` (resolved **0.26.1** in
-`Cargo.lock`; `crates/dreamd-core/Cargo.toml`). This document records what a future
-bump has to re-verify so it is a planned change rather than a surprise re-index.
+a major version. dreamd currently pins `tantivy = "0.27"` (resolved **0.27.0** in
+`Cargo.lock`; `crates/dreamd-core/Cargo.toml`). The 0.26.1 → 0.27.0 bump already
+landed; an index written by 0.26.1 at schema `index/1.3` opens in place. This
+document records what a future bump has to re-verify so it is a planned change
+rather than a surprise re-index.
 
 **Scope.** This is documentation of *current* behavior and its assumptions. It does
 **not** propose or perform a migration now. No schema, code, or manifest changes are
@@ -116,7 +118,7 @@ the acceptance signal.
 
 ## Forward-compatibility notes
 
-Targets: the **next** Tantivy major beyond 0.26.1, and any future vector backend
+Targets: the **next** Tantivy major beyond 0.27.0, and any future vector backend
 (WEG-155 / WEG-156 / WEG-158), which would introduce a second retrieval path
 alongside BM25 × salience. No such path exists today: recall is BM25 × salience
 only, the non-default `vectors` feature only downloads a model, and there is no

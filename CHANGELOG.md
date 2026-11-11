@@ -9,6 +9,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixed
 
 - **A failed dream cycle no longer blocks the next one until `dreamd watch` restarts** (BZR-1532). A cycle in the daemon that failed before its commit point left `state.json` at `in_progress`. Every later `POST /api/v1/dream` for that project then got `409`. A dream cycle or `dreamd forget` that fails before its commit point now removes its stage and sets `failed` before it returns, and the next cycle runs. An error after the commit point is retried once in the same process. If the retry fails too, the next writer to take the project lock rolls the cycle forward, as before.
+- **An event's content can no longer forge a lesson or fail every dream cycle** (BZR-1533). A lesson body was written as is, so content with `<!-- /dreamd:lesson -->` on a line of its own ended its block early.
+  - Content that then opened another block made the cycle write a second lesson naming any event id. That event was pinned, and recall returned the forged text as `lsn_<id>`.
+  - Any other text after the marker failed every cycle, with an error that blamed `AGENT_LEARNINGS.jsonl`.
+
+  dreamd now writes such a line with one more leading `\` and removes it when it reads the file, so every body round-trips byte for byte. A `LESSONS.md` written by 1.3.0 reads as before, unless a body line is the marker after one or more `\`. A pin that a forged lesson already set stays; `dreamd archive --force-unpin <id>` clears it. When a planned `LESSONS.md` does not parse, the error now names `LESSONS.md`.
 
 ## [1.3.0] - 2026-11-07
 

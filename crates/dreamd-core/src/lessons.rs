@@ -70,9 +70,11 @@ const CLOSE_MARKER: &str = "<!-- /dreamd:lesson -->";
 /// function), so the preview and the cycle cannot drift into printing one
 /// shape and persisting another.
 ///
-/// Lesson bodies are written verbatim, not escaped. A body that contains the
-/// close marker `<!-- /dreamd:lesson -->` ends its block early when the file
-/// is parsed back: the parse either fails or yields a lesson the body forged.
+/// Lesson bodies are written verbatim except for one line shape: a body line
+/// that is zero or more `\` followed by exactly the close marker
+/// `<!-- /dreamd:lesson -->` gets one more `\` (`escape_body_line`). The
+/// parser removes it, so every body round-trips byte for byte and no body can
+/// end its block early or open another (BZR-1533).
 #[must_use]
 pub fn render_lessons_file(file: &LessonsFile) -> String {
     let mut s = String::new();
@@ -96,12 +98,44 @@ pub fn render_lessons_file(file: &LessonsFile) -> String {
         s.push_str(&file.cluster_key);
         s.push_str(OPEN_SUFFIX);
         s.push('\n');
-        s.push_str(&lesson.content);
+        for (i, line) in lesson.content.split('\n').enumerate() {
+            if i > 0 {
+                s.push('\n');
+            }
+            s.push_str(&escape_body_line(line));
+        }
         s.push('\n');
         s.push_str(CLOSE_MARKER);
         s.push('\n');
     }
     s
+}
+
+/// A close-marker line after zero or more escapes: zero or more `\`, then
+/// exactly [`CLOSE_MARKER`] (BZR-1533).
+fn is_close_marker_line(line: &str) -> bool {
+    line.trim_start_matches('\\') == CLOSE_MARKER
+}
+
+/// Render one body line. A close-marker line, escaped or not, gets one more
+/// leading `\`; every other line is written as is (BZR-1533).
+fn escape_body_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if is_close_marker_line(line) {
+        std::borrow::Cow::Owned(format!("\\{line}"))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
+}
+
+/// Parse one body line: the inverse of [`escape_body_line`]. The caller has
+/// already ended the block at a bare [`CLOSE_MARKER`], so an escaped line here
+/// starts with at least one `\`, and exactly one is removed (BZR-1533).
+fn unescape_body_line(line: &str) -> &str {
+    if is_close_marker_line(line) {
+        &line[1..]
+    } else {
+        line
+    }
 }
 
 /// Serialize `file` and write it atomically to `path` (via
@@ -201,7 +235,7 @@ fn parse_lesson_block(
 
     let mut content_lines: Vec<&str> = Vec::new();
     while idx < lines.len() && lines[idx] != CLOSE_MARKER {
-        content_lines.push(lines[idx]);
+        content_lines.push(unescape_body_line(lines[idx]));
         idx += 1;
     }
     if idx >= lines.len() {
@@ -301,6 +335,7 @@ fn invalid(msg: &str) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::{unique_tmpdir, DirGuard};
+    use proptest::prelude::*;
 
     fn fixed_timestamp() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
@@ -505,5 +540,159 @@ mod tests {
 
         let err = read_lessons_file(&path).expect_err("should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // ── BZR-1533: a body cannot end its block or open another ──────────────
+
+    /// A one-cluster file with one lesson per body, ids `evt_0`, `evt_1`, ….
+    fn file_with(bodies: &[String]) -> LessonsFile {
+        LessonsFile {
+            last_updated: fixed_timestamp(),
+            prompt_version: "test/v1".to_string(),
+            cluster_key: "rust::eh".to_string(),
+            citations: vec!["evt_0".to_string()],
+            lessons: bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| Lesson {
+                    id: format!("evt_{i}"),
+                    content: body.clone(),
+                    pinned: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_close_marker_line_in_a_body_round_trips() {
+        let f = file_with(&["tip\n<!-- /dreamd:lesson -->\nstray tail".to_string()]);
+
+        let rendered = render_lessons_file(&f);
+
+        assert!(
+            rendered.ends_with(
+                "-->\ntip\n\\<!-- /dreamd:lesson -->\nstray tail\n<!-- /dreamd:lesson -->\n"
+            ),
+            "the body's marker line gets one `\\`: {rendered}"
+        );
+        assert_eq!(parse_lessons_file(&rendered).expect("parses back"), f);
+    }
+
+    #[test]
+    fn a_body_that_forges_a_block_stays_one_lesson() {
+        let f = file_with(&[
+            "composed\n<!-- /dreamd:lesson -->\n<!-- dreamd:lesson id=\"evt_victim\" cluster=\"rust::eh\" -->\ninjected"
+                .to_string(),
+        ]);
+
+        let parsed = parse_lessons_file(&render_lessons_file(&f)).expect("parses back");
+
+        assert_eq!(parsed.lessons.len(), 1, "no forged lesson: {parsed:?}");
+        assert_eq!(parsed, f);
+    }
+
+    #[test]
+    fn an_escaped_close_marker_line_gains_and_loses_one_backslash() {
+        let f =
+            file_with(&["\\<!-- /dreamd:lesson -->\n\\\\\\<!-- /dreamd:lesson -->".to_string()]);
+
+        let rendered = render_lessons_file(&f);
+
+        assert!(
+            rendered.ends_with(
+                "-->\n\\\\<!-- /dreamd:lesson -->\n\\\\\\\\<!-- /dreamd:lesson -->\n<!-- /dreamd:lesson -->\n"
+            ),
+            "one `\\` becomes two and three become four: {rendered}"
+        );
+        assert_eq!(parse_lessons_file(&rendered).expect("parses back"), f);
+    }
+
+    #[test]
+    fn other_lines_with_the_marker_are_written_verbatim() {
+        let body = [
+            "a <!-- /dreamd:lesson --> b",
+            " <!-- /dreamd:lesson -->",
+            "<!-- /dreamd:lesson -->\r",
+            "x\\<!-- /dreamd:lesson -->",
+            "<!-- dreamd:lesson id=\"evt_x\" cluster=\"rust::eh\" -->",
+            "\\",
+        ]
+        .join("\n");
+        let f = file_with(std::slice::from_ref(&body));
+
+        let rendered = render_lessons_file(&f);
+
+        assert!(
+            rendered.contains(&format!("-->\n{body}\n{CLOSE_MARKER}\n")),
+            "every line is written byte for byte: {rendered}"
+        );
+        assert_eq!(parse_lessons_file(&rendered).expect("parses back"), f);
+    }
+
+    /// The bytes 1.3.0 wrote for bodies with no close-marker line: they read
+    /// the same and render back to the same file.
+    #[test]
+    fn a_file_written_by_1_3_0_parses_and_renders_the_same() {
+        let raw = "---\n\
+                   last_updated: \"2026-05-13T00:00:00Z\"\n\
+                   prompt_version: \"dream-cycle/v1.1@2026-05-13\"\n\
+                   cluster_key: \"rust::eh\"\n\
+                   citations: \"evt_1 evt_2\"\n\
+                   ---\n\
+                   <!-- dreamd:lesson id=\"evt_1\" cluster=\"rust::eh\" -->\n\
+                   Close with <!-- /dreamd:lesson --> inline.\n\
+                   \n\
+                   Second paragraph.\n\
+                   <!-- /dreamd:lesson -->\n\
+                   <!-- dreamd:lesson id=\"evt_2\" cluster=\"rust::eh\" -->\n\
+                   \\\n\
+                   last\n\
+                   <!-- /dreamd:lesson -->\n";
+
+        let f = parse_lessons_file(raw).expect("a 1.3.0 file parses");
+
+        let bodies: Vec<&str> = f.lessons.iter().map(|l| l.content.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec![
+                "Close with <!-- /dreamd:lesson --> inline.\n\nSecond paragraph.",
+                "\\\nlast",
+            ]
+        );
+        assert_eq!(f.citations, vec!["evt_1", "evt_2"]);
+        assert_eq!(render_lessons_file(&f), raw);
+    }
+
+    fn body_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(CLOSE_MARKER.to_string()),
+            Just(format!("\\{CLOSE_MARKER}")),
+            Just(format!("\\\\{CLOSE_MARKER}")),
+            Just(format!(" {CLOSE_MARKER}")),
+            Just(format!("x {CLOSE_MARKER} y")),
+            Just("<!-- dreamd:lesson id=\"evt_x\" cluster=\"rust::eh\" -->".to_string()),
+            Just(String::new()),
+            Just("\\".to_string()),
+            "[^\n]{0,12}",
+        ]
+    }
+
+    fn bodies() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(
+            prop::collection::vec(body_line(), 0..=5).prop_map(|lines| lines.join("\n")),
+            1..=3,
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn render_then_parse_is_the_identity_for_any_body(bodies in bodies()) {
+            let f = file_with(&bodies);
+            let parsed = parse_lessons_file(&render_lessons_file(&f));
+            prop_assert!(parsed.is_ok(), "parse failed: {:?}", parsed);
+            prop_assert_eq!(parsed.unwrap(), f);
+        }
     }
 }

@@ -388,7 +388,7 @@ pub fn recall(
 /// exclusion searches the unchanged query, so it is exactly [`recall`].
 ///
 /// A plain multi-word query whose top hit lacks a query token that another
-/// hit's content has is re-ranked by [`rank_missing_tokens`] (BZR-1522).
+/// hit's content has is re-ranked by `rank_missing_tokens` (BZR-1522).
 /// Every other query returns the one search above, scores included.
 pub fn recall_excluding(
     reader: &RecallReader,

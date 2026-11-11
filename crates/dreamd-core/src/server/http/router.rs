@@ -228,8 +228,10 @@ fn http_on_response<B>(
 /// - no [`VERSION_HEADER`] on the request (curl, an older client): served;
 /// - a header equal to this binary's `CARGO_PKG_VERSION`: served;
 /// - any other value, empty included: **426** with
-///   `{"error": version_mismatch_message(client, daemon)}`, and the handler
-///   does not run.
+///   `{"error": version_mismatch_message(client, daemon, Launcher::Binary)}`,
+///   and the handler does not run. The daemon does not know the client's
+///   launcher, so this body names the `dreamd` binary. A dreamd client builds
+///   its own sentence from the [`VERSION_HEADER`] on the response.
 ///
 /// Every response this layer returns carries the daemon's version in
 /// [`VERSION_HEADER`]. The versions are compared as strings.

@@ -30,10 +30,14 @@ use crate::wal::{self, CycleKind, WalError};
 /// and lessons.
 #[derive(Debug, thiserror::Error)]
 pub enum ConsolidationError {
-    /// Reading the log or writing the sidecar failed, or a planned
-    /// `LESSONS.md` did not parse back after rendering (`InvalidData`).
+    /// Reading the log or writing the sidecar failed.
     #[error("reading AGENT_LEARNINGS.jsonl: {0}")]
     Io(#[from] std::io::Error),
+    /// The `LESSONS.md` a plan rendered did not parse back (`InvalidData`).
+    /// Bodies always round-trip (BZR-1533); a frontmatter value, such as a
+    /// hand-edited `skill_action` holding a newline, can still break it.
+    #[error("LESSONS.md: the planned file does not parse back: {0}")]
+    Lessons(#[source] std::io::Error),
     /// Serializing the recurrence sidecar failed, or `episodic::patch_lines`
     /// could not serialize a line it flips. `line` is always 0: neither path
     /// knows a line number, so the message reads "line 0". Reading the log

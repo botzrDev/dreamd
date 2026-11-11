@@ -110,7 +110,7 @@ Split them and the docs start describing rates the binary no longer charges agai
 
 ## Binary size
 
-The workspace `[profile.release]` sets `lto = "fat"` + `codegen-units = 1`; that fat-LTO build is what dead-strips the unused encodings and keeps NFR-2 (stripped `dreamd` ≤ 20 MB) green with `tiktoken-rs` linked in.
+The workspace `[profile.release]` sets `lto = "fat"` + `codegen-units = 1`; that fat-LTO build is what dead-strips the unused encodings and keeps NFR-2 (stripped `dreamd` ≤ 24 MB) green with `tiktoken-rs` linked in.
 
 ---
 

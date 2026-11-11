@@ -90,8 +90,10 @@ A dream cycle and `dreamd forget` stage every output under `.agent/.dreamd/stage
 change nothing live until one redo WAL (`dream_in_progress.wal`, `format: "redo/1"`)
 commits them. When a process takes the project writer lock, recovery rolls a redo WAL
 forward and wipes any stage directory (`wal::recover_on_startup`; its one caller is
-`WriterLock::acquire`). `.agent/` is either pre- or post-cycle, never mid-cycle; the crash
-sweep (`crash_sweep.rs`) pins that. Each operation reads the log and `LESSONS.md` once and
+`WriterLock::acquire`). Every cycle stages and commits through `wal::stage_and_commit`:
+an error before the commit point removes the stage and sets `failed` in the same process,
+and an error after it is retried once (BZR-1532). `.agent/` is either pre- or post-cycle,
+never mid-cycle; the crash sweep (`crash_sweep.rs`) pins that. Each operation reads the log and `LESSONS.md` once and
 plans every output, ledger edges included, with a pure function (`plan::plan_cycle` /
 `plan_forget`, BZR-1240). The redo WAL carries those edges, and the commit appends exactly
 them. The model call that composes a lesson runs before the stage opens and outside the
@@ -588,7 +590,29 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
 
 **Milestone 1.3.1 patch** (Linear, filed 2026-11-07 at Austin's call). The bugs come from the PM's triage of the v1.3.0 black-box torture (`assignments/reports/torture-1.3.0.triage.md`). The tester's own findings were withdrawn or minor. The tester also ran `pkill -f "dreamd watch"` with the real HOME and stopped Austin's systemd unit, so the re-run tester works inside a Docker container (`assignments/torture-1.3.0-container.prompt.md`). All three bugs are also in 1.2.2. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract.
 
-39. **BZR-1532**: a dream cycle in the daemon that fails before its commit point leaves `state.json` at `in_progress`. `dream_cycle::commit` relies on "the next writer" to set `failed`, but only `WriterLock::acquire` recovery does that, and the daemon takes the lock once. Every later `POST /api/v1/dream` for that project then gets `409` until `watch` restarts. `forget::cascade` shares `begin_cycle`.
+39. **BZR-1532** — on `release/v1.3.1` (`eddbfe9`; the commit message does not name the ticket). Austin made that branch from `main` (`70e958d`) at the same second as the commit, 2026-11-09 11:26:12, and pushed it. `main` does not hold `eddbfe9`; how 1.3.1 reaches `main` is BZR-1535's question. A cycle that fails ends in the process that began it:
+    - `wal::stage_and_commit(root, kind, now, ledger, build)` runs `begin_cycle`, the caller's staging closure, then `commit_cycle`. `dream_cycle::commit`, `forget::cascade` and `consolidation::run_deterministic_dream_cycle` all go through it. No production code outside `wal.rs` calls `begin_cycle` or `commit_cycle`.
+    - An error before the commit point (the WAL is not at its path) runs `abort_uncommitted`, which removes the WAL temp and the stage root and sets `failed`, leaving `last_dream_cycle_at`. Each step runs even if an earlier one failed.
+    - An error after the commit point is retried once with `roll_forward` (Austin's ruling, 2026-11-08). If the retry fails too, the WAL stays and the next lock acquisition rolls it forward.
+    - The abort and the retry do nothing after an injected crash, so the crash sweep still tests recovery. `stage.rs` gains a one-shot `arm_error`, and `crash_sweep.rs` an error sweep that checks the store in the same process, with no recovery.
+    - `WriterLock::acquire`, `recover_if_needed`, `roll_forward` and `wipe_stage` are unchanged.
+
+    PM verification (`assignments/reports/BZR-1532.verify.r0.md`):
+    - workspace 1470 / 0 / 0, all features 1474 / 0 / 0, dreamd-core lib 835;
+    - red-first: tests 9–16 fail on the base, test 15 at its second POST with 409;
+    - crash sweep k unchanged (17/6, 18/6, 16/5, 13/4, 12/3);
+    - M1–M18 fail as named; the failed sets equal the PM reference build's;
+    - `pm13-wedge.sh` on the debug binary: the second `POST /dream` gives the cycle's own error instead of 409, and the status is `failed`.
+
+    The production code equals the PM's reference build apart from wrapping. Austin committed before VERIFY, and the dev report is a Linear comment; all 13 reported blobs equal `eddbfe9`.
+
+    Behaviour changes for the 1.3.1 CHANGELOG (the `[Unreleased]` → `### Fixed` bullet is in the commit):
+    - a dream cycle or `dreamd forget` that fails before its commit point removes its stage and sets `failed` before it returns, so the next `POST /api/v1/dream` runs instead of getting 409 until `watch` restarts;
+    - an error after the commit point is retried once in the same process.
+
+    Held for later (spec §8): H1, a second failed roll-forward still gives 409 until restart; H4, an error while removing a committed cycle's stage still answers 500; H5, doctor does not report a stuck `in_progress`.
+
+    Spec: `assignments/BZR-1532.v2.md`.
 40. **BZR-1533**: the lesson end marker on a line of its own in event content either forges a second lesson block or fails every cycle:
     - the forged block names any event id, which is then pinned and recalled as `lsn_<id>`;
     - the failure's error blames `AGENT_LEARNINGS.jsonl`.
@@ -1275,6 +1299,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. Since BZR-1232 a stale `in_progress` never reaches that guard: `WriterLock::acquire` resets it to `failed` when there is no WAL and runs `wal::recover_on_startup` when there is one. The guard now fires only for a cycle that is live inside the lock holder (HTTP 409 through the daemon). Since BZR-1241 the daemon's authoritative check is `PrepareCycle`, inside the actor. It refuses while another cycle's ticket is alive or `state.json` says `in_progress`.
 - **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. BZR-172 made the 409 rule apply to the CLI, which left a no-WAL `in_progress` as a hand edit of `state.json`. BZR-1232 moved the reset into lock acquisition: a free lock proves no cycle is running.
 - **How to apply:** Do not remove the guard from `run_in_process`. Do not add a second stale-status reset outside `acquire`, and do not tell operators to hand-edit `state.json` (the 2026-10-25 docs amendment removed that advice). `ForgetCliError::InProgress` is effectively unreachable from the CLI; its test is a mapping unit test.
+- **Not a second reset (BZR-1532).** `wal::abort_uncommitted` sets `failed` when a cycle errors before its commit point. That is the failing cycle ending itself, in the process that began it, not a reset of someone else's stale status. `acquire` still handles what a crash leaves. In a lock holder, `in_progress` now means a cycle is live, or a commit whose roll-forward failed twice (spec §8 H1).
 - **Cross-refs:** `remaining-build-order-2026-09-24`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
 
 ### home-dir-does-not-consult-the-password-database
@@ -1537,6 +1562,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Require at least one crash point that did not land, one that landed with the WAL left, and every not-landed point before every landed one.
   - Report the final `k` and the first landed `k` rather than fixing them in the spec. A ticket that changes how many files a cycle stages (BZR-1240) moves them.
   - When a spec counts a function's definitions, count its `cfg` twins.
+  - Cleanup that the failing process runs itself must do nothing after an injected crash, or it hides recovery from the sweep. BZR-1532's `abort_uncommitted` and `retry_roll_forward` each start with `if crash_point().is_err() { return … }`, and the crash sweep asserts the store was still `in_progress` with its stage at the crash.
+  - To test that in-process cleanup, use the error sweep (`arm_error`, BZR-1532): one I/O error at each point, then check the store in the same process with no recovery. Pre-cycle and `failed` before the commit point, post-cycle and `complete` after it, and exactly one landed point returns `Err`: the last one.
 - **Cross-refs:** `mutation-must-get-past-the-backstop`, `guards-vs-mandates-same-line`, `architecture-claims-false-until-dreamd-hardening`
 
 ### refactor-oracle-is-byte-equivalence-with-the-base
@@ -1641,6 +1668,8 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 - **How to apply:**
   - Before queuing, check every `[`…`]` link in a §3 doc snippet against the visibility of its target.
   - In VERIFY, run `cargo doc` on a `git archive <base>` copy and on `HEAD`, each with its own target dir, then diff the sorted (message, file) pairs.
+  - Run `cargo doc` on the PM's reference build too, before the spec is queued. The reference build copies the spec's snippets, so it has the same bad link.
+- **Recurred on BZR-1533.** §3.1's rustdoc for the `pub` `render_lessons_file` linked the private `escape_body_line`. The PM's reference build had the same link and was never run through `cargo doc`. The dev wrote the name as plain code. By then dreamd-core had one rustdoc warning (BZR-1522's link to the private `rank_missing_tokens`), and a docs sweep in the same tree fixed it, so `cargo doc -p dreamd-core --no-deps` prints none.
 - **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`
 
 ### spec-test-expectations-follow-from-the-rule-text

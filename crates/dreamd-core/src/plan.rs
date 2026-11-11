@@ -89,9 +89,9 @@ pub fn plan_cycle(
 ///   stays absent. `prior_lessons` is only tested for presence, never parsed,
 ///   so a corrupt prior file does not fail the cycle.
 /// - The ids to pin and the ledger edges come from the *rendered* file parsed
-///   back, so they name what the `LESSONS.md` on disk names, even when a body
-///   contains the lesson delimiter. A rendered file that does not parse fails
-///   the plan.
+///   back, so they name what the `LESSONS.md` on disk names. Every body
+///   round-trips (BZR-1533). A rendered file that still does not parse, through
+///   a frontmatter value, fails the plan with [`ConsolidationError::Lessons`].
 /// - Every unpinned cited record is pinned; no pin is ever cleared.
 /// - Decay drops old records that are neither pinned nor pinned by this plan.
 pub fn plan_cycle_with(
@@ -112,7 +112,8 @@ pub fn plan_cycle_with(
         Some(selected) => {
             let body = body(&selected);
             let file = consolidation::lessons_file_from_selected(now_sec, &selected, body);
-            let cited = lessons::parse_lessons_file(&lessons::render_lessons_file(&file))?;
+            let cited = lessons::parse_lessons_file(&lessons::render_lessons_file(&file))
+                .map_err(ConsolidationError::Lessons)?;
             let pins = consolidation::cited_pins(raw, &cited);
             let edges = provenance::lesson_edges(&cited, listed(&promoted, &cited.cluster_key));
             (LessonsChange::Write(file), pins, edges)
@@ -627,10 +628,10 @@ mod tests {
     // ── Ids come from the rendered file parsed back ────────────────────────
 
     /// A body line that closes the lesson and opens another for record `1`:
-    /// the rendered file parses to two lessons, so `1` is pinned, as the file
-    /// on disk names it. The edges are the first lesson's.
+    /// the body is escaped, so the rendered file parses back to the one lesson
+    /// and `1` is not pinned (BZR-1533).
     #[test]
-    fn plan_cycle_pins_the_ids_the_rendered_file_parses_to() {
+    fn a_body_that_forges_a_block_pins_only_the_cited_ids() {
         let events = promoting();
         let raw = episodic::raw_lines(&log(&events));
         let body = format!(
@@ -643,11 +644,12 @@ mod tests {
         assert_eq!(
             plan.log,
             Some(log(&[
-                pinned(&events[0]),
+                events[0].clone(),
                 events[1].clone(),
                 pinned(&events[2]),
                 events[3].clone(),
-            ]))
+            ])),
+            "only the cited id is pinned"
         );
         assert_eq!(
             plan.edges,
@@ -660,17 +662,60 @@ mod tests {
         assert_eq!(file.lessons[0].content, body);
     }
 
+    /// A body line that is only the close marker no longer fails the plan
+    /// (BZR-1533).
     #[test]
-    fn plan_cycle_fails_when_the_rendered_file_does_not_parse() {
-        let raw = episodic::raw_lines(&log(&promoting()));
+    fn a_body_with_a_stray_close_marker_plans_one_lesson() {
+        let events = promoting();
+        let raw = episodic::raw_lines(&log(&events));
         let body = "composed\n<!-- /dreamd:lesson -->\nplain";
 
-        let err = plan_cycle(&raw, None, NOW, llm(body, &['3'])).unwrap_err();
+        let plan = plan_cycle(&raw, None, NOW, llm(body, &['3'])).unwrap();
 
+        let LessonsChange::Write(file) = &plan.lessons else {
+            panic!("a promoting cycle writes LESSONS.md: {:?}", plan.lessons);
+        };
+        assert_eq!(file.lessons.len(), 1);
+        assert_eq!(file.lessons[0].content, body);
+        assert_eq!(
+            plan.log,
+            Some(log(&[
+                events[0].clone(),
+                events[1].clone(),
+                pinned(&events[2]),
+                events[3].clone(),
+            ])),
+            "the cited id is pinned"
+        );
+    }
+
+    /// Bodies always round-trip, but a frontmatter value can still break the
+    /// parse-back: a hand-edited key holding a newline. The error names
+    /// `LESSONS.md`, not the log (BZR-1533).
+    #[test]
+    fn a_planned_file_that_does_not_parse_names_lessons_md() {
+        let events: Vec<AgentLearning> = promoting()
+            .into_iter()
+            .map(|mut e| {
+                if e.skill_action == "rust::eh" {
+                    e.skill_action = "rust::eh\nx".to_string();
+                }
+                e
+            })
+            .collect();
+        let raw = episodic::raw_lines(&log(&events));
+
+        let err = plan_cycle(&raw, None, NOW, LessonBodySource::Deterministic).unwrap_err();
+
+        let message = err.to_string();
         match err {
-            ConsolidationError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
-            other => panic!("expected Io(InvalidData), got {other:?}"),
+            ConsolidationError::Lessons(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected Lessons(InvalidData), got {other:?}"),
         }
+        assert!(message.contains("LESSONS.md"), "got: {message}");
+        assert!(!message.contains("AGENT_LEARNINGS"), "got: {message}");
     }
 
     #[test]

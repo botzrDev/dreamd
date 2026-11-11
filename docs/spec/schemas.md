@@ -81,12 +81,15 @@ versioned prompt id of the form `dream-cycle/v<N>@<date>`, and `citations` lists
 every cluster event the model drew on. dreamd pins every cited event.
 
 The opening tag carries `id` (the exemplar event) and `cluster` (the full
-`skill_action`); the closing tag sits on its own line right after the body. If a
-cycle promotes nothing, `LESSONS.md` is absent — an empty-frontmatter
-placeholder is invalid, and a file left by an earlier cycle is removed. The
-lesson body is a function of the input. `last_updated` is the time the cycle
-ran, so two runs a second apart differ on that line. At a fixed clock the
-deterministic body matches.
+`skill_action`); the closing tag sits on its own line right after the body. A
+body line that is the closing tag, after any number of `\`, is written with one
+more `\` in front, and dreamd removes it when it reads the file. So an event's
+content cannot end a lesson early or forge another (1.3.1). Every other line is
+written as is. If a cycle promotes nothing, `LESSONS.md` is absent — an
+empty-frontmatter placeholder is invalid, and a file left by an earlier cycle
+is removed. The lesson body is a function of the input. `last_updated` is the
+time the cycle ran, so two runs a second apart differ on that line. At a fixed
+clock the deterministic body matches.
 
 ## `personal/` and consent
 
