@@ -5,7 +5,7 @@
 **Date:** 2026-07-07  
 **Commit:** `5684105` (`main`)  
 **Verifier:** Cursor agent (automated MCP layer) + pending human Cline UI pass  
-**Linear:** [WEG-39](https://linear.app/wegetit/issue/WEG-39)
+**Ticket:** WEG-39
 
 ## Question
 
@@ -178,7 +178,7 @@ The Cline **CLI** reads `~/.cline/data/settings/cline_mcp_settings.json` — a d
 | `npx dreamd-mcp@0.1.0-rc.1 version` | Routes to `dreamd mcp version` → clap error (rc.1 shim lacks top-level `--version` handling; fixed in rc.2 shim) |
 | `npx dreamd-mcp@0.1.0-rc.1` (bare) | Downloads rc.1 binary; MCP stdio server starts |
 
-**Gap:** [WEG-292](https://linear.app/wegetit/issue/WEG-292) is Done (GitHub `v0.1.0-rc.2` published 2026-07-06) but npm publish step appears incomplete. This blocks the documented Cline quickstart and WEG-265 gate item 2 (`npx dreamd-mcp` clean install).
+**Gap:** WEG-292 is Done (GitHub `v0.1.0-rc.2` published 2026-07-06) but npm publish step appears incomplete. This blocks the documented Cline quickstart and WEG-265 gate item 2 (`npx dreamd-mcp` clean install).
 
 ---
 

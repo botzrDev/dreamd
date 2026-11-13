@@ -2334,6 +2334,94 @@ async fn resolve_supervisor_returns_the_same_arc_for_a_live_root() {
     assert_eq!(state.runtimes.lock().unwrap().len(), 1);
 }
 
+/// [`make_routing_state`], with a `runtimes` map whose idle timeout is zero:
+/// every entry is idle by the time the next request looks it up.
+fn make_routing_state_idle_now() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    AppState,
+) {
+    use crate::server::ProjectResourceMapConfig;
+
+    let (dir_a, dir_b, canonical_a, canonical_b, mut state) = make_routing_state();
+    state.runtimes = Arc::new(Mutex::new(ProjectResourceMap::new(
+        ProjectResourceMapConfig {
+            capacity: 10,
+            idle_timeout: std::time::Duration::ZERO,
+        },
+    )));
+    (dir_a, dir_b, canonical_a, canonical_b, state)
+}
+
+/// Pins DRM-49: a request for a non-boot root whose runtime sat idle past the
+/// timeout reuses that runtime. Releasing it and reopening at once was refused
+/// by the writer lock the released tasks still held.
+#[tokio::test]
+async fn resolve_supervisor_reuses_an_idle_runtime() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state_idle_now();
+
+    let first = state
+        .resolve_supervisor(&canonical_b)
+        .expect("first resolve starts B");
+    let second = state
+        .resolve_supervisor(&canonical_b)
+        .expect("second resolve reuses idle B");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "an idle root must return the same Arc, not a reopened runtime"
+    );
+    assert_eq!(state.runtimes.lock().unwrap().len(), 1);
+}
+
+/// Pins DRM-49: the second `POST /learn` to an idle non-boot project gets 201,
+/// not 500 `project writer lock is held by pid <own pid> (watch)`.
+#[tokio::test]
+async fn learn_to_an_idle_project_returns_201() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state_idle_now();
+    let router = build_router(state.clone());
+
+    const MARKERS: [&str; 2] = ["first idle marker drm49", "second idle marker drm49"];
+    for marker in MARKERS {
+        let body = sample_body("rust::routing", marker);
+        let resp = router
+            .clone()
+            .into_service()
+            .oneshot(with_peer_uid(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/learn")
+                    .header("x-agent-root", canonical_b.to_str().unwrap())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "learn {marker:?} to idle B must succeed; body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    let b_jsonl = std::fs::read_to_string(AgentRoot::new(canonical_b.clone()).episodic_jsonl())
+        .expect("B's JSONL must exist after the appends");
+    for marker in MARKERS {
+        assert!(
+            b_jsonl.contains(marker),
+            "B's JSONL must contain {marker:?}; got: {b_jsonl:?}"
+        );
+    }
+}
+
 /// A `POST /learn` for project B appends to B's JSONL, leaves the boot
 /// project A's JSONL untouched, and recall(B) surfaces it (WEG-272). A
 /// dispatch to the boot coordinator regardless of `entry.root` would misfile

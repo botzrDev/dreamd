@@ -88,18 +88,18 @@ Checklist under `context/audits/` (Jul-22 uninstall audit spirit):
 
 ## Ticket slices
 
-Linear epic: [AILAB-547](https://linear.app/wegetit/issue/AILAB-547)
+Epic: AILAB-547
 
 | # | ID | Type | Title | Blocked by |
 |---|-----|------|-------|------------|
-| 1 | [AILAB-548](https://linear.app/wegetit/issue/AILAB-548) | HITL | Lock wizard copy + harness write targets + conflict policy | — |
-| 2 | [AILAB-549](https://linear.app/wegetit/issue/AILAB-549) | AFK | `dreamd setup` clap + non-interactive scaffold | — |
-| 3 | [AILAB-550](https://linear.app/wegetit/issue/AILAB-550) | AFK | MCP merge writer | 548, 549 |
-| 4 | [AILAB-551](https://linear.app/wegetit/issue/AILAB-551) | AFK | TTY interactive wizard | 548, 549, 550 |
-| 5 | [AILAB-552](https://linear.app/wegetit/issue/AILAB-552) | AFK | `update` restart contract + `--restart` | — (related 226) |
-| 6 | [AILAB-555](https://linear.app/wegetit/issue/AILAB-555) | AFK | install-funnel isolation suite + CI | 549, 550, 552 |
-| 7 | [AILAB-553](https://linear.app/wegetit/issue/AILAB-553) | AFK | Docs front door → `setup` | 549, 550 |
-| 8 | [AILAB-554](https://linear.app/wegetit/issue/AILAB-554) | HITL | Clean-box audit | 551, 552, 555 | 
+| 1 | AILAB-548 | HITL | Lock wizard copy + harness write targets + conflict policy | — |
+| 2 | AILAB-549 | AFK | `dreamd setup` clap + non-interactive scaffold | — |
+| 3 | AILAB-550 | AFK | MCP merge writer | 548, 549 |
+| 4 | AILAB-551 | AFK | TTY interactive wizard | 548, 549, 550 |
+| 5 | AILAB-552 | AFK | `update` restart contract + `--restart` | — (related 226) |
+| 6 | AILAB-555 | AFK | install-funnel isolation suite + CI | 549, 550, 552 |
+| 7 | AILAB-553 | AFK | Docs front door → `setup` | 549, 550 |
+| 8 | AILAB-554 | HITL | Clean-box audit | 551, 552, 555 | 
 
 ## Related
 
