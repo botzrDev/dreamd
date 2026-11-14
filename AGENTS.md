@@ -643,12 +643,22 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H3: BZR-1475 and BZR-1498 should mention this fix.
 
     Spec: `assignments/BZR-1533.v2.md`.
-43. **DRM-49**: the first request to a non-boot project after 30 idle minutes gets 500 `project writer lock is held by pid <the daemon's own pid> (watch)`. Filed 2026-11-13, after the PM saw it on Austin's 1.3.0 daemon; it is not from the torture.
+43. **DRM-49** — on `release/v1.3.1` (`ce2e947`; the commit message does not name the ticket). The first request to a non-boot project after 30 idle minutes got 500 `project writer lock is held by pid <the daemon's own pid> (watch)`. Filed 2026-11-13, after the PM saw it on Austin's 1.3.0 daemon; it is not from the torture.
     - `ProjectResourceMap`'s idle pass runs before each lookup and releases the root the request asked for. `with_runtime` then reopens it at once, while the released coordinator and indexer tasks still hold their writer lock clones. A retry works once the tasks end.
     - Every release since 1.2.0 has it: the runtimes have held the lock since BZR-1232 (`17e8382`).
     - The fix spares the requested root in `get_mut`, `get_or_insert` and `insert_or_adopt`, which also covers in-process `dreamd mcp`'s index map. Spec: `assignments/DRM-49.v2.md` (base `9fe3878`). The PM's reference build and mutants are `assignments/reports/DRM-49.pm-reference.py` and `DRM-49.pm-mutants.py`.
+    - PM verification (`assignments/reports/DRM-49.verify.r0.md`). No dev report arrived, and Austin committed before VERIFY, so the PM verified the committed tree as unverified work:
+      - workspace 1484 / 0 / 0, all features 1488 / 0 / 0, dreamd-core lib 849;
+      - red-first on base production with the committed tests: exactly the five new tests fail;
+      - M1–M4 fail exactly the named tests. M5 also fails the existing `index_map::tests::idle_eviction_closes_handles_older_than_timeout`, which the spec's row missed;
+      - the production code equals the PM's reference build apart from one rustdoc line wrap.
+    - The commit also removes tracker links from three docs (spec Amendment 1). The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
     - Held for later (spec §8): H1, a root released by another root's request and asked for again before its tasks end can still be refused; H2, the refusal names the daemon's own pid as if a second writer held the lock.
-41. **BZR-1534**: every daemon-mode `dreamd mcp` holds its probe connection open (`mcp/mod.rs:567`, `Ok(_)`). Blocked by DRM-49. Its spec (`assignments/BZR-1534.v2.md`) compares with `9fe3878`, and its grep 5 expects `crates/dreamd-core/src/server` unchanged, so it needs a new base once DRM-49 lands.
+41. **BZR-1534** — signed off 2026-11-13, not yet committed (base `ce2e947`, spec Amendment 1). Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
+    - New test `crates/dreamd-cli/tests/mcp_probe_closes.rs` spawns the binary against a fake daemon and asserts the first connection closes before any MCP message.
+    - PM verification (`assignments/reports/BZR-1534.verify.r0.md`): workspace 1485 / 0 / 0, all features 1489 / 0 / 0; red-first and M1–M3 fail test 1 with `left: (0, StillOpen)`; `pm1534-probe.py` shows 0 daemon connections, idle and after tool calls; `mcp/mod.rs` equals the PM's reference build.
+    - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the tree.
+    - Held for later (spec §8): H1, the daemon's `serve_connection` has no idle timer.
 42. **BZR-1535**: 1.3.1 release prep (hitl). It also waits for the container torture to be triaged.
 
 **Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
@@ -1837,7 +1847,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 ### match-ok-underscore-keeps-the-probe-connection-open
 
 - **Rule:** `match UnixStream::connect(p).await { Ok(_) => { … serve().await } }` does not close the connection. `Ok(_)` moves nothing out of the scrutinee, and the temporary `Result` lives until the whole `match` ends, so the stream stays open until `serve` returns. A fake daemon in a test must serve each connection on its own thread.
-- **Why:** BZR-1531's dev found it in `run_mcp_server` (`mcp/mod.rs:567`). The spec said `dreamd mcp`'s reachability probe "closes first". A fake daemon with one accept loop blocked reading the probe, and test 12 timed out at 30 s. The comment at `:569` says "The connect only probes reachability", but every daemon-mode `dreamd mcp` holds one idle connection to the daemon for its whole session. The daemon's `serve_connection` (`uds_server.rs:75`) has no timer, so nothing times it out. No ticket yet (2026-11-07).
+- **Why:** BZR-1531's dev found it in `run_mcp_server` (`mcp/mod.rs:567`). The spec said `dreamd mcp`'s reachability probe "closes first". A fake daemon with one accept loop blocked reading the probe, and test 12 timed out at 30 s. The comment at `:569` says "The connect only probes reachability", but every daemon-mode `dreamd mcp` holds one idle connection to the daemon for its whole session. The daemon's `serve_connection` (`uds_server.rs:75`) has no timer, so nothing times it out. BZR-1534 fixed the probe; the daemon still has no timer.
 - **How to apply:**
   - A fake daemon for an integration test: one thread per accepted connection, and a connection that closes before `\r\n\r\n` gets no answer (`tests/version_mismatch_launcher.rs`).
   - To probe and drop, bind the value and drop it: `Ok(stream) => { drop(stream); … }`.

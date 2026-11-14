@@ -565,9 +565,15 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
     // Daemon proxy: if reachable over UDS, serve MCP backed by the daemon
     // store.
     match tokio::net::UnixStream::connect(&sock_path).await {
-        Ok(_) => {
-            // The connect only probes reachability; each tool call opens its
-            // own short-lived connection. Derive the X-Agent-Root header from
+        Ok(probe) => {
+            // The connect only probes reachability, so close it here. Each
+            // tool call opens its own short-lived connection. `Ok(_)` would
+            // not close it: the stream would live until this `match` ends,
+            // after `serve` returns, and hold one idle daemon connection for
+            // the whole session (BZR-1534).
+            drop(probe);
+
+            // Derive the X-Agent-Root header from
             // the discovered project root, canonicalized to match
             // `RegistryCache::resolve`'s server-side lookup (registry roots are
             // stored canonicalized — see registry.rs). No `.agent/` in ancestry

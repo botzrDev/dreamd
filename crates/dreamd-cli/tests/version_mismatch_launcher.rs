@@ -88,11 +88,10 @@ impl FakeDaemon {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let response = response.clone();
-                // One thread per connection: `dreamd mcp`'s reachability probe
-                // sends nothing and stays open while the server runs (the
-                // stream is the scrutinee of a `match` whose arm serves), so
-                // it must not hold up the accept loop. A connection that closes
-                // before a full request head gets no answer.
+                // One thread per connection, so a connection that stays open
+                // cannot hold up the accept loop. `dreamd mcp`'s reachability
+                // probe sends nothing and closes (BZR-1534); a connection that
+                // closes before a full request head gets no answer.
                 std::thread::spawn(move || {
                     if read_request_head(&mut stream) {
                         let _ = stream.write_all(&response);

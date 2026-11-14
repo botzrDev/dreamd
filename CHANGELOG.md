@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
   dreamd now writes such a line with one more leading `\` and removes it when it reads the file, so every body round-trips byte for byte. A `LESSONS.md` written by 1.3.0 reads as before, unless a body line is the marker after one or more `\`. A pin that a forged lesson already set stays; `dreamd archive --force-unpin <id>` clears it. When a planned `LESSONS.md` does not parse, the error now names `LESSONS.md`.
 - **The first request to a project after 30 idle minutes no longer fails** (DRM-49). For a project other than the one `dreamd watch` was started in, the request that found the project's coordinator and index idle for 30 minutes released them, then reopened them at once. The released tasks still held the project's writer lock, so the request got `500` with `project writer lock is held by pid <the daemon's own pid>`. A `search_nodes` or `append_node` after a break could fail this way, and a retry worked. A request now reuses its project's runtime however long it sat idle, and every other idle project is still released.
+- **An idle `dreamd mcp` session no longer holds a connection to the daemon** (BZR-1534). When `dreamd mcp` found a running daemon, it kept its reachability check open for the whole session, so every open editor or agent held one idle connection and one task in `dreamd watch`. The check now closes at once. Each tool call opens its own connection, as before.
 
 ## [1.3.0] - 2026-11-07
 
