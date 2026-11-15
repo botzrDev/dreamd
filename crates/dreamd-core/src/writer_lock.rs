@@ -133,6 +133,18 @@ pub enum WriterLockError {
     Recover(#[from] WalError),
 }
 
+impl WriterLockError {
+    /// Is the lock held by `dreamd watch` in this same process? In the daemon
+    /// that is a runtime it released whose tasks have not ended yet (DRM-50).
+    pub(crate) fn held_by_this_watch(&self) -> bool {
+        matches!(
+            self,
+            Self::Busy { holder: Some(h) }
+                if h.pid == std::process::id() && h.kind == WriterKind::Watch
+        )
+    }
+}
+
 fn busy_message(holder: &Option<Holder>) -> String {
     match holder {
         Some(h) => format!("project writer lock is held by pid {} ({})", h.pid, h.kind),
@@ -442,6 +454,24 @@ mod tests {
         drop(clone);
         let again = WriterLock::acquire(&root, WriterKind::Dream).unwrap();
         assert_eq!(again.kind(), WriterKind::Dream);
+    }
+
+    /// Pins DRM-50's wait rule: the daemon waits only for a lock held by
+    /// `watch` in this same process. Another pid, another kind, an unread
+    /// stamp or a legacy writer is a real second writer and is refused at once.
+    #[test]
+    fn held_by_this_watch_needs_this_pid_and_watch() {
+        let pid = std::process::id();
+        let busy = |pid, kind| WriterLockError::Busy {
+            holder: Some(Holder { pid, kind }),
+        };
+
+        assert!(busy(pid, WriterKind::Watch).held_by_this_watch());
+        assert!(!busy(pid, WriterKind::Dream).held_by_this_watch());
+        assert!(!busy(pid, WriterKind::Mcp).held_by_this_watch());
+        assert!(!busy(pid.wrapping_add(1), WriterKind::Watch).held_by_this_watch());
+        assert!(!WriterLockError::Busy { holder: None }.held_by_this_watch());
+        assert!(!WriterLockError::LegacyWriter.held_by_this_watch());
     }
 
     #[test]

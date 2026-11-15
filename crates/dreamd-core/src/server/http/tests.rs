@@ -35,6 +35,7 @@ fn make_test_state(registry_path: PathBuf) -> AppState {
         supervisor: Arc::new(supervisor),
         config: Arc::new(config),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
+        opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
         auth_json: None,
@@ -82,6 +83,7 @@ fn make_real_state_with_cadence(
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
+        opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: Some((canonical, primary)),
         auth_json: None,
@@ -560,6 +562,7 @@ async fn learn_channel_full_returns_503() {
         supervisor: Arc::new(supervisor),
         config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
+        opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
         primary: None,
         auth_json: None,
@@ -1415,6 +1418,7 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
         supervisor: Arc::new(Supervisor::for_backpressure_test().0),
         config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
+        opening: Default::default(),
         daemon_uid: wrong_uid,
         primary: None,
         auth_json: None,
@@ -1834,6 +1838,7 @@ async fn dream_in_progress_returns_409() {
     let canonical = std::fs::canonicalize(dir.path()).unwrap();
     state
         .with_index_handle(&canonical, |_| ())
+        .await
         .expect("open the project's runtime");
 
     // Write state.json with "in_progress" status to simulate a running cycle.
@@ -2029,6 +2034,7 @@ async fn dream_while_a_prepared_cycle_is_live_returns_409() {
     let canonical = std::fs::canonicalize(dir.path()).unwrap();
     let supervisor = state
         .resolve_supervisor(&canonical)
+        .await
         .expect("the project's supervisor");
     let (prepare_tx, prepare_rx) = oneshot::channel();
     supervisor
@@ -2146,6 +2152,7 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
     let now_sec = chrono::Utc::now().timestamp();
     let reader = state
         .with_index_handle(&canonical_root, |h| h.reader().clone())
+        .await
         .expect("resolve primary handle");
     reader.reload().expect("reload reader after flush");
     let results = crate::recall(
@@ -2275,6 +2282,7 @@ async fn lazy_resolve_recovers_mid_cycle_wal_on_project_b() {
 
     state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("resolve_supervisor must recover and start B");
 
     assert!(
@@ -2297,6 +2305,7 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
     let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
     state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("first resolve starts B");
     let root_b = AgentRoot::new(&canonical_b);
     // B's running cycle has reached its commit point: its redo WAL is on disk.
@@ -2307,6 +2316,7 @@ async fn resolve_supervisor_leaves_a_live_projects_wal_alone() {
     .expect("B's running cycle writes its redo WAL");
     state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("second resolve reuses B");
     assert!(
         root_b.wal_path().exists(),
@@ -2322,9 +2332,11 @@ async fn resolve_supervisor_returns_the_same_arc_for_a_live_root() {
 
     let first = state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("first resolve starts B");
     let second = state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("second resolve reuses B");
 
     assert!(
@@ -2364,9 +2376,11 @@ async fn resolve_supervisor_reuses_an_idle_runtime() {
 
     let first = state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("first resolve starts B");
     let second = state
         .resolve_supervisor(&canonical_b)
+        .await
         .expect("second resolve reuses idle B");
 
     assert!(
@@ -2374,6 +2388,40 @@ async fn resolve_supervisor_reuses_an_idle_runtime() {
         "an idle root must return the same Arc, not a reopened runtime"
     );
     assert_eq!(state.runtimes.lock().unwrap().len(), 1);
+}
+
+/// Pins DRM-50's wait on a released runtime (DRM-49 §8 H1): resolving C
+/// releases idle B, and B's old tasks keep its writer lock until the executor
+/// polls them. Asking for B again waits for them to end instead of being
+/// refused by the daemon's own lock.
+#[tokio::test]
+async fn resolve_supervisor_reopens_a_project_released_a_moment_ago() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state_idle_now();
+    let dir_c = tempfile::tempdir().unwrap();
+    let canonical_c = std::fs::canonicalize(dir_c.path()).unwrap();
+    std::fs::create_dir_all(AgentRoot::new(canonical_c.clone()).agent_dir()).unwrap();
+
+    let first = state
+        .resolve_supervisor(&canonical_b)
+        .await
+        .expect("first resolve starts B");
+    let released = Arc::downgrade(&first);
+    // Shadowing `first` with the weak reference would keep it alive.
+    drop(first);
+
+    state
+        .resolve_supervisor(&canonical_c)
+        .await
+        .expect("resolving C releases idle B");
+    assert!(
+        released.upgrade().is_none(),
+        "precondition: resolving C must release idle B"
+    );
+
+    state
+        .resolve_supervisor(&canonical_b)
+        .await
+        .expect("B reopens once its released tasks end");
 }
 
 /// Pins DRM-49: the second `POST /learn` to an idle non-boot project gets 201,
@@ -2420,6 +2468,308 @@ async fn learn_to_an_idle_project_returns_201() {
             "B's JSONL must contain {marker:?}; got: {b_jsonl:?}"
         );
     }
+}
+
+/// One request for `root` through `router` (DRM-50 tests), with
+/// `x-agent-root` set and, when there is a body, `content-type:
+/// application/json`. Returns the status and the body text.
+async fn request_for(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    root: &std::path::Path,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-agent-root", root.to_str().unwrap());
+    let req = match body {
+        Some(body) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+    let resp = router
+        .clone()
+        .into_service()
+        .oneshot(with_peer_uid(req))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `POST /api/v1/learn` of `content` for `root` (DRM-50 tests).
+async fn learn_for(
+    router: &axum::Router,
+    root: &std::path::Path,
+    content: &str,
+) -> (StatusCode, String) {
+    let body = sample_body("rust::routing", content);
+    request_for(router, "POST", "/api/v1/learn", root, Some(body)).await
+}
+
+/// Pins DRM-50's gate: learns that reach a project the daemon has not loaded
+/// at the same moment share one open of it, and every one is saved. Without
+/// the gate, every learn but the first got 500 `project writer lock is held by
+/// pid <own pid> (watch)`: the first one's open held the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_learns_to_an_unloaded_project_all_succeed() {
+    const N: usize = 8;
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let barrier = Arc::new(tokio::sync::Barrier::new(N));
+
+    let tasks: Vec<_> = (0..N)
+        .map(|i| {
+            let router = router.clone();
+            let barrier = Arc::clone(&barrier);
+            let root = canonical_b.clone();
+            tokio::spawn(async move {
+                let marker = format!("concurrent first marker drm50 {i}");
+                barrier.wait().await;
+                let (status, body) = learn_for(&router, &root, &marker).await;
+                (marker, status, body)
+            })
+        })
+        .collect();
+    let mut results = Vec::with_capacity(N);
+    for task in tasks {
+        results.push(task.await.expect("learn task"));
+    }
+
+    let failures: Vec<_> = results
+        .iter()
+        .filter(|(_, status, _)| *status != StatusCode::CREATED)
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "every concurrent first learn to B must get 201; failures (marker, status, body): \
+         {failures:#?}"
+    );
+    let b_jsonl = std::fs::read_to_string(AgentRoot::new(canonical_b.clone()).episodic_jsonl())
+        .expect("B's JSONL must exist after the appends");
+    for (marker, _, _) in &results {
+        assert!(
+            b_jsonl.contains(marker.as_str()),
+            "B's JSONL must contain {marker:?}; got: {b_jsonl:?}"
+        );
+    }
+    assert_eq!(state.runtimes.lock().unwrap().len(), 1);
+}
+
+/// Pins DRM-50's gate for every resolver: concurrent first requests of each
+/// kind that opens a runtime (learn, recall, health, dream, salience) share
+/// one open of an unloaded project instead of being refused by its writer
+/// lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_requests_of_every_kind_succeed() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let requests: Vec<(&'static str, &'static str, Option<serde_json::Value>)> = vec![
+        (
+            "POST",
+            "/api/v1/learn",
+            Some(sample_body("rust::routing", "kinds marker drm50 one")),
+        ),
+        (
+            "POST",
+            "/api/v1/learn",
+            Some(sample_body("rust::routing", "kinds marker drm50 two")),
+        ),
+        ("GET", "/api/v1/recall?q=marker&k=5", None),
+        ("GET", "/api/v1/recall?q=drm50&k=5", None),
+        ("GET", "/api/v1/health", None),
+        ("GET", "/api/v1/health", None),
+        ("POST", "/api/v1/dream", None),
+        ("GET", "/api/v1/observability/salience", None),
+    ];
+    let barrier = Arc::new(tokio::sync::Barrier::new(requests.len()));
+
+    let tasks: Vec<_> = requests
+        .into_iter()
+        .map(|(method, uri, body)| {
+            let router = router.clone();
+            let barrier = Arc::clone(&barrier);
+            let root = canonical_b.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let (status, text) = request_for(&router, method, uri, &root, body).await;
+                (method, uri, status, text)
+            })
+        })
+        .collect();
+    let mut failures = Vec::new();
+    for task in tasks {
+        let (method, uri, status, text) = task.await.expect("request task");
+        if !status.is_success() {
+            failures.push((method, uri, status, text));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "every concurrent first request to B must succeed; failures (method, uri, status, \
+         body): {failures:#?}"
+    );
+    assert_eq!(state.runtimes.lock().unwrap().len(), 1);
+}
+
+/// Pins DRM-50's wait: while this daemon's own `watch` still holds B's writer
+/// lock, as a runtime it released does until its tasks end, a learn for B
+/// waits for the lock and gets 201 instead of 500.
+#[tokio::test]
+async fn learn_waits_while_the_daemons_own_lock_is_released() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state);
+    let held = writer_lock(&AgentRoot::new(canonical_b.clone()));
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(held);
+    });
+
+    let (status, body) = learn_for(&router, &canonical_b, "waited marker drm50").await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a learn for B must wait out the daemon's own lock; body: {body}"
+    );
+    release.await.expect("release task");
+}
+
+/// Pins DRM-50's bound: when this daemon's own `watch` keeps B's writer lock,
+/// a learn for B waits for at most the bound and then gets today's 500, which
+/// names the daemon's own pid.
+#[tokio::test]
+async fn learn_gives_up_on_the_daemons_own_lock_after_the_bound() {
+    use std::time::{Duration, Instant};
+
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state);
+    let _held = writer_lock(&AgentRoot::new(canonical_b.clone()));
+
+    let started = Instant::now();
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(10),
+        learn_for(&router, &canonical_b, "bounded marker drm50"),
+    )
+    .await
+    .expect("the wait on the daemon's own lock must be bounded");
+    let waited = started.elapsed();
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+    let expected = format!(
+        "project writer lock is held by pid {} (watch)",
+        std::process::id()
+    );
+    assert!(
+        body.contains(&expected),
+        "the 500 must name the daemon's own lock; body: {body}"
+    );
+    // `OWN_LOCK_WAIT` is 2 s; the 100 ms margin is for timer granularity.
+    assert!(
+        waited >= Duration::from_millis(1_900),
+        "the request must wait out the bound; waited {waited:?}"
+    );
+}
+
+/// Pins DRM-50's rule that only this process's own `watch` is waited for: a
+/// writer lock held by another process is a real second writer, so a learn is
+/// refused at once with that holder's pid, as before.
+#[tokio::test]
+async fn learn_is_refused_at_once_when_another_process_holds_the_lock() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state);
+    let dreamd_dir = AgentRoot::new(canonical_b.clone()).dreamd_dir();
+    std::fs::create_dir_all(&dreamd_dir).unwrap();
+    let other = std::process::id().wrapping_add(1);
+    let mut lockfile = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(dreamd_dir.join(crate::writer_lock::WRITER_LOCK_FILENAME))
+        .unwrap();
+    lockfile
+        .try_lock()
+        .expect("hold B's writer lock as another process would");
+    writeln!(lockfile, r#"{{"pid":{other},"kind":"watch"}}"#).unwrap();
+
+    let started = Instant::now();
+    let (status, body) = learn_for(&router, &canonical_b, "refused marker drm50").await;
+    let took = started.elapsed();
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+    let expected = format!("project writer lock is held by pid {other} (watch)");
+    assert!(
+        body.contains(&expected),
+        "the 500 must name the other process; body: {body}"
+    );
+    assert!(
+        took < Duration::from_secs(1),
+        "another process's lock must be refused at once; took {took:?}"
+    );
+}
+
+/// Pins DRM-50's per-root gate: a learn waiting on B's writer lock holds only
+/// B's gate, so a request for another root C is answered at once. C has no
+/// `.agent/`, so its open fails straight away instead of opening an index.
+#[tokio::test]
+async fn a_wait_on_one_projects_lock_does_not_hold_up_another() {
+    use std::time::{Duration, Instant};
+
+    let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
+    let dir_c = tempfile::tempdir().unwrap();
+    let canonical_c = std::fs::canonicalize(dir_c.path()).unwrap();
+    let registry = [&canonical_a, &canonical_b, &canonical_c]
+        .iter()
+        .map(|root| format!("[[projects]]\nroot = \"{}\"\n", root.to_string_lossy()))
+        .collect::<String>();
+    std::fs::write(&state.registry_path, registry).unwrap();
+    let router = build_router(state);
+    let _held = writer_lock(&AgentRoot::new(canonical_b.clone()));
+
+    let waiting = {
+        let router = router.clone();
+        let root = canonical_b.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                learn_for(&router, &root, "waiting marker drm50"),
+            )
+            .await
+        })
+    };
+    // Let B's learn reach its wait.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = Instant::now();
+    let (status, body) = learn_for(&router, &canonical_c, "other root marker drm50").await;
+    let took = started.elapsed();
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+    assert!(
+        body.contains("no .agent/ store"),
+        "C's learn must fail on its missing store; body: {body}"
+    );
+    assert!(
+        took < Duration::from_secs(1),
+        "C's learn must not wait behind B's; took {took:?}"
+    );
+    let (status, body) = waiting
+        .await
+        .expect("B's learn task")
+        .expect("B's wait must be bounded");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
 }
 
 /// A `POST /learn` for project B appends to B's JSONL, leaves the boot
@@ -2475,6 +2825,7 @@ async fn learn_routes_to_owning_project_not_boot() {
     // flush + reload makes the assertion deterministic (no cadence wait).
     let b_sender = state
         .with_index_handle(&canonical_b, |h| h.sender())
+        .await
         .expect("resolve B index sender");
     let (ack_tx, ack_rx) = oneshot::channel();
     b_sender
@@ -2485,6 +2836,7 @@ async fn learn_routes_to_owning_project_not_boot() {
 
     let b_reader = state
         .with_index_handle(&canonical_b, |h| h.reader().clone())
+        .await
         .expect("resolve B reader");
     b_reader.reload().expect("reload B reader to latest commit");
 
@@ -3163,6 +3515,7 @@ async fn health_of_a_second_project_reads_its_own_runtime() {
     let (ack_tx, ack_rx) = oneshot::channel();
     state
         .with_index_handle(&canonical_b, |h| h.sender())
+        .await
         .expect("B's index")
         .send(crate::server::IndexerMsg::Flush { ack: ack_tx })
         .await

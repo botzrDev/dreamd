@@ -62,12 +62,12 @@ pub(crate) async fn post_dream(
     // WEG-272: route the cycle to the coordinator that owns this project root,
     // not the boot coordinator — otherwise project B's dream cycle would run
     // against (and prune) the boot project's JSONL.
-    let supervisor = match state.resolve_supervisor(&project_root) {
+    let supervisor = match state.resolve_supervisor(&project_root).await {
         Ok(s) => s,
         Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
     };
 
-    let index_sender = match state.with_index_handle(&project_root, |h| h.sender()) {
+    let index_sender = match state.with_index_handle(&project_root, |h| h.sender()).await {
         Ok(s) => s,
         Err(e) => {
             return (

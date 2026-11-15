@@ -37,6 +37,7 @@ pub(crate) async fn get_health(
     #[cfg(unix)]
     let result = state
         .live_marks(std::path::Path::new(&entry.root))
+        .await
         .map(|(commit, append)| crate::server::live_index_freshness(&commit, &append));
     #[cfg(not(unix))]
     let result = {

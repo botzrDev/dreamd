@@ -431,7 +431,7 @@ mod tests {
             assert!(guard.get_handle(root).is_none(), "cold map must miss");
         }
         // This closure stands in for the open between the miss and the publish,
-        // where `AppState::with_runtime` calls `ProjectRuntime::open`.
+        // where `AppState::with_runtime` calls `ProjectRuntime::open_for_watch`.
         let open_probe = |p: &Path| {
             let map_free = map.try_lock().is_ok();
             (TestIndexHandle::open(p, log.clone()), map_free)

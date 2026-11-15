@@ -654,12 +654,35 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
       - the production code equals the PM's reference build apart from one rustdoc line wrap.
     - The commit also removes tracker links from three docs (spec Amendment 1). The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
     - Held for later (spec §8): H1, a root released by another root's request and asked for again before its tasks end can still be refused; H2, the refusal names the daemon's own pid as if a second writer held the lock.
-41. **BZR-1534** — signed off 2026-11-13, not yet committed (base `ce2e947`, spec Amendment 1). Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
+41. **BZR-1534** — on `release/v1.3.1` (`7384c06`; base `ce2e947`, spec Amendment 1). All five paths equal the signed-off blobs. Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
     - New test `crates/dreamd-cli/tests/mcp_probe_closes.rs` spawns the binary against a fake daemon and asserts the first connection closes before any MCP message.
     - PM verification (`assignments/reports/BZR-1534.verify.r0.md`): workspace 1485 / 0 / 0, all features 1489 / 0 / 0; red-first and M1–M3 fail test 1 with `left: (0, StillOpen)`; `pm1534-probe.py` shows 0 daemon connections, idle and after tool calls; `mcp/mod.rs` equals the PM's reference build.
     - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the tree.
     - Held for later (spec §8): H1, the daemon's `serve_connection` has no idle timer.
-42. **BZR-1535**: 1.3.1 release prep (hitl). It also waits for the container torture to be triaged.
+44. **DRM-50** — filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reach a project the daemon has not loaded at the same moment, all but one get `500 … project writer lock is held by pid <the daemon's own pid> (watch)`. Over MCP the failed call can be an `append_node`. `AppState::with_runtime` (`server/http/state.rs:153`) drops the map mutex before `ProjectRuntime::open`. Its rustdoc (`:139-145`) says the loser "still gets the winner's runtime", but the loser fails on the lock before the winner publishes. It is reached at a session's first parallel tool calls, after an LRU release, and after an idle release (DRM-49 fixed only the single first request). It is in 1.3.0 too. The spec decides whether it also closes DRM-49 §8 H1 and H2.
+42. **BZR-1535**: 1.3.1 release prep (hitl).
+    - The container torture ran on 2026-11-14 against a musl build of `7384c06`. Prompt: `assignments/torture-1.3.1-container.prompt.md`. PM triage: `assignments/reports/torture-1.3.1.triage.md`.
+    - The four fixes hold. All 15 findings were confirmed by a PM re-run, and each is also in 1.3.0.
+    - T131-02 is DRM-50 above. The rest are milestone 1.3.2 patch.
+
+**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-14 at Austin's call). These are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. DRM-51 is `blockedBy` BZR-1535.
+
+45. **DRM-51** (T131-01): a daemon keeps writing a store deleted under it. `git clean -fdX` removes the gitignored `/.agent/.dreamd/`, and that reaches it, boot project included; so do setup's Undo lines followed by setup again.
+    - On its own, new appends go unindexed until a restart.
+    - With a second writer (`dream --no-commit`, or `init` re-creating the store), acked appends are lost, and `watch` will not restart until `doctor --repair`.
+    - The fix needs a store-identity check before a runtime is reused.
+46. **DRM-52** (T131-03): every project reopen leaks a `tantivy-warm-gc` thread. The cause is upstream: in tantivy 0.27.0, `reader/warming.rs:149-161`'s `gc_loop` never exits after its reader drops.
+47. **DRM-53** (T131-05, T131-09, T131-13): doctor and recovery gaps.
+    - A corrupt `state.json` is blamed on the WAL, and `doctor --repair` refuses it (v1.2 F03).
+    - A broken `config.toml` stops doctor before its other checks.
+    - Doctor gives no warning for a log id ahead of the clock.
+48. **DRM-54** (T131-04, T131-06, T131-14): setup.
+    - The Undo lines never stop the daemon setup started.
+    - `--dry-run` needs `--yes` without a TTY.
+    - `--no-write-mcp` still writes the habit files.
+49. **DRM-55** (T131-07, T131-08): `update`'s contract never says to start `watch` again, and `status` and doctor report a version-mismatched daemon as healthy.
+50. **DRM-56** (T131-10, T131-11, T131-15): `archive` logs an unpin before writing it, `dreamd.log` is 0644 (v1.2 F05), and EPIPE exits 1 or panics.
+51. **DRM-57** (T131-12): README's `git revert` of a dream cycle fails while the log is modified (docs).
 
 **Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
 

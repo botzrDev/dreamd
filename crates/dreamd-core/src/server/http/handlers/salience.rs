@@ -26,11 +26,13 @@ pub(crate) async fn get_salience(
 
     // Same reader resolution as `get_recall`: clone out so the `runtimes` mutex
     // is not held across the scan.
-    let reader =
-        match state.with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone()) {
-            Ok(r) => r,
-            Err(e) => return error_500(&format!("index open failed: {e}")),
-        };
+    let reader = match state
+        .with_index_handle(std::path::Path::new(&entry.root), |h| h.reader().clone())
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return error_500(&format!("index open failed: {e}")),
+    };
 
     let observability_dir = crate::layout::AgentRoot::new(&entry.root)
         .dreamd_dir()

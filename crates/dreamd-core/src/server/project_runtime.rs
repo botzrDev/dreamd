@@ -13,7 +13,7 @@
 //! indexer task is gone.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::layout::AgentRoot;
 use crate::server::index_map::{IndexError, IndexHandle};
@@ -21,6 +21,13 @@ use crate::server::lifecycle::{Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 use crate::server::project_resource_map::ProjectMapResource;
 use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 use crate::writer_lock::{WriterKind, WriterLock, WriterLockError};
+
+/// How long [`ProjectRuntime::open_for_watch`] waits while this process's own
+/// `watch` still holds the project writer lock (DRM-50).
+pub(crate) const OWN_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The pause between two tries within [`OWN_LOCK_WAIT`].
+pub(crate) const OWN_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// A project's coordinator and index, opened under one writer lock.
 pub struct ProjectRuntime {
@@ -38,10 +45,34 @@ impl ProjectRuntime {
     /// [`WriterLockError`] `Display`. A failed recovery keeps its
     /// [`IndexError::Wal`] shape.
     pub fn open(agent_root: &AgentRoot, kind: WriterKind) -> Result<Self, IndexError> {
-        let lock = WriterLock::acquire(agent_root, kind).map_err(|e| match e {
-            WriterLockError::Recover(e) => IndexError::Wal(e.to_string()),
-            other => IndexError::WriterLock(other.to_string()),
-        })?;
+        let lock = WriterLock::acquire(agent_root, kind).map_err(lock_error)?;
+        Self::open_locked(agent_root, lock)
+    }
+
+    /// [`Self::open`] for `dreamd watch`'s per-project runtimes
+    /// ([`WriterKind::Watch`]).
+    ///
+    /// When this process's own `watch` holds the writer lock, the holder is a
+    /// runtime the daemon released whose tasks have not ended yet: each keeps
+    /// a lock clone until the executor polls it (DRM-49 §8 H1). This waits for
+    /// them, trying again every [`OWN_LOCK_RETRY`] for at most
+    /// [`OWN_LOCK_WAIT`], and yields between tries so they can run. Any other
+    /// holder is refused at once, as [`Self::open`] refuses it.
+    pub(crate) async fn open_for_watch(agent_root: &AgentRoot) -> Result<Self, IndexError> {
+        let deadline = tokio::time::Instant::now() + OWN_LOCK_WAIT;
+        let lock = loop {
+            match WriterLock::acquire(agent_root, WriterKind::Watch) {
+                Ok(lock) => break lock,
+                Err(e) if e.held_by_this_watch() && tokio::time::Instant::now() < deadline => {}
+                Err(e) => return Err(lock_error(e)),
+            }
+            tokio::time::sleep(OWN_LOCK_RETRY).await;
+        };
+        Self::open_locked(agent_root, lock)
+    }
+
+    /// Open the index under `lock`, then start the coordinator wired to it.
+    fn open_locked(agent_root: &AgentRoot, lock: WriterLock) -> Result<Self, IndexError> {
         let index = Arc::new(TantivyIndexHandle::open(
             agent_root,
             &lock,
@@ -83,6 +114,16 @@ impl ProjectRuntime {
     pub async fn shutdown(self) {
         crate::server::watch::drain_daemon(self.supervisor, Some(self.index)).await;
         drop(self.lock);
+    }
+}
+
+/// A refused lock as an [`IndexError`]: a failed recovery keeps its
+/// [`IndexError::Wal`] shape, and anything else is [`IndexError::WriterLock`]
+/// carrying the [`WriterLockError`] `Display`.
+fn lock_error(e: WriterLockError) -> IndexError {
+    match e {
+        WriterLockError::Recover(e) => IndexError::Wal(e.to_string()),
+        other => IndexError::WriterLock(other.to_string()),
     }
 }
 

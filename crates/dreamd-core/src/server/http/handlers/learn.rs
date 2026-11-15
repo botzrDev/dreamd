@@ -104,7 +104,10 @@ pub(crate) async fn post_learn(
     // Resolve the coordinator that OWNS this project root (WEG-272),
     // then build and dispatch. Routing on `project.root` is what keeps a
     // `POST /learn` for project B out of the boot project's JSONL.
-    let supervisor = match state.resolve_supervisor(std::path::Path::new(&project.root)) {
+    let supervisor = match state
+        .resolve_supervisor(std::path::Path::new(&project.root))
+        .await
+    {
         Ok(s) => s,
         Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
     };

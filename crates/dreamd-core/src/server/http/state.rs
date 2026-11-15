@@ -1,5 +1,6 @@
 //! `AppState` — shared Axum state and WEG-272 multi-project routing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -12,7 +13,6 @@ use crate::server::{AppendMark, CommitMark};
 use crate::server::{
     IndexError, ProjectResourceMap, ProjectRuntime, Supervisor, TantivyIndexHandle,
 };
-use crate::writer_lock::WriterKind;
 
 /// Shared application state cloned into every Axum request via
 /// `State<AppState>`. All fields behind `Arc` so cloning is cheap.
@@ -36,6 +36,9 @@ use crate::writer_lock::WriterKind;
 /// that index, so the three open and evict as one entry. `Mutex` (not
 /// `RwLock`) because every lookup mutates LRU ordering. A runtime is not
 /// opened under this lock; see `AppState::with_runtime` (AILAB-186).
+///
+/// `opening` — one gate per root, so one request at a time opens that root's
+/// runtime (DRM-50).
 ///
 /// `daemon_uid` — UID of the process that started the daemon. Used by
 /// `peer_uid_middleware` (WEG-72) to reject connections from other users.
@@ -69,6 +72,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Lazy per-project lock + index + coordinator (LRU + idle eviction).
     pub runtimes: Arc<Mutex<ProjectResourceMap<ProjectRuntime>>>,
+    /// One open at a time per root (DRM-50); see `AppState::with_runtime`.
+    pub(crate) opening: Arc<OpenGates>,
     /// Daemon process UID for `peer_uid_middleware` (WEG-72).
     pub daemon_uid: u32,
     /// Pinned boot-project index handle; `None` only in tests.
@@ -91,6 +96,7 @@ impl AppState {
             supervisor: Arc::new(supervisor),
             config: Arc::new(config),
             runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
+            opening: Arc::default(),
             daemon_uid,
             primary: None,
             auth_json: None,
@@ -128,21 +134,23 @@ impl AppState {
 
     /// Resolve the live [`ProjectRuntime`] for `root` and run `f` against it.
     ///
-    /// A hit is touched and `f` runs under the `runtimes` mutex. On a miss the
-    /// mutex is **released before** [`ProjectRuntime::open`] runs, then re-taken
-    /// to publish the result (AILAB-186). `open` takes the project writer lock,
-    /// runs WAL recovery, runs the index coverage pass (indexing every log id
-    /// the index lacks), issues a Tantivy commit, allocates a 50 MB
+    /// A hit is touched and `f` runs under the `runtimes` mutex. A miss opens
+    /// the runtime with the `runtimes` mutex **released** (AILAB-186), then
+    /// re-takes it to publish the result. The open takes the project writer
+    /// lock, runs WAL recovery, runs the index coverage pass (indexing every
+    /// log id the index lacks), issues a Tantivy commit, allocates a 50 MB
     /// `IndexWriter` and starts a coordinator; holding the map lock across that
     /// would block every *other* project's requests for its duration.
     ///
-    /// That window is racy by construction — two first-touches of one root can
-    /// both try to open. The project writer lock refuses the second, and
-    /// [`ProjectResourceMap::insert_or_adopt`] settles any pair that both
-    /// opened: the runtime already in the map wins and the loser is released,
-    /// never leaked. If this caller's open *fails*, the map is re-checked before the
-    /// error is surfaced, so a caller that lost the race to a concurrent opener
-    /// still gets the winner's runtime.
+    /// One request at a time opens a given root (DRM-50). A miss takes the
+    /// root's gate in `opening` and checks the map again under it, so a request
+    /// that waited behind another request's open gets the runtime that request
+    /// published. Without the gate, every request but the first was refused by
+    /// the writer lock the first one held while it opened. The gate is per
+    /// root, so an open never holds up another root's requests.
+    ///
+    /// [`ProjectRuntime::open_for_watch`] waits, for a bounded time, while a
+    /// runtime this map released for `root` still holds its writer lock.
     ///
     /// Recovery runs only here, on the open. A request for a project whose
     /// runtime is live never recovers it, because a WAL on a live project
@@ -150,7 +158,7 @@ impl AppState {
     ///
     /// `f` does cheap, non-blocking work only — clone what it needs and return
     /// it; never hold the returned value's work across the `runtimes` mutex.
-    fn with_runtime<T>(
+    async fn with_runtime<T>(
         &self,
         root: &Path,
         f: impl FnOnce(&ProjectRuntime) -> T,
@@ -163,19 +171,19 @@ impl AppState {
             }
         }
 
-        // No lock is held from here to the re-lock below — the open is the only
-        // thing between them.
-        let opened =
-            match ProjectRuntime::open(&crate::layout::AgentRoot::new(root), WriterKind::Watch) {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    let mut map = self.lock_runtimes()?;
-                    return match map.get_mut(root) {
-                        Some(runtime) => Ok(f(runtime)),
-                        None => Err(e),
-                    };
-                }
-            };
+        let gate = self.opening.gate(root)?;
+        let _opening = gate.lock().await;
+
+        // A request that held the gate before this one may have published.
+        {
+            let mut map = self.lock_runtimes()?;
+            if let Some(runtime) = map.get_mut(root) {
+                return Ok(f(runtime));
+            }
+        }
+
+        // Only this root's gate is held across the open.
+        let opened = ProjectRuntime::open_for_watch(&crate::layout::AgentRoot::new(root)).await?;
 
         let mut map = self.lock_runtimes()?;
         Ok(f(map.insert_or_adopt(root, opened)))
@@ -190,7 +198,7 @@ impl AppState {
     ///
     /// A root that is not the pinned boot project opens a [`ProjectRuntime`],
     /// which holds that project's index.
-    pub(crate) fn with_index_handle<T>(
+    pub(crate) async fn with_index_handle<T>(
         &self,
         root: &Path,
         f: impl FnOnce(&TantivyIndexHandle) -> T,
@@ -201,7 +209,7 @@ impl AppState {
             }
         }
 
-        self.with_runtime(root, |runtime| f(runtime.index()))
+        self.with_runtime(root, |runtime| f(runtime.index())).await
     }
 
     /// What a recall on `root` needs (BZR-1437): the index's reader, its
@@ -209,7 +217,7 @@ impl AppState {
     /// It pairs as `live_marks` does: `primary` with the boot supervisor for
     /// the boot root, otherwise `root`'s runtime, opened on a miss. Every part
     /// is a clone, so no lock is held across the flush or the search.
-    pub(crate) fn recall_target(
+    pub(crate) async fn recall_target(
         &self,
         root: &Path,
     ) -> Result<(RecallReader, RecallFlusher, u64), IndexError> {
@@ -230,6 +238,7 @@ impl AppState {
                 runtime.supervisor().append_mark().appended,
             )
         })
+        .await
     }
 
     /// The marks of `root`'s coordinator and index, as one wired pair: `primary`
@@ -240,7 +249,10 @@ impl AppState {
     /// The commit mark is read before the append mark, so `appended` is never
     /// older than `committed_appends` (BZR-1243).
     #[cfg(unix)]
-    pub(crate) fn live_marks(&self, root: &Path) -> Result<(CommitMark, AppendMark), IndexError> {
+    pub(crate) async fn live_marks(
+        &self,
+        root: &Path,
+    ) -> Result<(CommitMark, AppendMark), IndexError> {
         if let Some((primary_root, handle)) = self.primary.as_ref() {
             if primary_root.as_path() == root {
                 let commit = handle.commit_mark();
@@ -251,6 +263,7 @@ impl AppState {
             let commit = runtime.index().commit_mark();
             (commit, runtime.supervisor().append_mark())
         })
+        .await
     }
 
     /// Resolve the coordinator that owns `root` (WEG-272).
@@ -264,7 +277,10 @@ impl AppState {
     ///
     /// Returns the same `Arc<Supervisor>` for repeated calls on one live root,
     /// so two writers never open the same `AGENT_LEARNINGS.jsonl`.
-    pub(crate) fn resolve_supervisor(&self, root: &Path) -> Result<Arc<Supervisor>, IndexError> {
+    pub(crate) async fn resolve_supervisor(
+        &self,
+        root: &Path,
+    ) -> Result<Arc<Supervisor>, IndexError> {
         match self.primary.as_ref() {
             // No pinned project (tests only) → the one coordinator.
             None => return Ok(self.supervisor.clone()),
@@ -276,5 +292,21 @@ impl AppState {
         }
 
         self.with_runtime(root, |runtime| Arc::clone(runtime.supervisor()))
+            .await
+    }
+}
+
+/// One async gate per project root, so one request at a time opens a root's
+/// runtime (DRM-50). A root's gate is made on its first miss and never
+/// removed: there is one per root the daemon has opened, and each is an empty
+/// async mutex.
+#[derive(Default)]
+pub(crate) struct OpenGates(Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>);
+
+impl OpenGates {
+    /// `root`'s gate, made on first use.
+    fn gate(&self, root: &Path) -> Result<Arc<tokio::sync::Mutex<()>>, IndexError> {
+        let mut gates = self.0.lock().map_err(|_| IndexError::LockPoisoned)?;
+        Ok(Arc::clone(gates.entry(root.to_path_buf()).or_default()))
     }
 }
