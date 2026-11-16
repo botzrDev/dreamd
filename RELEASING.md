@@ -278,7 +278,7 @@ it is the highest version. After that install works, yank the reservation so a
 pinned `0.0.0` cannot be fetched again:
 
 ```sh
-cargo yank -p dreamd --version 0.0.0
+cargo yank --version 0.0.0 dreamd
 ```
 
 docs.rs builds `dreamd` and `dreamd-core` without the `vectors` feature
