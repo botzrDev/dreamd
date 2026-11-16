@@ -1052,10 +1052,10 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
 /// search can name it.
 const FIRST_LESSON_SKILL: &str = "setup::first_lesson";
 
-/// The Cursor rule `setup` writes. The adapter file is the source, so a manual
-/// copy and a setup write cannot drift.
-const CURSOR_RECALL_RULE: &str =
-    include_str!("../../../../adapters/cursor/.cursor/rules/dreamd-recall.mdc");
+/// The Cursor rule `setup` writes. The bytes live in this crate so a crates.io
+/// build can compile them. `adapters/cursor/.cursor/rules/dreamd-recall.mdc`
+/// is the copy people read; `cursor_rule_matches_adapter` keeps the two equal.
+const CURSOR_RECALL_RULE: &str = include_str!("../../assets/dreamd-recall.mdc");
 
 const CLAUDE_BLOCK_START: &str = "<!-- dreamd:start -->";
 const CLAUDE_BLOCK_END: &str = "<!-- dreamd:end -->";
@@ -2053,6 +2053,15 @@ mod tests {
             !rendered.contains("What has dreamd remembered"),
             "a stored sentence replaces the generic verify line; got: {rendered}"
         );
+    }
+
+    #[test]
+    fn cursor_rule_matches_adapter() {
+        let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../adapters/cursor/.cursor/rules/dreamd-recall.mdc");
+        let on_disk = std::fs::read_to_string(&adapter)
+            .unwrap_or_else(|e| panic!("read {}: {e}", adapter.display()));
+        assert_eq!(on_disk, CURSOR_RECALL_RULE);
     }
 
     #[test]

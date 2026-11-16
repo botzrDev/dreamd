@@ -1,11 +1,23 @@
 [package]
 name = "dreamd-core"
-description = "Core engine for dreamd: storage, indexing, and dream consolidation."
+description = "Engine behind the dreamd binary: episodic store, BM25 recall, dream cycle."
+keywords = ["ai", "mcp", "agents", "memory", "search"]
+categories = ["development-tools"]
+documentation = "https://docs.rs/dreamd-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 authors.workspace = true
+readme.workspace = true
+
+# `vectors` downloads a model at compile time. docs.rs should build the engine
+# people link, not that optional embedder.
+[package.metadata.docs.rs]
+all-features = false
+features = ["mcp-http"]
 
 [lints]
 workspace = true

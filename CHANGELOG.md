@@ -6,7 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-11-15
+## [1.3.1] - 2026-11-16
 
 A patch release. A failed dream cycle no longer blocks the next one, an event's content can no longer forge a lesson, the first requests to a project no longer fail on the daemon's own writer lock when they arrive together or after the project idles, and an idle `dreamd mcp` session no longer holds a connection to the daemon. Recall is still BM25 × salience. No store migration or index rebuild is needed.
 

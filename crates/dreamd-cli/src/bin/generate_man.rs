@@ -1,6 +1,6 @@
 //! Regenerate `docs/dreamd.1` from the clap definition in `cli.rs`.
 //!
-//! Run: `cargo run -p dreamd --bin generate_man`
+//! Run: `cargo run -p dreamd --features manpage --bin generate_man`
 
 use std::fs;
 use std::path::PathBuf;

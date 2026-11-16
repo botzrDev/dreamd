@@ -2,4 +2,4 @@
 # Regenerate docs/dreamd.1 from clap definitions.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo run -p dreamd --bin generate_man --quiet
+cargo run -p dreamd --features manpage --bin generate_man --quiet

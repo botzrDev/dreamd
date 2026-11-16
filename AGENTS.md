@@ -125,7 +125,7 @@ Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle
 
 Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
 
-On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag `v1.2.2` is `d581785` (2026-11-04, Latest; cut from `v1.2.1`, and not an ancestor of `main`). npm `dreamd-mcp` is `1.2.2` on both `latest` and `next`, and the MCP registry's latest is 1.2.2 (checked 2026-11-04). `main` took the 1.2.2 version from one separate commit, not from a merge of the release branches, which Austin chose to delete once `main` had 1.2.2. Tag `v1.3.0` is `72f7201` (2026-11-07, Latest). It was released from `main`, so it is an ancestor of `main`, and the manifest-fill merge is `bcfa479`. npm `dreamd-mcp` is `1.3.0` on both `latest` and `next`, and the MCP registry's latest is 1.3.0 (checked 2026-11-07). Tag and publish stay human unless Austin hands a step to the agent, as he did for 1.3.0's tag, fill merge and GitHub release.
+On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag `v1.2.2` is `d581785` (2026-11-04, Latest; cut from `v1.2.1`, and not an ancestor of `main`). npm `dreamd-mcp` is `1.2.2` on both `latest` and `next`, and the MCP registry's latest is 1.2.2 (checked 2026-11-04). `main` took the 1.2.2 version from one separate commit, not from a merge of the release branches, which Austin chose to delete once `main` had 1.2.2. Tag `v1.3.0` is `72f7201` (2026-11-07, Latest). It was released from `main`, so it is an ancestor of `main`, and the manifest-fill merge is `bcfa479`. npm `dreamd-mcp` is `1.3.0` on both `latest` and `next`, and the MCP registry's latest is 1.3.0 (checked 2026-11-07). Tag and publish stay human unless Austin hands a step to the agent, as he did for 1.3.0's tag, fill merge and GitHub release. Tag `v1.3.1` is `cc6c36a` (2026-11-16, Latest). It was released from `main`, so it is an ancestor of `main`, and the manifest-fill merge is `7f65340`. npm `dreamd-mcp` is `1.3.1` on both `latest` and `next`, and the MCP registry's latest is 1.3.1 (checked 2026-11-16). Austin ran every 1.3.1 tag, merge and publish step himself.
 
 Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
 
@@ -141,7 +141,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-11-06
+**Last updated:** 2026-11-16
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.27; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -154,13 +154,13 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 **Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
 **Memory location:** `AGENTS.md` (this file) — drift catalog section below, plus the build-order section
 **Main branch:** `main`
-**Tracker:** the ticket ids in this file (`DRM-<n>` for tickets filed from 2026-11-13, `BZR-<n>` before that, and the older `AILAB-<n>` and `WEG-<n>`) are the maintainers' tracker ids. The tracker is not part of this repository. Live work is project **dreamd-hardening**, in the order of the build-order section below. Shipped history is project **dreamd-eng**. Project **R&D** was canceled on 2026-10-21; do not file there.
+**Tracker:** the ticket ids in this file (`DRM-<n>` for tickets filed from 2026-11-13, `BZR-<n>` before that, and the older `AILAB-<n>` and `WEG-<n>`) are the maintainers' tracker ids. The tracker is not part of this repository. Live work is projects **dreamd-hardening** (through 1.5, plus the 2.0 removals) and **deep-recall** (1.6, 1.7, Benchmark v0 and 2.0), in the order of the build-order section below. Shipped history is project **dreamd-eng**. Project **R&D** was canceled on 2026-10-21; do not file there.
 
 ---
 
 ## Build order — dreamd-hardening (2026-10-24)
 
-The response to the 2026-10-24 architecture audit of `c241538`. Tracker project **dreamd-hardening**. Each issue is `blockedBy` the one above it. **Do not start a ticket until every ticket above it has landed.** One ticket at a time. The user runs commits. Each ticket's contract is its `assignments/BZR-<n>.v2.md`, written just in time against the live tree; the ticket's acceptance criteria are a summary. The PM keeps the plan at `~/.claude/plans/plan-out-the-response-groovy-otter.md`.
+The response to the 2026-10-24 architecture audit of `c241538`. Tracker project **dreamd-hardening**; from milestone 1.6 on, the order continues in tracker project **deep-recall**. Each issue is `blockedBy` the one above it. **Do not start a ticket until every ticket above it has landed.** One ticket at a time. The user runs commits. Each ticket's contract is its `assignments/BZR-<n>.v2.md`, written just in time against the live tree; the ticket's acceptance criteria are a summary. The PM keeps the plan at `~/.claude/plans/plan-out-the-response-groovy-otter.md`.
 
 Locked 2026-10-24:
 - Recall `recurrence` is the all-time subtree count: live episodic events whose `skill_action` equals the doc's key or extends it with `::`. Promotion stays windowed.
@@ -590,7 +590,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
 
 **Milestone 1.3.1 patch** (tracker milestone, filed 2026-11-07 at Austin's call). The bugs come from the PM's triage of the v1.3.0 black-box torture (`assignments/reports/torture-1.3.0.triage.md`). The tester's own findings were withdrawn or minor. The tester also ran `pkill -f "dreamd watch"` with the real HOME and stopped Austin's systemd unit, so the re-run tester works inside a Docker container (`assignments/torture-1.3.0-container.prompt.md`). All three bugs are also in 1.2.2. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract.
 
-39. **BZR-1532** — on `release/v1.3.1` (`eddbfe9`; the commit message does not name the ticket). Austin made that branch from `main` (`70e958d`) at the same second as the commit, 2026-11-09 11:26:12, and pushed it. `main` does not hold `eddbfe9`; how 1.3.1 reaches `main` is BZR-1535's question. A cycle that fails ends in the process that began it:
+39. **BZR-1532** — on `main` (`eddbfe9`; the commit message does not name the ticket). It landed first on `release/v1.3.1`, which Austin made from `main` (`70e958d`) at the same second as the commit, 2026-11-09 11:26:12, and pushed. All five fixes in this milestone (items 39, 40, 41, 43 and 44) landed on that branch, and `main` fast-forwarded to it at `d612f4a` on 2026-11-15, before the 1.3.1 bump (BZR-1535). A cycle that fails ends in the process that began it:
     - `wal::stage_and_commit(root, kind, now, ledger, build)` runs `begin_cycle`, the caller's staging closure, then `commit_cycle`. `dream_cycle::commit`, `forget::cascade` and `consolidation::run_deterministic_dream_cycle` all go through it. No production code outside `wal.rs` calls `begin_cycle` or `commit_cycle`.
     - An error before the commit point (the WAL is not at its path) runs `abort_uncommitted`, which removes the WAL temp and the stage root and sets `failed`, leaving `last_dream_cycle_at`. Each step runs even if an earlier one failed.
     - An error after the commit point is retried once with `roll_forward` (Austin's ruling, 2026-11-08). If the retry fails too, the WAL stays and the next lock acquisition rolls it forward.
@@ -613,7 +613,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     Held for later (spec §8): H1, a second failed roll-forward still gives 409 until restart; H4, an error while removing a committed cycle's stage still answers 500; H5, doctor does not report a stuck `in_progress`.
 
     Spec: `assignments/BZR-1532.v2.md`.
-40. **BZR-1533** — on `release/v1.3.1` (`9fe3878`; the commit message does not name the ticket). No event content or model body can end a lesson block or open one:
+40. **BZR-1533** — on `main` (`9fe3878`; the commit message does not name the ticket). No event content or model body can end a lesson block or open one:
     - `render_lessons_file` writes a body line that is zero or more `\` and then exactly `<!-- /dreamd:lesson -->` with one more `\`, and `parse_lesson_block` removes one. Every other body line is written as is (Austin's ruling, 2026-11-09: escape on render, no ingress rejection). The three private helpers are `is_close_marker_line`, `escape_body_line` and `unescape_body_line`.
     - A planned `LESSONS.md` that does not parse back now fails with `ConsolidationError::Lessons`, whose message names `LESSONS.md`. `Io` still covers the log read and the sidecar. The parse-back at `plan.rs:115` stays.
     - `SPEC.md` records the escape as a v0.2 clarification, with no version bump. `docs/spec/schemas.md` says the same.
@@ -643,7 +643,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - H3: BZR-1475 and BZR-1498 should mention this fix.
 
     Spec: `assignments/BZR-1533.v2.md`.
-43. **DRM-49** — on `release/v1.3.1` (`ce2e947`; the commit message does not name the ticket). The first request to a non-boot project after 30 idle minutes got 500 `project writer lock is held by pid <the daemon's own pid> (watch)`. Filed 2026-11-13, after the PM saw it on Austin's 1.3.0 daemon; it is not from the torture.
+43. **DRM-49** — on `main` (`ce2e947`; the commit message does not name the ticket). The first request to a non-boot project after 30 idle minutes got 500 `project writer lock is held by pid <the daemon's own pid> (watch)`. Filed 2026-11-13, after the PM saw it on Austin's 1.3.0 daemon; it is not from the torture.
     - `ProjectResourceMap`'s idle pass runs before each lookup and releases the root the request asked for. `with_runtime` then reopens it at once, while the released coordinator and indexer tasks still hold their writer lock clones. A retry works once the tasks end.
     - Every release since 1.2.0 has it: the runtimes have held the lock since BZR-1232 (`17e8382`).
     - The fix spares the requested root in `get_mut`, `get_or_insert` and `insert_or_adopt`, which also covers in-process `dreamd mcp`'s index map. Spec: `assignments/DRM-49.v2.md` (base `9fe3878`). The PM's reference build and mutants are `assignments/reports/DRM-49.pm-reference.py` and `DRM-49.pm-mutants.py`.
@@ -654,12 +654,12 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
       - the production code equals the PM's reference build apart from one rustdoc line wrap.
     - The commit also removes tracker links from three docs (spec Amendment 1). The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
     - Held for later (spec §8): H1, a root released by another root's request and asked for again before its tasks end can still be refused; H2, the refusal names the daemon's own pid as if a second writer held the lock.
-41. **BZR-1534** — on `release/v1.3.1` (`7384c06`; base `ce2e947`, spec Amendment 1). All five paths equal the signed-off blobs. Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
+41. **BZR-1534** — on `main` (`7384c06`; base `ce2e947`, spec Amendment 1). All five paths equal the signed-off blobs. Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
     - New test `crates/dreamd-cli/tests/mcp_probe_closes.rs` spawns the binary against a fake daemon and asserts the first connection closes before any MCP message.
     - PM verification (`assignments/reports/BZR-1534.verify.r0.md`): workspace 1485 / 0 / 0, all features 1489 / 0 / 0; red-first and M1–M3 fail test 1 with `left: (0, StillOpen)`; `pm1534-probe.py` shows 0 daemon connections, idle and after tool calls; `mcp/mod.rs` equals the PM's reference build.
     - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the tree.
     - Held for later (spec §8): H1, the daemon's `serve_connection` has no idle timer.
-44. **DRM-50** — on `release/v1.3.1` (`7a30ac5`; base `7384c06`). Filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reached a project the daemon had not loaded at the same moment, all but one got `500 … project writer lock is held by pid <the daemon's own pid> (watch)`, and over MCP the failed call could be an `append_node`. `with_runtime` dropped the map mutex before `ProjectRuntime::open`, so the loser failed on the lock before the winner published. It was reached at a session's first parallel tool calls, after an LRU release and after an idle release, and it is in 1.3.0 too.
+44. **DRM-50** — on `main` (`7a30ac5`; base `7384c06`). Filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reached a project the daemon had not loaded at the same moment, all but one got `500 … project writer lock is held by pid <the daemon's own pid> (watch)`, and over MCP the failed call could be an `append_node`. `with_runtime` dropped the map mutex before `ProjectRuntime::open`, so the loser failed on the lock before the winner published. It was reached at a session's first parallel tool calls, after an LRU release and after an idle release, and it is in 1.3.0 too.
     - `AppState::with_runtime` is `async`. A miss takes the root's gate (`OpenGates` in `AppState::opening`, one `tokio::sync::Mutex` per root) and checks the map again under it, so requests for one root open it once and share the result. An open never holds up another root's requests.
     - `ProjectRuntime::open_for_watch` retries every 10 ms, for at most 2 s (`OWN_LOCK_WAIT`), while the lock's holder is this process's own `watch` (`WriterLockError::held_by_this_watch`): a released runtime whose tasks have not ended. That closes DRM-49 §8 H1 (Austin, 2026-11-14). Any other holder is refused at once, as before.
     - The four resolvers (`with_index_handle`, `recall_target`, `live_marks`, `resolve_supervisor`) are `async`, and the six handler call sites await them.
@@ -671,12 +671,29 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - Spec Amendment 1: there are 13 existing resolver calls in `tests.rs`, not 11, and `observability::tests::a_set_dreamd_log_replaces_both_defaults` is a pre-existing flake.
     - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
     - Held for later (spec §8): H1 (DRM-49 §8 H2), after the 2 s bound the 500 still names the daemon's own pid; H2, Windows `watch` does not wait; H3, a same-pid `watch` in another PID namespace is waited on for 2 s; H4, a root's gate is never removed.
-42. **BZR-1535**: 1.3.1 release prep (hitl).
+42. **BZR-1535** (DRM-48 in the tracker): 1.3.1 release prep (hitl). **Released 2026-11-16.**
     - The container torture ran on 2026-11-14 against a musl build of `7384c06`. Prompt: `assignments/torture-1.3.1-container.prompt.md`. PM triage: `assignments/reports/torture-1.3.1.triage.md`.
     - The four fixes hold. All 15 findings were confirmed by a PM re-run, and each is also in 1.3.0.
-    - T131-02 is DRM-50 above. The rest are milestone 1.3.2 patch.
+    - T131-02 is DRM-50 above. The rest are milestone 1.5 below.
+    - **Austin's rulings (2026-11-15):** fast-forward `main` to `release/v1.3.1` and bump on `main`, as for 1.3.0, so CI runs on the five fixes before the tag; BZR-1533's bullet goes first, under `### Security`. The spec dated the release 2026-11-15. It went out on 2026-11-16, so `CHANGELOG.md` and README's history row moved to that date afterwards.
+    - **The bump:** `9ec287b`, Austin's commit, with 19 paths. The 18 that are not `Cargo.lock` equal the PM's reference build (`assignments/reports/DRM-48.pm-reference.py`). `SECURITY.md`'s table now names 1.3.x and `main`, and `RELEASING.md` lists `SECURITY.md` as a version surface. All features 1497 / 0 / 0; `node --test` 44 / 45, the one failure being the allowed `PENDING` check; alpha suites 30 / 0, 7 / 0 and 14 / 0; stripped glibc `dreamd` 21,996,320 bytes; `recall_gate.py` passes all three rows. The commit has no `Signed-off-by:` line; CI's DCO job runs on PRs only. Report: `assignments/reports/DRM-48.r0.md`.
+    - **CI on the bump** (run 43781061161) failed in three jobs, none caused by the bump:
+      - Lint, on an `ort-sys` ONNX Runtime download (`Peer disconnected`). Lint gates the other jobs, so they were skipped.
+      - `cargo audit`, on RUSTSEC-2026-0538 (`quinn-udp` 0.5.15, a `Cargo.lock` entry no build compiles). `cargo update -p quinn-udp` took it to 0.5.16; the Linux and macOS dependency graphs are unchanged.
+      - `cargo audit` and `cargo deny`, on RUSTSEC-2026-0462 (`rmcp` 1.7.0, Streamable HTTP clients). dreamd compiles no rmcp client transport, and the fix is only in rmcp ≥ 3.9.0, so Austin waived it, in `deny.toml` and `.cargo/audit.toml`, until the move to rmcp 3.x (DRM-94). `docs/ci.md` names the waiver.
 
-**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-14 at Austin's call). These are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. DRM-51 is `blockedBy` BZR-1535.
+      `cc6c36a` holds the `quinn-udp` bump and the waiver (report `assignments/reports/DRM-48.r1.md`). Its CI run 43870227488 passed, apart from the placeholder shim test and the known red `Test (windows-latest)`.
+    - **The release:**
+      - tag `v1.3.1` (lightweight) is `cc6c36a`;
+      - `release.yml` run 43872546048 built all four targets, and its "Open PR" step failed as on earlier releases. Austin opened PR #65 from the bot's `chore/mcp-manifest-v1.3.1` (`26c1db8`, `manifest.json` only) and merged it `--merge --admin` as `7f65340`;
+      - every manifest sha equals the sha256 of its extracted binary. The `linux-x86_64` binary is static-pie musl, 22,709,784 bytes;
+      - the GitHub release was published 14:08:27Z and is Latest. Its body is the CHANGELOG `[1.3.1]` block;
+      - npm `dreamd-mcp@1.3.1` was published 14:13:58Z from `7f65340` (shasum `021a65f1…`). `latest` and `next` are 1.3.1, and the MCP registry's 1.3.1 is latest (14:30:38Z);
+      - the packed shim passed `version` and `setup --yes` in four clean containers before the publish, and the published package passed in the same four after it.
+    - **Who ran what:** Austin ran every commit and push, the tag, the fill merge, the GitHub release, the npm publish and dist-tag, and the MCP registry login and publish. At his instruction, the PM fast-forwarded the local `main` and wrote the bump and waiver files for his commits.
+    - Under WSL, `npm publish` and `npm dist-tag add` need `--no-browser` too, not only `npm login`; RELEASING.md step 6 now says so.
+
+**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. They are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-52 → … → DRM-57 → DRM-90. Whether the version is 1.5.0, skipping 1.4, is settled at the bump.
 
 45. **DRM-51** (T131-01): a daemon keeps writing a store deleted under it. `git clean -fdX` removes the gitignored `/.agent/.dreamd/`, and that reaches it, boot project included; so do setup's Undo lines followed by setup again.
     - On its own, new appends go unindexed until a restart.
@@ -694,12 +711,61 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
 49. **DRM-55** (T131-07, T131-08): `update`'s contract never says to start `watch` again, and `status` and doctor report a version-mismatched daemon as healthy.
 50. **DRM-56** (T131-10, T131-11, T131-15): `archive` logs an unpin before writing it, `dreamd.log` is 0644 (v1.2 F05), and EPIPE exits 1 or panics.
 51. **DRM-57** (T131-12): README's `git revert` of a dream cycle fails while the log is modified (docs).
+52. **DRM-90** — 1.5 release prep (hitl).
+
+**Milestone 1.6 source receipts** (tracker project **deep-recall**, target 2027-01-10). Planned: none of it is in the tree. DRM-90 blocks DRM-66, and the rest run in this order:
+
+53. **DRM-66** — exact recall: no recency term, and it searches the decay archive.
+54. **DRM-64** — spec: SPEC v0.3 source pointers, computed tiers, supersession and the observation store.
+55. **DRM-65** — an event with a code pointer recalls as CITED.
+56. **DRM-67** — every recall hit shows the cue it matched and any conflicting record.
+57. **DRM-68** — `dreamd capture`: store a content-hashed blob and record an observation that points at it.
+58. **DRM-69** — `dreamd setup` installs a Claude Code hook that captures tool output and diffs.
+59. **DRM-70** — export and import source blobs for another machine.
+60. **DRM-71** — record the 1.6 demo: a 90-day-old detail recalled with its source span and tier.
+61. **DRM-91** — 1.6 release prep (hitl).
+
+The planned tiers are VERBATIM (captured bytes), CITED (the pointer resolves and its hash matches; the claim itself is not checked), REPORTED, and INFERRED (every lesson). A tier is computed at recall, not stored. Until DRM-91 ships them, "Trust labels are direction, not shipped" at the top of this file stands: do not describe a tier as shipped.
+
+**Milestone 1.7 outcome trace and declared loss** (tracker project **deep-recall**, target 2027-02-14). Planned. DRM-58 to DRM-61 moved here from 1.5 on 2026-11-15. DRM-91 blocks DRM-58.
+
+62. **DRM-58** — record which lessons a search served.
+63. **DRM-59** — report success or failure against a serve.
+64. **DRM-60** — `blame --outcome` names the lessons a failure was served.
+65. **DRM-61** — quarantine a lesson so recall drops it, and undo that.
+66. **DRM-62** — quarantine a cluster so a re-promoted lesson stays hidden. Blocked by DRM-61 only; it blocks nothing.
+67. **DRM-63** — design: revise a bad lesson (rewrite it, unpin its citations, or forget its exemplar). Blocked by DRM-61 only; it blocks nothing.
+68. **DRM-72** — design: the lesson ledger entry (declared invariant, per-event survival, error budget). Blocked by DRM-61.
+69. **DRM-73** — every new lesson gets a ledger entry with its entity survival.
+70. **DRM-74** — `dreamd doctor --ledger` recomputes the lesson ledger from the files.
+71. **DRM-75** — an error budget per cluster: report the spend in the dream response and in doctor.
+72. **DRM-76** — capture tool output in Cursor, as far as Cursor allows.
+73. **DRM-77** — capture tool output in Cline, as far as Cline allows.
+74. **DRM-92** — 1.7 release prep (hitl).
+
+**Milestone Benchmark v0** (tracker project **deep-recall**, target 2027-02-28). Planned. It runs alongside the releases: DRM-78 has no blocker.
+
+75. **DRM-78** — register the deep recall benchmark's predictions and scoring rules.
+76. **DRM-79** — generate coding-agent histories with planted details and ground truth.
+77. **DRM-80** — score dreamd 1.3.0 and raw-transcript BM25 end to end.
+78. **DRM-81**, **DRM-82**, **DRM-83** — one benchmark adapter or baseline each: Mem0 open source, Palinode, and Memorilla on a rented GPU. Each is blocked by DRM-80 only.
+79. **DRM-84** — score dreamd 1.6 against 1.3.0. Blocked by DRM-80 and DRM-91, so a 1.6 slip moves it.
+80. **DRM-85** — publish the harness, the results and the write-up on the same day. Blocked by DRM-81 to DRM-84.
+
+**Milestone 2.0 trust tiers** (tracker project **deep-recall**, target 2027-04-30). Planned. DRM-92 blocks DRM-86.
+
+81. **DRM-86** — promote the source fields into the schema, with a migration.
+82. **DRM-87** — design: one gate for every change to a lesson or a source, with refusals recorded.
+83. **DRM-88** — design: source rules for memory shared between agents.
+84. **DRM-89** — sign the ledger root and the forget receipt.
+85. Then **BZR-1246** (item 17, Milestone 2.0 removal below), which DRM-89 blocks.
+86. **DRM-93** — 2.0 release prep (hitl). Blocked by BZR-1246.
 
 **Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
 
 **Milestone 2.0 removal**
 
-17. **BZR-1246** — remove the deprecated surfaces. Not scheduled.
+17. **BZR-1246** (DRM-17 in the tracker) — remove the deprecated surfaces. Scheduled on 2026-11-15: it ships with 2.0, after DRM-89 and before DRM-93 (Milestone 2.0 trust tiers above).
 
 **Not in the order:** **BZR-1247** is a design issue for one runtime topology (MCP host election). It needs the AILAB-210 founder decision first. Do not implement it.
 
@@ -1150,7 +1216,7 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
 
 ### ticket-ids-and-the-build-order
 
-- **Rule:** dreamd tickets filed from 2026-11-13 have `DRM-<n>` ids (DRM-49 is the first) and no `BZR-<n>`. Earlier ones are `BZR-<n>` (the same numbers as the retired `AILAB-<n>` ids), and the tracker still finds them by that id. Shipped work is project **dreamd-eng**, and live work is project **dreamd-hardening**. Project **R&D** was canceled on 2026-10-21; do not file there or read it as the spine. The order of work is the dreamd-hardening section of this file, not the tracker's milestone progress.
+- **Rule:** dreamd tickets filed from 2026-11-13 have `DRM-<n>` ids (DRM-49 is the first) and no `BZR-<n>`. Earlier ones are `BZR-<n>` (the same numbers as the retired `AILAB-<n>` ids), and the tracker still finds them by that id. Shipped work is project **dreamd-eng**, and live work is projects **dreamd-hardening** and **deep-recall**. Project **R&D** was canceled on 2026-10-21; do not file there or read it as the spine. The order of work is the dreamd-hardening build-order section of this file, which continues into deep-recall's milestones, not the tracker's milestone progress.
 - **Why:** 2026-08-27 look-ahead: a query by the wrong grouping found zero issues while the project still held them. On 2026-09-26 the open spine (827 through 157, plus 207, 210, 149, 152) moved to R&D, so dreamd-eng held only Done, Canceled and Duplicate, and its milestone bars read 100%. The dreamd-eng description still said RFC-011 was proposed; BZR-1075 accepted it the same day.
 - **How to apply:** For the next ticket, take the first item of the dreamd-hardening section that has not landed. Read `DRM-<n>`, or `BZR-<n>` for an older ticket, as the live id. Milestone progress is not evidence that a ticket shipped.
 - **Cross-refs:** `open-ticket-can-already-be-on-main`, `remaining-build-order-2026-09-24`

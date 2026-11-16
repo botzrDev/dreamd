@@ -88,15 +88,15 @@ dreamd needs a project root sentinel (`.git/`, `Cargo.toml`, `package.json` or `
 
 `setup` prompts when it has a TTY. In scripts and non-interactive shells, pass `--yes --harness claude|cursor|both` (`--harness none` or `--no-write-mcp` scaffolds without touching any MCP config).
 
-### Cargo / from source
+### Cargo
 
 ```bash
-git clone https://github.com/botzrDev/dreamd.git
-cd dreamd
-cargo install --path crates/dreamd-cli
+cargo install dreamd --version ^1.3
 ```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
+That requirement skips the `0.0.0` name reservation on crates.io. `1.3.1` is the first version that installs the binary. Rust 1.95.0 or newer.
+
+From a git checkout, `cargo install --path crates/dreamd-cli` builds this tree. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev setup.
 
 ---
 
@@ -191,7 +191,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
-| **v1.3.1** (2026-11-15) | A failed dream cycle no longer blocks the next one; an event's content can no longer forge a lesson; the first requests to a project, at once or after it idles, no longer fail on the daemon's own writer lock; an idle `dreamd mcp` session no longer holds a connection to the daemon |
+| **v1.3.1** (2026-11-16) | A failed dream cycle no longer blocks the next one; an event's content can no longer forge a lesson; the first requests to a project, at once or after it idles, no longer fail on the daemon's own writer lock; an idle `dreamd mcp` session no longer holds a connection to the daemon |
 | **v1.3.0** (2026-11-07) | Recall ranks the event that has a multi-word query's missing words, and a fat `skill_action` parent no longer outweighs a more painful child (`SPEC.md` v0.2); recall hits carry their `id`; the dream cycle's git commit runs again; a client and a daemon of different versions say so |
 | **v1.2.2** (2026-11-04) | `dreamd setup` through npx names `npx -y dreamd-mcp …` commands, and its card lists everything it wrote with an Undo line for each |
 | **v1.2.1** (2026-11-03) | Static Linux binary with no glibc requirement (runs on Ubuntu 20.04 and 22.04, Debian 12 and Alpine); fixes from the 1.2.0 torture session; the npm shim forwards every `dreamd` command |

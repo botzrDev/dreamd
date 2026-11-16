@@ -1,11 +1,17 @@
 [package]
 name = "dreamd-protocol"
-description = "Shared serde types for the dreamd HTTP API and on-disk JSONL records."
+description = "Serde types for dreamd's on-disk JSONL records and HTTP API."
+keywords = ["ai", "mcp", "agents", "memory", "serde"]
+categories = ["development-tools"]
+documentation = "https://docs.rs/dreamd-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 authors.workspace = true
+readme.workspace = true
 
 [lints]
 workspace = true

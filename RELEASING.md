@@ -172,7 +172,7 @@ The merged PR already landed the fill on `main`, so the ff-only merge of a local
 ```sh
 gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
 
-gh release edit vX.Y.Z --repo botzrDev/dreamd --draft=false   # publish; download URLs now resolve
+gh release edit vX.Y.Z --repo botzrDev/dreamd --draft=false --latest   # publish and mark Latest; download URLs now resolve
 ```
 
 (The tag stays at the step-1 commit; `main` HEAD is the step-4 fill commit. This gap
@@ -189,8 +189,10 @@ callers; it is NOT a missing package.
 
 Run every command in this step in your own terminal. Under WSL, npm ignores
 `BROWSER=`; `--no-browser` makes it print the auth URL and poll until you finish in a
-browser. A non-TTY runner (an agent session, or Claude Code's `!` prefix) gets the auth
-URL redacted and npm aborts.
+browser. Every command here that asks for auth takes it, not only `npm login`: without
+it, `npm publish` offers "Press ENTER to open in the browser", and pressing ENTER aborts
+the publish (`Set the BROWSER environment variable`). A non-TTY runner (an agent
+session, or Claude Code's `!` prefix) gets the auth URL redacted and npm aborts.
 
 ```sh
 npm login --auth-type=web --no-browser # open the printed URL; authenticate as dataprime1 with the passkey
@@ -200,8 +202,8 @@ git checkout main && git pull --ff-only   # must contain the step-4 fill commit
 grep -c PENDING packages/dreamd-mcp/manifest.json   # must print 0
 
 cd packages/dreamd-mcp
-npm publish                            # passkey-prompts; moves the `latest` dist-tag to X.Y.Z
-npm dist-tag add dreamd-mcp@X.Y.Z next # keep `next` off any older/broken release
+npm publish --no-browser                            # open the printed URL; passkey; moves `latest` to X.Y.Z
+npm dist-tag add dreamd-mcp@X.Y.Z next --no-browser # keep `next` off any older/broken release
 npm view dreamd-mcp dist-tags          # confirm latest = X.Y.Z (and next)
 ```
 
@@ -245,6 +247,43 @@ again right before you publish, even if you logged in earlier the same day. Full
 (`just mcp-registry-validate`), and the confirming `curl` live in
 `packages/dreamd-mcp/README.md` §Official MCP Registry. Deliberately not
 automated in CI — no workflow holds registry credentials.
+
+## 9. Publish to crates.io — HUMAN ONLY
+
+crates.io is a second install path (`cargo install dreamd`). It does not replace
+npm or the GitHub Release. Do this after step 6, from the commit that is on
+`main` for `X.Y.Z`, with a clean tree. An agent session does not publish.
+
+The `dreamd` name is already owned by `botzrDev`. `0.0.0` (2026-05-08) is a
+reservation, about 5 KB, and it is what `cargo install dreamd` fetches until a
+1.x version exists. `dreamd-core` and `dreamd-protocol` are unpublished.
+
+Publish in dependency order. `cargo publish` uploads the crate and yanks nothing.
+A version can be published once.
+
+```sh
+cargo package -p dreamd-protocol --allow-dirty=false
+cargo package -p dreamd-core
+cargo package -p dreamd
+# log in once: https://crates.io/settings/tokens — not a CI secret
+cargo publish -p dreamd-protocol
+cargo publish -p dreamd-core
+cargo publish -p dreamd
+cargo install dreamd --version ^1.3
+dreamd version
+```
+
+`cargo install dreamd` with no version requirement then selects `X.Y.Z`, because
+it is the highest version. After that install works, yank the reservation so a
+pinned `0.0.0` cannot be fetched again:
+
+```sh
+cargo yank -p dreamd --version 0.0.0
+```
+
+docs.rs builds `dreamd` and `dreamd-core` without the `vectors` feature
+(`[package.metadata.docs.rs]`). Give it a few minutes, then open
+`https://docs.rs/dreamd-protocol` and `https://docs.rs/dreamd`.
 
 ## Why this procedure exists
 

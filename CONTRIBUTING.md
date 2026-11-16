@@ -35,11 +35,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-To run the CLI you just built, name the binary — the `dreamd` package ships two (`dreamd` and `generate_man`), so a bare `cargo run -p dreamd` errors out:
+`cargo run -p dreamd` builds the `dreamd` binary (`default-run`). The man-page helper is a second bin behind the `manpage` feature, so `cargo install dreamd` does not put `generate_man` on your `PATH`:
 
 ```bash
-cargo run -p dreamd --bin dreamd -- --help
-cargo run -p dreamd --bin dreamd -- doctor
+cargo run -p dreamd -- --help
+cargo run -p dreamd -- doctor
+cargo run -p dreamd --features manpage --bin generate_man
 ```
 
 CLI unit tests live in the library target (`cargo test -p dreamd --lib <filter>`); `cargo test -p dreamd --bin dreamd` runs zero tests and still exits 0.
@@ -49,7 +50,7 @@ Repository layout:
 | Path | What |
 |---|---|
 | `crates/dreamd-core/` | Memory engine: Tantivy BM25 index, salience collector, episodic store, coordinator, dream cycle + WAL, HTTP server, MCP server |
-| `crates/dreamd-cli/` | The `dreamd` binary (package name `dreamd`) and the `generate_man` helper |
+| `crates/dreamd-cli/` | The `dreamd` binary (package name `dreamd`). `generate_man` is the `manpage` feature |
 | `crates/dreamd-protocol/` | Shared types: `AgentLearning`, `EventId`, HTTP schemas |
 | `packages/dreamd-mcp/` | Node.js `npx` shim that downloads the prebuilt binary (`node --test` for its tests) |
 | `adapters/` | Per-harness setup files and READMEs |

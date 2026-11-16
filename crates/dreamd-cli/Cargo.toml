@@ -1,12 +1,24 @@
 [package]
 name = "dreamd"
-description = "Portable memory layer for AI coding agents"
+description = "Local-first memory for AI coding agents. One binary, files you can git diff, and an MCP server."
+keywords = ["ai", "mcp", "agents", "memory", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+documentation = "https://docs.rs/dreamd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 readme.workspace = true
+default-run = "dreamd"
+
+# docs.rs builds with `--all-features` unless told otherwise. `vectors` fetches
+# ONNX at compile time and is not part of the install people come here for.
+[package.metadata.docs.rs]
+all-features = false
+features = ["mcp-http"]
 
 [[bin]]
 name = "dreamd"
@@ -16,12 +28,16 @@ path = "src/main.rs"
 name = "generate_man"
 path = "src/bin/generate_man.rs"
 doc = false
+required-features = ["manpage"]
 
 [lints]
 workspace = true
 
 [features]
 default = []
+# `cargo run -p dreamd --features manpage --bin generate_man`. Off by default
+# so `cargo install dreamd` installs the `dreamd` binary and not `generate_man`.
+manpage = []
 # AILAB-206 — `dreamd mcp --bind` Streamable HTTP. Off by default for NFR-2;
 # see `dreamd-core`'s `mcp-http`. Build: `cargo build --release -p dreamd
 # --features mcp-http`.
