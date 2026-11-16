@@ -21,12 +21,11 @@ Security fixes land on `main` and the latest release.
 
 | Version | Supported |
 |---|---|
-| `1.0.x` | Yes |
-| `0.1.1` | Yes |
+| `1.3.x` | Yes |
 | `main` | Yes |
 | Anything else | No |
 
-`1.0.x` is the current release. `0.1.1` stays on this table. Fixes land on `main` and the latest release.
+`1.3.x` is the current release line. Fixes land on `main` and the latest release.
 
 ## Threat model (summary)
 

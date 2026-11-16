@@ -96,6 +96,13 @@ BM25 × salience.
 - **A client and a daemon of different versions say so**, and name the commands
   that fix it.
 
+## Shipped — v1.3.1
+
+- **Fixes**, listed in [`CHANGELOG.md`](CHANGELOG.md). A failed dream cycle no
+  longer blocks the next one, an event's content can no longer forge a lesson,
+  the first requests to a project no longer fail on the daemon's own writer
+  lock, and an idle `dreamd mcp` session no longer holds a connection.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

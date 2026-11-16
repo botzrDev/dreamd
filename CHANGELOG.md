@@ -6,14 +6,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-### Fixed
+## [1.3.1] - 2026-11-15
 
-- **A failed dream cycle no longer blocks the next one until `dreamd watch` restarts** (BZR-1532). A cycle in the daemon that failed before its commit point left `state.json` at `in_progress`. Every later `POST /api/v1/dream` for that project then got `409`. A dream cycle or `dreamd forget` that fails before its commit point now removes its stage and sets `failed` before it returns, and the next cycle runs. An error after the commit point is retried once in the same process. If the retry fails too, the next writer to take the project lock rolls the cycle forward, as before.
+A patch release. A failed dream cycle no longer blocks the next one, an event's content can no longer forge a lesson, the first requests to a project no longer fail on the daemon's own writer lock when they arrive together or after the project idles, and an idle `dreamd mcp` session no longer holds a connection to the daemon. Recall is still BM25 × salience. No store migration or index rebuild is needed.
+
+**Upgrading from 1.3.0.** A client refuses a daemon of another version, so a 1.3.0 `dreamd watch` left running answers every 1.3.1 MCP tool call with `version mismatch: client 1.3.1, daemon 1.3.0` until it stops. Run `npx -y dreamd-mcp update`, which stops the `dreamd mcp` and `dreamd watch` processes under your home and clears the binary cache. Then run `npx -y dreamd-mcp watch` and reload your MCP harness. If a `dreamd service` unit runs the daemon, run `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`. With a cargo-installed `dreamd`, stop the old daemon and run `dreamd watch`. A 1.3.0 binary that reads a `LESSONS.md` written by 1.3.1 shows one more `\` on any escaped line.
+
+### Security
+
 - **An event's content can no longer forge a lesson or fail every dream cycle** (BZR-1533). A lesson body was written as is, so content with `<!-- /dreamd:lesson -->` on a line of its own ended its block early.
   - Content that then opened another block made the cycle write a second lesson naming any event id. That event was pinned, and recall returned the forged text as `lsn_<id>`.
   - Any other text after the marker failed every cycle, with an error that blamed `AGENT_LEARNINGS.jsonl`.
 
   dreamd now writes such a line with one more leading `\` and removes it when it reads the file, so every body round-trips byte for byte. A `LESSONS.md` written by 1.3.0 reads as before, unless a body line is the marker after one or more `\`. A pin that a forged lesson already set stays; `dreamd archive --force-unpin <id>` clears it. When a planned `LESSONS.md` does not parse, the error now names `LESSONS.md`.
+
+### Fixed
+
+- **A failed dream cycle no longer blocks the next one until `dreamd watch` restarts** (BZR-1532). A cycle in the daemon that failed before its commit point left `state.json` at `in_progress`. Every later `POST /api/v1/dream` for that project then got `409`. A dream cycle or `dreamd forget` that fails before its commit point now removes its stage and sets `failed` before it returns, and the next cycle runs. An error after the commit point is retried once in the same process. If the retry fails too, the next writer to take the project lock rolls the cycle forward, as before.
 - **The first request to a project after 30 idle minutes no longer fails** (DRM-49). For a project other than the one `dreamd watch` was started in, the request that found the project's coordinator and index idle for 30 minutes released them, then reopened them at once. The released tasks still held the project's writer lock, so the request got `500` with `project writer lock is held by pid <the daemon's own pid>`. A `search_nodes` or `append_node` after a break could fail this way, and a retry worked. A request now reuses its project's runtime however long it sat idle, and every other idle project is still released.
 - **Requests that reach a project at the same moment no longer fail while it opens** (DRM-50). When two or more requests arrived for a project the daemon had not loaded yet, such as an agent's first parallel tool calls in a session, only the first opened the project. The others got `500` with `project writer lock is held by pid <the daemon's own pid>`, so an `append_node` among them was not saved. The same happened when a project the daemon had just released was asked for again before its old tasks ended. Requests for one project now wait while it opens and then use it, and a project released a moment ago is reopened once its old tasks end, after a wait of at most 2 seconds. Opening one project still never holds up requests for another.
 - **An idle `dreamd mcp` session no longer holds a connection to the daemon** (BZR-1534). When `dreamd mcp` found a running daemon, it kept its reachability check open for the whole session, so every open editor or agent held one idle connection and one task in `dreamd watch`. The check now closes at once. Each tool call opens its own connection, as before.
@@ -392,7 +401,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/botzrDev/dreamd/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/botzrDev/dreamd/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/botzrDev/dreamd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/botzrDev/dreamd/compare/v1.2.0...v1.2.1
