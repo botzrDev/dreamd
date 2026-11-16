@@ -17,7 +17,6 @@ homepage = "https://github.com/botzrDev/dreamd"
 # an older rustc instead of failing deep in a dependency.
 rust-version = "1.95.0"
 authors = ["Austin Green <austin@botzr.com>"]
-readme = "README.md"
 
 [workspace.lints.rust]
 # dreamd handles user data and secrets (auth.json, AGENT_LEARNINGS.jsonl);
