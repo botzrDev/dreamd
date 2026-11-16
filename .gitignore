@@ -11,6 +11,9 @@ context/
 /target
 # Local task/spec assignment files, not repo artifacts
 /assignments
+# Local deep-recall benchmark and the experiments against it. Not a repo artifact.
+# scripts/benchmark/ stays the committed public harness. DRM-85 publishes a frozen copy.
+/lab/
 # Local dev .agent/ stores (examples/ carry their own fixtures)
 /.agent/
 

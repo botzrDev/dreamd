@@ -659,7 +659,18 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - PM verification (`assignments/reports/BZR-1534.verify.r0.md`): workspace 1485 / 0 / 0, all features 1489 / 0 / 0; red-first and M1–M3 fail test 1 with `left: (0, StillOpen)`; `pm1534-probe.py` shows 0 daemon connections, idle and after tool calls; `mcp/mod.rs` equals the PM's reference build.
     - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the tree.
     - Held for later (spec §8): H1, the daemon's `serve_connection` has no idle timer.
-44. **DRM-50** — filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reach a project the daemon has not loaded at the same moment, all but one get `500 … project writer lock is held by pid <the daemon's own pid> (watch)`. Over MCP the failed call can be an `append_node`. `AppState::with_runtime` (`server/http/state.rs:153`) drops the map mutex before `ProjectRuntime::open`. Its rustdoc (`:139-145`) says the loser "still gets the winner's runtime", but the loser fails on the lock before the winner publishes. It is reached at a session's first parallel tool calls, after an LRU release, and after an idle release (DRM-49 fixed only the single first request). It is in 1.3.0 too. The spec decides whether it also closes DRM-49 §8 H1 and H2.
+44. **DRM-50** — on `release/v1.3.1` (`7a30ac5`; base `7384c06`). Filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reached a project the daemon had not loaded at the same moment, all but one got `500 … project writer lock is held by pid <the daemon's own pid> (watch)`, and over MCP the failed call could be an `append_node`. `with_runtime` dropped the map mutex before `ProjectRuntime::open`, so the loser failed on the lock before the winner published. It was reached at a session's first parallel tool calls, after an LRU release and after an idle release, and it is in 1.3.0 too.
+    - `AppState::with_runtime` is `async`. A miss takes the root's gate (`OpenGates` in `AppState::opening`, one `tokio::sync::Mutex` per root) and checks the map again under it, so requests for one root open it once and share the result. An open never holds up another root's requests.
+    - `ProjectRuntime::open_for_watch` retries every 10 ms, for at most 2 s (`OWN_LOCK_WAIT`), while the lock's holder is this process's own `watch` (`WriterLockError::held_by_this_watch`): a released runtime whose tasks have not ended. That closes DRM-49 §8 H1 (Austin, 2026-11-14). Any other holder is refused at once, as before.
+    - The four resolvers (`with_index_handle`, `recall_target`, `live_marks`, `resolve_supervisor`) are `async`, and the six handler call sites await them.
+    - PM verification (`assignments/reports/DRM-50.verify.r0.md`). Austin committed before VERIFY; all 12 paths equal the dev's r0 blobs, and the production code equals the PM's reference build:
+      - workspace 1493 / 0 / 0, all features 1497 / 0 / 0; clippy, fmt and `cargo doc -p dreamd-core` clean;
+      - red-first, five runs: tests 1–4 fail with the own-pid 500, and 5 and 6 pass;
+      - M1–M8 fail exactly the named tests;
+      - the torture's T131-02 repro in a container (`DRM-50.verify.e2e.txt`): on `7384c06`, 10/10 pairs fail, 15 of 16 learns fail in every round, and the MCP `append_node` is lost; on `7a30ac5`, in two runs, 0/10 fail, 16 of 16 learns succeed, and the append lands.
+    - Spec Amendment 1: there are 13 existing resolver calls in `tests.rs`, not 11, and `observability::tests::a_set_dreamd_log_replaces_both_defaults` is a pre-existing flake.
+    - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
+    - Held for later (spec §8): H1 (DRM-49 §8 H2), after the 2 s bound the 500 still names the daemon's own pid; H2, Windows `watch` does not wait; H3, a same-pid `watch` in another PID namespace is waited on for 2 s; H4, a root's gate is never removed.
 42. **BZR-1535**: 1.3.1 release prep (hitl).
     - The container torture ran on 2026-11-14 against a musl build of `7384c06`. Prompt: `assignments/torture-1.3.1-container.prompt.md`. PM triage: `assignments/reports/torture-1.3.1.triage.md`.
     - The four fixes hold. All 15 findings were confirmed by a PM re-run, and each is also in 1.3.0.
@@ -1876,3 +1887,12 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - To probe and drop, bind the value and drop it: `Ok(stream) => { drop(stream); … }`.
   - Read a probe's scope from the code, not from its comment.
 - **Cross-refs:** `daemon-recall-tests-run-without-the-test-coordinator`
+
+### spec-counts-come-from-a-grep-of-the-base
+
+- **Rule:** A number a spec states about the tree, such as "11 calls to update" or "4 literals", comes from a grep of the base commit that the spec quotes. Never count the entries of the PM's reference script or patch.
+- **Why:** DRM-50's fact 6 and §3.6 said 11 resolver calls in `server/http/tests.rs` needed `.await`. That was the number of replacement entries in `DRM-50.pm-reference.py`, and two of those entries each covered a pair of calls. The base had 13 (`grep -cE '\.(resolve_supervisor|with_index_handle|recall_target|live_marks)\(' crates/dreamd-core/src/server/http/tests.rs`). The dev caught it in r0, and Amendment 1 corrected it. The build would have caught a missed call anyway, but a wrong count makes the dev doubt a correct tree.
+- **How to apply:**
+  - Put the counting command next to each count in §1, and run it on `git show <base>:<path>`, not on the working tree.
+  - When a reference script does the edit, compare its result with that grep before the spec is queued.
+- **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `spec-test-expectations-follow-from-the-rule-text`
