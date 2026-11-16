@@ -56,8 +56,17 @@ wildcards = "deny"
 unmaintained = "workspace"
 yanked = "deny"
 
-# No per-advisory `ignore` entries. When adding one, give its RUSTSEC id and
-# crate version, why the risk is accepted, and when it is due for removal.
+# Each per-advisory `ignore` entry gives its RUSTSEC id and crate version, why
+# the risk is accepted, and when it is due for removal. `cargo audit` reads
+# `.cargo/audit.toml`, not this file: keep the two lists the same.
+ignore = [
+    # rmcp 1.7.0: unbounded response body buffering in rmcp's Streamable HTTP
+    # clients. dreamd builds only rmcp's server side (`server`, `transport-io`,
+    # and `transport-streamable-http-server` under `mcp-http`), so no affected
+    # client is compiled. The fix is rmcp 3.9.0. Remove this entry when dreamd
+    # moves to rmcp 3.x.
+    { id = "RUSTSEC-2026-0462", reason = "rmcp's HTTP client transports are not compiled into dreamd; remove on the move to rmcp 3.x" },
+]
 
 [sources]
 # Only crates.io: any other registry or git source fails the check.

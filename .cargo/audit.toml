@@ -1,0 +1,6 @@
+# `cargo audit` configuration. Keep `ignore` the same as `[advisories] ignore` in
+# `deny.toml`, which gives each entry's crate version, reason and removal trigger.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0462", # rmcp 1.7.0; its HTTP client transports are not compiled into dreamd
+]

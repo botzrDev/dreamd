@@ -77,7 +77,7 @@ cargo install cargo-audit   # one-time
 cargo audit
 ```
 
-Fails when a dependency matches an advisory in the [RustSec database](https://rustsec.org/). No advisory is ignored today: there is no `.cargo/audit.toml`, and `deny.toml` (which the next job reads, not this one) has no `ignore` entries either.
+Fails when a dependency matches an advisory in the [RustSec database](https://rustsec.org/). It skips the advisories listed in `.cargo/audit.toml`. That list must match `[advisories] ignore` in `deny.toml` (which the next job reads, not this one), where each entry gives its crate version, why the risk is accepted, and when it is due for removal. One advisory is ignored today: RUSTSEC-2026-0462 (rmcp 1.7.0), whose affected HTTP clients dreamd does not compile.
 
 ---
 
