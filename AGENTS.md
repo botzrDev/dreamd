@@ -693,12 +693,28 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - **Who ran what:** Austin ran every commit and push, the tag, the fill merge, the GitHub release, the npm publish and dist-tag, and the MCP registry login and publish. At his instruction, the PM fast-forwarded the local `main` and wrote the bump and waiver files for his commits.
     - Under WSL, `npm publish` and `npm dist-tag add` need `--no-browser` too, not only `npm login`; RELEASING.md step 6 now says so.
 
-**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. They are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-52 → … → DRM-57 → DRM-90. Whether the version is 1.5.0, skipping 1.4, is settled at the bump.
+**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-16 at Austin's call). A quick patch after 1.3.1. It reverses the 2026-11-15 decision that no 1.3.2 ships. Austin asked for it while reviewing what dreamd is missing for him as a user: on 2026-11-16 it was connected in none of the 7 folders he works in, only one of which had a store, and nothing had told him. DRM-51 and DRM-95 moved here from 1.5. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-95 → DRM-96 → DRM-97, and DRM-97 blocks DRM-52. Austin also asked the same day for every command, flag and setting to be tested "until we know its working as well as it can". That lever pass runs alongside this milestone, against the released 1.3.1 binary in containers. Its findings go to 1.5 unless Austin pulls one into 1.3.2.
 
 45. **DRM-51** (T131-01): a daemon keeps writing a store deleted under it. `git clean -fdX` removes the gitignored `/.agent/.dreamd/`, and that reaches it, boot project included; so do setup's Undo lines followed by setup again.
     - On its own, new appends go unindexed until a restart.
     - With a second writer (`dream --no-commit`, or `init` re-creating the store), acked appends are lost, and `watch` will not restart until `doctor --repair`.
     - The fix needs a store-identity check before a runtime is reused.
+    - Decisions (Austin, 2026-11-16, recorded on the ticket):
+      - the daemon reopens the project itself, the boot project included;
+      - in-process `dreamd mcp` stops writing and returns a clear error, and does not reopen;
+      - the docs say what `git clean -fdX` deletes.
+    - Split the same day. DRM-51 makes a stale runtime stop writing: a store-identity check in every writer, and the MCP error. **DRM-95**, which comes next, reopens the project (map and boot routing, the handler retry) and adds the docs.
+87. **DRM-95** (T131-01, second half): a running `watch` reopens a project whose `.agent/.dreamd/` was replaced under it, the boot project included, so new events are recallable again with no restart. A learn or dream that a stale runtime refused is retried once on the reopened runtime. It adds the `git clean -fdX` docs.
+88. **DRM-96**: `dreamd setup` installs per user (Austin, 2026-11-16).
+    - Setup writes Claude Code's user-level MCP config, Cursor's global `~/.cursor/mcp.json` and a user-level habit block once, so every project and session gets dreamd, and a repo cleanup can't remove it. That reverses the rule that setup writes only inside the project (`Harness::config_targets`).
+    - Why: setup had run in this repo twice. Its untracked `.mcp.json`, `.cursor/mcp.json` and `CLAUDE.md` block were gone, while the gitignored `.agent/` survived. Nothing outside `setup` checks for those files, so `doctor` and `status` stayed green.
+    - `AgentRoot::discover` must skip the daemon home. It stops at the first ancestor that has `.agent/`, so a folder under `$HOME` with no store of its own resolves to `$HOME`, and `~/.agent/` already held a project store that a `watch` had opened.
+    - In a folder with no store of its own, both tools answer that the folder isn't set up and name the setup command. Nothing is written (Austin, 2026-11-16). Today the in-process `search_nodes` answers `{"results":[]}`, which reads as "no memories".
+    - The open questions are on the ticket: per-user as the default or a flag, what becomes of the project files, Cursor's user rules, the stray store in `~/.agent/`, the Undo lines, and Windows.
+89. **DRM-97**: 1.3.2 release prep (hitl). DRM-96 adds an install mode, which semver would make 1.4.0, so the number is confirmed at the bump. `main`'s 5 commits since `v1.3.1` change no behaviour and ship with it. Tag and publish stay human.
+
+**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. On 2026-11-16 he asked for a quick 1.3.2 after all, and DRM-51 and DRM-95 moved to it (above). The rest are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is DRM-97 → DRM-52 → … → DRM-57 → DRM-90. Whether the version is 1.5.0, skipping 1.4, is settled at the bump.
+
 46. **DRM-52** (T131-03): every project reopen leaks a `tantivy-warm-gc` thread. The cause is upstream: in tantivy 0.27.0, `reader/warming.rs:149-161`'s `gc_loop` never exits after its reader drops.
 47. **DRM-53** (T131-05, T131-09, T131-13): doctor and recovery gaps.
     - A corrupt `state.json` is blamed on the WAL, and `doctor --repair` refuses it (v1.2 F03).
