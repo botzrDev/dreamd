@@ -289,6 +289,9 @@ impl IndexerPersist {
         &mut self,
         writer: &mut IndexWriter<TantivyDocument>,
     ) -> Result<(), IndexError> {
+        // DRM-51: a commit writes `meta.json` into the index dir at its path,
+        // which after a replaced store is another writer's index.
+        self.ledger.check_store()?;
         writer.commit().map_err(tantivy_to_index)?;
         #[cfg(test)]
         self.counts
@@ -385,6 +388,12 @@ pub(crate) async fn run_indexer(
                 match msg {
                     Some(IndexerMsg::Append { event_id, learning }) => {
                         state.persist.receive();
+                        // DRM-51: tantivy creates a new segment's files in the
+                        // index dir at its path as soon as a document arrives,
+                        // committed or not.
+                        if state.persist.ledger.check_store().is_err() {
+                            continue;
+                        }
                         if let Err(e) = add_document(&mut writer, &fields, &learning) {
                             tracing::warn!(error = ?e, "indexer add_document failed");
                             continue;
@@ -420,6 +429,8 @@ pub(crate) async fn run_indexer(
                     }
                     Some(IndexerMsg::IndexSemanticLessons { agent_root, response }) => {
                         let result = (|| -> Result<(), IndexError> {
+                            // DRM-51: no lesson documents into a replaced store.
+                            state.persist.ledger.check_store()?;
                             let outcome = index_semantic_lessons(&mut writer, &fields, &agent_root)?;
                             // No delete/add was issued (unreadable or malformed
                             // LESSONS.md) — nothing to commit. A *missing* file
@@ -461,6 +472,11 @@ pub(crate) async fn run_indexer(
                 }
             }
             _ = interval.tick() => {
+                // DRM-51: once the store was replaced, every commit is refused;
+                // skip the pass and the commit rather than warn on every tick.
+                if state.persist.ledger.store_replaced() {
+                    continue;
+                }
                 // A log replaced by rename, or one that shrank, can hold ids
                 // the index has never seen and lack ids it has.
                 let now = LogIdentity::at(&state.agent_root.episodic_jsonl()).ok().flatten();
@@ -496,6 +512,8 @@ fn resync(
     fields: &SchemaFields,
     state: &mut IndexerState,
 ) -> Result<CoverageReport, IndexError> {
+    // DRM-51: no coverage pass over a store this process no longer holds.
+    state.persist.ledger.check_store()?;
     if state.persist.has_pending() {
         state.persist.commit(writer)?;
     }

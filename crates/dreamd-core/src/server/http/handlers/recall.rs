@@ -90,6 +90,10 @@ pub(crate) async fn get_recall(
     let (reader, flusher, appended) =
         match state.recall_target(std::path::Path::new(&entry.root)).await {
             Ok(target) => target,
+            // DRM-51: the message names the store and what to do.
+            Err(e @ crate::server::index_map::IndexError::StoreReplaced(_)) => {
+                return error_500(&e.to_string())
+            }
             Err(e) => return error_500(&format!("index open failed: {e}")),
         };
     // BZR-1437: commit the appends acked before this request, if the index has

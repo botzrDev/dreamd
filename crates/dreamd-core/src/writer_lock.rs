@@ -31,16 +31,25 @@
 //! The lockfile is never deleted, for the reason [`crate::io::ExclusiveLock`]
 //! gives. A stamp left behind by a holder that exited is stale and is
 //! overwritten by the next holder.
+//!
+//! Something outside dreamd can still delete it: `git clean -fdX` removes the
+//! gitignored `.agent/.dreamd/`, and deleting `.agent/` then running `dreamd
+//! init` makes a new store. Another writer can then lock the new file while
+//! this process still holds the old one. Every writer checks the token's
+//! [`StoreGuard`] before it writes, and stops for good once the file at the
+//! path is no longer the file it locked (DRM-51).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::daemon_state::update_daemon_state;
+use crate::launcher::Launcher;
 use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
 use crate::server::INDEX_DIR_NAME;
@@ -152,12 +161,130 @@ fn busy_message(holder: &Option<Holder>) -> String {
     }
 }
 
+/// A write refused because the project's `.agent/.dreamd/` was deleted or
+/// replaced while this process held its writer lock (DRM-51).
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{}", replaced_message(.dreamd_dir, .kind))]
+pub struct StoreReplaced {
+    /// The `.agent/.dreamd/` directory the lock was taken in.
+    pub dreamd_dir: PathBuf,
+    /// What the refused writer is.
+    pub kind: WriterKind,
+}
+
+fn replaced_message(dreamd_dir: &Path, kind: &WriterKind) -> String {
+    let next = match kind {
+        WriterKind::Watch => format!("Restart `{}`.", Launcher::from_env().command("watch")),
+        WriterKind::Mcp => "Reload your MCP harness so it starts dreamd again.".to_string(),
+        _ => "Run the command again.".to_string(),
+    };
+    format!(
+        "{} was deleted or replaced while this dreamd process ({kind}) was using it, \
+         for example by `git clean -fdX`. It stopped writing to the store. {next}",
+        dreamd_dir.display()
+    )
+}
+
+/// The lockfile this process locked, and whether that file is still at its
+/// path (DRM-51). Every clone of a [`WriterLock`] and its [`Ledger`] share one.
+#[derive(Clone, Debug)]
+pub struct StoreGuard {
+    inner: Arc<GuardInner>,
+}
+
+#[derive(Debug)]
+struct GuardInner {
+    lock_path: PathBuf,
+    kind: WriterKind,
+    /// Device and inode of the locked file.
+    #[cfg(unix)]
+    id: (u64, u64),
+    replaced: AtomicBool,
+}
+
+impl StoreGuard {
+    fn new(lock_path: PathBuf, file: &File, kind: WriterKind) -> io::Result<Self> {
+        #[cfg(unix)]
+        let id = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = file.metadata()?;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let _ = file;
+        Ok(Self {
+            inner: Arc::new(GuardInner {
+                lock_path,
+                kind,
+                #[cfg(unix)]
+                id,
+                replaced: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// `Ok` while the file at the lockfile's path is the file this process
+    /// locked.
+    ///
+    /// A missing lockfile, or one with another device or inode, trips the
+    /// guard: this call and every later one return [`StoreReplaced`], and the
+    /// call that trips it logs one `WARN`. Any other `stat` error is not
+    /// evidence, so it returns `Ok` and the next check looks again. Windows
+    /// never trips (DRM-51 §8 H5).
+    pub fn check(&self) -> Result<(), StoreReplaced> {
+        if !self.is_replaced() && self.still_locked() {
+            return Ok(());
+        }
+        if !self.inner.replaced.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                lockfile = %self.inner.lock_path.display(),
+                kind = %self.inner.kind,
+                "the project writer lock's file was deleted or replaced; \
+                 this process writes nothing more to the store"
+            );
+        }
+        Err(self.replaced())
+    }
+
+    /// Has a [`Self::check`] tripped the guard?
+    pub fn is_replaced(&self) -> bool {
+        self.inner.replaced.load(Ordering::Acquire)
+    }
+
+    #[cfg(unix)]
+    fn still_locked(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match fs::metadata(&self.inner.lock_path) {
+            Ok(meta) => (meta.dev(), meta.ino()) == self.inner.id,
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn still_locked(&self) -> bool {
+        true
+    }
+
+    fn replaced(&self) -> StoreReplaced {
+        StoreReplaced {
+            dreamd_dir: self
+                .inner
+                .lock_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            kind: self.inner.kind,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     file: File,
     /// Canonicalized `.agent/` (raw if canonicalize failed).
     agent_dir: PathBuf,
     kind: WriterKind,
+    guard: StoreGuard,
     ledger: Ledger,
     /// Set when this acquire quarantined an unreadable WAL. Repair only.
     quarantined: Option<PathBuf>,
@@ -201,6 +328,7 @@ impl WriterLock {
         let path = dreamd_dir.join(WRITER_LOCK_FILENAME);
 
         let file = lock_file(&path)?;
+        let guard = StoreGuard::new(path, &file, kind)?;
         probe_legacy_writer(
             &dreamd_dir
                 .join(INDEX_DIR_NAME)
@@ -213,7 +341,7 @@ impl WriterLock {
                 kind,
             },
         )?;
-        let ledger = Ledger::open(root.provenance_ledger());
+        let ledger = Ledger::open_guarded(root.provenance_ledger(), guard.clone());
 
         if !root.wal_path().exists() && wal::read_last_cycle_status(root)? == "in_progress" {
             update_daemon_state(root, |s| s.last_dream_cycle_status = "failed".to_string())
@@ -239,6 +367,7 @@ impl WriterLock {
                 file,
                 agent_dir: canonical_or_raw(&agent_dir),
                 kind,
+                guard,
                 ledger,
                 quarantined,
             }),
@@ -253,6 +382,12 @@ impl WriterLock {
 
     pub fn kind(&self) -> WriterKind {
         self.inner.kind
+    }
+
+    /// The check every writer runs before it writes (DRM-51). Every clone of
+    /// this token, and its ledger, share it.
+    pub fn guard(&self) -> &StoreGuard {
+        &self.inner.guard
     }
 
     /// The project's provenance appender. Every clone of this token shares it.
@@ -712,5 +847,170 @@ mod tests {
             "the index writer lock is held by a dreamd process that predates the project \
              writer lock (1.0.x); stop it first"
         );
+    }
+
+    // ── DRM-51: the store guard ─────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn lock_path(root: &AgentRoot) -> PathBuf {
+        root.dreamd_dir().join(WRITER_LOCK_FILENAME)
+    }
+
+    /// DRM-51 test 1: while the lockfile at its path is the file this process
+    /// locked, every check passes and nothing trips.
+    #[test]
+    fn guard_holds_while_the_lockfile_is_the_locked_file() {
+        let (root, _g) = store("drm51-guard-holds");
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+
+        assert!(lock.guard().check().is_ok());
+        assert!(lock.guard().check().is_ok());
+        assert!(lock.ledger().check_store().is_ok());
+        assert!(!lock.guard().is_replaced());
+    }
+
+    /// DRM-51 test 2: `git clean -fdX` removes `.agent/.dreamd/`, lockfile
+    /// included, and the guard trips with the store and the writer's kind.
+    #[cfg(unix)]
+    #[test]
+    fn guard_trips_when_dreamd_dir_is_removed() {
+        let (root, _g) = store("drm51-guard-removed");
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+
+        fs::remove_dir_all(root.dreamd_dir()).unwrap();
+
+        let err = lock.guard().check().unwrap_err();
+        assert_eq!(err.dreamd_dir, root.dreamd_dir());
+        assert_eq!(err.kind, WriterKind::Watch);
+        assert!(lock.guard().is_replaced());
+        assert!(lock.ledger().store_replaced());
+    }
+
+    /// DRM-51 test 3: a new store's lockfile is another file, which a second
+    /// writer can lock. The old guard trips on the inode; the new one holds.
+    #[cfg(unix)]
+    #[test]
+    fn guard_trips_when_a_new_store_takes_the_lock() {
+        let (root, _g) = store("drm51-guard-new-store");
+        let old = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+
+        fs::remove_dir_all(root.dreamd_dir()).unwrap();
+        let new = WriterLock::acquire(&root, WriterKind::Dream)
+            .expect("the new store's lockfile is free to lock");
+
+        assert!(old.guard().check().is_err(), "the old guard must trip");
+        assert!(new.guard().check().is_ok(), "the new guard must hold");
+    }
+
+    /// DRM-51 test 4 (C3): once tripped, the guard never untrips, even when
+    /// the locked file comes back to its path.
+    #[cfg(unix)]
+    #[test]
+    fn a_tripped_guard_stays_tripped() {
+        let (root, _g) = store("drm51-guard-sticky");
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let path = lock_path(&root);
+        let aside = path.with_extension("aside");
+
+        fs::rename(&path, &aside).unwrap();
+        assert!(lock.guard().check().is_err(), "a missing lockfile trips");
+        fs::rename(&aside, &path).unwrap();
+
+        assert!(
+            lock.guard().check().is_err(),
+            "the locked file back at its path must not untrip the guard"
+        );
+        assert!(lock.guard().is_replaced());
+    }
+
+    /// DRM-51 test 5 (C2): a `stat` error other than `NotFound` is not
+    /// evidence of a replaced store, so the guard does not trip.
+    #[cfg(unix)]
+    #[test]
+    fn a_stat_error_does_not_trip_the_guard() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if nix::unistd::geteuid().is_root() {
+            eprintln!(
+                "skipping a_stat_error_does_not_trip_the_guard: root ignores directory modes"
+            );
+            return;
+        }
+        let (root, _g) = store("drm51-guard-eacces");
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let dreamd = root.dreamd_dir();
+        let mode = fs::metadata(&dreamd).unwrap().permissions().mode();
+
+        fs::set_permissions(&dreamd, fs::Permissions::from_mode(0o000)).unwrap();
+        let during = lock.guard().check();
+        fs::set_permissions(&dreamd, fs::Permissions::from_mode(mode)).unwrap();
+
+        assert!(
+            during.is_ok(),
+            "EACCES on the lockfile must not trip the guard: {during:?}"
+        );
+        assert!(!lock.guard().is_replaced());
+        assert!(lock.guard().check().is_ok());
+    }
+
+    /// DRM-51 test 6 (C13): the message names the store, the writer's kind,
+    /// the likely cause, and the next step for that kind.
+    #[test]
+    fn the_message_names_the_store_and_the_next_step() {
+        let dir = PathBuf::from("/work/project/.agent/.dreamd");
+        for kind in [WriterKind::Watch, WriterKind::Mcp, WriterKind::Dream] {
+            let msg = StoreReplaced {
+                dreamd_dir: dir.clone(),
+                kind,
+            }
+            .to_string();
+
+            assert!(
+                msg.starts_with(&format!("{} was deleted or replaced", dir.display())),
+                "{msg}"
+            );
+            assert!(msg.contains(&format!("({kind})")), "{msg}");
+            assert!(msg.contains("`git clean -fdX`"), "{msg}");
+            match kind {
+                WriterKind::Watch => {
+                    assert!(msg.ends_with(" watch`."), "{msg}");
+                    assert!(msg.contains("Restart `"), "{msg}");
+                }
+                WriterKind::Mcp => assert!(
+                    msg.ends_with("Reload your MCP harness so it starts dreamd again."),
+                    "{msg}"
+                ),
+                _ => assert!(msg.ends_with("Run the command again."), "{msg}"),
+            }
+        }
+    }
+
+    /// DRM-51 test 7: the lock's ledger checks the guard before it appends,
+    /// and a refused append writes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_guarded_ledger_appends_nothing_once_the_store_is_replaced() {
+        use crate::provenance::{Kind, ProvenanceError};
+
+        let (root, _g) = store("drm51-guarded-ledger");
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        let edge = |id: &str| (Kind::IndexDoc, id.to_string(), id.to_string());
+        lock.ledger()
+            .append(&[edge("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV")])
+            .unwrap();
+        let before = fs::read(root.provenance_ledger()).unwrap();
+        let path = lock_path(&root);
+
+        fs::rename(&path, path.with_extension("aside")).unwrap();
+        let err = lock
+            .ledger()
+            .append(&[edge("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW")])
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ProvenanceError::StoreReplaced(_)),
+            "got {err:?}"
+        );
+        assert_eq!(fs::read(root.provenance_ledger()).unwrap(), before);
     }
 }

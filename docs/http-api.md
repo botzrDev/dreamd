@@ -613,6 +613,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32600` | `project not registered with daemon; run dreamd init` | Daemon mode only: the project root is not in `~/.agent/registry.toml` |
 | `-32600` | `recall failed: …` | In-process only: the search failed for a reason other than the query |
 | `-32600` | `index open failed: …` | In-process only: the index could not be opened |
+| `-32600` | `<root>/.agent/.dreamd was deleted or replaced while this dreamd process (mcp) was using it, for example by `git clean -fdX`. It stopped writing to the store. Reload your MCP harness so it starts dreamd again.` | In-process only: `.agent/.dreamd/` was deleted or replaced while the session ran. Every later call gets the same answer. In daemon mode the same message arrives inside `daemon error 500 …` |
 | `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |

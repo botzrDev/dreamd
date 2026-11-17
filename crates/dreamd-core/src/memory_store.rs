@@ -235,6 +235,9 @@ impl InProcessStore {
                     TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE)
                 })
                 .map_err(|e| MemoryStoreError::invalid(format!("index open failed: {e}")))?;
+            handle
+                .check_store()
+                .map_err(|e| MemoryStoreError::invalid(e.to_string()))?;
             handle.touch();
             handle.reader().clone()
         };
@@ -267,6 +270,11 @@ impl MemoryStore for InProcessStore {
             // index has not, so the search sees them. Bounded; past the wait
             // it searches the last commit.
             if let Some(pinned) = &self.pinned {
+                // DRM-51: before the flush, which would only be refused.
+                pinned
+                    .index
+                    .check_store()
+                    .map_err(|e| MemoryStoreError::invalid(e.to_string()))?;
                 let appended = pinned
                     .appends
                     .lock()
@@ -324,6 +332,8 @@ impl MemoryStore for InProcessStore {
                 CoordinatorError::PayloadTooLarge { .. } => {
                     MemoryStoreError::params(learning_too_large_message())
                 }
+                // DRM-51: project state no argument fixes.
+                e @ CoordinatorError::StoreReplaced(_) => MemoryStoreError::invalid(e.to_string()),
                 other => MemoryStoreError::internal(other.to_string()),
             })?;
 

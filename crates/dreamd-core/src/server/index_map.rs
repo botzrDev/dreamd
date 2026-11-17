@@ -69,6 +69,10 @@ pub enum IndexError {
     /// [`WriterLockError`](crate::writer_lock::WriterLockError) `Display`.
     #[error("{0}")]
     WriterLock(String),
+    /// The store was replaced under the writer lock this index was opened
+    /// with (DRM-51). Nothing was committed.
+    #[error("{0}")]
+    StoreReplaced(#[from] crate::writer_lock::StoreReplaced),
 }
 
 impl IndexError {

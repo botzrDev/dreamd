@@ -223,6 +223,7 @@ impl AppState {
     ) -> Result<(RecallReader, RecallFlusher, u64), IndexError> {
         if let Some((primary_root, handle)) = self.primary.as_ref() {
             if primary_root.as_path() == root {
+                handle.check_store()?;
                 return Ok((
                     handle.reader().clone(),
                     handle.recall_flusher(),
@@ -232,13 +233,14 @@ impl AppState {
         }
         self.with_runtime(root, |runtime| {
             let index = runtime.index();
-            (
+            index.check_store()?;
+            Ok((
                 index.reader().clone(),
                 index.recall_flusher(),
                 runtime.supervisor().append_mark().appended,
-            )
+            ))
         })
-        .await
+        .await?
     }
 
     /// The marks of `root`'s coordinator and index, as one wired pair: `primary`

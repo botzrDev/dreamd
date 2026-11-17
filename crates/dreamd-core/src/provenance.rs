@@ -43,6 +43,7 @@ use crate::episodic::{self, EpisodicError};
 use crate::index::RecurrenceSidecar;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, LessonsFile};
+use crate::writer_lock::{StoreGuard, StoreReplaced};
 
 /// The ledger's `schema_version` token. It is not the episodic record token
 /// and not the daemon state token.
@@ -83,6 +84,10 @@ pub enum ProvenanceError {
     /// `verify` could not read the episodic log it checks edges against.
     #[error("provenance verify: episodic log: {0}")]
     Episodic(#[from] EpisodicError),
+    /// The store was replaced under the writer lock (DRM-51). Nothing was
+    /// written.
+    #[error("{0}")]
+    StoreReplaced(#[from] StoreReplaced),
 }
 
 /// Wire shape of one line. Field order is the key order on the wire.
@@ -115,6 +120,8 @@ struct LedgerInner {
     path: PathBuf,
     /// Opened on the first non-empty append.
     open: Mutex<Option<Open>>,
+    /// The writer lock's guard (DRM-51). `None` only for a test ledger.
+    guard: Option<StoreGuard>,
 }
 
 /// The appender's fd and every triple the file holds.
@@ -139,13 +146,24 @@ fn edge_key(kind: &str, from: &str, to: &str) -> [u8; 32] {
 }
 
 impl Ledger {
+    /// A ledger with no writer lock guard, for tests.
+    #[cfg(test)]
+    pub(crate) fn open(path: PathBuf) -> Self {
+        Self::build(path, None)
+    }
+
     /// Cut a torn final line, then return an appender that has not opened the
-    /// file. Called only by `WriterLock::acquire`.
+    /// file and checks `guard` before every append. Called only by
+    /// `WriterLock::acquire`.
     ///
     /// A missing file is left missing. Any other failure, such as
     /// `provenance/` being a regular file, is a `warn!`: the appender is still
     /// returned, and its first append reports the error.
-    pub(crate) fn open(path: PathBuf) -> Self {
+    pub(crate) fn open_guarded(path: PathBuf, guard: StoreGuard) -> Self {
+        Self::build(path, Some(guard))
+    }
+
+    fn build(path: PathBuf, guard: Option<StoreGuard>) -> Self {
         if let Err(e) = cut_torn_tail(&path) {
             tracing::warn!(
                 path = %path.display(),
@@ -157,12 +175,30 @@ impl Ledger {
             inner: Arc::new(LedgerInner {
                 path,
                 open: Mutex::new(None),
+                guard,
             }),
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// The writer lock's [`StoreGuard::check`] (DRM-51); `Ok` for a test
+    /// ledger, which has no guard.
+    pub fn check_store(&self) -> Result<(), StoreReplaced> {
+        match &self.inner.guard {
+            Some(guard) => guard.check(),
+            None => Ok(()),
+        }
+    }
+
+    /// Has the writer lock's guard tripped? `false` for a test ledger.
+    pub fn store_replaced(&self) -> bool {
+        self.inner
+            .guard
+            .as_ref()
+            .is_some_and(StoreGuard::is_replaced)
     }
 
     /// Append `edges`, skipping any `(kind, from, to)` already in the file or
@@ -179,6 +215,7 @@ impl Ledger {
         if edges.is_empty() {
             return Ok(());
         }
+        self.check_store()?;
         let mut slot = self.inner.open.lock().expect("ledger mutex poisoned");
         if slot.is_none() {
             *slot = Some(self.open_and_load()?);

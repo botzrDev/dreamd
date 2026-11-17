@@ -73,7 +73,7 @@ use crate::server::indexer_actor::{
     index_semantic_lessons, run_indexer, IndexerHandle, IndexerPersist, IndexerState,
     DEFAULT_INDEXER_CHANNEL_CAPACITY,
 };
-use crate::writer_lock::WriterLock;
+use crate::writer_lock::{StoreGuard, WriterLock};
 
 // Freshness and the indexer actor live in sibling modules (BZR-170). Their
 // public surface is re-exported so `crate::server::tantivy_handle::…` paths
@@ -200,6 +200,8 @@ pub struct TantivyIndexHandle {
     reader: RecallReader,
     /// What the indexer's persist step last published (BZR-1243).
     commit_mark: Arc<Mutex<CommitMark>>,
+    /// The writer lock's guard (DRM-51), for recall's check.
+    store: StoreGuard,
     #[cfg(test)]
     counts: Arc<crate::server::indexer_actor::IndexerCounts>,
 }
@@ -325,6 +327,7 @@ impl TantivyIndexHandle {
             agent_root: agent_root.clone(),
             log,
         };
+        let store = lock.guard().clone();
         let lock = lock.clone();
         let join = tokio::spawn(async move {
             let _lock = lock;
@@ -336,6 +339,7 @@ impl TantivyIndexHandle {
             indexer: IndexerHandle { tx, join },
             reader,
             commit_mark,
+            store,
             #[cfg(test)]
             counts,
         })
@@ -368,6 +372,13 @@ impl TantivyIndexHandle {
             indexer: self.sender(),
             committed: Arc::clone(&self.commit_mark),
         }
+    }
+
+    /// DRM-51: `Err` once the store was replaced under the writer lock this
+    /// index was opened with. A recall checks it before it searches, because
+    /// the index at the path may now be another writer's.
+    pub fn check_store(&self) -> Result<(), IndexError> {
+        Ok(self.store.check()?)
     }
 
     /// Returns this project's reader, with the recurrence warmer attached
@@ -3082,6 +3093,193 @@ mod tests {
         let outcome = flusher_over(tx, 0).commit_pending_within(1, limit).await;
         assert!(matches!(outcome, RecallFlush::IndexerGone), "{outcome:?}");
         assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+    }
+
+    // ── DRM-51: a stale indexer writes nothing into a new store ─────────────
+
+    /// A cadence that never ticks within a test.
+    #[cfg(unix)]
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// The files tantivy 0.27 creates for a segment when its writer takes the
+    /// segment's first document, before any commit (DRM-51 fact 6).
+    #[cfg(unix)]
+    const SEGMENT_EXTENSIONS: [&str; 6] = ["fast", "fieldnorm", "idx", "pos", "store", "term"];
+
+    /// What `git clean -fdX` does to `agent_root`'s store, then a new writer's
+    /// lock and a new index under it.
+    #[cfg(unix)]
+    fn replace_store_and_reopen(agent_root: &AgentRoot) -> (WriterLock, TantivyIndexHandle) {
+        std::fs::remove_dir_all(agent_root.dreamd_dir()).expect("remove .agent/.dreamd/");
+        let lock = WriterLock::acquire(agent_root, WriterKind::Dream)
+            .expect("the new store's lock is free");
+        let handle = TantivyIndexHandle::open(agent_root, &lock, HOUR).expect("open the new index");
+        (lock, handle)
+    }
+
+    /// Every file under `index/`, by name, with its bytes.
+    #[cfg(unix)]
+    fn index_files(agent_root: &AgentRoot) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let index_dir = agent_root.dreamd_dir().join(INDEX_DIR_NAME);
+        std::fs::read_dir(&index_dir)
+            .expect("read index/")
+            .map(|entry| {
+                let path = entry.expect("index/ entry").path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read(&path).expect("read an index file"))
+            })
+            .collect()
+    }
+
+    /// Wait until `index/` holds every [`SEGMENT_EXTENSIONS`] file: the
+    /// indexer took a document and tantivy opened its segment.
+    #[cfg(unix)]
+    async fn wait_for_segment_files(agent_root: &AgentRoot) {
+        let index_dir = agent_root.dreamd_dir().join(INDEX_DIR_NAME);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let extensions: std::collections::BTreeSet<String> = std::fs::read_dir(&index_dir)
+                .expect("read index/")
+                .filter_map(|entry| {
+                    let path = entry.ok()?.path();
+                    Some(path.extension()?.to_string_lossy().into_owned())
+                })
+                .collect();
+            if SEGMENT_EXTENSIONS
+                .iter()
+                .all(|ext| extensions.contains(*ext))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no segment files within 10 s; index/ has {extensions:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// DRM-51 test 12: an indexer that took a document before its store was
+    /// replaced does not commit it. A commit would write `meta.json` into the
+    /// new store's `index/`, naming segments that dir lacks, and the next open
+    /// would fail. Only `meta.json` is compared: the old writer can still
+    /// finalize a segment it opened before the replace (spec §8 H4).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_indexer_commits_nothing_into_a_new_index() {
+        let dir = unique_tmpdir("drm51-stale-commit");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let old_lock = writer_lock(&agent_root);
+        let old = open_over_an_empty_log(&agent_root, &old_lock, HOUR);
+        let learning = sample_learning(make_event_id('1'), "rust::drm51", "taken before the clean");
+        append_through_the_indexer(&dir, &old, learning).await;
+        wait_for_segment_files(&agent_root).await;
+
+        let (_new_lock, new) = replace_store_and_reopen(&agent_root);
+        let meta_path = agent_root
+            .dreamd_dir()
+            .join(INDEX_DIR_NAME)
+            .join("meta.json");
+        let meta = std::fs::read(&meta_path).expect("the new index's meta.json");
+
+        let flushed = flush(&old).await;
+        assert!(
+            matches!(flushed, Err(IndexError::StoreReplaced(_))),
+            "got {flushed:?}"
+        );
+        assert!(old.check_store().is_err());
+        assert!(new.check_store().is_ok());
+        assert_eq!(
+            std::fs::read(&meta_path).unwrap(),
+            meta,
+            "the stale flush must not rewrite the new meta.json"
+        );
+        old.shutdown().await.expect("shutdown the old handle");
+        assert_eq!(
+            std::fs::read(&meta_path).unwrap(),
+            meta,
+            "the stale shutdown must not rewrite the new meta.json"
+        );
+        new.shutdown().await.expect("shutdown the new handle");
+    }
+
+    /// DRM-51 test 12b: the indexer adds no document once its store was
+    /// replaced. The old writer has no open segment (its one document was
+    /// committed before the clean), so a document it took would start a new
+    /// segment, whose files tantivy creates at once in the new store's
+    /// `index/` (fact 6).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_indexer_adds_no_document_after_the_store_is_replaced() {
+        let dir = unique_tmpdir("drm51-stale-add");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let old_lock = writer_lock(&agent_root);
+        let old = open_over_an_empty_log(&agent_root, &old_lock, HOUR);
+        let first = sample_learning(
+            make_event_id('1'),
+            "rust::drm51",
+            "committed before the clean",
+        );
+        append_through_the_indexer(&dir, &old, first).await;
+        flush(&old)
+            .await
+            .expect("the first append commits before the clean");
+
+        let (_new_lock, new) = replace_store_and_reopen(&agent_root);
+        let snapshot = index_files(&agent_root);
+        let second = sample_learning(make_event_id('2'), "rust::drm51", "sent after the clean");
+        append_through_the_indexer(&dir, &old, second).await;
+        // Joins the indexer task, which drops the writer and joins tantivy's
+        // indexing threads.
+        old.shutdown().await.expect("shutdown the old handle");
+
+        assert_eq!(
+            index_files(&agent_root),
+            snapshot,
+            "the stale indexer must write nothing into the new index/"
+        );
+        new.shutdown().await.expect("shutdown the new handle");
+    }
+
+    /// DRM-51 test 13: neither the coverage pass nor the lesson pass runs on a
+    /// store this process no longer holds, though the log and `LESSONS.md`
+    /// hold documents the old index has never seen.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_indexer_runs_no_coverage_or_lesson_pass() {
+        let dir = unique_tmpdir("drm51-stale-passes");
+        let _g = DirGuard(dir.clone());
+        let agent_root = AgentRoot::new(&dir);
+        std::fs::create_dir_all(agent_root.episodic_dir()).unwrap();
+        let old_lock = writer_lock(&agent_root);
+        let old = open_over_an_empty_log(&agent_root, &old_lock, HOUR);
+
+        let (_new_lock, new) = replace_store_and_reopen(&agent_root);
+        let snapshot = index_files(&agent_root);
+        seed_quokka_store(&dir, &agent_root);
+
+        let resynced = old.resync().await;
+        assert!(
+            matches!(resynced, Err(IndexError::StoreReplaced(_))),
+            "got {resynced:?}"
+        );
+        let lessons = old.index_semantic_lessons(agent_root.clone()).await;
+        assert!(
+            matches!(lessons, Err(IndexError::StoreReplaced(_))),
+            "got {lessons:?}"
+        );
+        old.shutdown().await.expect("shutdown the old handle");
+
+        assert_eq!(
+            index_files(&agent_root),
+            snapshot,
+            "the stale indexer must write nothing into the new index/"
+        );
+        new.shutdown().await.expect("shutdown the new handle");
     }
 }
 

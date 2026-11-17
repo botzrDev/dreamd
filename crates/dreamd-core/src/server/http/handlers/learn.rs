@@ -145,6 +145,8 @@ pub(crate) async fn post_learn(
             axum::Json(serde_json::json!({ "error": "payload too large" })),
         )
             .into_response(),
+        // DRM-51: the message names the store and what to do.
+        Ok(Err(e @ CoordinatorError::StoreReplaced(_))) => error_500(&e.to_string()),
         Ok(Err(_)) | Err(_) => error_500("coordinator error"),
     }
 }

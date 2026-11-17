@@ -3799,3 +3799,127 @@ async fn recall_answers_from_the_last_commit_when_the_indexer_stalls() {
     assert!(hits.iter().any(|c| c.ends_with("alpha")), "{json}");
     assert!(!hits.iter().any(|c| c.ends_with("beta")), "{json}");
 }
+
+// ── DRM-51: a replaced store answers 500 with a message that names it ───────
+
+/// Recall `q` for `root` until a hit's content has it: at most 50 tries,
+/// 100 ms apart. Once found, the indexer has committed the append and has
+/// nothing left to write, so a `remove_dir_all` of `.dreamd/` cannot race a
+/// commit (which fails it with `DirectoryNotEmpty`).
+async fn recall_until_found(router: &axum::Router, root: &std::path::Path, q: &str) {
+    let uri = format!("/api/v1/recall?q={q}&k=5");
+    let mut last = (StatusCode::OK, String::new());
+    for _ in 0..50 {
+        last = request_for(router, "GET", &uri, root, None).await;
+        if last.0 == StatusCode::OK && last.1.contains(q) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("recall never found {q:?}; last answer {last:?}");
+}
+
+/// The exact `500` body a writer of `kind` gives once `root`'s store was
+/// replaced.
+fn store_replaced_body(root: &std::path::Path, kind: WriterKind) -> serde_json::Value {
+    let msg = crate::writer_lock::StoreReplaced {
+        dreamd_dir: AgentRoot::new(root).dreamd_dir(),
+        kind,
+    }
+    .to_string();
+    serde_json::json!({ "error": msg })
+}
+
+fn assert_store_replaced(
+    what: &str,
+    (status, body): (StatusCode, String),
+    expected: &serde_json::Value,
+) {
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{what}: {body}");
+    let json: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{what}: {e}: {body}"));
+    assert_eq!(&json, expected, "{what}");
+}
+
+/// DRM-51 test 18: the boot project's store is deleted under `watch` (no
+/// second writer). Learn, recall and dream each answer `500` with the
+/// message, and the log is not written.
+#[tokio::test]
+async fn learn_recall_and_dream_name_a_replaced_boot_store() {
+    let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
+    let router = build_router(state);
+    let (status, body) = learn_for(&router, &canonical_a, "boot store drm51").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    recall_until_found(&router, &canonical_a, "drm51").await;
+
+    let agent_root = AgentRoot::new(canonical_a.clone());
+    std::fs::remove_dir_all(agent_root.dreamd_dir()).expect("remove A's .dreamd/");
+    let log = std::fs::read(agent_root.episodic_jsonl()).unwrap();
+    let expected = store_replaced_body(&canonical_a, WriterKind::Watch);
+
+    assert_store_replaced(
+        "learn",
+        learn_for(&router, &canonical_a, "after the clean drm51").await,
+        &expected,
+    );
+    assert_store_replaced(
+        "recall",
+        request_for(
+            &router,
+            "GET",
+            "/api/v1/recall?q=drm51&k=5",
+            &canonical_a,
+            None,
+        )
+        .await,
+        &expected,
+    );
+    assert_store_replaced(
+        "dream",
+        request_for(&router, "POST", "/api/v1/dream", &canonical_a, None).await,
+        &expected,
+    );
+    assert_eq!(
+        std::fs::read(agent_root.episodic_jsonl()).unwrap(),
+        log,
+        "the log is not written"
+    );
+}
+
+/// DRM-51 test 19: the same for a project the runtime map serves.
+#[tokio::test]
+async fn learn_and_recall_name_a_replaced_project_store() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state);
+    let (status, body) = learn_for(&router, &canonical_b, "project store drm51").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    recall_until_found(&router, &canonical_b, "drm51").await;
+
+    let agent_root = AgentRoot::new(canonical_b.clone());
+    std::fs::remove_dir_all(agent_root.dreamd_dir()).expect("remove B's .dreamd/");
+    let log = std::fs::read(agent_root.episodic_jsonl()).unwrap();
+    let expected = store_replaced_body(&canonical_b, WriterKind::Watch);
+
+    assert_store_replaced(
+        "learn",
+        learn_for(&router, &canonical_b, "after the clean drm51").await,
+        &expected,
+    );
+    assert_store_replaced(
+        "recall",
+        request_for(
+            &router,
+            "GET",
+            "/api/v1/recall?q=drm51&k=5",
+            &canonical_b,
+            None,
+        )
+        .await,
+        &expected,
+    );
+    assert_eq!(
+        std::fs::read(agent_root.episodic_jsonl()).unwrap(),
+        log,
+        "the log is not written"
+    );
+}

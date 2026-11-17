@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dreamd process stops writing once its store is deleted or replaced under it** (DRM-51). `git clean -fdX` deletes the gitignored `.agent/.dreamd/`. A running `dreamd watch` or `dreamd mcp` kept writing as if nothing had happened: new events went unindexed, and when another dreamd command then created a new store there, the old process wrote into it too, which lost acknowledged events and left an index the next `watch` could not open. Every writer now checks, before it writes, that `.agent/.dreamd/writer.lock` is still the file it locked. Once it is not, the process writes nothing more to that store, and `learn`, `recall` and `dream` answer `500` with a message that names the store and says what to do (restart `watch`, or reload your MCP harness). Library: new `writer_lock::{StoreGuard, StoreReplaced}`, `WriterLock::guard`, `provenance::Ledger::{check_store, store_replaced}` and `TantivyIndexHandle::check_store`, and a `StoreReplaced` variant on `CoordinatorError`, `IndexError`, `WalError` and `ProvenanceError`.
+
 ## [1.3.1] - 2026-11-16
 
 A patch release. A failed dream cycle no longer blocks the next one, an event's content can no longer forge a lesson, the first requests to a project no longer fail on the daemon's own writer lock when they arrive together or after the project idles, and an idle `dreamd mcp` session no longer holds a connection to the daemon. Recall is still BM25 × salience. No store migration or index rebuild is needed.

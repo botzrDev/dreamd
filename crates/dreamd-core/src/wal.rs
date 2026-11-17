@@ -37,6 +37,7 @@ use crate::io::write_atomic;
 use crate::layout::AgentRoot;
 use crate::provenance::{Kind, Ledger, ProvenanceError};
 use crate::stage::{crash_point, Stage};
+use crate::writer_lock::StoreReplaced;
 
 /// Schema version for daemon state (`state.json`). Re-exported from
 /// [`crate::daemon_state`], which owns the typed writer (AILAB-167);
@@ -172,6 +173,10 @@ pub enum WalError {
     /// Appending the WAL's edges to the provenance ledger failed.
     #[error("WAL provenance: {0}")]
     Provenance(#[from] ProvenanceError),
+    /// The store was replaced under the writer lock (DRM-51). Nothing was
+    /// begun, committed or rolled forward.
+    #[error("{0}")]
+    StoreReplaced(#[from] StoreReplaced),
 }
 
 impl From<DaemonStateError> for WalError {
@@ -239,16 +244,27 @@ pub fn stage_and_commit<T, E>(
 where
     E: From<WalError>,
 {
+    // DRM-51: begin writes `state.json` and the stage under `.dreamd/`.
+    ledger.check_store().map_err(WalError::from)?;
     let mut stage = begin_cycle(agent_root, kind, now_sec)?;
     let out = match build(&mut stage) {
         Ok(out) => out,
         Err(e) => {
-            abort_uncommitted(agent_root);
+            abort_held(agent_root, ledger);
             return Err(e);
         }
     };
     commit_cycle(stage, ledger, now_sec)?;
     Ok(out)
+}
+
+/// [`abort_uncommitted`], unless the store was replaced under the writer lock:
+/// the WAL temp, the stage root and `state.json` at those paths then belong to
+/// another writer (DRM-51).
+fn abort_held(agent_root: &AgentRoot, ledger: &Ledger) {
+    if ledger.check_store().is_ok() {
+        abort_uncommitted(agent_root);
+    }
 }
 
 /// End a cycle that failed before its commit point, in the process that
@@ -297,12 +313,16 @@ fn abort_uncommitted(agent_root: &AgentRoot) {
 /// are appended after the renames. `now_sec` stamps `last_dream_cycle_at`.
 pub fn commit_cycle(stage: Stage, ledger: &Ledger, now_sec: i64) -> Result<(), WalError> {
     let agent_root = stage.agent_root().clone();
+    // DRM-51: the WAL at its path is the commit point. Never write it into a
+    // store this process no longer holds, and leave that store's stage and
+    // status alone.
+    ledger.check_store()?;
     let redo = stage.redo();
     let applied = match write_redo(&stage, &redo) {
         Ok(()) => roll_forward(&agent_root, &redo, ledger, Some(now_sec)).map(drop),
         // The commit point is the WAL at its path, not this call's result.
         Err(e) if !agent_root.wal_path().exists() => {
-            abort_uncommitted(&agent_root);
+            abort_held(&agent_root, ledger);
             return Err(e);
         }
         Err(e) => Err(e),
@@ -367,6 +387,8 @@ fn roll_forward(
     ledger: &Ledger,
     cycle_at: Option<i64>,
 ) -> Result<(usize, usize), WalError> {
+    // DRM-51: a roll-forward renames into live paths and appends edges.
+    ledger.check_store()?;
     validate(redo)?;
     let agent_dir = agent_root.agent_dir();
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
@@ -1510,5 +1532,189 @@ mod tests {
         assert!(!root.wal_path().exists());
         assert_eq!(status(&root), "complete");
         assert!(corrupt_sidecars(&root).is_empty());
+    }
+
+    // ── DRM-51: a cycle commits nothing into a store it no longer holds ─────
+
+    /// Every path under `.agent/`, with a file's bytes (`None` for a dir).
+    #[cfg(unix)]
+    fn agent_tree(root: &AgentRoot) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(
+            base: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+        ) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(base).unwrap().to_path_buf();
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(base, &path, out);
+                } else {
+                    out.insert(rel, Some(fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let base = root.agent_dir();
+        let mut out = std::collections::BTreeMap::new();
+        walk(&base, &base, &mut out);
+        out
+    }
+
+    /// The old writer: a `watch` lock over a store with a live log.
+    #[cfg(unix)]
+    fn old_writer(label: &str) -> (AgentRoot, DirGuard, crate::writer_lock::WriterLock) {
+        use crate::writer_lock::{WriterKind, WriterLock};
+
+        let (root, g) = setup_root(label);
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(root.episodic_jsonl(), b"live log\n").unwrap();
+        let lock = WriterLock::acquire(&root, WriterKind::Watch).unwrap();
+        (root, g, lock)
+    }
+
+    /// What `git clean -fdX` does, then the new store's holder: its own lock,
+    /// its own status `complete`, and a stage dir of its own.
+    #[cfg(unix)]
+    fn replace_with_a_new_holder(root: &AgentRoot) -> crate::writer_lock::WriterLock {
+        use crate::writer_lock::{WriterKind, WriterLock};
+
+        fs::remove_dir_all(root.dreamd_dir()).unwrap();
+        let lock = WriterLock::acquire(root, WriterKind::Dream).expect("the new store's lock");
+        update_daemon_state(root, |s| {
+            s.last_dream_cycle_status = "complete".to_string();
+        })
+        .unwrap();
+        fs::create_dir_all(root.stage_dir().join("theirs")).unwrap();
+        lock
+    }
+
+    /// DRM-51 test 14: a cycle does not begin on a replaced store. `begin`
+    /// would set the new holder's status and stage under its `.dreamd/`.
+    #[cfg(unix)]
+    #[test]
+    fn stage_and_commit_begins_nothing_once_the_store_is_replaced() {
+        let (root, _g, old) = old_writer("drm51-begin");
+        let _new = replace_with_a_new_holder(&root);
+        let before = agent_tree(&root);
+        let mut ran = false;
+
+        let err = stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            old.ledger(),
+            |_stage| -> Result<(), WalError> {
+                ran = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, WalError::StoreReplaced(_)), "got {err:?}");
+        assert!(!ran, "the build must never run");
+        assert_eq!(agent_tree(&root), before, "nothing was written");
+    }
+
+    /// DRM-51 test 15: the store is replaced while the build runs. The commit
+    /// writes no WAL into the new store, so nothing is renamed into it.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_replaced_during_the_build_commits_nothing() {
+        let (root, _g, old) = old_writer("drm51-during-build");
+        let mut new = None;
+        let mut left = None;
+
+        let err = stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            old.ledger(),
+            |stage| -> Result<(), WalError> {
+                stage
+                    .put(&root.episodic_jsonl(), b"staged\n")
+                    .map_err(WalError::Io)?;
+                new = Some(replace_with_a_new_holder(&root));
+                left = Some(agent_tree(&root));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, WalError::StoreReplaced(_)), "got {err:?}");
+        assert!(!root.wal_path().exists(), "no WAL");
+        assert_eq!(
+            Some(agent_tree(&root)),
+            left,
+            "the tree is the one the build left"
+        );
+        assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), b"live log\n");
+        assert!(new.is_some(), "the build replaced the store");
+    }
+
+    /// DRM-51 test 16 (C7): a build that fails after the store was replaced
+    /// aborts nothing. The status, the stage root and the WAL temp at those
+    /// paths belong to the new store's holder.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_error_after_the_store_is_replaced_aborts_nothing() {
+        let (root, _g, old) = old_writer("drm51-build-error");
+        let mut new = None;
+        let mut left = None;
+
+        let err = stage_and_commit(
+            &root,
+            CycleKind::Dream,
+            NOW_SEC,
+            old.ledger(),
+            |_stage| -> Result<(), WalError> {
+                new = Some(replace_with_a_new_holder(&root));
+                left = Some(agent_tree(&root));
+                Err(WalError::Io(io::Error::other("build failed")))
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("build failed"), "{err}");
+        assert_eq!(status(&root), "complete", "the new holder's status stays");
+        assert!(
+            root.stage_dir().join("theirs").is_dir(),
+            "the new holder's stage stays"
+        );
+        assert_eq!(
+            Some(agent_tree(&root)),
+            left,
+            "the tree is the one the build left"
+        );
+        assert!(new.is_some(), "the build replaced the store");
+    }
+
+    /// DRM-51 test 17: a roll-forward renames into live paths and stamps the
+    /// status. Neither happens on a store this process no longer holds.
+    #[cfg(unix)]
+    #[test]
+    fn roll_forward_is_refused_once_the_store_is_replaced() {
+        let (root, _g, old) = old_writer("drm51-roll-forward");
+        let _new = replace_with_a_new_holder(&root);
+        let staged = root.stage_dir().join("theirs").join("LESSONS.md");
+        fs::write(&staged, b"staged lessons\n").unwrap();
+        let redo = RedoWal {
+            schema_version: STATE_SCHEMA_VERSION.to_string(),
+            format: REDO_FORMAT.to_string(),
+            renames: vec![RedoRename {
+                from: ".dreamd/stage/theirs/LESSONS.md".to_string(),
+                to: "semantic/LESSONS.md".to_string(),
+            }],
+            unlinks: vec![],
+            edges: vec![],
+        };
+        let before = agent_tree(&root);
+
+        let err = roll_forward(&root, &redo, old.ledger(), Some(NOW_SEC)).unwrap_err();
+
+        assert!(matches!(err, WalError::StoreReplaced(_)), "got {err:?}");
+        assert_eq!(agent_tree(&root), before, "nothing renamed or stamped");
+        assert!(staged.exists());
+        assert!(!root.lessons_md().exists());
     }
 }

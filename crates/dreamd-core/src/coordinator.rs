@@ -40,6 +40,7 @@ use crate::id_minter::IdMinter;
 use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
 use crate::server::index_freshness::AppendMark;
+use crate::writer_lock::StoreReplaced;
 
 /// Hard cap on one serialized JSONL line, re-exported from [`crate::episodic`],
 /// which owns the line format. The HTTP handler maps a breach to 413.
@@ -89,6 +90,10 @@ pub enum CoordinatorError {
     /// says `in_progress`. Caller maps to HTTP 409.
     #[error("dream cycle in progress")]
     CycleInProgress,
+    /// The store was replaced under this coordinator's writer lock (DRM-51).
+    /// Nothing was written.
+    #[error("{0}")]
+    StoreReplaced(#[from] StoreReplaced),
 }
 
 impl From<EpisodicError> for CoordinatorError {
@@ -378,6 +383,10 @@ impl MemoryCoordinator {
             }
         }
 
+        // DRM-51: a replaced `.agent/.dreamd/` may belong to another writer
+        // now. A dedup hit above writes nothing, so it still answers.
+        self.check_store()?;
+
         // A `git checkout` or `merge` under a live daemon replaces the log.
         // Write to the file at the path, not the replaced one.
         //
@@ -466,6 +475,7 @@ impl MemoryCoordinator {
                 "this coordinator was opened without the project writer lock".to_string(),
             ));
         }
+        self.check_store()?;
         if self
             .open_cycle
             .as_ref()
@@ -563,6 +573,7 @@ impl MemoryCoordinator {
         cycle_date: &str,
         body: LessonBodySource,
     ) -> Result<DecayResult, CoordinatorError> {
+        ledger.check_store()?;
         let (raw, body) = match self.log_since(&mut open)? {
             Some(raw) => (raw, body),
             None => {
@@ -637,6 +648,15 @@ impl MemoryCoordinator {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),
+        }
+    }
+
+    /// DRM-51: refuse a write once the store was replaced under the writer
+    /// lock. A coordinator from `open_at` has no lock to check.
+    fn check_store(&self) -> Result<(), CoordinatorError> {
+        match &self.ledger {
+            Some(ledger) => Ok(ledger.check_store()?),
+            None => Ok(()),
         }
     }
 
@@ -2193,5 +2213,132 @@ mod tests {
     #[test]
     fn replace_after_the_write_does_not_duplicate_a_held_line() {
         assert_eq!(confirm_after_replace(true), 1);
+    }
+
+    // ── DRM-51: a coordinator stops once its store is replaced ──────────────
+
+    /// What `git clean -fdX` does to `root`'s store, then a new writer taking
+    /// the new store's lock. Returns that writer's lock.
+    #[cfg(unix)]
+    fn replace_store(root: &AgentRoot) -> WriterLock {
+        std::fs::remove_dir_all(root.dreamd_dir()).expect("remove .agent/.dreamd/");
+        WriterLock::acquire(root, WriterKind::Dream).expect("the new store's lock is free")
+    }
+
+    #[cfg(unix)]
+    fn is_store_replaced(err: &CoordinatorError, root: &AgentRoot) -> bool {
+        matches!(
+            err,
+            CoordinatorError::StoreReplaced(r)
+                if r.dreamd_dir == root.dreamd_dir() && r.kind == WriterKind::Watch
+        )
+    }
+
+    /// DRM-51 test 8: an append after the store was replaced is refused, and
+    /// nothing under `.agent/` changes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_is_refused_once_the_store_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _old) = open_coordinator(&root);
+        c.handle_append(appended("rust::eh", "before the clean", 6.0, 7.0), None)
+            .await
+            .expect("an append before the clean lands");
+
+        let _new = replace_store(&root);
+        let before = agent_tree(&root);
+        let err = c
+            .handle_append(appended("rust::eh", "after the clean", 6.0, 7.0), None)
+            .await
+            .expect_err("an append after the clean must be refused");
+
+        assert!(is_store_replaced(&err, &root), "got {err:?}");
+        assert_eq!(agent_tree(&root), before, "nothing was written");
+    }
+
+    /// DRM-51 test 9 (C6): a dedup hit writes nothing, so it still answers
+    /// with the first append's id after the store was replaced.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dedup_hit_still_answers_after_the_store_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _old) = open_coordinator(&root);
+        let first = c
+            .handle_append(
+                appended("rust::eh", "keyed append", 6.0, 7.0),
+                Some("k1".to_string()),
+            )
+            .await
+            .expect("first append");
+
+        let _new = replace_store(&root);
+        let before = agent_tree(&root);
+        let again = c
+            .handle_append(
+                appended("rust::eh", "keyed append", 6.0, 7.0),
+                Some("k1".to_string()),
+            )
+            .await
+            .expect("a dedup hit still answers");
+
+        assert!(again.deduplicated);
+        assert_eq!(again.id, first.id);
+        assert_eq!(agent_tree(&root), before, "nothing was written");
+    }
+
+    /// DRM-51 test 10: a dream cycle cannot start on a replaced store.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_is_refused_once_the_store_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _old) = open_coordinator(&root);
+
+        let _new = replace_store(&root);
+        let before = agent_tree(&root);
+        let result = c.handle_prepare_cycle(CYCLE_NOW_SEC);
+
+        match &result {
+            Err(err) => assert!(is_store_replaced(err, &root), "got {err:?}"),
+            Ok(_) => panic!("prepare must be refused; got {result:?}"),
+        }
+        assert_eq!(agent_tree(&root), before, "nothing was written");
+    }
+
+    /// DRM-51 test 11: a cycle prepared before the clean commits nothing, and
+    /// the refusal is the coordinator's own, not a WAL error under another
+    /// variant.
+    #[cfg(unix)]
+    #[test]
+    fn commit_is_refused_once_the_store_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        seed_eh_store(&root);
+        let (mut c, _tx, _old) = open_coordinator(&root);
+        let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
+        assert!(
+            prepared.selected.is_some(),
+            "precondition: the store promotes"
+        );
+
+        let _new = replace_store(&root);
+        let before = agent_tree(&root);
+        let result =
+            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+
+        match &result {
+            Err(err) => assert!(is_store_replaced(err, &root), "got {err:?}"),
+            Ok(_) => panic!("commit must be refused; got {result:?}"),
+        }
+        assert_eq!(agent_tree(&root), before, "nothing was written");
+        assert!(!root.wal_path().exists(), "no WAL");
+        assert!(!root.stage_dir().exists(), "no stage");
+        assert!(!root.state_json().exists(), "no status");
+        assert!(!root.lessons_md().exists(), "no lesson");
     }
 }

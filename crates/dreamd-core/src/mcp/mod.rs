@@ -2493,4 +2493,87 @@ mod tests {
             "the late commit is visible: {hits:?}"
         );
     }
+
+    /// DRM-51 test 20: in-process `dreamd mcp` stops writing once its store is
+    /// deleted, and both tools answer `-32600` with the message for `mcp`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn in_process_tools_name_a_replaced_store() {
+        use crate::server::ProjectRuntime;
+        use crate::writer_lock::StoreReplaced;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = setup_agent_root(dir.path());
+        let runtime = ProjectRuntime::open(&root, WriterKind::Mcp).expect("open project runtime");
+        let server = MemoryMcpServer::with_coordinator_and_index(
+            root.clone(),
+            runtime.supervisor(),
+            Arc::clone(runtime.index()),
+        );
+        let append = |content: &str| AppendNodeParams {
+            content: content.to_string(),
+            source_harness: "test-harness".to_string(),
+            skill_action: "rust::mcp".to_string(),
+            pain: Some(6.0),
+            importance: Some(7.0),
+            client_dedup_key: None,
+        };
+        let search = || SearchNodesParams {
+            query: "drm51".to_string(),
+            k: Some(5),
+        };
+
+        server
+            .append_node(Parameters(append("in-process store drm51")))
+            .await
+            .expect("append_node before the clean");
+        let mut found = false;
+        for _ in 0..50 {
+            let result = server
+                .search_nodes(Parameters(search()))
+                .await
+                .expect("search_nodes before the clean");
+            let text = result
+                .content
+                .iter()
+                .find_map(|c| c.as_text().map(|t| t.text.clone()))
+                .expect("text content present");
+            if text.contains("in-process store drm51") {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(found, "search_nodes never found the append");
+
+        std::fs::remove_dir_all(root.dreamd_dir()).expect("remove .agent/.dreamd/");
+        let log = std::fs::read(root.episodic_jsonl()).unwrap();
+        let expected = StoreReplaced {
+            dreamd_dir: root.dreamd_dir(),
+            kind: WriterKind::Mcp,
+        }
+        .to_string();
+
+        let err = server
+            .append_node(Parameters(append("after the clean drm51")))
+            .await
+            .expect_err("append_node after the clean");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST, "{err:?}");
+        assert_eq!(err.message, expected);
+        let err = server
+            .search_nodes(Parameters(search()))
+            .await
+            .expect_err("search_nodes after the clean");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST, "{err:?}");
+        assert_eq!(err.message, expected);
+        assert_eq!(
+            std::fs::read(root.episodic_jsonl()).unwrap(),
+            log,
+            "the log is not written"
+        );
+
+        drop(server);
+        runtime.shutdown().await;
+    }
 }
