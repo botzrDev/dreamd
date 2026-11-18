@@ -166,6 +166,8 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 | `503 Service Unavailable` | `{"error":"coordinator busy, retry"}` | Coordinator channel full; includes `Retry-After: 1` |
 | `500 Internal Server Error` | `{"error":"…"}` | Coordinator or routing failure |
 
+If the project's `.agent/.dreamd/` was deleted or replaced since the daemon opened it, for example by `git clean -fdX`, the daemon opens the project again and the request goes through. `learn`, `recall` and `dream` do this. While another dreamd command holds the new store's writer lock, they answer `500` `project writer lock is held by pid N (…)`. See [troubleshooting](troubleshooting.md#git-clean--fdx-deleted-agentdreamd).
+
 #### curl example
 
 ```bash
@@ -190,7 +192,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 #### Idempotency (`X-Client-Dedup-Key`)
 
-Optional opaque string. When present, a second `POST /learn` with the **same key and same project** returns the original `id` with `"deduplicated": true` instead of appending a duplicate line. Keys are scoped per coordinator (per project) — the same key on two different projects creates two distinct records.
+Optional opaque string. When present, a second `POST /learn` with the **same key and same project** returns the original `id` with `"deduplicated": true` instead of appending a duplicate line. Keys are scoped per coordinator (per project) — the same key on two different projects creates two distinct records. An empty or all-whitespace key counts as no key.
 
 ---
 
@@ -613,7 +615,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32600` | `project not registered with daemon; run dreamd init` | Daemon mode only: the project root is not in `~/.agent/registry.toml` |
 | `-32600` | `recall failed: …` | In-process only: the search failed for a reason other than the query |
 | `-32600` | `index open failed: …` | In-process only: the index could not be opened |
-| `-32600` | `` <root>/.agent/.dreamd was deleted or replaced while this dreamd process (mcp) was using it, for example by `git clean -fdX`. It stopped writing to the store. Reload your MCP harness so it starts dreamd again. `` | In-process only: `.agent/.dreamd/` was deleted or replaced while the session ran. Every later call gets the same answer. In daemon mode the same message arrives inside `daemon error 500 …` |
+| `-32600` | `` <root>/.agent/.dreamd was deleted or replaced while this dreamd process (mcp) was using it, for example by `git clean -fdX`. It stopped writing to the store. Reload your MCP harness so it starts dreamd again. `` | In-process only: `.agent/.dreamd/` was deleted or replaced while the session ran. Every later call gets the same answer. In daemon mode the daemon opens the project again and the call goes through; see [`POST /learn`](#post-apiv1learn) |
 | `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |

@@ -87,15 +87,24 @@ pub(crate) async fn get_recall(
     // appends, WEG-264), else the index of the project's lazily-opened
     // runtime (`AppState::runtimes`). Every part is an Arc-backed clone, so the
     // `runtimes` mutex is never held across the flush or the Tantivy search.
-    let (reader, flusher, appended) =
-        match state.recall_target(std::path::Path::new(&entry.root)).await {
-            Ok(target) => target,
-            // DRM-51: the message names the store and what to do.
-            Err(e @ crate::server::index_map::IndexError::StoreReplaced(_)) => {
-                return error_500(&e.to_string())
-            }
-            Err(e) => return error_500(&format!("index open failed: {e}")),
-        };
+    //
+    // DRM-95: a check that finds the store replaced retires that runtime, so
+    // the second call reopens the project. One retry only.
+    let root = std::path::Path::new(&entry.root);
+    let target = match state.recall_target(root).await {
+        Err(crate::server::index_map::IndexError::StoreReplaced(_)) => {
+            state.recall_target(root).await
+        }
+        other => other,
+    };
+    let (reader, flusher, appended) = match target {
+        Ok(target) => target,
+        // DRM-51: the message names the store and what to do.
+        Err(e @ crate::server::index_map::IndexError::StoreReplaced(_)) => {
+            return error_500(&e.to_string())
+        }
+        Err(e) => return error_500(&format!("index open failed: {e}")),
+    };
     // BZR-1437: commit the appends acked before this request, if the index has
     // not, so the search sees them. Bounded; past the wait it searches the
     // last commit.

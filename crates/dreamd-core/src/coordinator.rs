@@ -370,6 +370,10 @@ impl MemoryCoordinator {
         mut learning: AgentLearning,
         client_dedup_key: Option<String>,
     ) -> Result<AppendOutcome, CoordinatorError> {
+        // DRM-98: an empty or all-whitespace key is no key. As a key, `""` made
+        // every later learning that sent it a dedup hit, so none was written.
+        let client_dedup_key = client_dedup_key.filter(|k| !k.trim().is_empty());
+
         // Idempotency lookup before any write. A hit short-circuits to the
         // cached EventId — no second line on disk.
         if let Some(key) = client_dedup_key.as_deref() {
@@ -1030,6 +1034,66 @@ mod tests {
         let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 1, "second call must not produce a second line");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DRM-98: an empty or all-whitespace key is no key. Four different
+    /// learnings sent with `""`, `""`, `"  "` and `"\t"` are all written,
+    /// each with its own id. A real key still dedups.
+    #[tokio::test]
+    async fn an_empty_or_blank_dedup_key_is_no_key() {
+        let dir = unique_tmp_dir("blank-dedup");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let mut ids = Vec::new();
+        for (i, key) in ["", "", "  ", "\t"].into_iter().enumerate() {
+            let mut learning = sample_learning();
+            learning.content = format!("learning number {i}");
+            let (r_tx, r_rx) = oneshot::channel();
+            tx.send(MemoryCoordinatorMsg::AppendLearning {
+                learning,
+                client_dedup_key: Some(key.to_string()),
+                response_tx: r_tx,
+            })
+            .await
+            .unwrap();
+            let outcome = r_rx.await.unwrap().unwrap();
+            assert!(!outcome.deduplicated, "key {key:?} must not dedup");
+            ids.push(outcome.id);
+        }
+        let (r_tx, r_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning: sample_learning(),
+            client_dedup_key: Some(String::new()),
+            response_tx: r_tx,
+        })
+        .await
+        .unwrap();
+        assert!(!r_rx.await.unwrap().unwrap().deduplicated);
+        for want_dedup in [false, true] {
+            let (r_tx, r_rx) = oneshot::channel();
+            tx.send(MemoryCoordinatorMsg::AppendLearning {
+                learning: sample_learning(),
+                client_dedup_key: Some("k1".to_string()),
+                response_tx: r_tx,
+            })
+            .await
+            .unwrap();
+            assert_eq!(r_rx.await.unwrap().unwrap().deduplicated, want_dedup);
+        }
+
+        shutdown(tx, handle).await;
+
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "four distinct ids");
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        assert_eq!(
+            raw.lines().filter(|l| !l.is_empty()).count(),
+            6,
+            "k1 written once"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -381,6 +381,13 @@ impl TantivyIndexHandle {
         Ok(self.store.check()?)
     }
 
+    /// Has a check, by this handle or by any writer sharing its writer lock,
+    /// found the store replaced? Reads the guard's flag only; no `stat`
+    /// (DRM-95).
+    pub fn store_replaced(&self) -> bool {
+        self.store.is_replaced()
+    }
+
     /// Returns this project's reader, with the recurrence warmer attached
     /// (BZR-1242). Used by HTTP handlers to execute recall queries (WEG-69).
     pub fn reader(&self) -> &RecallReader {

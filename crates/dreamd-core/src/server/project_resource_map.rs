@@ -114,6 +114,14 @@ impl<R: ProjectMapResource> ProjectResourceMap<R> {
         Some(self.promote(idx))
     }
 
+    /// Take `project_root`'s resource out of the map, unreleased. The caller
+    /// releases it. `AppState::with_runtime` uses this to drop a runtime whose
+    /// store was replaced under it (DRM-95).
+    pub fn remove(&mut self, project_root: &Path) -> Option<R> {
+        let idx = self.position(project_root)?;
+        Some(self.entries.remove(idx).1)
+    }
+
     /// Publish an already-opened `resource` for `project_root`, or adopt the
     /// incumbent if another caller published one first. Returns the winner.
     ///

@@ -153,6 +153,30 @@ Point all harnesses at MCP — they auto-bridge to the daemon proxy when the soc
 
 ---
 
+## `git clean -fdX` deleted `.agent/.dreamd/`
+
+**Symptom:** you ran `git clean -fdX` (or `-fdx`), or deleted `.agent/` and ran `dreamd setup` or `dreamd init` again, while dreamd was running.
+
+**What was deleted:** `git clean -fdX` removes ignored files, and `.agent/.dreamd/` is gitignored. That folder holds:
+
+- the search index, rebuilt from the log;
+- `state.json`, the record of the last dream cycle;
+- `config.toml`, this project's settings;
+- `snapshots/`, the decay archive: events a dream cycle moved out of the log;
+- `branches/`, memory branches and autosnaps;
+- `provenance/ledger.jsonl`, which records where each lesson came from.
+
+The episodic log (`.agent/episodic/`) and `LESSONS.md` are not ignored, so they stay.
+
+**What happens next:**
+
+- **`dreamd watch`** notices at the next learn, recall or dream for that project, opens the project again with a new store folder, indexes the log, and lets the request through: nothing to restart. `/health` and the salience report do not check, so until one of those three requests arrives they answer from the old store. If another dreamd command took the new store first, requests answer `project writer lock is held by pid N (…)` until that command finishes.
+- **An in-process `dreamd mcp`** (no `watch` running) stops writing, and every tool call answers that the store was deleted or replaced. Reload your MCP harness.
+
+**What can't come back:** an edited `config.toml`, the decay archive, memory branches, the ledger's lesson edges, and `state.json`. Without `state.json`'s record of what the last cycle wrote, a `LESSONS.md` that differs from the one git last committed reads as a hand edit, and the next dream cycle holds its git commit until you commit that file. dreamd rebuilds the index and its ledger edges from the log; nothing else. If you need the rest, stop `dreamd watch`, restore `.agent/.dreamd/` from a backup, then start `dreamd watch` again.
+
+---
+
 ## How do I reset or clear memory?
 
 | Goal | Command |

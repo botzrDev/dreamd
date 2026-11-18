@@ -14,6 +14,15 @@ use dreamd::commands::lifecycle_cleanup::{PlannedStop, StopReport, StopScope};
 use dreamd::commands::version::VERSION_SHORT;
 use dreamd::commands::{init, uninstall, update};
 
+/// An orphaned daemon socket at `path`: on Unix a bound-then-dropped listener,
+/// as a crashed `watch` leaves. A regular file there is refused (DRM-99).
+fn orphan_socket(path: &std::path::Path) {
+    #[cfg(unix)]
+    drop(std::os::unix::net::UnixListener::bind(path).expect("bind test socket"));
+    #[cfg(not(unix))]
+    std::fs::write(path, b"").unwrap();
+}
+
 /// Fake stop hook: reports "attempted, nothing matched" without signaling
 /// any real process.
 fn no_op_stop(_: &mut dyn std::io::Write) -> StopReport {
@@ -70,7 +79,7 @@ fn fixture() -> Fixture {
     .unwrap();
 
     // Fake daemon socket file.
-    std::fs::write(daemon_home.path().join("dreamd.sock"), b"").unwrap();
+    orphan_socket(&daemon_home.path().join("dreamd.sock"));
 
     // Fake native binary cache tree: <cache>/dreamd-mcp/<version>/dreamd.
     let cache = tempfile::tempdir().unwrap();

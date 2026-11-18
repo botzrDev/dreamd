@@ -190,7 +190,7 @@ pub struct AppendNodeParams {
     /// Importance score 0–10: how broadly applicable is this?
     pub importance: Option<f64>,
     /// Optional idempotency key. Duplicate calls with the same key return the
-    /// cached id without a second write.
+    /// cached id without a second write. An empty key counts as no key.
     pub client_dedup_key: Option<String>,
 }
 

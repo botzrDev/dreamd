@@ -618,6 +618,10 @@ pub enum SocketRemoval {
     /// A daemon answered on the socket, so it was left in place. Callers warn
     /// and continue; see [`remove_socket`] for why this is not an error.
     RefusedLive,
+    /// The path is taken by something that is not a unix socket, such as a
+    /// regular file a mistyped `DREAMD_SOCK` names, or a symlink. It was left
+    /// as it is (DRM-99). Callers warn and continue.
+    NotASocket,
     /// A real unlink failure (e.g. permission denied). Callers warn on
     /// stderr with the path and continue — an unremovable socket must not
     /// abort the wider uninstall/update flow.
@@ -679,6 +683,17 @@ const STOP_POLL: Duration = Duration::from_millis(50);
 fn remove_socket_within(socket: &Path, grace: Duration) -> SocketRemoval {
     if !wait_until_quiet(socket, grace) {
         return SocketRemoval::RefusedLive;
+    }
+    // DRM-99: a regular file also answers the probe as "not live". Only a
+    // socket is removed; a symlink is judged by itself and never followed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if let Ok(meta) = std::fs::symlink_metadata(socket) {
+            if !meta.file_type().is_socket() {
+                return SocketRemoval::NotASocket;
+            }
+        }
     }
     match std::fs::remove_file(socket) {
         Ok(()) => SocketRemoval::Removed,
@@ -1566,16 +1581,40 @@ mod tests {
         );
     }
 
+    /// DRM-99: a regular file at the socket path answers the liveness probe as
+    /// "not live", like an orphaned socket. It is left as it was.
+    #[cfg(unix)]
     #[test]
-    fn remove_socket_unlinks_present_file() {
+    fn remove_socket_leaves_a_regular_file() {
         let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("dreamd.sock");
-        fs::write(&sock, b"").unwrap();
+        let sock = dir.path().join("todo.txt");
+        fs::write(&sock, b"my notes\n").unwrap();
         assert!(
-            matches!(remove_socket(&sock), SocketRemoval::Removed),
-            "present socket file must be removed"
+            matches!(remove_socket(&sock), SocketRemoval::NotASocket),
+            "a regular file is not a socket"
         );
-        assert!(!sock.exists());
+        assert_eq!(fs::read(&sock).unwrap(), b"my notes\n");
+    }
+
+    /// DRM-99: a symlink is judged by itself. A link to an orphaned socket is
+    /// left, and so is the socket it points at.
+    #[cfg(unix)]
+    #[test]
+    fn remove_socket_leaves_a_symlink_even_to_an_orphan_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("orphan.sock");
+        drop(UnixListener::bind(&target).expect("bind test listener"));
+        let link = dir.path().join("dreamd.sock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(matches!(remove_socket(&link), SocketRemoval::NotASocket));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(target.exists());
     }
 
     #[test]

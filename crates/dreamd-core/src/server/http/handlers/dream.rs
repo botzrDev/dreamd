@@ -43,12 +43,7 @@ pub(crate) async fn post_dream(
     Extension(entry): Extension<crate::registry::ProjectEntry>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    use crate::dream_cycle::{GuardedCycleOptions, IndexBackend};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tracing::Instrument;
-
-    let project_root = std::path::PathBuf::from(&entry.root);
-    let agent_root = AgentRoot::new(&entry.root);
 
     let no_llm = read_no_llm_header(&headers);
     let share_personal = read_share_personal_header(&headers);
@@ -59,67 +54,16 @@ pub(crate) async fn post_dream(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // WEG-272: route the cycle to the coordinator that owns this project root,
-    // not the boot coordinator — otherwise project B's dream cycle would run
-    // against (and prune) the boot project's JSONL.
-    let supervisor = match state.resolve_supervisor(&project_root).await {
-        Ok(s) => s,
-        Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
-    };
-
-    let index_sender = match state.with_index_handle(&project_root, |h| h.sender()).await {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
-    };
-
-    // Guard, dirty capture, and post phases belong to the sequencer. The
-    // dispatch prepares in the coordinator actor, composes in this task, and
-    // commits in the actor (`dispatch_cycle`): WEG-271 routes the commit
-    // through the coordinator so its long-lived append fd is reopened after
-    // the cycle's atomic rename(s). Running the rewrites inline here would make
-    // this task a second writer racing the coordinator's appends.
-    //
-    // The whole sequencer runs on a spawned task, and this handler awaits its
-    // handle: axum drops a handler future when its client disconnects, and a
-    // cycle the daemon accepted must still commit (or release its ticket) and
-    // run its post phases. The task keeps the request's span, so its logs
-    // still carry the request id.
-    let task = tokio::spawn(
-        async move {
-            dream_cycle::run_guarded_cycle(
-                GuardedCycleOptions {
-                    agent_root: &agent_root,
-                    project_root: &project_root,
-                    now_sec,
-                    commit_autobiography: true,
-                    index: IndexBackend::Sender(index_sender),
-                },
-                |now_sec, cycle_date| {
-                    dispatch_cycle(
-                        supervisor,
-                        agent_root.clone(),
-                        now_sec,
-                        cycle_date,
-                        no_llm,
-                        share_personal,
-                    )
-                },
-            )
-            .await
-        }
-        .in_current_span(),
-    );
-    let result = match task.await {
+    // DRM-95: a coordinator whose store was replaced refuses to prepare or
+    // commit, writes nothing, and its refusal retires its runtime. The second
+    // attempt resolves again, which reopens the project. One retry only.
+    let mut attempt = run_cycle(&state, &entry.root, now_sec, no_llm, share_personal).await;
+    if matches!(attempt, Ok(Err(DreamCycleError::StoreReplaced(_)))) {
+        attempt = run_cycle(&state, &entry.root, now_sec, no_llm, share_personal).await;
+    }
+    let result = match attempt {
         Ok(result) => result,
-        Err(e) => Err(DreamCycleError::Coordinator(format!(
-            "dream cycle task failed: {e}"
-        ))),
+        Err(response) => return response,
     };
 
     let cycle = match result {
@@ -167,6 +111,86 @@ pub(crate) async fn post_dream(
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
 }
 
+/// One attempt at a cycle for `root`: resolve its coordinator and index, then
+/// run the guarded sequencer on a spawned task. The outer `Err` is a resolve
+/// failure, already a response.
+async fn run_cycle(
+    state: &AppState,
+    root: &str,
+    now_sec: i64,
+    no_llm: bool,
+    share_personal: bool,
+) -> Result<Result<dream_cycle::DreamCycleResult, DreamCycleError>, axum::response::Response> {
+    use crate::dream_cycle::{GuardedCycleOptions, IndexBackend};
+    use tracing::Instrument;
+
+    let project_root = std::path::PathBuf::from(root);
+    let agent_root = AgentRoot::new(root);
+
+    // WEG-272: route the cycle to the coordinator that owns this project root,
+    // not the boot coordinator — otherwise project B's dream cycle would run
+    // against (and prune) the boot project's JSONL.
+    let supervisor = match state.resolve_supervisor(&project_root).await {
+        Ok(s) => s,
+        Err(e) => return Err(error_500(&format!("coordinator routing failed: {e}"))),
+    };
+
+    let index_sender = match state.with_index_handle(&project_root, |h| h.sender()).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response());
+        }
+    };
+
+    // Guard, dirty capture, and post phases belong to the sequencer. The
+    // dispatch prepares in the coordinator actor, composes in this task, and
+    // commits in the actor (`dispatch_cycle`): WEG-271 routes the commit
+    // through the coordinator so its long-lived append fd is reopened after
+    // the cycle's atomic rename(s). Running the rewrites inline here would make
+    // this task a second writer racing the coordinator's appends.
+    //
+    // The whole sequencer runs on a spawned task, and this handler awaits its
+    // handle: axum drops a handler future when its client disconnects, and a
+    // cycle the daemon accepted must still commit (or release its ticket) and
+    // run its post phases. The task keeps the request's span, so its logs
+    // still carry the request id.
+    let task = tokio::spawn(
+        async move {
+            dream_cycle::run_guarded_cycle(
+                GuardedCycleOptions {
+                    agent_root: &agent_root,
+                    project_root: &project_root,
+                    now_sec,
+                    commit_autobiography: true,
+                    index: IndexBackend::Sender(index_sender),
+                },
+                |now_sec, cycle_date| {
+                    dispatch_cycle(
+                        supervisor,
+                        agent_root.clone(),
+                        now_sec,
+                        cycle_date,
+                        no_llm,
+                        share_personal,
+                    )
+                },
+            )
+            .await
+        }
+        .in_current_span(),
+    );
+    Ok(match task.await {
+        Ok(result) => result,
+        Err(e) => Err(DreamCycleError::Coordinator(format!(
+            "dream cycle task failed: {e}"
+        ))),
+    })
+}
+
 /// Prepare in the actor, compose here, commit in the actor (BZR-1241). The
 /// model call runs between the two messages, so appends keep landing.
 ///
@@ -201,6 +225,9 @@ async fn dispatch_cycle(
     let prepared = match rx.await {
         Ok(Ok(prepared)) => prepared,
         Ok(Err(CoordinatorError::CycleInProgress)) => return Err(DreamCycleError::InProgress),
+        Ok(Err(CoordinatorError::StoreReplaced(r))) => {
+            return Err(DreamCycleError::StoreReplaced(r))
+        }
         Ok(Err(e)) => return Err(DreamCycleError::Coordinator(e.to_string())),
         Err(_) => {
             return Err(DreamCycleError::Coordinator(
@@ -230,6 +257,7 @@ async fn dispatch_cycle(
     }
     match rx.await {
         Ok(Ok(decay)) => Ok(decay),
+        Ok(Err(CoordinatorError::StoreReplaced(r))) => Err(DreamCycleError::StoreReplaced(r)),
         Ok(Err(e)) => Err(DreamCycleError::Coordinator(e.to_string())),
         Err(_) => Err(DreamCycleError::Coordinator(
             "coordinator dropped the commit response".to_string(),

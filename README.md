@@ -145,7 +145,7 @@ Recall ranks episodes and lessons with BM25 × salience (age decay, pain, import
 | Location | Contents | Commit? |
 |---|---|---|
 | `<project>/.agent/` | Episodic JSONL, semantic lessons, personal prefs | **Yes** (this is the shared memory) |
-| `<project>/.agent/.dreamd/` | Local index, daemon state, config template, provenance ledger | No (gitignored by `init`) |
+| `<project>/.agent/.dreamd/` | Local index, daemon state, `config.toml`, provenance ledger, decay archive (`snapshots/`), memory branches (`branches/`) | No (gitignored by `init`); `git clean -fdX` deletes it, see [troubleshooting](docs/troubleshooting.md#git-clean--fdx-deleted-agentdreamd) |
 | `~/.agent/registry.toml` | Which projects have a store | No |
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 | `~/.agent/star-asked` | Set after setup has asked for a GitHub star, once per user | No |

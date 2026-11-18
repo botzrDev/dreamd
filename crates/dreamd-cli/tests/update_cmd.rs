@@ -16,6 +16,15 @@ use dreamd::commands::lifecycle_cleanup::StopReport;
 use dreamd::commands::update;
 use dreamd::commands::version::VERSION_SHORT;
 
+/// An orphaned daemon socket at `path`: on Unix a bound-then-dropped listener,
+/// as a crashed `watch` leaves. A regular file there is refused (DRM-99).
+fn orphan_socket(path: &std::path::Path) {
+    #[cfg(unix)]
+    drop(std::os::unix::net::UnixListener::bind(path).expect("bind test socket"));
+    #[cfg(not(unix))]
+    std::fs::write(path, b"").unwrap();
+}
+
 /// Temp socket + populated native binary cache tree. No registry involved —
 /// `update` never touches it.
 struct Fixture {
@@ -25,7 +34,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("dreamd.sock"), b"").unwrap();
+        orphan_socket(&home.path().join("dreamd.sock"));
         let tree = home.path().join("dreamd-mcp").join("0.1.0-test");
         std::fs::create_dir_all(&tree).unwrap();
         std::fs::write(tree.join("dreamd"), b"fake binary").unwrap();

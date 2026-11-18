@@ -3800,12 +3800,12 @@ async fn recall_answers_from_the_last_commit_when_the_indexer_stalls() {
     assert!(!hits.iter().any(|c| c.ends_with("beta")), "{json}");
 }
 
-// ── DRM-51: a replaced store answers 500 with a message that names it ───────
+// ── DRM-51 / DRM-95: a replaced store is reopened on the next request ───────
 
 /// Recall `q` for `root` until a hit's content has it: at most 50 tries,
-/// 100 ms apart. Once found, the indexer has committed the append and has
-/// nothing left to write, so a `remove_dir_all` of `.dreamd/` cannot race a
-/// commit (which fails it with `DirectoryNotEmpty`).
+/// 100 ms apart. Once found, the append is committed. The indexer can still be
+/// writing its ledger edges, or have a resync to run; `seed_then_clean` waits
+/// for both before it deletes `.dreamd/`.
 async fn recall_until_found(router: &axum::Router, root: &std::path::Path, q: &str) {
     let uri = format!("/api/v1/recall?q={q}&k=5");
     let mut last = (StatusCode::OK, String::new());
@@ -3819,107 +3819,226 @@ async fn recall_until_found(router: &axum::Router, root: &std::path::Path, q: &s
     panic!("recall never found {q:?}; last answer {last:?}");
 }
 
-/// The exact `500` body a writer of `kind` gives once `root`'s store was
-/// replaced.
-fn store_replaced_body(root: &std::path::Path, kind: WriterKind) -> serde_json::Value {
-    let msg = crate::writer_lock::StoreReplaced {
-        dreamd_dir: AgentRoot::new(root).dreamd_dir(),
-        kind,
-    }
-    .to_string();
-    serde_json::json!({ "error": msg })
+/// The number of lines in `root`'s episodic log.
+fn log_lines(root: &std::path::Path) -> usize {
+    let log = std::fs::read(AgentRoot::new(root).episodic_jsonl()).unwrap();
+    log.iter().filter(|b| **b == b'\n').count()
 }
 
-fn assert_store_replaced(
-    what: &str,
-    (status, body): (StatusCode, String),
-    expected: &serde_json::Value,
-) {
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{what}: {body}");
-    let json: serde_json::Value =
-        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{what}: {e}: {body}"));
-    assert_eq!(&json, expected, "{what}");
+/// Learn `seed` for `root`, wait until recall finds it, then delete `root`'s
+/// `.agent/.dreamd/`, as `git clean -fdX` does. Returns the log's line count.
+///
+/// Before the delete, the indexer runs a coverage pass and acks it. After that
+/// it has nothing left to write: no pending document, no ledger edge, and the
+/// log identity it holds is the log's. Without it, the indexer's last persist
+/// or its first resync of the new log can check the store after the delete,
+/// and the request under test never meets the replaced store itself.
+async fn seed_then_clean(
+    router: &axum::Router,
+    state: &AppState,
+    root: &std::path::Path,
+    seed: &str,
+) -> usize {
+    let (status, body) = learn_for(router, root, &format!("before the clean {seed}")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    recall_until_found(router, root, seed).await;
+    let indexer = state
+        .with_index_handle(root, |h| h.sender())
+        .await
+        .expect("the store is live before the delete");
+    let (tx, rx) = oneshot::channel();
+    indexer
+        .send(crate::server::IndexerMsg::Resync { ack: Some(tx) })
+        .await
+        .expect("indexer is running");
+    rx.await.expect("resync acked").expect("resync succeeds");
+    std::fs::remove_dir_all(AgentRoot::new(root).dreamd_dir()).expect("remove .dreamd/");
+    log_lines(root)
 }
 
-/// DRM-51 test 18: the boot project's store is deleted under `watch` (no
-/// second writer). Learn, recall and dream each answer `500` with the
-/// message, and the log is not written.
+/// The `201` body's `deduplicated` flag, asserting the status.
+fn created(what: &str, (status, body): (StatusCode, String)) -> bool {
+    assert_eq!(status, StatusCode::CREATED, "{what}: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    json["deduplicated"].as_bool().expect("deduplicated")
+}
+
+/// DRM-95 test 1: the boot project's `.dreamd/` is deleted under `watch`. The
+/// next learn is refused by the boot coordinator, which retires the boot pair,
+/// and is sent again on a reopened runtime: `201`, written once, recallable,
+/// and the boot root is now served from the runtime map. A dream works too.
 #[tokio::test]
-async fn learn_recall_and_dream_name_a_replaced_boot_store() {
+async fn a_replaced_boot_store_reopens_on_the_next_learn() {
     let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
-    let router = build_router(state);
-    let (status, body) = learn_for(&router, &canonical_a, "boot store drm51").await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    recall_until_found(&router, &canonical_a, "drm51").await;
+    let router = build_router(state.clone());
+    let before = seed_then_clean(&router, &state, &canonical_a, "alpha95").await;
+    assert_eq!(state.runtimes.lock().unwrap().len(), 0, "precondition");
 
-    let agent_root = AgentRoot::new(canonical_a.clone());
-    std::fs::remove_dir_all(agent_root.dreamd_dir()).expect("remove A's .dreamd/");
-    let log = std::fs::read(agent_root.episodic_jsonl()).unwrap();
-    let expected = store_replaced_body(&canonical_a, WriterKind::Watch);
-
-    assert_store_replaced(
+    let dedup = created(
         "learn",
-        learn_for(&router, &canonical_a, "after the clean drm51").await,
-        &expected,
+        learn_for(&router, &canonical_a, "after the clean omega95").await,
     );
-    assert_store_replaced(
-        "recall",
-        request_for(
-            &router,
-            "GET",
-            "/api/v1/recall?q=drm51&k=5",
-            &canonical_a,
-            None,
-        )
-        .await,
-        &expected,
-    );
-    assert_store_replaced(
-        "dream",
-        request_for(&router, "POST", "/api/v1/dream", &canonical_a, None).await,
-        &expected,
-    );
+
+    assert!(!dedup, "a new learning, not a dedup hit");
+    assert_eq!(log_lines(&canonical_a), before + 1, "written exactly once");
+    recall_until_found(&router, &canonical_a, "omega95").await;
+    recall_until_found(&router, &canonical_a, "alpha95").await;
     assert_eq!(
-        std::fs::read(agent_root.episodic_jsonl()).unwrap(),
-        log,
-        "the log is not written"
+        state.runtimes.lock().unwrap().len(),
+        1,
+        "the retired boot root is served from the runtime map"
+    );
+    let (status, body) = request_for(&router, "POST", "/api/v1/dream", &canonical_a, None).await;
+    assert_eq!(status, StatusCode::OK, "dream: {body}");
+    assert!(AgentRoot::new(&canonical_a)
+        .dreamd_dir()
+        .join("writer.lock")
+        .exists());
+}
+
+/// DRM-95 test 2: for a project the runtime map serves, the first request
+/// after the delete is a recall. It finds the event from before the delete:
+/// the reopen's coverage pass indexes the log. A learn after it lands once.
+#[tokio::test]
+async fn a_replaced_project_store_reopens_on_the_next_recall() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let before = seed_then_clean(&router, &state, &canonical_b, "alpha95").await;
+
+    let (status, body) = request_for(
+        &router,
+        "GET",
+        "/api/v1/recall?q=alpha95&k=5",
+        &canonical_b,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "recall: {body}");
+    assert!(
+        body.contains("alpha95"),
+        "the reopen indexes the log: {body}"
+    );
+
+    let dedup = created(
+        "learn",
+        learn_for(&router, &canonical_b, "after the clean omega95").await,
+    );
+    assert!(!dedup);
+    assert_eq!(log_lines(&canonical_b), before + 1, "written exactly once");
+    recall_until_found(&router, &canonical_b, "omega95").await;
+}
+
+/// DRM-95 test 5: for a map project the first request after the delete is a
+/// learn. The stale runtime's coordinator refuses it, and it lands once on the
+/// reopened runtime.
+#[tokio::test]
+async fn a_replaced_project_store_reopens_on_the_next_learn() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let before = seed_then_clean(&router, &state, &canonical_b, "alpha95").await;
+
+    let dedup = created(
+        "learn",
+        learn_for(&router, &canonical_b, "after the clean omega95").await,
+    );
+
+    assert!(!dedup);
+    assert_eq!(log_lines(&canonical_b), before + 1, "written exactly once");
+    recall_until_found(&router, &canonical_b, "omega95").await;
+    recall_until_found(&router, &canonical_b, "alpha95").await;
+}
+
+/// DRM-95 test 6: for a map project the first request after the delete is a
+/// dream. The stale runtime's coordinator refuses to prepare, and the cycle
+/// runs on the reopened runtime.
+#[tokio::test]
+async fn a_replaced_project_store_reopens_on_the_next_dream() {
+    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    seed_then_clean(&router, &state, &canonical_b, "alpha95").await;
+
+    let (status, body) = request_for(&router, "POST", "/api/v1/dream", &canonical_b, None).await;
+
+    assert_eq!(status, StatusCode::OK, "dream: {body}");
+    assert!(AgentRoot::new(&canonical_b)
+        .dreamd_dir()
+        .join("writer.lock")
+        .exists());
+}
+
+/// DRM-95 test 7: all of the boot project's `.agent/` is deleted and set up
+/// again, as deleting `.agent/` and running `dreamd setup` does. The next
+/// learn lands in the new store, which holds only it.
+#[tokio::test]
+async fn a_store_deleted_and_set_up_again_takes_the_next_learn() {
+    let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    seed_then_clean(&router, &state, &canonical_a, "alpha95").await;
+    let agent = AgentRoot::new(&canonical_a);
+    std::fs::remove_dir_all(agent.agent_dir()).expect("remove .agent/");
+    std::fs::create_dir_all(agent.agent_dir()).expect("set .agent/ up again");
+
+    let dedup = created(
+        "learn",
+        learn_for(&router, &canonical_a, "in the new store omega95").await,
+    );
+
+    assert!(!dedup);
+    assert_eq!(
+        log_lines(&canonical_a),
+        1,
+        "the new log holds only the new learning"
+    );
+    recall_until_found(&router, &canonical_a, "omega95").await;
+}
+
+/// DRM-95 test 3: the first request after the boot store's delete is a dream.
+/// The boot coordinator refuses to prepare, and the cycle runs again on the
+/// reopened runtime.
+#[tokio::test]
+async fn a_replaced_boot_store_reopens_on_the_next_dream() {
+    let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    seed_then_clean(&router, &state, &canonical_a, "alpha95").await;
+
+    let (status, body) = request_for(&router, "POST", "/api/v1/dream", &canonical_a, None).await;
+
+    assert_eq!(status, StatusCode::OK, "dream: {body}");
+    assert_eq!(
+        state.runtimes.lock().unwrap().len(),
+        1,
+        "reopened in the map"
     );
 }
 
-/// DRM-51 test 19: the same for a project the runtime map serves.
+/// DRM-95 test 4: another writer took the new store's lock first. Requests
+/// get the lock-busy answer while it holds the lock, and reopen once it is
+/// free. Nothing is written while it holds the lock.
 #[tokio::test]
-async fn learn_and_recall_name_a_replaced_project_store() {
-    let (_dir_a, _dir_b, _canonical_a, canonical_b, state) = make_routing_state();
-    let router = build_router(state);
-    let (status, body) = learn_for(&router, &canonical_b, "project store drm51").await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    recall_until_found(&router, &canonical_b, "drm51").await;
+async fn a_replaced_store_reopens_once_another_writer_lets_go() {
+    let (_dir_a, _dir_b, canonical_a, _canonical_b, state) = make_routing_state();
+    let router = build_router(state.clone());
+    let before = seed_then_clean(&router, &state, &canonical_a, "alpha95").await;
+    let other = WriterLock::acquire(&AgentRoot::new(&canonical_a), WriterKind::Dream)
+        .expect("the new store's lock is free");
 
-    let agent_root = AgentRoot::new(canonical_b.clone());
-    std::fs::remove_dir_all(agent_root.dreamd_dir()).expect("remove B's .dreamd/");
-    let log = std::fs::read(agent_root.episodic_jsonl()).unwrap();
-    let expected = store_replaced_body(&canonical_b, WriterKind::Watch);
+    let (status, body) = learn_for(&router, &canonical_a, "while held omega95").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body.contains(&format!(
+            "project writer lock is held by pid {} (dream)",
+            std::process::id()
+        )),
+        "{body}"
+    );
+    assert_eq!(log_lines(&canonical_a), before, "nothing written");
 
-    assert_store_replaced(
+    drop(other);
+    let dedup = created(
         "learn",
-        learn_for(&router, &canonical_b, "after the clean drm51").await,
-        &expected,
+        learn_for(&router, &canonical_a, "after release omega95").await,
     );
-    assert_store_replaced(
-        "recall",
-        request_for(
-            &router,
-            "GET",
-            "/api/v1/recall?q=drm51&k=5",
-            &canonical_b,
-            None,
-        )
-        .await,
-        &expected,
-    );
-    assert_eq!(
-        std::fs::read(agent_root.episodic_jsonl()).unwrap(),
-        log,
-        "the log is not written"
-    );
+    assert!(!dedup);
+    assert_eq!(log_lines(&canonical_a), before + 1);
+    recall_until_found(&router, &canonical_a, "omega95").await;
 }

@@ -49,7 +49,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon_state::update_daemon_state;
-use crate::launcher::Launcher;
 use crate::layout::AgentRoot;
 use crate::provenance::Ledger;
 use crate::server::INDEX_DIR_NAME;
@@ -174,7 +173,8 @@ pub struct StoreReplaced {
 
 fn replaced_message(dreamd_dir: &Path, kind: &WriterKind) -> String {
     let next = match kind {
-        WriterKind::Watch => format!("Restart `{}`.", Launcher::from_env().command("watch")),
+        // DRM-95: the daemon reopens the project on the next request.
+        WriterKind::Watch => "Send the request again: the daemon reopens the project.".to_string(),
         WriterKind::Mcp => "Reload your MCP harness so it starts dreamd again.".to_string(),
         _ => "Run the command again.".to_string(),
     };
@@ -972,10 +972,10 @@ mod tests {
             assert!(msg.contains(&format!("({kind})")), "{msg}");
             assert!(msg.contains("`git clean -fdX`"), "{msg}");
             match kind {
-                WriterKind::Watch => {
-                    assert!(msg.ends_with(" watch`."), "{msg}");
-                    assert!(msg.contains("Restart `"), "{msg}");
-                }
+                WriterKind::Watch => assert!(
+                    msg.ends_with("Send the request again: the daemon reopens the project."),
+                    "{msg}"
+                ),
                 WriterKind::Mcp => assert!(
                     msg.ends_with("Reload your MCP harness so it starts dreamd again."),
                     "{msg}"

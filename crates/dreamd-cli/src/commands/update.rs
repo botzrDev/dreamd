@@ -175,6 +175,15 @@ pub fn run(
                     socket.display()
                 )?;
             }
+            lifecycle_cleanup::SocketRemoval::NotASocket => {
+                // DRM-99: a mistyped `DREAMD_SOCK` must not cost the user a file.
+                writeln!(
+                    err,
+                    "dreamd: warning — {} is not a unix socket; left it in place. \
+                     Check `DREAMD_SOCK`.",
+                    socket.display()
+                )?;
+            }
             lifecycle_cleanup::SocketRemoval::Failed(e) => {
                 // Best-effort: warn with the path and continue — an
                 // unremovable socket must not abort the update.

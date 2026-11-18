@@ -87,6 +87,11 @@ pub enum DreamCycleError {
     /// dropped reply, or an error from the actor). The string is the message.
     #[error("{0}")]
     Coordinator(String),
+    /// The coordinator refused to prepare or commit because the store was
+    /// replaced under its writer lock (DRM-51). Nothing was written, so the
+    /// daemon sends the cycle again on the reopened project (DRM-95).
+    #[error("{0}")]
+    StoreReplaced(crate::writer_lock::StoreReplaced),
     /// The in-process cycle could not take the project writer lock: another
     /// process writes this project, or recovery under the lock failed.
     #[error("{0}")]

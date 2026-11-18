@@ -32,6 +32,12 @@ pub enum UdsBindError {
     #[error("socket already bound by another writer-process")]
     AlreadyBound(UnixStream),
 
+    /// The path is taken by something that is not a unix socket, such as a
+    /// regular file a mistyped `DREAMD_SOCK` names. It is left as it is
+    /// (DRM-99); `dreamd doctor --repair` refuses it with the same words.
+    #[error("{} is not a unix socket; refusing to unlink it", .0.display())]
+    NotASocket(std::path::PathBuf),
+
     /// Underlying syscall failed for a reason other than `AddrInUse`.
     #[error("UDS bind failed: {0}")]
     Io(#[from] io::Error),
@@ -66,6 +72,13 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
                     // as orphaned too — a race where the file vanished
                     // between the AddrInUse bind and the connect attempt is
                     // safe to retry as a fresh bind.
+                    //
+                    // DRM-99: only a socket is an orphan. A regular file also
+                    // refuses the connect, and removing it would delete a file
+                    // that is not dreamd's.
+                    if !is_socket_or_gone(path)? {
+                        return Err(UdsBindError::NotASocket(path.to_path_buf()));
+                    }
                     std::fs::remove_file(path)?;
                     let l = UnixListener::bind(path)?;
                     chmod_0600(path)?;
@@ -75,6 +88,17 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
             }
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Is `path` a unix socket, or gone? A symlink is judged by itself, not by
+/// what it points at, so `watch` never removes a link, even one to a socket.
+fn is_socket_or_gone(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::FileTypeExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => Ok(meta.file_type().is_socket()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
     }
 }
 
@@ -141,6 +165,51 @@ mod tests {
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket must be created with 0600 perms");
         drop(listener);
+    }
+
+    /// DRM-99: a regular file at the socket path refuses the connect probe like
+    /// an orphaned socket does. It is not removed: the bind fails, naming it,
+    /// and the file keeps its bytes.
+    #[test]
+    fn bind_refuses_a_regular_file_and_leaves_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("important.txt");
+        std::fs::write(&path, b"not a socket, keep me\n").unwrap();
+
+        let err = bind_socket_raw(&path).expect_err("a regular file is not an orphan");
+
+        assert!(
+            matches!(err, UdsBindError::NotASocket(ref p) if p == &path),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} is not a unix socket; refusing to unlink it",
+                path.display()
+            )
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a socket, keep me\n");
+    }
+
+    /// DRM-99: a symlink at the socket path is judged by itself, not by its
+    /// target. A link to a stale socket is refused, not removed, and the link
+    /// stays.
+    #[test]
+    fn bind_refuses_a_symlink_even_to_a_stale_socket() {
+        let dir = tempdir().unwrap();
+        let stale = dir.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        let link = dir.path().join("dreamd.sock");
+        std::os::unix::fs::symlink(&stale, &link).unwrap();
+
+        let err = bind_socket_raw(&link).expect_err("a symlink is not an orphaned socket");
+
+        assert!(matches!(err, UdsBindError::NotASocket(_)), "{err:?}");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

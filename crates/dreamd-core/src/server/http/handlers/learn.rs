@@ -104,49 +104,59 @@ pub(crate) async fn post_learn(
     // Resolve the coordinator that OWNS this project root (WEG-272),
     // then build and dispatch. Routing on `project.root` is what keeps a
     // `POST /learn` for project B out of the boot project's JSONL.
-    let supervisor = match state
-        .resolve_supervisor(std::path::Path::new(&project.root))
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
-    };
+    //
+    // DRM-95: a coordinator whose store was replaced refuses the append before
+    // it writes anything, and its refusal retires its runtime. The second
+    // attempt resolves again, which reopens the project, so the caller does
+    // not see the swap. One retry only.
+    let root = std::path::Path::new(&project.root);
+    let mut retried = false;
+    loop {
+        let supervisor = match state.resolve_supervisor(root).await {
+            Ok(s) => s,
+            Err(e) => return error_500(&format!("coordinator routing failed: {e}")),
+        };
 
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let msg = MemoryCoordinatorMsg::AppendLearning {
-        learning,
-        client_dedup_key,
-        response_tx: resp_tx,
-    };
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let msg = MemoryCoordinatorMsg::AppendLearning {
+            learning: learning.clone(),
+            client_dedup_key: client_dedup_key.clone(),
+            response_tx: resp_tx,
+        };
 
-    match supervisor.try_send(msg).await {
-        Ok(()) => {}
-        Err(CoordinatorSendError::Full) => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                [(header::RETRY_AFTER, HeaderValue::from_static("1"))],
-                axum::Json(serde_json::json!({ "error": "coordinator busy, retry" })),
+        match supervisor.try_send(msg).await {
+            Ok(()) => {}
+            Err(CoordinatorSendError::Full) => {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, HeaderValue::from_static("1"))],
+                    axum::Json(serde_json::json!({ "error": "coordinator busy, retry" })),
+                )
+                    .into_response();
+            }
+            Err(CoordinatorSendError::Closed) => {
+                return error_500("coordinator unavailable");
+            }
+        }
+
+        return match resp_rx.await {
+            Ok(Ok(outcome)) => (
+                axum::http::StatusCode::CREATED,
+                axum::Json(LearnResponse::from_append_outcome(&outcome)),
             )
-                .into_response();
-        }
-        Err(CoordinatorSendError::Closed) => {
-            return error_500("coordinator unavailable");
-        }
-    }
-
-    match resp_rx.await {
-        Ok(Ok(outcome)) => (
-            axum::http::StatusCode::CREATED,
-            axum::Json(LearnResponse::from_append_outcome(&outcome)),
-        )
-            .into_response(),
-        Ok(Err(CoordinatorError::PayloadTooLarge { .. })) => (
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            axum::Json(serde_json::json!({ "error": "payload too large" })),
-        )
-            .into_response(),
-        // DRM-51: the message names the store and what to do.
-        Ok(Err(e @ CoordinatorError::StoreReplaced(_))) => error_500(&e.to_string()),
-        Ok(Err(_)) | Err(_) => error_500("coordinator error"),
+                .into_response(),
+            Ok(Err(CoordinatorError::PayloadTooLarge { .. })) => (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(serde_json::json!({ "error": "payload too large" })),
+            )
+                .into_response(),
+            Ok(Err(CoordinatorError::StoreReplaced(_))) if !retried => {
+                retried = true;
+                continue;
+            }
+            // DRM-51: the message names the store and what to do.
+            Ok(Err(e @ CoordinatorError::StoreReplaced(_))) => error_500(&e.to_string()),
+            Ok(Err(_)) | Err(_) => error_500("coordinator error"),
+        };
     }
 }

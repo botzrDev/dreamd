@@ -50,7 +50,9 @@ use crate::server::{
 /// (canonicalized) project root use this handle instead of `runtimes`, so the
 /// coordinator's live appends and the recall reader share **one** index — and
 /// therefore one Tantivy `IndexWriter` (only one is permitted per index dir).
-/// Never evicted. `None` only in tests; `run_watch` always pins one.
+/// Never evicted. Once a check finds its store replaced (`git clean -fdX`),
+/// the pair is retired, and the boot root is served from `runtimes` like any
+/// other project (DRM-95). `None` only in tests; `run_watch` always pins one.
 ///
 /// `auth_json` — path to `~/.agent/auth.json`, the bearer token file
 /// (AILAB-203) that `bearer_auth_middleware` re-reads on every request. `None`
@@ -156,6 +158,11 @@ impl AppState {
     /// runtime is live never recovers it, because a WAL on a live project
     /// belongs to a cycle that is running.
     ///
+    /// A runtime whose store a check found replaced is not a hit (DRM-95). It
+    /// is taken out of the map and released, and this call opens the project
+    /// again: a new writer lock on the new store, WAL recovery, and the
+    /// coverage pass, which indexes the log.
+    ///
     /// `f` does cheap, non-blocking work only — clone what it needs and return
     /// it; never hold the returned value's work across the `runtimes` mutex.
     async fn with_runtime<T>(
@@ -166,7 +173,7 @@ impl AppState {
         // Hit path. The guard dies at this block's closing brace.
         {
             let mut map = self.lock_runtimes()?;
-            if let Some(runtime) = map.get_mut(root) {
+            if let Some(runtime) = live_runtime(&mut map, root) {
                 return Ok(f(runtime));
             }
         }
@@ -177,7 +184,7 @@ impl AppState {
         // A request that held the gate before this one may have published.
         {
             let mut map = self.lock_runtimes()?;
-            if let Some(runtime) = map.get_mut(root) {
+            if let Some(runtime) = live_runtime(&mut map, root) {
                 return Ok(f(runtime));
             }
         }
@@ -203,13 +210,31 @@ impl AppState {
         root: &Path,
         f: impl FnOnce(&TantivyIndexHandle) -> T,
     ) -> Result<T, IndexError> {
-        if let Some((primary_root, handle)) = self.primary.as_ref() {
-            if primary_root.as_path() == root {
-                return Ok(f(handle.as_ref()));
-            }
+        if let Some(handle) = self.live_primary(root) {
+            return Ok(f(handle.as_ref()));
         }
 
         self.with_runtime(root, |runtime| f(runtime.index())).await
+    }
+
+    /// The pinned boot handle, when `root` is the boot project and no check
+    /// has found its store replaced (DRM-95).
+    ///
+    /// Once one has, the boot project is retired: every resolver serves its
+    /// root from `runtimes`, like any other project, so the next request
+    /// reopens it. The guard is sticky, so the boot pair is never used again.
+    /// It reads the guard's flag only. The write or recall that runs next makes
+    /// its own check, and the handler that gets [`IndexError::StoreReplaced`]
+    /// or its coordinator twin sends the request once more.
+    fn live_primary(&self, root: &Path) -> Option<&Arc<TantivyIndexHandle>> {
+        match self.primary.as_ref() {
+            Some((primary_root, handle))
+                if primary_root.as_path() == root && !handle.store_replaced() =>
+            {
+                Some(handle)
+            }
+            _ => None,
+        }
     }
 
     /// What a recall on `root` needs (BZR-1437): the index's reader, its
@@ -221,15 +246,13 @@ impl AppState {
         &self,
         root: &Path,
     ) -> Result<(RecallReader, RecallFlusher, u64), IndexError> {
-        if let Some((primary_root, handle)) = self.primary.as_ref() {
-            if primary_root.as_path() == root {
-                handle.check_store()?;
-                return Ok((
-                    handle.reader().clone(),
-                    handle.recall_flusher(),
-                    self.supervisor.append_mark().appended,
-                ));
-            }
+        if let Some(handle) = self.live_primary(root) {
+            handle.check_store()?;
+            return Ok((
+                handle.reader().clone(),
+                handle.recall_flusher(),
+                self.supervisor.append_mark().appended,
+            ));
         }
         self.with_runtime(root, |runtime| {
             let index = runtime.index();
@@ -255,11 +278,9 @@ impl AppState {
         &self,
         root: &Path,
     ) -> Result<(CommitMark, AppendMark), IndexError> {
-        if let Some((primary_root, handle)) = self.primary.as_ref() {
-            if primary_root.as_path() == root {
-                let commit = handle.commit_mark();
-                return Ok((commit, self.supervisor.append_mark()));
-            }
+        if let Some(handle) = self.live_primary(root) {
+            let commit = handle.commit_mark();
+            return Ok((commit, self.supervisor.append_mark()));
         }
         self.with_runtime(root, |runtime| {
             let commit = runtime.index().commit_mark();
@@ -272,10 +293,12 @@ impl AppState {
     ///
     /// * `primary` is `None` (tests only) → the boot `state.supervisor`, the
     ///   one coordinator those tests start.
-    /// * `root` is the pinned boot project → the boot `state.supervisor`.
+    /// * `root` is the pinned boot project, and no check has found its store
+    ///   replaced → the boot `state.supervisor`.
     /// * otherwise → the coordinator of `root`'s [`ProjectRuntime`], opened on a
     ///   miss, wired to that root's index so its appends index into the same
-    ///   handle recall and dream read.
+    ///   handle recall and dream read. A retired boot project lands here too
+    ///   (DRM-95).
     ///
     /// Returns the same `Arc<Supervisor>` for repeated calls on one live root,
     /// so two writers never open the same `AGENT_LEARNINGS.jsonl`.
@@ -283,19 +306,34 @@ impl AppState {
         &self,
         root: &Path,
     ) -> Result<Arc<Supervisor>, IndexError> {
-        match self.primary.as_ref() {
-            // No pinned project (tests only) → the one coordinator.
-            None => return Ok(self.supervisor.clone()),
-            // The request targets the pinned boot project → its coordinator.
-            Some((boot_root, _)) if boot_root.as_path() == root => {
-                return Ok(self.supervisor.clone());
-            }
-            Some(_) => {}
+        // No pinned project (tests only) → the one coordinator.
+        if self.primary.is_none() || self.live_primary(root).is_some() {
+            return Ok(self.supervisor.clone());
         }
 
         self.with_runtime(root, |runtime| Arc::clone(runtime.supervisor()))
             .await
     }
+}
+
+/// `root`'s runtime in `map`, unless a check found its store replaced. That
+/// runtime is taken out and released, and the caller opens a new one (DRM-95).
+/// Its tasks keep their clones of the old writer lock until they end. That
+/// lock is on the deleted lockfile, so it does not block the new one.
+fn live_runtime<'m>(
+    map: &'m mut ProjectResourceMap<ProjectRuntime>,
+    root: &Path,
+) -> Option<&'m mut ProjectRuntime> {
+    if map.get_mut(root)?.index().store_replaced() {
+        if let Some(stale) = map.remove(root) {
+            if let Err(e) = crate::server::project_resource_map::ProjectMapResource::release(stale)
+            {
+                tracing::warn!(root = %root.display(), "releasing a replaced store's runtime: {e}");
+            }
+        }
+        return None;
+    }
+    map.get_mut(root)
 }
 
 /// One async gate per project root, so one request at a time opens a root's
