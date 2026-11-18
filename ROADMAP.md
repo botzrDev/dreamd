@@ -103,6 +103,14 @@ BM25 × salience.
   the first requests to a project no longer fail on the daemon's own writer
   lock, and an idle `dreamd mcp` session no longer holds a connection.
 
+## Shipped — v1.3.2
+
+- **Fixes**, listed in [`CHANGELOG.md`](CHANGELOG.md). `dreamd watch` opens a
+  project again when `git clean -fdX` deletes its `.agent/.dreamd/`, no dreamd
+  process writes into a store that replaced its own, an empty dedup key no
+  longer drops learnings, and `watch` no longer deletes a file that is not a
+  socket.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-17
+
+A patch release. `git clean -fdX` deletes the gitignored `.agent/.dreamd/`, and a dreamd process that was running kept writing as if nothing had happened. Now every dreamd process stops writing to a store that was deleted or replaced under it, and `dreamd watch` opens the project again on the next request, with no restart. An empty dedup key no longer drops learnings, and `dreamd watch` no longer deletes a file at `DREAMD_SOCK` that is not a socket. Recall is still BM25 × salience. No store migration or index rebuild is needed.
+
+**Upgrading from 1.3.1.** A client refuses a daemon of another version, so a 1.3.1 `dreamd watch` left running answers every 1.3.2 MCP tool call with `version mismatch: client 1.3.2, daemon 1.3.1` until it stops. Run `npx -y dreamd-mcp update`, which stops the `dreamd mcp` and `dreamd watch` processes under your home and clears the binary cache. Then run `npx -y dreamd-mcp watch` and reload your MCP harness. If a `dreamd service` unit runs the daemon, run `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`. With a cargo-installed `dreamd`, stop the old daemon and run `dreamd watch`.
+
 ### Fixed
 
 - **A dreamd process stops writing once its store is deleted or replaced under it** (DRM-51). `git clean -fdX` deletes the gitignored `.agent/.dreamd/`. A running `dreamd watch` or `dreamd mcp` kept writing as if nothing had happened: new events went unindexed, and when another dreamd command then created a new store there, the old process wrote into it too, which lost acknowledged events and left an index the next `watch` could not open. Every writer now checks, before it writes, that `.agent/.dreamd/writer.lock` is still the file it locked. Once it is not, the process writes nothing more to that store, and `learn`, `recall` and `dream` answer with a message that names the store and says what to do (reload your MCP harness, or run the command again). `dreamd watch` opens the project again instead (DRM-95, below). Library: new `writer_lock::{StoreGuard, StoreReplaced}`, `WriterLock::guard`, `provenance::Ledger::{check_store, store_replaced}` and `TantivyIndexHandle::check_store`, and a `StoreReplaced` variant on `CoordinatorError`, `IndexError`, `WalError` and `ProvenanceError`.
@@ -408,7 +414,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/botzrDev/dreamd/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/botzrDev/dreamd/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/botzrDev/dreamd/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/botzrDev/dreamd/compare/v1.2.1...v1.2.2

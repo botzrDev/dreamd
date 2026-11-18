@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# 1.3.1. Patch: dream-cycle failure handling, lesson-marker escaping, concurrent and post-idle project opens in the daemon, and the MCP probe connection. Recall is still BM25 × salience.
-version = "1.3.1"
+# 1.3.2. Patch: a store deleted or replaced under a running dreamd (the daemon reopens the project), empty dedup keys, and the socket path check. Recall is still BM25 × salience.
+version = "1.3.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

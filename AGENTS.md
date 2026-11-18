@@ -141,7 +141,7 @@ Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
 
 ## Project inventory — paired-dev-loop
 
-**Last updated:** 2026-11-16
+**Last updated:** 2026-11-17
 
 **Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.27; no DB
 **Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
@@ -693,7 +693,7 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
     - **Who ran what:** Austin ran every commit and push, the tag, the fill merge, the GitHub release, the npm publish and dist-tag, and the MCP registry login and publish. At his instruction, the PM fast-forwarded the local `main` and wrote the bump and waiver files for his commits.
     - Under WSL, `npm publish` and `npm dist-tag add` need `--no-browser` too, not only `npm login`; RELEASING.md step 6 now says so.
 
-**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-16 at Austin's call). A quick patch after 1.3.1. It reverses the 2026-11-15 decision that no 1.3.2 ships. Austin asked for it while reviewing what dreamd is missing for him as a user: on 2026-11-16 it was connected in none of the 7 folders he works in, only one of which had a store, and nothing had told him. DRM-51 and DRM-95 moved here from 1.5. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-95 → DRM-96 → DRM-97, and DRM-97 blocks DRM-52. Austin also asked the same day for every command, flag and setting to be tested "until we know its working as well as it can". That lever pass runs alongside this milestone, against the released 1.3.1 binary in containers. Its findings go to 1.5 unless Austin pulls one into 1.3.2.
+**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-16 at Austin's call). A quick patch after 1.3.1. It reverses the 2026-11-15 decision that no 1.3.2 ships. Austin asked for it while reviewing what dreamd is missing for him as a user: on 2026-11-16 it was connected in none of the 7 folders he works in, only one of which had a store, and nothing had told him. DRM-51 and DRM-95 moved here from 1.5. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-95 → DRM-97, and DRM-97 blocks DRM-96 and DRM-52. On 2026-11-17 Austin moved DRM-96 to its own milestone, 1.4.0 (below), and pulled two lever-pass P0s into 1.3.2, DRM-98 and DRM-99; both block DRM-97. Austin also asked the same day for every command, flag and setting to be tested "until we know its working as well as it can". That lever pass runs alongside this milestone, against the released 1.3.1 binary in containers. Its findings go to 1.5 unless Austin pulls one into 1.3.2.
 
 45. **DRM-51** (T131-01): a daemon keeps writing a store deleted under it. `git clean -fdX` removes the gitignored `/.agent/.dreamd/`, and that reaches it, boot project included; so do setup's Undo lines followed by setup again.
     - On its own, new appends go unindexed until a restart.
@@ -704,16 +704,32 @@ Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (reg
       - in-process `dreamd mcp` stops writing and returns a clear error, and does not reopen;
       - the docs say what `git clean -fdX` deletes.
     - Split the same day. DRM-51 makes a stale runtime stop writing: a store-identity check in every writer, and the MCP error. **DRM-95**, which comes next, reopens the project (map and boot routing, the handler retry) and adds the docs.
-87. **DRM-95** (T131-01, second half): a running `watch` reopens a project whose `.agent/.dreamd/` was replaced under it, the boot project included, so new events are recallable again with no restart. A learn or dream that a stale runtime refused is retried once on the reopened runtime. It adds the `git clean -fdX` docs.
+    - **On `main`** (`c1eb9e6`, plus `ed5a8bd` for Amendment 1's `docs/http-api.md` row). `writer_lock::StoreGuard` records the locked lockfile's (dev, ino); `check` stats it before every write and trips for good when the file is gone or another inode, logging one `WARN`. Every clone of a lock and its `Ledger` shares one guard. The coordinator (append, prepare, commit), the indexer (add, commit, coverage, lessons), the WAL and the ledger refuse with a `StoreReplaced` error that names the store and the next step.
+    - LANDED 2026-11-17 (`assignments/reports/DRM-51.landed/LANDED.md`): the production code equals the PM reference build (7 files whole, the production slice of the other 5); M0–M22 on `HEAD` each fail exactly their row; the container e2e ran a `c1eb9e6` binary. The verified tree's hash record was lost in that day's reboot (it was in the scratchpad). Spec: `assignments/DRM-51.v2.md` (Amendment 1).
+87. **DRM-95** — on `main` (`67ba26c`, one commit with DRM-98 and DRM-99; its message names none of them). A running `watch` reopens a project whose `.agent/.dreamd/` was deleted or replaced under it, the boot project included, with no restart:
+    - Routing follows DRM-51's sticky flag. `AppState::live_primary` serves the boot pair only while its guard has not tripped, and `live_runtime` takes a tripped map runtime out of the map and releases it. A retired boot root is then an ordinary map entry.
+    - The request that meets the replaced store is refused by its own DRM-51 check and sent once more: learn on `CoordinatorError::StoreReplaced`, recall on `IndexError::StoreReplaced`, dream on the new `DreamCycleError::StoreReplaced` (at prepare and at commit). The `watch` remedy text says to send the request again.
+    - Docs: README's `.agent/.dreamd/` row, a troubleshooting entry on what `git clean -fdX` deletes and what can't come back, and a paragraph in `docs/http-api.md`.
+    - The PM built it (Austin, 2026-11-17: "I build, fresh agent reviews"). A fresh agent reviewed the diff with only the code and the tickets (spec Amendment 2). It found no double write and no lost ack; its finding 1 became part of DRM-99, and findings 7–10 were fixed.
+    - PM verification: workspace 1525 / 0 / 0; all features 1528 / 1 / 0, the 1 being `weg12`'s small-payload budget under load (17.3 s), which passed 3 of 3 alone; clippy and fmt clean. Mutants R1–R10 fail exactly their rows (`assignments/reports/DRM-95.mutants/`, `DRM-95.final/`). The container e2e (`assignments/reports/DRM-95.verify.e2e.txt`): after `git clean -fdX` a learn answers 201 and recalls with no restart, with and without a second writer. `67ba26c`'s tree equals the snapshot the final mutant run used.
+    - The first mutant run had R1, R3 and R6 surviving under load, because the tests raced the indexer (drift entry `a-test-that-deletes-a-store-quiesces-its-indexer-first`, Amendment 1).
+    - Held for later (spec §5): H1, the retired boot pair stays allocated until `watch` exits; H2, only `writer.lock` replaced with `index/` kept; H3, a dream refused at commit calls the model again; H4, `/health` and salience answer from the old pair until a learn, recall or dream; H6, a `.dreamd/` moved away and back leaves the boot project at 500 until restart; H7, a dedup key resent after the reopen writes again; H8, a delete between the commit's two checks gets a 500 with no retry.
+
+    Spec: `assignments/DRM-95.v2.md` (Amendments 1–2).
+90. **DRM-98** (LP-HTTP-01) — on `main` (`67ba26c`). An empty or all-whitespace dedup key (`X-Client-Dedup-Key`, `append_node`'s `client_dedup_key`) counts as no key: `handle_append` filters it first. Before, the first such learning was written and every later one answered 201 with its id and wrote nothing. Test `an_empty_or_blank_dedup_key_is_no_key`, mutant R7. Austin pulled it into 1.3.2 from the lever pass on 2026-11-17; the contract is the ticket.
+91. **DRM-99** (LP-CONFIG-01) — on `main` (`67ba26c`). `watch`'s bind (`uds::bind_socket_raw`) removes a path that refuses the connect only when `symlink_metadata` says it is a socket. Anything else, a symlink included, is `UdsBindError::NotASocket` with doctor's text. The review found the same bug in `update` and `uninstall` (`lifecycle_cleanup::remove_socket_within`), which now return `SocketRemoval::NotASocket` and warn. The `update_cmd` and `uninstall_cmd` fixtures bind a real orphaned socket instead of writing an empty file. Mutants R8–R10. Doctor's own check (`is_unix_socket`) still follows a symlink. Austin pulled it into 1.3.2 on 2026-11-17; the contract is the ticket.
+89. **DRM-97**: 1.3.2 release prep (hitl). The number is 1.3.2: Austin moved DRM-96, which adds an install mode, to milestone 1.4.0 on 2026-11-17. The bump is `assignments/reports/DRM-97.pm-reference.py`. `main`'s 5 commits since `v1.3.1` change no behaviour and ship with it. Tag and publish stay human.
+
+**Milestone 1.4.0** (tracker milestone, filed 2026-11-17 at Austin's call). DRM-96 on its own: an install mode is a minor release. DRM-97 blocks it.
+
 88. **DRM-96**: `dreamd setup` installs per user (Austin, 2026-11-16).
     - Setup writes Claude Code's user-level MCP config, Cursor's global `~/.cursor/mcp.json` and a user-level habit block once, so every project and session gets dreamd, and a repo cleanup can't remove it. That reverses the rule that setup writes only inside the project (`Harness::config_targets`).
     - Why: setup had run in this repo twice. Its untracked `.mcp.json`, `.cursor/mcp.json` and `CLAUDE.md` block were gone, while the gitignored `.agent/` survived. Nothing outside `setup` checks for those files, so `doctor` and `status` stayed green.
     - `AgentRoot::discover` must skip the daemon home. It stops at the first ancestor that has `.agent/`, so a folder under `$HOME` with no store of its own resolves to `$HOME`, and `~/.agent/` already held a project store that a `watch` had opened.
     - In a folder with no store of its own, both tools answer that the folder isn't set up and name the setup command. Nothing is written (Austin, 2026-11-16). Today the in-process `search_nodes` answers `{"results":[]}`, which reads as "no memories".
     - The open questions are on the ticket: per-user as the default or a flag, what becomes of the project files, Cursor's user rules, the stray store in `~/.agent/`, the Undo lines, and Windows.
-89. **DRM-97**: 1.3.2 release prep (hitl). DRM-96 adds an install mode, which semver would make 1.4.0, so the number is confirmed at the bump. `main`'s 5 commits since `v1.3.1` change no behaviour and ship with it. Tag and publish stay human.
 
-**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. On 2026-11-16 he asked for a quick 1.3.2 after all, and DRM-51 and DRM-95 moved to it (above). The rest are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is DRM-97 → DRM-52 → … → DRM-57 → DRM-90. Whether the version is 1.5.0, skipping 1.4, is settled at the bump.
+**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. On 2026-11-16 he asked for a quick 1.3.2 after all, and DRM-51 and DRM-95 moved to it (above). The rest are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is DRM-97 → DRM-52 → … → DRM-57 → DRM-90. 1.4.0 is DRM-96 (above).
 
 46. **DRM-52** (T131-03): every project reopen leaks a `tantivy-warm-gc` thread. The cause is upstream: in tantivy 0.27.0, `reader/warming.rs:149-161`'s `gc_loop` never exits after its reader drops.
 47. **DRM-53** (T131-05, T131-09, T131-13): doctor and recovery gaps.
@@ -1978,3 +1994,17 @@ Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not 
   - Put the counting command next to each count in §1, and run it on `git show <base>:<path>`, not on the working tree.
   - When a reference script does the edit, compare its result with that grep before the spec is queued.
 - **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `spec-test-expectations-follow-from-the-rule-text`
+
+### a-test-that-deletes-a-store-quiesces-its-indexer-first
+
+- **Rule:** A test that deletes or replaces `.agent/.dreamd/` under a running indexer, to see what a request does next, first sends that indexer an acknowledged `IndexerMsg::Resync`. Run its mutants under load, never only on a quiet machine.
+- **Why:** DRM-95's tests deleted the store as soon as recall found the seed event. On a quiet machine the request under test met the replaced store and the retry ran. Under three parallel mutant builds the indexer got there first, by one of two checks:
+  - after the commit that recall sees, `IndexerPersist::commit` still appends the `index_doc` edges, and `Ledger::append` checks the store;
+  - `make_routing_state` opens the boot index before the log exists, so the first tick after the seed runs a resync, which checks the store.
+
+  Either one tripped the guard, the request was routed to a fresh runtime, and the retry never ran. Mutants R1, R3 and R6 (no learn retry, no dream retry, an untyped prepare refusal) survived, though a probe showed R1 failing test 1 every time on a quiet machine.
+- **How to apply:**
+  - See `seed_then_clean` in `server/http/tests.rs`. After the resync ack the indexer has nothing pending, no edge to write, and the log identity it holds is the log's.
+  - A recall that finds a document proves the commit landed, not that the indexer is idle.
+  - When a mutant survives, probe it alone with a backtrace where the guard trips before blaming the test or the code.
+- **Cross-refs:** `mutation-must-get-past-the-backstop`, `index-fixtures-must-write-the-log-first`, `mutate-each-check-of-a-compound-guard-alone`
