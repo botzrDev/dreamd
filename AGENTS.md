@@ -4,6 +4,9 @@ This file is read by Claude Code, Cursor, Cline, Codex, and other MCP-aware codi
 agents when working in this repository. It describes what this project builds, how to
 navigate and work in it, and the conventions that govern the codebase.
 
+The release record is `CHANGELOG.md`. The version is `Cargo.toml`. Ticket history
+lives in the tracker, not here.
+
 ---
 
 ## What this repo builds
@@ -16,1996 +19,265 @@ of truth — plain JSONL and Markdown you can cat, grep, git diff, and hand-edit
 **The one job dreamd is hired for:** memory continuity across tools. Not a second brain,
 not an ambient capture product, not a Python framework SDK.
 
-**Trust labels are direction, not shipped.** The provenance ledger is the substrate a future
-trust label would ride on (every effect traceable to the data that caused it; no datum
-causes an effect above its own trust label), a design that needs its own spec before any
-code. It changes nothing shipped: no trust label exists, `source_harness` is caller-asserted,
-`docs/provenance.md` is format only (BZR-154) and records derivation, not trust.
-**Constraints that stand:** do not claim momo `MemoryRegion` objects (the BZR-827 rule below);
-do not document a trust label, taint, or "the Memory" as if it shipped; do not describe a larger product,
-kernel or sibling repository that dreamd belongs to in this repository's docs, README or
-llms files (ruled 2026-11-04).
+**Trust labels are direction, not shipped.** The provenance ledger records which event
+fed which index document and lesson. It is not a trust label: no label, taint, or tier
+exists, `source_harness` is caller-asserted, and `docs/provenance.md` is format only.
+Do not document a trust label, taint, or "the Memory" as if it shipped. Do not claim
+momo `MemoryRegion` objects. Do not describe a larger product, kernel, or sibling
+repository that dreamd belongs to in this repository's docs, README, or llms files
+(ruled 2026-11-04).
 
 ---
 
 ## Repository layout
 
-  crates/dreamd-core/        Core memory engine: Tantivy BM25 index, salience
-                             collector, episodic store, dream cycle WAL.
-  crates/dreamd-cli/         CLI binary: init, mcp, watch, dream, doctor, version.
-  crates/dreamd-protocol/    Shared types: AgentLearning, EventId, HTTP schemas.
-  packages/dreamd-mcp/       Node.js npx shim (dreamd-mcp). Downloads
-                             prebuilt binary — no Rust required at runtime.
-  adapters/claude-code/      .mcp.json.example for Claude Code users.
-  adapters/cursor/           .mcp.json.example + .cursor/rules/dreamd-recall.mdc.
-  SPEC.md                    Implementation-agnostic spec for the .agent/ convention.
-  CONTRIBUTING.md            Dev setup, PR workflow, DCO sign-off requirement.
-  SECURITY.md                Threat model and disclosure policy.
-  ARCHITECTURE.md            Load-bearing engineering decisions for contributors.
+```
+crates/dreamd-core/        Core memory engine: Tantivy BM25 index, salience
+                           collector, episodic store, dream cycle WAL.
+crates/dreamd-cli/         CLI binary. Package name `dreamd`. Two bins:
+                           `dreamd` and `generate_man`.
+crates/dreamd-protocol/    Shared types: AgentLearning, EventId, SkillAction,
+                           RECORD_SCHEMA_VERSION. The HTTP response and
+                           recall wire types are in dreamd-core `ingress/`.
+packages/dreamd-mcp/       Node.js npx shim (`dreamd-mcp`). Downloads a
+                           prebuilt binary — no Rust required at runtime.
+adapters/                  Harness configs (.mcp.json.example and friends).
+SPEC.md                    On-disk contract for `.agent/`: layout, schema,
+                           salience, dream cycle. Implementation-agnostic.
+ARCHITECTURE.md            Load-bearing engineering decisions.
+CONTRIBUTING.md            Dev setup, PR workflow, DCO sign-off.
+SECURITY.md                Threat model and disclosure policy.
+CHANGELOG.md               What shipped, by version.
+docs/                      Operator and HTTP docs. `docs/windows.md` for Windows.
+assignments/               Ticket specs (`<id>.v2.md`), written against the
+                           live tree. Not a substitute for this file.
+```
+
+`dreamd --help` is the command list. `ARCHITECTURE.md` is the map of the
+coordinator, index, HTTP API, MCP server, and dream cycle. `SPEC.md` is the
+on-disk contract. Read those before changing the engine; do not re-derive
+them from old tickets.
 
 ---
 
 ## Build and test
 
-Requires Rust stable.
+Rust 1.95.0, pinned by `rust-toolchain.toml` and `rust-version` in `Cargo.toml`.
 
 ```bash
-cargo build                              # build all crates
-cargo test --workspace                   # full test suite
-cargo clippy --workspace -- -D warnings  # lint (CI enforces zero warnings)
-cargo bench -p dreamd-core               # recall latency benchmarks
-scripts/coverage.sh                      # HTML + lcov coverage report
+cargo build
+cargo test --workspace
+cargo test --all-features --workspace          # CI
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo bench -p dreamd-core
+scripts/coverage.sh                            # HTML + lcov
 ```
 
-All commits require DCO sign-off: `git commit -s`.
+`cargo run -p dreamd -- …` runs `dreamd` (`default-run`). `generate_man`
+needs `--features manpage --bin generate_man`. CLI unit tests live under `--lib`, not
+`--bin dreamd` (`main.rs` is a thin shim; `--bin dreamd` reports 0 tests and
+exits 0). (`cargo-run-dreamd-needs-bin`)
+
+All commits require DCO sign-off: `git commit -s`. The user runs commits.
+Tagging and publishing stay human steps in `RELEASING.md`.
+
+Stripped `dreamd` must stay at or under 24 MB (25,165,824 bytes, NFR-2) on the
+Linux and macOS release builds. The `vectors` feature is measured, never gated,
+and stays out of the default binary.
 
 ---
 
 ## Architectural conventions — read before making changes
 
 **Single-writer, append-only episodic log.**
-`episodic/AGENT_LEARNINGS.jsonl` is append-only. Every process that writes a project's
-store first takes the project writer lock (`.agent/.dreamd/writer.lock`,
-`writer_lock::WriterLock::acquire`). Inside the holder, appends go through the
-coordinator actor. The CLI rewrites (`forget`, `archive`, `memory checkout`) run
-in-process under the lock. Do not touch the store without the lock.
+`episodic/AGENT_LEARNINGS.jsonl` is append-only. Every process that writes a
+project's store first takes the project writer lock
+(`.agent/.dreamd/writer.lock`, `writer_lock::WriterLock::acquire`). Inside the
+holder, appends go through the coordinator actor (`AppendLearning`,
+`PrepareCycle`, `CommitCycle`, `Shutdown`). There is no `Mutex<File>` writer.
+CLI commands that write (`forget`, `archive`, `memory checkout` and `bisect`,
+`doctor --repair`, `setup`, an in-process `dream`) take the lock in-process;
+`WriterKind` lists every holder. Do not touch the store without the lock.
+
+Before a write, the holder checks that the locked `writer.lock` is still the
+same file. If the store was deleted or replaced under the process, that process
+writes nothing more. `dreamd watch` opens the project again on the next
+request; in-process `dreamd mcp` stops and returns the error.
 
 **EventId is daemon-minted.**
-`AgentLearning.id` is an `evt_`-prefixed Crockford base32 ULID minted by the coordinator.
-Any inbound `id` field is overwritten. Clients never supply IDs.
+`AgentLearning.id` is an `evt_`-prefixed Crockford base32 ULID minted by the
+coordinator. Any inbound `id` is overwritten, along with `schema_version` and
+`timestamp`. Callers pass a valid placeholder `EventId`. Clients never supply
+the durable id.
 
 **MCP tool names are locked.**
-The MCP server exposes `search_nodes` and `append_node`. These names match the Anthropic
-reference memory server intentionally. Do not rename them.
+The MCP server exposes `search_nodes` and `append_node`. These names match the
+Anthropic reference memory server intentionally. Do not rename them. There is
+no layer filter on `search_nodes`.
 
 **Salience is computed at query time.**
-`BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`, where `d(0) = 0` and `d(r) = 1.5 - 0.5 / r` (`salience::dampen_recurrence`, BZR-1523, SPEC v0.2).
-This is computed on recall. Age, pain and importance come from Tantivy fastfields. `recurrence` is the all-time subtree count, which `recurrence::RecurrenceWarmer` derives per searcher generation (BZR-1242). The salience score and `d` are never stored.
-`citations[].recurrence` and `blame --explain --json`'s `recurrence` show `d`. `results[].metadata.recurrence` and the `recall` and `score` tables show the count.
-`salience()` clamps its inputs first (BZR-1237): `salience::age_secs` floors the age at 0,
-and `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
+`BM25 × exp(-age_days/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`,
+where `d(0) = 0` and `d(r) = 1.5 - 0.5 / r` (`salience::dampen_recurrence`,
+SPEC v0.2). Age, pain, and importance come from Tantivy fastfields.
+`recurrence` is the all-time subtree count (`recurrence::RecurrenceWarmer`):
+live episodic events whose `skill_action` equals the document's key or extends
+it with `::`. The score and `d` are never stored. Do not add an indexed score
+field. The schema's `recurrence` and `cited_event_count` fastfields are written
+as 0 and read by nothing; do not wire recall to them.
+
+`citations[].recurrence` and `blame --explain --json`'s `recurrence` show `d`.
+`results[].metadata.recurrence` and the `recall` and `score` tables show the
+count. `salience()` clamps first: `age_secs` floors age at 0, and `clamp_score`
+holds pain and importance to [0, 10], with NaN as 0. The `/14` is an e-folding
+time, not a half-life.
+
+**The semantic layer is `LESSONS.md`, not embeddings.**
+`Layer::Semantic` is the lessons document layer in the same Tantivy index. It
+is still BM25 × salience. A lesson inherits pain and importance from its
+exemplar event; if the exemplar is missing, skip the document. Its
+`timestamp_sec` is when the lesson was written (`LessonsFile.last_updated`),
+not the exemplar's timestamp. A missing fastfield scores 0 and the hit
+disappears.
+
+**Deletes target a unique field.**
+`delete_term` uses `event_id` (one document) or `layer` (a whole-layer
+replace). Never `skill_action`: episodic and semantic documents share it, so a
+cluster-keyed delete removes the cluster's events. Lesson documents use an
+`lsn_` id so a per-event delete does not take them with the exemplar.
+
+**Pins are the decay exemption.**
+`pinned` short-circuits decay. A dream cycle pins every record the lesson
+cites and does not clear pins. A cited exemplar does not age out. `dreamd
+archive --force-unpin <id>` is how a pin comes off.
+
+**JSONL readers skip bad lines; rewrites go through `patch_lines`.**
+A `\n`-terminated line that does not parse stays in the log and is skipped.
+A torn final line that parses as a record gets its `\n`; any other fragment
+is truncated. Do not quarantine lines to a sidecar and do not halt on a blank
+mid-file line. Every log rewrite (pin pass, decay, `forget`, `archive
+--force-unpin`) goes through `episodic::patch_lines`, which keeps unknown
+fields, skipped lines, and a torn tail. Do not rebuild a line with
+`serde_json::Value`.
+
+**The index is a function of the log.**
+Every episodic add upserts on `event_id`. Open and `IndexerMsg::Resync` cover
+the set difference between log ids and indexed ids. A test that seeds the
+index writes the log first. The index schema is `index/1.3` and self-heals;
+`dreamd migrate` does not rewrite it. The exception: a missing or empty log
+beside an index that holds events means the log was lost, not the index.
+`dreamd doctor --repair` refuses then (`--allow-empty-log` overrides). Do not
+rebuild the index from an empty log unasked.
 
 **Dream cycle is WAL-protected.**
-A dream cycle and `dreamd forget` stage every output under `.agent/.dreamd/stage/` and
-change nothing live until one redo WAL (`dream_in_progress.wal`, `format: "redo/1"`)
-commits them. When a process takes the project writer lock, recovery rolls a redo WAL
-forward and wipes any stage directory (`wal::recover_on_startup`; its one caller is
-`WriterLock::acquire`). Every cycle stages and commits through `wal::stage_and_commit`:
-an error before the commit point removes the stage and sets `failed` in the same process,
-and an error after it is retried once (BZR-1532). `.agent/` is either pre- or post-cycle,
-never mid-cycle; the crash sweep (`crash_sweep.rs`) pins that. Each operation reads the log and `LESSONS.md` once and
-plans every output, ledger edges included, with a pure function (`plan::plan_cycle` /
-`plan_forget`, BZR-1240). The redo WAL carries those edges, and the commit appends exactly
-them. The model call that composes a lesson runs before the stage opens and outside the
-coordinator: the daemon sends `PrepareCycle`, composes in the request's task, then sends
-`CommitCycle` (BZR-1241).
+A dream cycle and `dreamd forget` stage every output under
+`.agent/.dreamd/stage/` and change nothing live until one redo WAL
+(`dream_in_progress.wal`, `format: "redo/1"`) commits them. Taking the writer
+lock rolls a pending redo WAL forward and wipes any stage directory. Staging
+and commit go through `wal::stage_and_commit`: an error before the commit
+point removes the stage and sets `failed` in the same process; an error after
+it is retried once. Each operation reads the log and `LESSONS.md` once and
+plans every output, ledger edges included, with `plan::plan_cycle` /
+`plan_forget`. The model call runs outside the coordinator, between
+`PrepareCycle` and `CommitCycle`.
 
 **`unsafe` policy.**
-`unsafe_code = "forbid"` at workspace level, and every crate inherits it (`[lints] workspace = true`).
-No crate overrides it and there is no `unsafe` in the workspace: BZR-1244 deleted
-`detach_double_fork` and dreamd-core's `deny` override. Do not add an override.
+`unsafe_code = "forbid"` at workspace level. Every crate inherits it. Do not
+add an override. There is no `unsafe` in the workspace.
 
 **Unix domain socket only.**
-HTTP API binds to `~/.agent/dreamd.sock` with `SO_PEERCRED` UID-match enforcement on
-every request. Do not bind to TCP without `--insecure`.
+The HTTP API binds `~/.agent/dreamd.sock` (or `DREAMD_SOCK`) with `SO_PEERCRED`
+UID-match on every request. One socket per user. On Unix, `watch` has no TCP
+listener; `--bind` and `--insecure` are usage errors there. Windows `watch` is
+loopback TCP plus a bearer; a non-loopback `--bind` needs `--insecure` and
+keeps the bearer. See `docs/windows.md`. `dreamd mcp --bind` is a different server: Streamable HTTP
+at `/mcp`, behind the non-default `mcp-http` feature, with no bearer. It is
+not the `/api/v1` router.
+
+**Home directory.**
+`layout::home_dir` is the one resolver. Empty `HOME` is unset. There is no
+password-database fallback. `USERPROFILE` is only for Windows.
 
 ---
 
 ## Schema
 
-Every persisted record carries `schema_version: "1.0.0"`. Before changing the schema,
-register a real transform in `dreamd-core::migrate` (WEG-133 shipped the stub:
-`dreamd migrate --from 1.0.0 --to 1.0.0` only). `skill_action` is the dream-cycle clustering key — segments match `[a-z0-9_]`, joined by `::`, language-first (e.g. `rust::error_handling::axum_rejection`).
+Every persisted record carries `schema_version: "1.0.0"`
+(`dreamd_protocol::RECORD_SCHEMA_VERSION`). That is the episodic record token.
+Daemon `state.json` is `"1.0"`. The index manifest is `"index/1.3"`. Do not
+conflate them.
+
+`dreamd migrate --from` / `--to` take the episodic token only. The command
+does not bak or rewrite the index. Before changing the record schema, register
+a real transform in `dreamd-core::migrate`. The shipped stub is
+`dreamd migrate --from 1.0.0 --to 1.0.0`. (`migrate-from-to-is-record-schema`)
+
+`skill_action` is the dream-cycle clustering key. Segments match `[a-z0-9_]`,
+joined by `::`, language-first (for example
+`rust::error_handling::axum_rejection`), at most 256 bytes. `SkillAction::parse`
+trims, lowercases, and turns whitespace into `_` first; dots, hyphens, and
+slashes are then rejected.
 
 ---
 
-## Scope (1.0.0)
+## What is shipped, and what is not
 
-Shipped in v0.1.0: BM25 lexical recall, Linux + macOS, deterministic dream cycle, npm distribution.
+Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer.
+Shipped with that: the dream cycle (deterministic, and opt-in LLM with a
+deterministic fallback), forget, memory branches, the provenance ledger, and
+`dreamd service` on Linux, macOS, and Windows.
 
-Shipped in v0.1.1: LLM-assisted dream cycle (opt-in; deterministic fallback), `LESSONS.md` semantic indexing (Tantivy document layer, still BM25 × salience — **not** embeddings), Windows `watch` + `learn` over loopback TCP + bearer, `dreamd service` on Linux / macOS / Windows.
+Deprecated since 1.2.0 and removed in 2.0 (`commands/deprecation.rs`): every
+`dreamd memory` subcommand (`branch`, `checkout`, `branches`, `delete`, `diff`,
+`bisect`), `dreamd vectors enable` with the `vectors` feature, and
+`dreamd dream --auto`. They still ship. Do not extend them.
 
-On `origin/main` at `0064355` the workspace version is `1.0.0`. Tag `v1.0.0` is `dacd95d` (GitHub Release published 2026-10-02, stable). Manifest shas were filled in `42e8e62`. There is no `v0.2.0-alpha.1` tag. npm `dreamd-mcp` is `1.0.0` on both `latest` and `next` (registry check 2026-10-02). Publishing again stays the human step in `RELEASING.md`. Since then, tag `v1.0.1` is `00e682d` (2026-10-21, the rustls RustSec bump), and `main` carried workspace version `1.0.1` from `f2638c7`. Tag `v1.2.0` is `3e822f1` (2026-10-29). Tag `v1.2.1` is `042d9d2` (2026-11-03, Latest; not an ancestor of `main`, whose `abc16b6` has the same tree). npm `dreamd-mcp` is `1.2.1` on both `latest` and `next` (registry check 2026-11-03). Tag `v1.2.2` is `d581785` (2026-11-04, Latest; cut from `v1.2.1`, and not an ancestor of `main`). npm `dreamd-mcp` is `1.2.2` on both `latest` and `next`, and the MCP registry's latest is 1.2.2 (checked 2026-11-04). `main` took the 1.2.2 version from one separate commit, not from a merge of the release branches, which Austin chose to delete once `main` had 1.2.2. Tag `v1.3.0` is `72f7201` (2026-11-07, Latest). It was released from `main`, so it is an ancestor of `main`, and the manifest-fill merge is `bcfa479`. npm `dreamd-mcp` is `1.3.0` on both `latest` and `next`, and the MCP registry's latest is 1.3.0 (checked 2026-11-07). Tag and publish stay human unless Austin hands a step to the agent, as he did for 1.3.0's tag, fill merge and GitHub release. Tag `v1.3.1` is `cc6c36a` (2026-11-16, Latest). It was released from `main`, so it is an ancestor of `main`, and the manifest-fill merge is `7f65340`. npm `dreamd-mcp` is `1.3.1` on both `latest` and `next`, and the MCP registry's latest is 1.3.1 (checked 2026-11-16). Austin ran every 1.3.1 tag, merge and publish step himself.
+Still out of scope, and not to be described as shipped:
 
-Still out of scope: vector/embedding recall, hybrid retrieval, a power-loss proof of the Windows directory flush, a prebuilt `dreamd-mcp` Windows binary, Homebrew install, auto dream cycle. Windows learn, the dream cycle, and the Tantivy index run; see `docs/windows.md`.
+- vector or embedding recall, and hybrid retrieval. The optional `vectors`
+  feature downloads a model and does not rank. There is no fusion code.
+- a power-loss proof of the Windows directory flush
+- a prebuilt `dreamd-mcp` Windows binary
+- Homebrew install
+- an automatic dream cycle. `dream_cycle_mode = "auto"` makes `watch` fail;
+  cycles run when invoked.
 
-The optional `vectors` feature downloads a model and does not rank. BZR-1244 deleted `rrf`, so there is no fusion code. Forget, memory branches, and the in-RAM latency page are shipped. Do not describe vector recall or hybrid retrieval as shipped. `v1.0.0` is a published tag; `v0.2.0-alpha.1` was never tagged.
+`dreamd forget --proof` writes a receipt. Nothing in the ledger is signed.
+
+---
+
+## Working conventions
+
+**`npm-dreamd-mcp-unscoped`.** The npm package is unscoped `dreamd-mcp`.
+User-facing docs and `.mcp.json.example` files use the floating form
+`npx -y dreamd-mcp` (and `["-y", "dreamd-mcp"]` in MCP configs). Do not
+hard-pin `dreamd-mcp@<version>` in those files. `scripts/check-npx-floating.sh`
+enforces it. Pin only in `RELEASING.md`, `CHANGELOG.md`, or `docs/spikes/`.
+
+**`doc-first-append-via-uds-learn`.** Adapter docs teach a durable append as
+`POST /api/v1/learn` against a live daemon, with a placeholder id. They do not
+teach `echo >>` of `AGENT_LEARNINGS.jsonl`. There is no `dreamd learn` command.
+A benchmark that writes the log directly is an import, not the adapter pattern.
+
+**`no-hoisted-stdio-lock-across-tantivy`.** Never hold `stdout.lock()` or
+`stderr.lock()` across `TantivyIndexHandle::open`, a commit, or anything that
+can block on Tantivy's segment updater while tracing may write stderr. A
+hoisted lock there deadlocks the process; in-process tests with a `Vec<u8>`
+writer stay green. An arm that still hoists a lock carries an inline
+`// lock-ok (AILAB-583):` comment naming why it never opens an index. A new
+or changed arm that can open one uses unlocked `stdout()` / `stderr()`.
+
+**Privacy banner.** `DR413_DISCLOSURE` in `privacy.rs` is the first-run banner
+for `dreamd init` and the first MCP spawn. `tests/fixtures/init.golden.txt` is
+byte-locked to it. When the daemon's network behavior changes, change both in
+the same commit. Do not leave "planned for vX.Y.Z" in the banner after that
+version has shipped.
+
+**Changelog.** Released sections of `CHANGELOG.md` stay as they were published.
+A correction to an old release goes under `[Unreleased]`.
 
 ---
 
 ## License
 
 Apache-2.0. All contributions require DCO sign-off (`git commit -s`).
-
----
-
-## Project inventory — paired-dev-loop
-
-**Last updated:** 2026-11-17
-
-**Stack:** Rust 2021 edition (CI pin `1.95.0`), Axum 0.8, Tokio 1, Tantivy 0.27; no DB
-**Manifest(s):** root `Cargo.toml` workspace; members `crates/dreamd-core`, `crates/dreamd-cli` (package name `dreamd`), `crates/dreamd-protocol`
-**Static-check command:** `cargo check --workspace`
-**Lint command:** `cargo clippy --workspace --all-targets --all-features -- -D warnings` (also `cargo fmt --all -- --check`)
-**Test command:** `cargo test --workspace` / `cargo test --all-features --workspace` (CI)
-**Test convention:** unit tests in `src/**`; integration tests in `crates/*/tests/` (often `wegNN_*.rs`); unix-only suites use `#![cfg(unix)]`; helper bins under `crates/dreamd-core/tests/bin/`
-**Migration dir:** n/a (JSONL + `schema_version: "1.0.0"`; `dreamd migrate` stub via `dreamd-core::migrate` / WEG-133)
-**Spec dir:** `assignments/`, naming `<ticket id>.v2.md` (for example `BZR-1532.v2.md`) for dreamd tickets (legacy `AILAB-<n>.v2.md` and `WEG-<n>.v2.md` still valid if present; v1 often only in the tracker)
-**Spec v2 convention:** `assignments/AILAB-*.v2.md` (or `WEG-*.v2.md`) next to any local v1; leave v1 intact when a local file exists
-**Memory location:** `AGENTS.md` (this file) — drift catalog section below, plus the build-order section
-**Main branch:** `main`
-**Tracker:** the ticket ids in this file (`DRM-<n>` for tickets filed from 2026-11-13, `BZR-<n>` before that, and the older `AILAB-<n>` and `WEG-<n>`) are the maintainers' tracker ids. The tracker is not part of this repository. Live work is projects **dreamd-hardening** (through 1.5, plus the 2.0 removals) and **deep-recall** (1.6, 1.7, Benchmark v0 and 2.0), in the order of the build-order section below. Shipped history is project **dreamd-eng**. Project **R&D** was canceled on 2026-10-21; do not file there.
-
----
-
-## Build order — dreamd-hardening (2026-10-24)
-
-The response to the 2026-10-24 architecture audit of `c241538`. Tracker project **dreamd-hardening**; from milestone 1.6 on, the order continues in tracker project **deep-recall**. Each issue is `blockedBy` the one above it. **Do not start a ticket until every ticket above it has landed.** One ticket at a time. The user runs commits. Each ticket's contract is its `assignments/BZR-<n>.v2.md`, written just in time against the live tree; the ticket's acceptance criteria are a summary. The PM keeps the plan at `~/.claude/plans/plan-out-the-response-groovy-otter.md`.
-
-Locked 2026-10-24:
-- Recall `recurrence` is the all-time subtree count: live episodic events whose `skill_action` equals the doc's key or extends it with `::`. Promotion stays windowed.
-- Delete library-only code now. Deprecate shipped CLI surfaces in 1.x and remove them at 2.0.
-- `dream --no-commit` against a live writer refuses; it is not proxied.
-- Recurrence moves to a Tantivy `Warmer`; the index schema stays `index/1.3`.
-- Everything here ships as **1.1.0**. v1.0.1 already shipped the rustls RustSec bump (tag `00e682d`, 2026-10-21), so there is no separate patch release for these fixes. BZR-1238 is the 1.1.0 release prep and comes last.
-
-**Milestone 1.1.0 data integrity + structure** (data integrity first, then structure)
-
-1. **BZR-1230** — on `main` (`573f4f3`, in a commit shared with the coding recall oracle). Store invariant checker (`invariants::check_store`) plus 9 ignored red tests that reproduce the audit defects (`tests/bzr1230_audit_defects.rs` and one in `server/http/tests.rs`). `LessonsUnreadable` is reported with or without an index. Spec: `assignments/BZR-1230.v2.md`.
-2. **BZR-1231** — on `main` (`06c82eb`). Deleted `MemoryCoordinatorMsg::Forget`, `handle_forget`, `forget_index_phases` and `CoordinatorError::Forget`, with the one test that sent the message. Corrected the docs that called it the production route (`forget.rs`, ARCHITECTURE §3, `docs/architecture.md`, `docs/architecture/durability.md`). `dreamd forget` is unchanged: in-process, and it refuses while a daemon is live. Spec: `assignments/BZR-1231.v2.md`.
-3. **BZR-1232** — on `main` (`17e8382`). Project writer lock (`writer_lock.rs`, `.agent/.dreamd/writer.lock`, std `File::try_lock`, stamp `{"pid","kind"}`) and one acquisition sequence for every writer (lock → legacy index-lock probe → reset stale `in_progress` → WAL recover → index → coordinator). `server/project_runtime.rs` replaces the daemon's `index_map` / `supervisor_map` fields with one `AppState::runtimes` map; `supervisor_map.rs` is deleted. Fixes per-request recovery deleting a live WAL, the wipe before the lock, `--no-commit` and `DREAMD_SOCK`-elsewhere CLI writers as second writers, recovery that only watch runs, and idle eviction of the in-process MCP index. Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238): a registered root with no `.agent/` now gets HTTP 500 instead of a silently scaffolded store, and the CLI writers refuse while an in-process `dreamd mcp` holds the lock. The `cfg(not(unix))` lock paths were never compiled; about seven of the new tests will fail on the (already red, continue-on-error) Windows job. Spec: `assignments/BZR-1232.v2.md` (Amendment 1 fixed four stale docs).
-4. **BZR-1233** — on `main` (`f7b00fa`). Open-time recovery runs on its own plain read/write fd, which `open_at` closes before it opens the append fd with `O_APPEND`. On Unix a stat check (device, inode, length) runs before each append (`ensure_live_log`) and after it (`confirm_landed`, which appends the line again if the file was replaced). The dream cycle reopens the fd on every exit path. `id_minter::IdMinter` mints strictly increasing ids, seeded from the log, and skips ids more than 24 h ahead of the clock. `Ord` on `EventId`. R1 is un-ignored. The R4 and V2 tests are new (BZR-1230 never wrote them). Windows gets `O_APPEND` only. A reopen after an outside change logs a warning and leaves a `BZR-1236` marker where `IndexerMsg::Resync` goes. ulid 1.2.1's `Ulid::from_string` wraps an overflowing first character instead of rejecting it, so the seed checks `0`–`7` itself. The dev measured the stripped `dreamd` at 20,719,744 bytes. Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238): an append after a `git checkout` / `merge` / `pull` replaced the log now lands in the new file instead of being lost; ids are strictly increasing per coordinator; a foreign final line without `\n` gets one before the next append. Spec: `assignments/BZR-1233.v2.md`.
-5. **BZR-1234** — on `main` (`18d5767`). New helpers in `episodic`:
-   - `raw_lines` / `read_raw` read every line with its bytes. `scan` and both of them share one line loop, `lines()`.
-   - `patch_lines(raw, pins, drops)` builds the new log. A flipped line is rebuilt from an ordered `RawValue` member list, not `serde_json::Value` (drift entry `jsonl-rewrites-go-through-patch-lines`).
-
-   All four log rewrites go through them: the pin pass, decay, `forget::cascade`, and `dreamd archive --force-unpin` (the user added archive to scope). `rewrite_atomic` / `rewrite_guarded` take bytes, and `serialize_records` is gone. dreamd-core's `serde_json` names `raw_value`, and `Cargo.lock` is unchanged. Stripped `dreamd` is 20,738,432 bytes, as measured by the dev.
-
-   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-   - a rewrite keeps `x_` and other unknown fields, skipped lines, and a torn final line;
-   - the pin pass no longer renames the log or records a WAL intent when no pin changes;
-   - decay archive rows are the log's line bytes, a row whose id is already in that day's archive is not appended again, and a torn archive tail gets `\n` before the next row;
-   - `archive --force-unpin <id>` unpins every line with that id, not only the first.
-
-   Spec: `assignments/BZR-1234.v2.md`.
-6. **BZR-1235** — on `main` (`4449d2a`). Open-time `episodic::recover` is skip-only:
-   - every `\n`-terminated line stays in the log, skipped ones included, and one `warn!` gives the count and the first line number;
-   - a torn final line that parses as a record gets `\n` and is returned with the others, so the `IdMinter` seeds from it; any other fragment is `set_len`'d away;
-   - `parse_record` is the one parse rule `lines()` and `recover` share, and `lines()` still yields `Torn`.
-
-   `recover_at`, `quarantine_path`, `append_quarantine`, `ScanSkip.raw` and the AILAB-163 tests 5a, 5b, 5d and 5e are deleted. V7 and V15 are un-ignored. Docs changed: ARCHITECTURE §1 and its durability table, `durability.md`, `docs/spec/layout.md`, the crash-recovery example, and doctor's torn-tail warning. Stripped `dreamd` is 20,737,600 bytes, as measured by the dev.
-
-   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238; the AC's `[Unreleased]` bullet was deferred there):
-   - open-time recovery no longer moves bad lines to `episodic/.corrupt-<date>.jsonl` or rewrites the log; a bad line stays where it is, readers skip it, and `dreamd doctor` lists it;
-   - a final record that lacks only its `\n` gets the newline instead of being truncated;
-   - every open logs one `WARN` while skipped lines remain, where the quarantine warned once and left a clean log;
-   - sidecars written by earlier versions are left in place and never read.
-
-   Spec: `assignments/BZR-1235.v2.md`.
-7. **BZR-1236** — on `main` (`600d638`). The index is a function of the log:
-   - every episodic add is an upsert: `add_document` deletes the `event_id` term first;
-   - `server/index_coverage.rs` computes the set difference between log ids and alive `evt_` terms, keyed by the 26-byte ULID body. `cover` adds missing ids, re-adds duplicated ones, and deletes ids the log lacks. The mass-delete guard skips those deletes when the log is empty, or when more than half of the index and at least 64 docs would go;
-   - `TantivyIndexHandle::open` runs the pass in place of `replay_two_pass`. The indexer runs it on `IndexerMsg::Resync`, which the coordinator sends after an outside change, and from the 5 s tick when the log's inode changed or the file shrank;
-   - `IndexerPersist::commit` is the one persist step: commit, then `index_doc` edges, then the watermark, which is now the largest committed id. Every coverage pass backfills an edge for every log id;
-   - `provenance::Ledger` is the one appender per process and project. `WriterLock::acquire` builds it and cuts a torn tail; it opens `O_APPEND` lazily and appends behind a mutex. `append_edges` is gone, and `record_cycle`, `run_filesystem_phases(_with_backend)`, `forget::cascade` and `MemoryCoordinator::open` take the ledger;
-   - doctor's `index_freshness:` line is the set difference (`assess_index_coverage`). `/health` stays on the watermark until BZR-1243.
-
-   R2 is un-ignored. The V9 and V12 tests are new; BZR-1230 never wrote them. Two `mcp/mod.rs` fixtures now write the log before seeding the index (drift entry `index-fixtures-must-write-the-log-first`). PM re-run: workspace 1167 passed / 0 failed / 2 ignored. The pasted report was cut off at mutation row M12, so the PM has no figure for M13–M17 or NFR-2.
-
-   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-   - recall no longer returns an event twice after a lost or stale watermark: every add is an upsert, and the next open re-adds any id that has two documents;
-   - an event merged in below the newest indexed id is indexed at the next open;
-   - an event no longer in the log leaves the index, unless the log is empty or more than half of the index (at least 64 docs) would go; then a `WARN` names `dreamd doctor --repair`;
-   - a running daemon re-covers the index when the log is replaced or shrinks, and when an append finds it changed outside dreamd;
-   - `dreamd doctor`'s `index_freshness` line reports missing, not-in-log and duplicated ids from the committed index. A store with no index yet prints `no index yet` and no longer warns;
-   - `/health`'s `last_indexed_id` is the largest committed id, not the last one to arrive;
-   - the dream cycle and the indexer no longer interleave ledger appends;
-   - a torn ledger tail is cut when the writer lock is taken, not on every append;
-   - the first open after the upgrade backfills an `index_doc` edge for every event the index holds;
-   - library: `MemoryCoordinator::open`, `run_filesystem_phases(_with_backend)`, `forget::cascade` and `provenance::record_cycle` take a `Ledger`, and `provenance::append_edges` is removed.
-
-   Spec: `assignments/BZR-1236.v2.md`.
-8. **BZR-1237** — on `main` (`a99975e`). `salience()` clamps its inputs with three new public helpers:
-   - `age_secs` is `now.saturating_sub(ts).max(0)`; `age_days` divides it by 86,400;
-   - `clamp_score` holds pain and importance to [0, 10], with NaN as 0.
-
-   `should_decay` uses `age_secs`. That changes no result, because a future record never reached the 90-day gate.
-
-   CLI `explain_factors` and HTTP `citations[].age_days` report the clamped values, so the explain product still equals the score bit-for-bit (user call, 2026-10-27).
-
-   The AC's fixture rework was not needed: every dream-cycle snapshot passed unchanged.
-
-   V10 is un-ignored. 10 new tests: 4 salience unit, 1 decay, 3 proptest properties (the bound uses `prop::num::f64::ANY`), 1 CLI and 1 citation. PM re-run: workspace 1178 passed / 0 failed / 1 ignored. Stripped `dreamd` is 20,801,728 bytes, which covers BZR-1236 too.
-
-   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-   - salience is at most `1 + ln(1 + recurrence)` for every input, including documents indexed before 1.1.0. A timestamp after `now` scores as written now, out-of-range pain or importance scores as its bound, and NaN scores 0;
-   - `recall --explain`, `blame --explain` and its JSON, the recall table's `age_days` column, and `citations[].age_days` show the clamped age and factors. `citations[].pain` and `importance` stay the stored values;
-   - library: new `salience::age_secs`, `age_days` and `clamp_score`.
-
-   The two docs left for BZR-1238 are settled, though that ticket closed without them: `docs/observability.md` no longer says "Stored 0.0–10.0", and `docs/architecture.md` names the new properties (2026-11-06). Spec: `assignments/BZR-1237.v2.md`.
-9. **BZR-1239** — on `main` (`22da460`). A dream cycle and `forget::cascade` stage every output, then commit them with one redo WAL:
-   - `stage::Stage` (`read` / `put` / `unlink` / `redo`) holds the outputs under `.agent/.dreamd/stage/<kind>-<now>/`. Every phase reads through the stage, so later phases see earlier staged output.
-   - `wal::begin_cycle(root, kind, now)` returns the stage and refuses while a WAL is pending. `commit_cycle(stage, ledger, now)` fsyncs the stage and writes `{"schema_version":"1.0","format":"redo/1","renames":[…],"unlinks":[…]}` (the commit point). It then runs `roll_forward` and removes the stage dir.
-   - `roll_forward`:
-     1. validate, failing closed on an absolute or `..` path, a `from` outside the stage, or a `to` / unlink inside it;
-     2. renames, then unlinks, then directory fsyncs;
-     3. `provenance::record_cycle`;
-     4. status `complete`, then WAL delete.
-   - Recovery at `WriterLock::acquire` rolls a redo WAL forward, keeps the old meaning of a legacy `intents` WAL, and wipes the stage root.
-   - The autosnap object is written directly; only its ref is staged.
-   - `crash_sweep.rs` crashes at every stage and rename point through `#[cfg(test)]` hooks and asserts the recovered store is pre- or post-cycle (drift entry `crash-sweep-oracle-is-the-image-not-the-wal`). V6 had no BZR-1230 test. The PM's own repro failed on `a99975e`.
-
-   PM re-run: workspace 1189 passed / 0 failed / 1 ignored. Mutations M1–M15 and a PM-only P1 fail as named. Stripped `dreamd` is 20,846,112 bytes.
-
-   Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-   - a dream cycle and `dreamd forget` stage every output under `.agent/.dreamd/stage/` and change nothing live until one redo WAL commits them. A crash before that point leaves the store as it was (`failed`); a crash after it is rolled forward by the next writer (`complete`). Before 1.1.0 a crash between the `LESSONS.md` rename and the pin pass left a lesson citing an unpinned event (audit V6);
-   - `dream_in_progress.wal` is now `{"format":"redo/1","renames":[…],"unlinks":[…]}`. A pre-1.1.0 binary refuses to start on it. 1.1.0 still recovers a legacy `intents` WAL the old way;
-   - a WAL with an unknown `format`, or a redo path outside `.agent/` or on the wrong side of the stage, makes every writer refuse to start;
-   - a cycle refuses to begin while a WAL is pending;
-   - the day's decay archive is staged and renamed as a whole file instead of appended in place;
-   - a roll-forward at recovery sets the status to `complete` but leaves `last_dream_cycle_at` as it was;
-   - library: `wal::begin_cycle(root, kind, now) -> Stage`, `commit_cycle(stage, ledger, now)`, `recover_if_needed(root, ledger)` and `recover_on_startup(root, ledger)`; `apply_pin_unpin`, `select_lesson_or_retire`, `write_selected_lesson` and `run_decay_pruner` take a `&mut Stage`; `run_deterministic_dream_cycle(root, ledger, now)`. New: `stage::Stage`, `wal::{RedoWal, RedoRename, CycleKind, REDO_FORMAT}`, `RecoveryOutcome::RolledForward`, `WalError::{Pending, UnknownFormat, BadRedoPath, Provenance}`, `consolidation::stage_cluster_engine`, `lessons::parse_lessons_file`, `snapshot::stage_autosnap`, `AgentRoot::stage_dir`. Removed: `wal::guarded_replace`, `GuardedReplaceKind`, `append_intent`, `episodic::rewrite_guarded`. BZR-1240 replaces several of these again; write the CHANGELOG against the 1.1.0 tree, not this list.
-
-   Left for later tickets, all settled by 2026-11-06:
-   - `docs/architecture/durability.md` says the commit replaces the file, since BZR-1241.
-   - BZR-1245's `retention::collect_objects` removes an unreferenced autosnap object after a one-hour grace.
-   - `io::write_atomic_with_hook` keeps its non-test caller, `write_atomic`.
-
-   Spec: `assignments/BZR-1239.v2.md`. Amendment 1 moved the stage removal into `commit_cycle` and fixed the crash-sweep oracle.
-10. **BZR-1240** — on `main` (`1953ef5`). A dream cycle, the deterministic cycle and `forget::cascade` each read the log and `LESSONS.md` once, plan every output with a pure function, stage the plan, and commit it:
-    - `plan::plan_cycle(raw, prior, now, body)` and `plan_forget(raw, prior, id, now)` return a `CyclePlan`: the new log (or `None`), the archived lines, the lessons change (`Keep` / `Write` / `Unlink`), the sidecar, and the ledger edges. They read no file and no clock.
-    - `plan_cycle` takes its pins and edges from the rendered `LESSONS.md` parsed back, which is what the pin pass saw before (Amendment 1). It tests the prior file only for presence.
-    - `Stage::apply_plan` stages the log, lessons, sidecar, archive and edges. The redo WAL has a required `edges` key, and `roll_forward` appends those edges where `record_cycle` used to derive them from disk.
-    - `provenance::lesson_edges` is the one edge rule, and `verify` uses it too.
-
-    PM verification: an independent harness ran 26 stores through `22da460` and through the new tree, and every `.agent/` file came out byte-identical (drift entry `refactor-oracle-is-byte-equivalence-with-the-base`). Workspace 1207 passed / 0 failed / 1 ignored. Crash sweep final k / first landed k: Promoting 17/6, Retiring 16/5, ForgetCitation 13/4, ForgetExemplar 12/3. Mutations M1–M16 and a PM-only P1 fail as named. Stripped `dreamd` is 20,859,104 bytes.
-
-    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-    - for the same store and clock, a dream cycle's and `dreamd forget`'s outputs are byte-identical to before; they now come from one read of the log and of `LESSONS.md`;
-    - the redo WAL carries the cycle's ledger edges (a required `edges` key), and the commit and any roll-forward append exactly those. Edges are no longer re-derived from `LESSONS.md` and the sidecar after the renames. The format token stays `redo/1`, because no release wrote the edge-less form;
-    - a `LESSONS.md` that exists but cannot be read (a directory at that path, or a file without read permission) now fails a dream cycle before its commit point, and nothing changes. Before, a directory there failed the rename after the commit point and wedged every writer's recovery, and an unreadable file was replaced;
-    - library: new `plan` module (`plan_cycle`, `plan_forget`, `CyclePlan`, `LessonsChange`), `consolidation::{select_lesson, cited_pins}`, `decay::{plan_decay, DecayPlan, merge_archive}`, `provenance::lesson_edges`, `wal::RedoEdge`, `RedoWal.edges` and `stage::Stage::{record_edges, apply_plan}`. `provenance::Kind` derives `Deserialize`, and `run_deterministic_dream_cycle` now decays. Removed: `consolidation::{stage_cluster_engine, apply_pin_unpin, select_lesson_or_retire, write_selected_lesson}`, `decay::{run_decay_pruner, DecayError}`, `provenance::record_cycle` and `DreamCycleError::Decay`.
-
-    Found during the ticket and reported to the user; neither has a ticket:
-    - a lesson body (exemplar content or LLM prose) containing `<!-- /dreamd:lesson -->` either fails every promoting cycle for that cluster with `InvalidData` or forges a second lesson whose id gets pinned. Behaviour is unchanged from `22da460`;
-    - on a store where none of the four autosnap inputs exists, every dream cycle fails writing `<id>.partial/manifest.json`, because the `.partial` dir is only created as a side effect of writing an entry. It has been there since BZR-160 (`806b764`).
-
-    Left for BZR-1241: clustering runs twice per cycle, in `filesystem_phases` for the model prompt and again in `plan_cycle`. Spec: `assignments/BZR-1240.v2.md` (Amendment 1 added the round trip and the unreadable-file test).
-11. **BZR-1241** — on `main` (`5b4f1e3`). The dream cycle's model call runs outside the coordinator:
-    - `RunDreamCycle` is gone. `PrepareCycle { now_sec }` reads the log once in the actor, selects the lesson, keeps the lines as its `OpenCycle` and returns the selection with a `CycleTicket`. The handler's task composes (`dream_cycle::compose`). `CommitCycle { ticket, cycle_date, body }` plans over the prepared lines plus the bytes the actor appended since (`log_since`), stages, commits and reopens the fd.
-    - In-progress is the actor's open cycle plus `state.json`, both checked in Prepare. The ticket holds an `Arc<()>` lease and the actor a `Weak`, so a dropped caller frees the next Prepare. `post_dream` runs the sequencer on `tokio::spawn` because axum drops a handler on disconnect (drift entry `split-actor-protocol-needs-a-lease-and-a-spawned-handler`).
-    - `log_since` returns `None` on any outside change: the `outside_changes` counter, the identity at the path, dev/ino, length, or a prepared read that does not end on a line. `None` re-reads the log (after `ensure_live_log`) and writes the deterministic body.
-    - `dream_cycle::{prepare, select, compose, commit, gate_at_commit}` and `plan::plan_cycle_with`. `gate_at_commit` keeps a model body only for the same `cluster_key` with every citation still a member. `run_filesystem_phases(_with_backend)` run the same three steps in-process with unchanged signatures.
-
-    PM verification:
-    - Two harnesses ran 26 stores each through `1953ef5` and the new tree, one in-process and one through the actor (`RunDreamCycle` against Prepare + Commit). Both came out byte-identical.
-    - Workspace 1224 passed / 0 failed / 1 ignored. Crash sweep k is unchanged (17/6, 16/5, 13/4, 12/3). M1–M14 fail as named. Stripped `dreamd` is 20,897,280 bytes.
-    - Round 1 added the counter test after PM-only P1 survived (drift entry `mutate-each-check-of-a-compound-guard-alone`).
-    - The V4 red repro failed on `1953ef5` (two queued cycles, both Ok).
-
-    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-    - the model call no longer runs inside the coordinator: appends land while it runs and the commit includes them, so a slow or retried model call no longer makes `POST /learn` wait or return 503;
-    - a second `POST /api/v1/dream` while one is composing gets 409 instead of running after it (audit V4);
-    - `state.json` says `in_progress` only during the commit, so `dreamd status` shows the previous cycle's status while the model runs;
-    - when the top cluster moves, or a cited record leaves it, during the model call, the cycle writes the deterministic lesson for the cluster on top at the commit. An outside change to the log during the model call makes the commit re-read it and write the deterministic lesson;
-    - the autosnap is taken at the commit and includes records appended during the model call;
-    - the shutdown drain no longer waits behind a model call; a cycle that is mid-compose at shutdown commits nothing, and its `POST /dream` returns 500;
-    - an unreadable episodic log fails a cycle before `state.json` or the stage is touched;
-    - a cycle that promotes nothing no longer reads `config.toml`, so a broken config no longer logs a warning on it;
-    - library: `MemoryCoordinatorMsg::{PrepareCycle, CommitCycle}` replace `RunDreamCycle`. New: `PreparedCycle`, `CycleTicket`, `CoordinatorError::CycleInProgress`, `dream_cycle::{Prepared, select, prepare, compose, commit}` and `plan::plan_cycle_with`.
-
-    Left as is: `examples/crash-recovery/README.md:48` still says the daemon "serializes cycles", which stays true because the second trigger gets 409. Spec: `assignments/BZR-1241.v2.md`.
-12. **BZR-1242** — on `main` (`3a610fd` + `8588449`). Recall's recurrence is one derived table:
-    - `recurrence.rs`:
-      - `ClusterCounts` holds exact counts keyed by `skill_action` bytes; `subtree(k)` adds `k`'s own count and the range `[k::, k:;)`;
-      - a per-segment scan, cached by `(SegmentId, delete_opstamp)`;
-      - `RecurrenceWarmer`, a Tantivy `Warmer` attached through `IndexReaderBuilder::warmers`. `garbage_collect` keeps the live generations and their segments;
-      - `RecallReader { reader, recurrence }`. The handle's reader and the four read-only CLI readers (`recall`, `score`, `blame`, `salience`) are all `RecallReader`s.
-    - The collector takes the table from the searcher it searches. A segment with no table is `InternalError`, never recurrence 0.
-    - Deleted: the live counter, `count_clusters`, `ApplyRecurrenceSidecar` / `apply_recurrence_sidecar` (including forget's call) and `cluster_member_count`. Both fastfields are written as 0. The schema stays `index/1.3`.
-    - `memory_diff` uses `ClusterCounts::from_events` over each object's events. `salience_report` uses the searcher's table.
-    - `check_store` reports `RecurrenceMismatch` only when the index covers the log exactly: no `DuplicateEventId`, `MissingFromIndex`, `NotInLog` or `DuplicateIndexDoc`.
-    - New bench `recall_subtree` (drift entry `subtree-bench-is-the-recurrence-gate`).
-
-    PM verification:
-    - Workspace 1236 / 0 / 0. R3 red-first on `5b4f1e3` gave `[3, 2, 1]`.
-    - A PM oracle matched a brute-force count over 24 stores: nested keys `a`, `a::b`, `a::b::c`, `ab`, `a::bc`, `a:b`, plus flushes, prunes and a reopen.
-    - M1–M18 fail as named. Round 1 added tests 10–13 and T8's `check_store` assertion, after five PM mutants of the checker survived round 0 (drift entry `mutate-each-check-of-a-compound-guard-alone`).
-    - `recall_subtree` 10k P50 282,317 ns (the gate is 1 ms). Quality suite 14 / 0. Stripped `dreamd` 20,921,888 bytes.
-    - The user committed `3a610fd` mid-ticket, with two failing tests. `8588449` adds Amendment 1's two test fixes and round 1.
-
-    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-    - Recall's `recurrence` is the all-time number of live episodic events whose `skill_action` equals the document's or extends it with `::`. An event counts itself, and a lesson gets its `cluster_key`'s count. Before 1.1.0 it depended on how the document was indexed: a live append got a running counter, a replay got the count at open, and a dream cycle's sidecar overwrote some clusters. Rankings change wherever keys nest or documents were indexed live (audit V3);
-    - `recall --explain`, `blame --explain`, and `citations[].recurrence` on `GET /api/v1/recall?explain=1` show the new value;
-    - `GET /api/v1/observability/salience` and `dreamd salience-drift` score with the new value. A drift against a snapshot written before 1.1.0 compares across the two definitions;
-    - `dreamd memory diff` scores each object's events with that object's log subtree counts. An event whose subtree grew between the objects now shows a salience row even when no sidecar exists. An invalid `recurrence_counts.json` is compared as bytes instead of failing the diff;
-    - a dream cycle and `dreamd forget` no longer re-index every event of a promoted cluster to apply the sidecar. `semantic/recurrence_counts.json` is now only the promotion report;
-    - the `recurrence` and `cited_event_count` fastfields are written as 0 and read by nothing. The index schema stays `index/1.3`, so no rebuild is needed;
-    - `invariants::check_store` reports `Violation::RecurrenceMismatch` when the index covers the log exactly;
-    - new bench: `cargo bench -p dreamd-core --bench recall_subtree`;
-    - library: new module `recurrence` (`ClusterCounts`, `RecallReader`, `RecurrenceWarmer`, `RecurrenceTables`, `SegmentRecurrence`; `ClusterCounts` and `RecallReader` are re-exported at the crate root). `recall`, `recall_excluding`, `score_by_salience`, `salience_report::build_report`, `invariants::check_store` and `recall_to_json` take `&RecallReader`, and `TantivyIndexHandle::reader()` returns one. `SalienceCollector::new(k, now_sec, tables)`. `RecurrenceContext::RecallIndexFastfield` is now `RecallSubtreeCount`. Removed: `IndexerMsg::ApplyRecurrenceSidecar`, `TantivyIndexHandle::apply_recurrence_sidecar` and `memory_diff::DiffError::Sidecar`.
-
-    Spec: `assignments/BZR-1242.v2.md`. Amendment 1 covers two existing assertions under the new definition, and moves the git greps onto `5b4f1e3`.
-13. **BZR-1243** — on `main` (`cd575af` + `bd3ef26`). Four maintenance paths no longer cost O(store size) per call:
-    - `/health` on Unix reads two in-memory marks through `AppState::live_marks`:
-      - `AppendMark { tail_id, appended }`, kept by the coordinator: at open, after each durable append, after a cycle commit, and when `reopen_after_external_change` re-reads the log;
-      - `CommitMark { last_indexed_id, committed_appends }`, published at the end of a successful `IndexerPersist::commit`; after a coverage pass `committed_appends` is every `Append` received.
-
-      `live_index_freshness` combines them. Windows keeps `assess_index_freshness`.
-    - `provenance::Ledger` loads its triples once, at the first append, as SHA-256 keys. Keys are inserted only after the write and sync succeed.
-    - `registry::RegistryCache` (`AppState::registry`) parses `registry.toml` once per `(len, mtime, dev, ino)`. `agent_root_middleware` calls it on `spawn_blocking`. `resolve_project` stays for the CLI.
-    - `recall_excluding` turns the exclusion into `MustNot` clauses: a `TermSetQuery` on `event_id`, and per prefix a `TermQuery` plus a `RangeQuery [p::, p:;)` on `skill_action`. `SegmentExclusion` and `SalienceCollector::with_exclusion` are deleted. An empty exclusion searches the unchanged query.
-
-    PM verification:
-    - Workspace 1254 / 0 / 0. Red-first: L1 on `8588449`; H1 via M1.
-    - The PM re-ran M1, M6, M7, M9, M11, M16, M18 and M19–M21; each fails as named.
-    - Base vs HEAD benches show no regression (drift entry `subtree-bench-is-the-recurrence-gate`). Stripped `dreamd` 20,937,248 bytes.
-    - The user committed `cd575af` mid-ticket, before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`). `bd3ef26` holds r1: T16–T18, the re-read `tail_id` update and a `router.rs` rustdoc reword.
-    - r0's gaps were the spec's: the coverage-pass rule and the publish-after-ledger order had no test (drift entry `an-ordering-test-must-fail-the-step-it-orders`).
-
-    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-    - `GET /api/v1/health` on Unix reads no file. It reports the running daemon's own marks:
-      - `jsonl_tail_id` is the largest id in the log as the daemon last read or wrote it;
-      - `last_indexed_id` is the largest committed id;
-      - `unindexed_count` is the appends this daemon made that the index has not committed;
-      - `stale` is `unindexed_count > 0`;
-    - a change to the log made outside the daemon no longer shows in `/health`; `dreamd doctor`'s `index_freshness` line reports it;
-    - `/health` for a registered project that is not loaded loads it, as recall does (user decision, 2026-10-28). A polled project stays loaded, and a registered root without `.agent/` gets 500;
-    - Windows `/health` is unchanged;
-    - the ledger appender reads `provenance/ledger.jsonl` once per process, at its first append, instead of on every append;
-    - the daemon caches `registry.toml` and re-reads it when its size, mtime or inode changes; the lookup no longer blocks an async worker thread;
-    - `exclude=` / `--without` / `--without-cluster` drop matches in the query instead of reading each match's stored fields. Results are unchanged;
-    - library: new `server::{AppendMark, CommitMark, live_index_freshness}`, `registry::RegistryCache`, `AppState::registry`, `Supervisor::append_mark`, `TantivyIndexHandle::commit_mark` and `MemoryCoordinator::append_mark_handle`. Removed: `SalienceCollector::with_exclusion`.
-
-    Spec: `assignments/BZR-1243.v2.md`. Amendment 1 covers resuming after the mid-ticket commit; Amendment 2 is r1.
-14. **BZR-1244** — on `main` (`9bfd00b` + `14a5617`). Deleted the code with no production caller:
-    - the modules `context_grant` (`GrantedStore`, `ContextGrant`, with `docs/context-grant.md`), `letta` (`LettaStore`, with `adapters/letta/`) and `rrf`;
-    - `ServerConfig`, `detach_double_fork` and `ServerError::Fork`, and dreamd-core's `deny` override: every crate now inherits the workspace `forbid` (`[lints] workspace = true`), and nix's `process` feature is gone from dreamd-core's production dependency;
-    - `SocketGuard` and `bind_writer_socket`. Production binds through `uds_server::bind_api_socket` → `bind_socket_raw`, and the weg21 helper and `status.rs` test bind through std;
-    - the `layer` parameter of `collector::recall` and `recall_excluding`.
-
-    Supersedes BZR-827, BZR-183 and BZR-182; those are not reopened. ARCHITECTURE §8 / §8.1 and the source map record it.
-
-    PM verification:
-    - Workspace 1243 / 0 / 0; `--all-features` 1247 / 0 / 0.
-    - The forbid probe (`#[allow(unsafe_code)] fn _bzr1244_probe() { unsafe {} }`) fails with E0453 on `HEAD` in the lib, bin and test targets, and compiles on `bd3ef26`.
-    - M1–M5 fail as named; BZR-1243's M16 and M18 still fail against the new exclusion code.
-    - 30/30 CLI commands are byte-identical, base vs `HEAD` (drift entry `refactor-oracle-is-byte-equivalence-with-the-base`).
-    - Interleaved benches show no regression beyond noise. `cargo doc` gives the same 66 warnings.
-    - Stripped `dreamd` is 20,937,120 bytes.
-    - The user committed `9bfd00b` mid-ticket, before the report (drift entry `mid-ticket-commit-keeps-the-ticket-base`). `14a5617` holds Amendment 1's two comment fixes. Its sign-off line is a template placeholder, not a real DCO.
-
-    Behaviour changes for the 1.1.0 CHANGELOG (BZR-1238):
-    - none for the CLI, HTTP or MCP: every command, route, tool and output is unchanged;
-    - library: removed the modules `context_grant` (`GrantedStore`, `ContextGrant`), `letta` (`LettaStore`) and `rrf` (`fuse`, `RRF_K`); removed `server::{ServerConfig, detach_double_fork, SocketGuard, bind_writer_socket}` and `ServerError::Fork`; `collector::recall` and `recall_excluding` no longer take a `layer` argument;
-    - docs: `docs/context-grant.md` and `adapters/letta/` are removed;
-    - build: `unsafe_code = "forbid"` now holds in every crate, with no override; dreamd-core's production `nix` dependency drops the `process` feature.
-
-    Spec: `assignments/BZR-1244.v2.md`. Amendment 1 fixed two comments; Amendment 2 covers resuming after the mid-ticket commit.
-15. **BZR-1245** — on `main` (`ce2daec`). Deprecated `memory branch|checkout|branches|delete|diff|bisect`, `vectors` and `dream --auto` (notices in `commands/deprecation.rs`), and capped autosnap retention at 20 `snap-*` refs (`retention.rs`; named branches, `HEAD` and refs an in-progress bisect names are kept). Spec: `assignments/BZR-1245.v2.md` (Amendments 1–3).
-16. **BZR-1238** — 1.1.0 release prep. Closed 2026-10-30 as superseded by BZR-1304: 1.1.0 and 1.2.0 shipped (v1.2.0 tag 2026-10-29) without this ticket being worked as written.
-
-**Milestone 1.2.1 patch** (filed 2026-10-30 from the 2026-10-29 black-box torture session of v1.2.0; report at `~/dreamd-hell/v12-torture-20261029/REPORT.md`, verified on `2ab0270`). Same rules: one ticket at a time, `blockedBy` order, v2 spec is the contract. The tester withdrew findings 14 and 9 after their own re-runs (client-side capture artifact; "registration" attempts were the finding-2 no-op).
-
-18. **BZR-1297** — tantivy 0.27 to clear the three waived zstd RustSec advisories. Chain root (decided 2026-10-30). Scope stays inside dreamd-core's index open / rebuild paths; no WAL, stage, lock or coordinator changes. Timeboxed: if 0.27 breaks the indexer actor or lockfile semantics, defer it to the next patch milestone and note the waivers on BZR-1304. Re-run the torture probe matrix after it lands.
-19. **BZR-1298** — operator recovery path for an unreadable dream-cycle WAL. The BZR-1239 fail-closed refusal stays; doctor reports it and a repair arm quarantines the WAL, wipes the stage and sets `failed` under the writer lock. `watch` names the doctor command. Today every writer refuses forever and systemd loops.
-20. **BZR-1299** — `dreamd init` and `setup` register an existing `.agent/` when the canonical root is missing from `registry.toml`, print one line (`dreamd: registered existing .agent/ in ~/.agent/registry.toml`; `--quiet` prints nothing), and do not rewrite the store. An already-registered store still prints the rerun line. Spec: `assignments/BZR-1299.v2.md`.
-21. **BZR-1300** — `dreamd uninstall` gets the `service uninstall --purge` confirmation idiom (`y` on a TTY, `--yes`, exit 2 otherwise). It currently stops daemons, unregisters and wipes both caches with no gate.
-22. **BZR-1301** — `memory_store.rs` `map_remote_status_error` labels every 400 "invalid X-Agent-Root"; return the daemon's `error` string. Guard the recall query length so hyper's "uri too long" never reaches an MCP caller.
-23. **BZR-1302** — doctor WARNING lines for hand-edit anomalies: out-of-range scores, duplicate ids, future timestamps, unparseable `registry.toml`. Report only; readers keep clamping (BZR-1237) and upserting (BZR-1236).
-24. **BZR-1303** — CLI markdown tables escape C0 control characters; `recall` currently leaks a stored NUL to stdout.
-25. **BZR-1304** — 1.2.1 release prep (hitl). Tag and publish stay human.
-
-Status on 2026-11-03 (`origin/main` `da34a3d`):
-- On `main`:
-  - 1297 (`442228c`, `4b3a9a0`);
-  - 1298 (`a06ff76`);
-  - 1299 (`fb30024`, `4adbbaa`);
-  - 1300 (`14800d0`, `a52b16d`);
-  - 1301 (`edf9f85`, `3bd371a`);
-  - 1302 (`0e0df5a`);
-  - 1303 (`d6e4a9b`);
-  - **BZR-1417**, the Windows replace probe (`7f2bc0f`);
-  - **BZR-1437**, `search_nodes` commits pending appends first (`da34a3d`).
-- 1298 and 1299 landed with no CHANGELOG bullet; BZR-1304 adds them.
-- Added to the milestone after filing:
-  - **BZR-1438**: the Linux release binary needed glibc 2.39. Austin picked option C on 2026-11-03: the static musl build ships as `linux-x86_64`. Spec `assignments/BZR-1438.v2.md`.
-    - Its rebuild STOP check tripped: `doctor --repair` over 20,000 events took a median 714 ms on musl and 354 ms on glibc (2.02×, against a 1.5× limit). `recall_subtree` 10k stayed between 0.92× and 1.08× of glibc.
-    - Austin chose the same day to ship musl with its built-in malloc and no added allocator (§12 D3 stays "none"). A mimalloc probe matched glibc's rebuild time but raised idle VmRSS from 15 MB to 25–27 MB, against the 30 MB limit.
-  - **BZR-1401**: re-run the torture matrix on the 1.2.1 tree before release prep. 48 of 48 checks passed on 2026-11-03, on the BZR-1438 tree's static musl binary (crates identical to `da34a3d`).
-- Scope, decided 2026-11-03: 1.2.1 is `main` plus BZR-1438. BZR-1467, 1468, 1469 and 1470 moved to milestone **1.2.2 polish**. The remaining order is 1438 → 1401 → 1304.
-
-**Released 2026-11-03.** BZR-1438 (`0bd2e77`) and BZR-1401 are Done.
-- Tag `v1.2.1` is `042d9d2`; the GitHub release was published 14:49:51Z and is Latest. PR #61 landed as a rebase, so the tag is not an ancestor of `main`; `abc16b6` has the identical tree.
-- npm `dreamd-mcp@1.2.1` is `latest` and `next`. The MCP registry's latest is 1.2.1.
-- BZR-1304 is Done; its ticket comments are the release record.
-
-Triage notes: torture findings 14 (unknown MCP tool gets no response) and 9 (registry not re-read until restart) did **not** reproduce on `2ab0270` and were withdrawn by the tester; HTTP rejects out-of-range scores with 400, so finding 6 is a hand-edit case; findings 4 and 5 are by design. **BZR-1238** (1.1.0 release prep) was closed 2026-10-30 as superseded by BZR-1304; 1.1.0 and 1.2.0 shipped without it.
-
-**Milestone 1.2.2 patch** (tracker milestone, target 2026-11-10; decided by Austin 2026-11-04). It ships the BZR-1469 setup-hint fix (item 28 below) on its own, so the Show HN on Wed 2026-11-11 08:00 America/Chicago meets `npx -y dreamd-mcp watch`. It goes ahead of BZR-1470; 1470 resumes after the handoff.
-
-33. **BZR-1516** — 1.2.2 release prep (hitl). Spec: `assignments/release-1.2.2.v2.md`.
-    - **Branch:** `release/v1.2.2`, cut from tag `v1.2.1` (`042d9d2`), in the worktree `/home/botzr/development/dreamd-release-1.2.2`. Austin's instruction overrides the loop's no-`worktree add` rule for this release only.
-    - **What it holds:** only BZR-1469's hunks of `47f8c94`, which are the 9 code, test, shim and doc paths plus one hunk each of `GUIDE.md`, `docs/troubleshooting.md` and `packages/dreamd-mcp/README.md`. These are staged and uncommitted. On `v1.2.1` every code path equals `47f8c94`, except `setup.rs`, which lacks BZR-1468's 21 lines.
-    - **What stays out:** BZR-1467, 1468 and 1470, the 16 docs outside the ticket, and the post-sign-off doc edits.
-    - **Getting 1.2.2 onto `main`** (Austin's decision): one separate staged change, made after the release build. It bumps `main`, fills the shas and moves the BZR-1469 bullet under `[1.2.2]`. The fill PR is not merged and no `--admin` merge is used, so tag `v1.2.2` stays off `main`.
-    - **npm** is published from `chore/mcp-manifest-v1.2.2` (the tag plus the fill), not from `main`, because `main`'s package README describes BZR-1467 and 1468.
-    - Tag and publish stay human.
-    - **Released 2026-11-04.** BZR-1516 is Done, and its ticket comment is the release record:
-      - tag `v1.2.2` (lightweight) is `d581785`, on `fd78011` (the BZR-1469 cherry-pick) over `v1.2.1`;
-      - the GitHub release was published 16:50:45Z and is Latest. `release.yml` run 41867571203 built all four targets, and its "Open PR" step failed as on 1.2.1;
-      - npm `dreamd-mcp@1.2.2` was published at 17:04:19Z from `01fc2ba` (`d581785` plus the manifest fill; shasum `4cb03539…`). `latest` and `next` are 1.2.2, and the MCP registry's 1.2.2 is latest (17:14:02Z);
-      - a live-download npx run in four clean containers, and the public `npx -y dreamd-mcp` afterwards, printed `start it with: npx -y dreamd-mcp watch`. Report: `assignments/reports/release-1.2.2.verify.r0.md`;
-      - Austin decided the same day to delete `release/v1.2.2`, `chore/mcp-manifest-v1.2.2` and the release worktree once `main` had 1.2.2. The tags stay.
-
-**Milestone 1.3** (tracker milestone; renamed from "1.2.2 polish" on 2026-11-04). It shipped as v1.3.0 on 2026-11-07, before the Show HN, by Austin's call that day; the plan had been to ship after it. Added to the paired loop 2026-11-03 as a user decision. It holds the findings from Austin's Nov 1 macOS test of the Yohei paste-in prompt that did not go into 1.2.1. BZR-1469 moved to "1.2.2 patch". Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The automated paired loop ended when BZR-1519 landed (Austin added it after BZR-1473 on 2026-11-04). BZR-1522, 1523 and 1524 joined the milestone after that; BZR-1523 ran as a manual `/paired-dev-loop`.
-
-26. **BZR-1467** — on `main` (`6db64aa`). The autobiography start check compares bytes instead of asking git for status (drift entry `autobiography-check-is-content-not-git-status`):
-    - `LESSONS.md` is dreamd's when it is absent, equals HEAD's blob, or matches `state.json`'s new `autobiography_baseline` hash;
-    - the log is dreamd's when HEAD's blob is a prefix of it, or its first `log_len` bytes match the baseline;
-    - with no baseline, a file HEAD does not track is dreamd's.
-
-    `record_baseline` runs after every successful dispatch, `--no-commit` included. A file dirty at cycle start keeps its old entry, so a hand edit holds only that file until the user commits it. The hold is the user's ruling (D2, 2026-11-03); holding per file is the PM's call (§11 H1). The commit's tree is HEAD's tree plus the two paths, built in an in-memory index. It respects `.gitignore` for paths HEAD does not track, makes no empty commit (`Unchanged`), and resolves paths through the project root. `POST /api/v1/dream`'s 200 body has an `autobiography` object, `dreamd dream` prints `skip_message`, and doctor names the files.
-
-    PM verification:
-    - workspace 1383 / 1 / 0 (`weg12` load flake, which passed alone twice);
-    - red-first 27 and 28 on `ca8323e`;
-    - 19 PM mutants fail as named;
-    - stripped `dreamd` 21,913,728 bytes;
-    - an e2e run with the release binary.
-
-    The user committed `6db64aa` during VERIFY, and it equals the verified tree. The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
-
-    Held for later (spec §11):
-    - H2: a cycle commits during a merge or rebase;
-    - H3: git filters such as `core.autocrlf`;
-    - H4: crash windows leave the old baseline;
-    - H5: in the daemon, a second cycle can race the first cycle's post-phase `state.json` writes.
-
-    The `no_baseline` text reads "… differ from HEAD" for one file. Spec: `assignments/BZR-1467.v2.md` (Amendment 1).
-27. **BZR-1468** — on `main` (`1a59f1c`). Every recall hit carries `id`, its first key:
-    - `RecallResultJson.id` is the stored `RecallResult::event_id`, unchanged: the `evt_…` id for an event, `lsn_evt_…` for a lesson (user ruling D1). One `map_one` serves in-process and daemon-mode `search_nodes`, `GET /api/v1/recall`, `explain=1` and `exclude=`;
-    - `id` is always serialized. serde_json has no `preserve_order`, so declaration order is key order;
-    - the `search_nodes` description (the const and both literals) says "Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson." The `CLAUDE.md` block and the Cursor rule say "its id".
-
-    PM verification:
-    - workspace 1393 / 0 / 0;
-    - red-first on `6db64aa`;
-    - M1–M8 plus PM-only P5 (`forget` accepting `lsn_`) and P7 (`blame` blanking the id) fail as named;
-    - stripped `dreamd` 21,912,960 bytes;
-    - r1 made test 9 retry its first search (drift entry `search-after-append-tests-retry-past-the-commit-bound`).
-
-    The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit. The dated capture in `docs/spikes/dr-014-cline-mcp.md` stays as history.
-
-    Held for later (spec §11):
-    - H1: `forget lsn_…` still answers "is not an event id";
-    - H2: a daemon from an older version answers without `id`;
-    - H3: a habit block written by an older setup keeps "event id" until setup reruns.
-
-    Spec: `assignments/BZR-1468.v2.md` (Amendment 1).
-28. **BZR-1469** — on `main` (`47f8c94`). `dreamd setup` names commands that work for the launcher, and its card lists everything it wrote:
-    - the npx shim runs the binary with `DREAMD_LAUNCHER=npx` at both exec sites (user ruling D1). Under it, setup's hints name `npx -y dreamd-mcp watch`, `doctor` and `init --uninstall-project`. A `dreamd` binary still names `dreamd …`;
-    - the success card has one row per thing dreamd owns in the project: the store, the registry entry, the `.gitignore` line, each MCP file, each habit file (the `CLAUDE.md` block, the Cursor rule) and the daemon. A store or registry entry that was already there is marked (PM call D3);
-    - `Undo:` is always printed, with a line per row, and names deleting `.agent/` only when that run created it (user ruling D2);
-    - `docs/troubleshooting.md` gains the resumed-session cause: a Claude Code session resumed from another folder does not load this repo's `.mcp.json`.
-
-    PM verification:
-    - workspace 1404 / 0 / 0;
-    - M1–M19 and PM-only P2–P7, P9 and P10 fail as named; P8 is guarded by §6 grep 2;
-    - a real-shim e2e card is byte-identical to §3.5 (1132 bytes);
-    - stripped `dreamd` is 21,918,592 bytes.
-
-    The user's commit also carries docs edits made after sign-off. Three signed-off docs (`GUIDE.md`, `docs/troubleshooting.md`, `packages/dreamd-mcp/README.md`) and 16 files outside the ticket changed, docs only. The PM re-checked them against the tree (`assignments/reports/BZR-1469.verify.landed.md`). Every claim holds except `SKILL.md`'s "Empty after that means the query did not match", which is false when the commit takes longer than the 1 s bound (`search-after-append-tests-retry-past-the-commit-bound`).
-
-    The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
-
-    Held for later (spec §11, Amendment 2):
-    - H1: other commands' hints (doctor's `--repair` advice, `status`, `watch`, MCP errors) still name `dreamd …`;
-    - H2: the first-lesson sentence setup stores has no Undo line;
-    - H3: `init` prints `.agent/.dreamd/` without the leading slash the `.gitignore` line gets;
-    - H4: every setup run rewrites the Cursor rule and the `CLAUDE.md` block;
-    - H5: `DREAMD_LAUNCHER` is inherited by the `watch` setup spawns and by an IDE's npx `dreamd mcp`;
-    - H6: no test reaches `watch_spawn_failed_line`'s launcher argument (PM mutant P1 survives).
-
-    Spec: `assignments/BZR-1469.v2.md` (Amendments 1–2).
-29. **BZR-1470** — on `main` (r0 `40425a9`, r1 `c0c0b4e`). The console is text everywhere, coloured only on a terminal, and `DREAMD_LOG_FORMAT=json` switches it to JSON. `watch`'s console shows its start and stop lines and warnings; per-request lines go to `~/.agent/dreamd.log`. Library targets stay at `warn` unless `DREAMD_LOG` is set. Austin committed r0 before any report (drift entry `mid-ticket-commit-keeps-the-ticket-base`), and the base stayed `47f8c94`. VERIFY r0 (`assignments/reports/BZR-1470.verify.r0.md`) passed every row except PM-only mutants P4 (`init_tracing` ignores `DREAMD_LOG_FORMAT`) and P6 (`watch` ignores `DREAMD_LOG`), which survived 1,416 / 0 / 0, and a stale `service.rs:137-138` rustdoc. r1 (Amendment 2) is test 13 plus the rustdoc. No r1 verify report is on file. Spec: `assignments/BZR-1470.v2.md`.
-30. **BZR-1471** — on `main` (`c0c0b4e`). A missing API key is reported on the cycle, and a deterministic lesson says it is a copy of the representative event.
-31. **BZR-1472** — on `main` (`c0c0b4e`). A dream cycle's git commit message names the cited event ids and the pins.
-32. **BZR-1473** — on `main` (`c0c0b4e`). `forget --dry-run` prints `would_remove=` and writes nothing.
-
-    Items 30–32 have no v2 spec or report on file. The record is each ticket's comment and its `CHANGELOG.md` bullet.
-34. **BZR-1519** — on `main` (`ae95a93`). BZR-1474's follow-up (Austin, 2026-11-04):
-    - `dreamd watch` resolves its bind path through `client::resolve_daemon_socket`, like every client, so it honours the existing `DREAMD_SOCK`. The ticket's first name, `DREAMD_SOCKET`, did not ship.
-    - A client and a daemon of different versions get a `426` that names both versions. A 401 or 403 is returned as that status.
-    - `docs/configuration.md`, `docs/architecture.md` and `docs/troubleshooting.md` say the socket is per user. `SECURITY.md` covers a daemon binding a path outside `~/.agent`.
-    - Out of scope: per-project sockets by default, a second env var name, and BZR-1247's topology.
-
-    No report is on file. Spec: `assignments/BZR-1519.v2.md`.
-
-35. **BZR-1522** — on `main` (`8a2343a`). When a plain multi-word query's top hit is missing a token that another event's content has, that other event is ranked above it. Every other query stays on the one-query path, scores included. `recall_excluding`'s rustdoc links the private `rank_missing_tokens`, which is the one `cargo doc` warning on `main`. No report is on file. Spec: `assignments/BZR-1522.v2.md`.
-36. **BZR-1523** — on `main` (`ff3c571`, a commit shared with the `dreamd setup` GitHub star prompt; its message does not name the ticket). Recall's recurrence saturates:
-    - `salience::dampen_recurrence` is `d(0) = 0`, `d(r) = 1.5 - 0.5 / r`. `salience()` applies it before the log term, and `explain_factors` calls it too. It is monotonic and at most 1.5, and `d(1) = 1`, so a one-off scores as before and recurrence adds at most 13.2%.
-    - Austin chose the term on 2026-11-06, because ordinary dampening cannot pass the gate (drift entry `a-ranking-gate-is-an-inequality-compute-it-first`). `SPEC.md` moved to v0.2, numbered separately from the product.
-    - `citations[].recurrence` (now `f64`), `blame --explain --json`'s `recurrence` and `--explain`'s new `d(recurrence)` line show the dampened value. `RecallResult`, `metadata.recurrence` and the `recall` and `score` tables keep the count.
-    - `salience()` is shared, so a dream cycle's top cluster can change, and `salience-drift`, `GET /api/v1/observability/salience` and `memory diff` score with the term. Decay passes 0, so it is unchanged.
-
-    PM verification:
-    - Workspace 1444 / 0 / 0 and all features 1448 / 0 / 0, each with the star change's 4 tests.
-    - Red-first on `8a2343a`: `hub_parent_does_not_drown_a_more_painful_child` and `top_cluster_uses_the_dampened_recurrence` fail.
-    - Gate `single_anchor=pass hub_drown=pass consolidation=pass`, oracle 12 of 12, quality suite 14 / 0, M1–M18 fail as named. Stripped `dreamd` is 21,964,000 bytes.
-    - Base and head benches, alternating, show no regression. Head's `recall` ran about 11% faster at 10k and 100k in both runs. This change does not explain that, so do not cite it.
-    - All 32 paths at LANDED match the signed-off hashes (`assignments/reports/BZR-1523.verify.r0.md`).
-
-    Limits:
-    - No real store has a fat cluster, and LongMemEval was not re-run (`docs/evals/external-benchmarks.md` says so).
-    - A parent still ranks first at equal pain, importance, age and BM25.
-    - At a large hub a child wins only if it beats the parent by more than 13.2% on pain × importance × recency × BM25. Pain 7 against 6 wins; 6.5 against 6 loses.
-
-    Two stale passages in `tests/fixtures/demo-corpus/EXPECTED.md`, found during this ticket, were fixed on 2026-11-06 with no ticket: its last paragraph on live recurrence, and its intro's claim about the `result_vs_panic` cluster.
-
-    The CHANGELOG `[Unreleased]` → `### Changed` bullet is in the commit. Spec: `assignments/BZR-1523.v2.md` (Amendment 1).
-37. **BZR-1524** — 1.3.0 release prep (hitl). **Released 2026-11-07.**
-    - **Austin's rulings during r0 (spec Amendment 1):** release from `main` with no `release/v1.3.0` branch, and date the release 2026-11-07. The plan from 2026-11-06 had been to ship after the Show HN. Because the bump went to `main` with the `PENDING_*` manifest, `mcp-shim` was red on `main` until the fill merged.
-    - **The bump:** `72f7201`, Austin's commit, with the 20 signed-off paths. It bumps every RELEASING.md surface, moves the `[Unreleased]` bullets byte for byte under `[1.3.0]` with an intro and an "Upgrading from 1.2.x" paragraph, removes the README "`main` is ahead of npm" note, resets `GUIDE.md:15`, and fixes three 1.2.2 claims that BZR-1467 wrote (`docs/http-api.md:418`, `client.rs:23`, `daemon_state.rs:73`). `SPEC.md` stays v0.2.
-    - **PM verification:** all features 1456 / 0 / 0; `node --test` 44 / 45, the one failure being the allowed `PENDING` check; alpha suites funnel 30 / 0, alpha 7 / 0, quality 14 / 0; the coding oracle matches README's line; the stripped release binary is 21,964,384 bytes; `recall_gate.py` passes all three rows on the release binary.
-    - **The release:**
-      - tag `v1.3.0` (lightweight) is `72f7201`;
-      - `release.yml` run 42401476111 built all four targets, and its "Open PR" step failed as on 1.2.1 and 1.2.2. The PM opened PR #64 by hand (`manifest.json` only, shas equal to the draft's, Linux sha checked against the extracted binary) and merged it `--merge --admin` as `bcfa479`;
-      - the GitHub release was published 18:53:06Z and is Latest;
-      - npm `dreamd-mcp@1.3.0` was published 19:07:53Z from `bcfa479` (shasum `8e37aa4d…`). `latest` and `next` are 1.3.0, and the MCP registry's 1.3.0 is latest (19:11:09Z);
-      - the packed shim passed in four clean containers before the publish, and the published package passed `version` and `init` in three after it.
-    - **Who ran what:** Austin ran the bump commit, the npm publish and dist-tag, and the MCP registry login and publish. With his permission, the PM pushed the tag, merged #64 and published the release.
-    - **CI:**
-      - `Test (macos-latest)` failed once on `72f7201`, in `commands::forget::tests::forgotten_event_leaves_the_index` (`WriterLockError::LegacyWriter`), and passed on `bcfa479`. No ticket.
-      - The PM's re-run of that job cancelled `bcfa479`'s first CI run, because CI uses `cancel-in-progress`. The re-run passed, with the known red `Test (windows-latest)`.
-
-    Spec: `assignments/BZR-1524.v2.md` (Amendment 1). Reports: `assignments/reports/BZR-1524.r0.md` and `BZR-1524.verify.r0.md`.
-38. **BZR-1531** — on `main` (`4288f95`; the commit message does not name the ticket). Under the npx shim, a version mismatch names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, then a harness reload, where it named `dreamd watch`, which npx users cannot run. Found in BZR-1524's pre-flight: a 1.2.2 `watch` that `setup` left running from `~/.cache/dreamd-mcp/1.2.2/` fails every 1.3.0 `search_nodes` and `append_node`. Austin chose on 2026-11-07 to fix the message before 1.3.0, rather than rely on release notes or a self-healing upgrade.
-    - `Launcher` moved to `dreamd_core::launcher` (`LAUNCHER_ENV`, `from_env`, `command`), and `setup.rs` re-exports it. The client builds its own sentence from the daemon's `x-dreamd-version` header and its launcher, and no longer shows the 426 body. The daemon's 426 body stays `Launcher::Binary`.
-    - `client.rs` changed only in a test that pinned the old 426 body (Austin approved, Amendment 1).
-    - PM verification: workspace 1452 / 0 / 0, all features 1456 / 0 / 0. M3, M4 and PM-only P1–P3 fail as named. In an e2e through the real shim against the v1.2.2 release binary, the npx sentence printed, and `update` then `watch` cleared it.
-    - Left as is: the `router.rs:229-231` rustdoc still shows the two-argument `version_mismatch_message`, and the `dreamd mcp` probe connection stays open for the whole session (drift entry `match-ok-underscore-keeps-the-probe-connection-open`). The probe connection is now BZR-1534; the rustdoc has no ticket.
-
-    Spec: `assignments/BZR-1531.v2.md` (Amendment 1). Report: `assignments/reports/BZR-1531.verify.r0.md`.
-
-**Milestone 1.3.1 patch** (tracker milestone, filed 2026-11-07 at Austin's call). The bugs come from the PM's triage of the v1.3.0 black-box torture (`assignments/reports/torture-1.3.0.triage.md`). The tester's own findings were withdrawn or minor. The tester also ran `pkill -f "dreamd watch"` with the real HOME and stopped Austin's systemd unit, so the re-run tester works inside a Docker container (`assignments/torture-1.3.0-container.prompt.md`). All three bugs are also in 1.2.2. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract.
-
-39. **BZR-1532** — on `main` (`eddbfe9`; the commit message does not name the ticket). It landed first on `release/v1.3.1`, which Austin made from `main` (`70e958d`) at the same second as the commit, 2026-11-09 11:26:12, and pushed. All five fixes in this milestone (items 39, 40, 41, 43 and 44) landed on that branch, and `main` fast-forwarded to it at `d612f4a` on 2026-11-15, before the 1.3.1 bump (BZR-1535). A cycle that fails ends in the process that began it:
-    - `wal::stage_and_commit(root, kind, now, ledger, build)` runs `begin_cycle`, the caller's staging closure, then `commit_cycle`. `dream_cycle::commit`, `forget::cascade` and `consolidation::run_deterministic_dream_cycle` all go through it. No production code outside `wal.rs` calls `begin_cycle` or `commit_cycle`.
-    - An error before the commit point (the WAL is not at its path) runs `abort_uncommitted`, which removes the WAL temp and the stage root and sets `failed`, leaving `last_dream_cycle_at`. Each step runs even if an earlier one failed.
-    - An error after the commit point is retried once with `roll_forward` (Austin's ruling, 2026-11-08). If the retry fails too, the WAL stays and the next lock acquisition rolls it forward.
-    - The abort and the retry do nothing after an injected crash, so the crash sweep still tests recovery. `stage.rs` gains a one-shot `arm_error`, and `crash_sweep.rs` an error sweep that checks the store in the same process, with no recovery.
-    - `WriterLock::acquire`, `recover_if_needed`, `roll_forward` and `wipe_stage` are unchanged.
-
-    PM verification (`assignments/reports/BZR-1532.verify.r0.md`):
-    - workspace 1470 / 0 / 0, all features 1474 / 0 / 0, dreamd-core lib 835;
-    - red-first: tests 9–16 fail on the base, test 15 at its second POST with 409;
-    - crash sweep k unchanged (17/6, 18/6, 16/5, 13/4, 12/3);
-    - M1–M18 fail as named; the failed sets equal the PM reference build's;
-    - `pm13-wedge.sh` on the debug binary: the second `POST /dream` gives the cycle's own error instead of 409, and the status is `failed`.
-
-    The production code equals the PM's reference build apart from wrapping. Austin committed before VERIFY, and the dev report is a ticket comment; all 13 reported blobs equal `eddbfe9`.
-
-    Behaviour changes for the 1.3.1 CHANGELOG (the `[Unreleased]` → `### Fixed` bullet is in the commit):
-    - a dream cycle or `dreamd forget` that fails before its commit point removes its stage and sets `failed` before it returns, so the next `POST /api/v1/dream` runs instead of getting 409 until `watch` restarts;
-    - an error after the commit point is retried once in the same process.
-
-    Held for later (spec §8): H1, a second failed roll-forward still gives 409 until restart; H4, an error while removing a committed cycle's stage still answers 500; H5, doctor does not report a stuck `in_progress`.
-
-    Spec: `assignments/BZR-1532.v2.md`.
-40. **BZR-1533** — on `main` (`9fe3878`; the commit message does not name the ticket). No event content or model body can end a lesson block or open one:
-    - `render_lessons_file` writes a body line that is zero or more `\` and then exactly `<!-- /dreamd:lesson -->` with one more `\`, and `parse_lesson_block` removes one. Every other body line is written as is (Austin's ruling, 2026-11-09: escape on render, no ingress rejection). The three private helpers are `is_close_marker_line`, `escape_body_line` and `unescape_body_line`.
-    - A planned `LESSONS.md` that does not parse back now fails with `ConsolidationError::Lessons`, whose message names `LESSONS.md`. `Io` still covers the log read and the sidecar. The parse-back at `plan.rs:115` stays.
-    - `SPEC.md` records the escape as a v0.2 clarification, with no version bump. `docs/spec/schemas.md` says the same.
-
-    PM verification (`assignments/reports/BZR-1533.verify.r0.md`). No dev report arrived, so the PM verified the tree as unverified work:
-    - workspace 1479 / 0 / 0, all features 1483 / 0 / 0, dreamd-core lib 844;
-    - red-first on base behaviour: exactly tests 1, 2, 3 and 6–11 fail (835 / 9), and tests 4 and 5 pass;
-    - M1–M11 each fail exactly the named tests;
-    - `cargo doc -p dreamd-core` prints no warnings;
-    - `pm1533-marker.sh` on the debug binary: both stores `complete` with one lesson each, the victim not pinned, no `lsn_<victim>`.
-
-    The production code equals the PM's reference build, except that `render_lessons_file`'s rustdoc names `escape_body_line` as plain code. The spec linked it, and a `pub` item linking a private one is a rustdoc warning (drift entry `spec-rustdoc-must-not-link-a-private-item`).
-
-    The commit also carries eight doc and comment fixes outside the ticket, which Austin committed with it. The PM checked each one against the code:
-    - `CONTRIBUTING.md`, `Justfile` and `docs/llm-cost-accuracy.md` name the 24 MB NFR-2 limit;
-    - `docs/architecture.md` and `docs/architecture/tantivy-migration.md` name tantivy 0.27.0;
-    - rustdoc fixes in `collector.rs` (the private `rank_missing_tokens` link, the one `cargo doc` warning BZR-1522 left), `server/http/router.rs` (BZR-1531's three-argument `version_mismatch_message`) and `index.rs` (`last_updated_sec` is read by nothing on the recall path).
-
-    Behaviour changes for the 1.3.1 CHANGELOG (the `[Unreleased]` → `### Fixed` bullet is in the commit; Austin may move it to `### Security`):
-    - an event whose content has the lesson close marker on a line of its own no longer forges a lesson that pins and resurfaces another event, and no longer fails every cycle;
-    - a `LESSONS.md` written by 1.3.0 reads as before, unless a body line is the marker after one or more `\`, which now reads with one `\` fewer. A 1.3.0 reader shows a 1.3.1 file's extra `\`;
-    - a planned `LESSONS.md` that does not parse names `LESSONS.md` in its error, not the log.
-
-    Held for later (spec §8):
-    - H1: a store that 1.3.0 already forged keeps the victim's pin, and no doctor check finds it; `dreamd archive --force-unpin <id>` clears it;
-    - H2: frontmatter values are not escaped. Ingress keeps `cluster_key` safe, but a hand-edited log can still fail a cycle, now naming `LESSONS.md`;
-    - H3: BZR-1475 and BZR-1498 should mention this fix.
-
-    Spec: `assignments/BZR-1533.v2.md`.
-43. **DRM-49** — on `main` (`ce2e947`; the commit message does not name the ticket). The first request to a non-boot project after 30 idle minutes got 500 `project writer lock is held by pid <the daemon's own pid> (watch)`. Filed 2026-11-13, after the PM saw it on Austin's 1.3.0 daemon; it is not from the torture.
-    - `ProjectResourceMap`'s idle pass runs before each lookup and releases the root the request asked for. `with_runtime` then reopens it at once, while the released coordinator and indexer tasks still hold their writer lock clones. A retry works once the tasks end.
-    - Every release since 1.2.0 has it: the runtimes have held the lock since BZR-1232 (`17e8382`).
-    - The fix spares the requested root in `get_mut`, `get_or_insert` and `insert_or_adopt`, which also covers in-process `dreamd mcp`'s index map. Spec: `assignments/DRM-49.v2.md` (base `9fe3878`). The PM's reference build and mutants are `assignments/reports/DRM-49.pm-reference.py` and `DRM-49.pm-mutants.py`.
-    - PM verification (`assignments/reports/DRM-49.verify.r0.md`). No dev report arrived, and Austin committed before VERIFY, so the PM verified the committed tree as unverified work:
-      - workspace 1484 / 0 / 0, all features 1488 / 0 / 0, dreamd-core lib 849;
-      - red-first on base production with the committed tests: exactly the five new tests fail;
-      - M1–M4 fail exactly the named tests. M5 also fails the existing `index_map::tests::idle_eviction_closes_handles_older_than_timeout`, which the spec's row missed;
-      - the production code equals the PM's reference build apart from one rustdoc line wrap.
-    - The commit also removes tracker links from three docs (spec Amendment 1). The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
-    - Held for later (spec §8): H1, a root released by another root's request and asked for again before its tasks end can still be refused; H2, the refusal names the daemon's own pid as if a second writer held the lock.
-41. **BZR-1534** — on `main` (`7384c06`; base `ce2e947`, spec Amendment 1). All five paths equal the signed-off blobs. Daemon-mode `dreamd mcp` held its probe connection open for the whole session (`mcp/mod.rs:567`, `Ok(_)`). The arm is now `Ok(probe)` and drops the stream before it serves. Each tool call still opens its own connection.
-    - New test `crates/dreamd-cli/tests/mcp_probe_closes.rs` spawns the binary against a fake daemon and asserts the first connection closes before any MCP message.
-    - PM verification (`assignments/reports/BZR-1534.verify.r0.md`): workspace 1485 / 0 / 0, all features 1489 / 0 / 0; red-first and M1–M3 fail test 1 with `left: (0, StillOpen)`; `pm1534-probe.py` shows 0 daemon connections, idle and after tool calls; `mcp/mod.rs` equals the PM's reference build.
-    - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the tree.
-    - Held for later (spec §8): H1, the daemon's `serve_connection` has no idle timer.
-44. **DRM-50** — on `main` (`7a30ac5`; base `7384c06`). Filed 2026-11-14 from the container torture of the 1.3.1 candidate (T131-02); Austin added it to 1.3.1. When two or more requests reached a project the daemon had not loaded at the same moment, all but one got `500 … project writer lock is held by pid <the daemon's own pid> (watch)`, and over MCP the failed call could be an `append_node`. `with_runtime` dropped the map mutex before `ProjectRuntime::open`, so the loser failed on the lock before the winner published. It was reached at a session's first parallel tool calls, after an LRU release and after an idle release, and it is in 1.3.0 too.
-    - `AppState::with_runtime` is `async`. A miss takes the root's gate (`OpenGates` in `AppState::opening`, one `tokio::sync::Mutex` per root) and checks the map again under it, so requests for one root open it once and share the result. An open never holds up another root's requests.
-    - `ProjectRuntime::open_for_watch` retries every 10 ms, for at most 2 s (`OWN_LOCK_WAIT`), while the lock's holder is this process's own `watch` (`WriterLockError::held_by_this_watch`): a released runtime whose tasks have not ended. That closes DRM-49 §8 H1 (Austin, 2026-11-14). Any other holder is refused at once, as before.
-    - The four resolvers (`with_index_handle`, `recall_target`, `live_marks`, `resolve_supervisor`) are `async`, and the six handler call sites await them.
-    - PM verification (`assignments/reports/DRM-50.verify.r0.md`). Austin committed before VERIFY; all 12 paths equal the dev's r0 blobs, and the production code equals the PM's reference build:
-      - workspace 1493 / 0 / 0, all features 1497 / 0 / 0; clippy, fmt and `cargo doc -p dreamd-core` clean;
-      - red-first, five runs: tests 1–4 fail with the own-pid 500, and 5 and 6 pass;
-      - M1–M8 fail exactly the named tests;
-      - the torture's T131-02 repro in a container (`DRM-50.verify.e2e.txt`): on `7384c06`, 10/10 pairs fail, 15 of 16 learns fail in every round, and the MCP `append_node` is lost; on `7a30ac5`, in two runs, 0/10 fail, 16 of 16 learns succeed, and the append lands.
-    - Spec Amendment 1: there are 13 existing resolver calls in `tests.rs`, not 11, and `observability::tests::a_set_dreamd_log_replaces_both_defaults` is a pre-existing flake.
-    - The CHANGELOG `[Unreleased]` → `### Fixed` bullet is in the commit.
-    - Held for later (spec §8): H1 (DRM-49 §8 H2), after the 2 s bound the 500 still names the daemon's own pid; H2, Windows `watch` does not wait; H3, a same-pid `watch` in another PID namespace is waited on for 2 s; H4, a root's gate is never removed.
-42. **BZR-1535** (DRM-48 in the tracker): 1.3.1 release prep (hitl). **Released 2026-11-16.**
-    - The container torture ran on 2026-11-14 against a musl build of `7384c06`. Prompt: `assignments/torture-1.3.1-container.prompt.md`. PM triage: `assignments/reports/torture-1.3.1.triage.md`.
-    - The four fixes hold. All 15 findings were confirmed by a PM re-run, and each is also in 1.3.0.
-    - T131-02 is DRM-50 above. The rest are milestone 1.5 below.
-    - **Austin's rulings (2026-11-15):** fast-forward `main` to `release/v1.3.1` and bump on `main`, as for 1.3.0, so CI runs on the five fixes before the tag; BZR-1533's bullet goes first, under `### Security`. The spec dated the release 2026-11-15. It went out on 2026-11-16, so `CHANGELOG.md` and README's history row moved to that date afterwards.
-    - **The bump:** `9ec287b`, Austin's commit, with 19 paths. The 18 that are not `Cargo.lock` equal the PM's reference build (`assignments/reports/DRM-48.pm-reference.py`). `SECURITY.md`'s table now names 1.3.x and `main`, and `RELEASING.md` lists `SECURITY.md` as a version surface. All features 1497 / 0 / 0; `node --test` 44 / 45, the one failure being the allowed `PENDING` check; alpha suites 30 / 0, 7 / 0 and 14 / 0; stripped glibc `dreamd` 21,996,320 bytes; `recall_gate.py` passes all three rows. The commit has no `Signed-off-by:` line; CI's DCO job runs on PRs only. Report: `assignments/reports/DRM-48.r0.md`.
-    - **CI on the bump** (run 43781061161) failed in three jobs, none caused by the bump:
-      - Lint, on an `ort-sys` ONNX Runtime download (`Peer disconnected`). Lint gates the other jobs, so they were skipped.
-      - `cargo audit`, on RUSTSEC-2026-0538 (`quinn-udp` 0.5.15, a `Cargo.lock` entry no build compiles). `cargo update -p quinn-udp` took it to 0.5.16; the Linux and macOS dependency graphs are unchanged.
-      - `cargo audit` and `cargo deny`, on RUSTSEC-2026-0462 (`rmcp` 1.7.0, Streamable HTTP clients). dreamd compiles no rmcp client transport, and the fix is only in rmcp ≥ 3.9.0, so Austin waived it, in `deny.toml` and `.cargo/audit.toml`, until the move to rmcp 3.x (DRM-94). `docs/ci.md` names the waiver.
-
-      `cc6c36a` holds the `quinn-udp` bump and the waiver (report `assignments/reports/DRM-48.r1.md`). Its CI run 43870227488 passed, apart from the placeholder shim test and the known red `Test (windows-latest)`.
-    - **The release:**
-      - tag `v1.3.1` (lightweight) is `cc6c36a`;
-      - `release.yml` run 43872546048 built all four targets, and its "Open PR" step failed as on earlier releases. Austin opened PR #65 from the bot's `chore/mcp-manifest-v1.3.1` (`26c1db8`, `manifest.json` only) and merged it `--merge --admin` as `7f65340`;
-      - every manifest sha equals the sha256 of its extracted binary. The `linux-x86_64` binary is static-pie musl, 22,709,784 bytes;
-      - the GitHub release was published 14:08:27Z and is Latest. Its body is the CHANGELOG `[1.3.1]` block;
-      - npm `dreamd-mcp@1.3.1` was published 14:13:58Z from `7f65340` (shasum `021a65f1…`). `latest` and `next` are 1.3.1, and the MCP registry's 1.3.1 is latest (14:30:38Z);
-      - the packed shim passed `version` and `setup --yes` in four clean containers before the publish, and the published package passed in the same four after it.
-    - **Who ran what:** Austin ran every commit and push, the tag, the fill merge, the GitHub release, the npm publish and dist-tag, and the MCP registry login and publish. At his instruction, the PM fast-forwarded the local `main` and wrote the bump and waiver files for his commits.
-    - Under WSL, `npm publish` and `npm dist-tag add` need `--no-browser` too, not only `npm login`; RELEASING.md step 6 now says so.
-
-**Milestone 1.3.2 patch** (tracker milestone, filed 2026-11-16 at Austin's call). A quick patch after 1.3.1. It reverses the 2026-11-15 decision that no 1.3.2 ships. Austin asked for it while reviewing what dreamd is missing for him as a user: on 2026-11-16 it was connected in none of the 7 folders he works in, only one of which had a store, and nothing had told him. DRM-51 and DRM-95 moved here from 1.5. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is BZR-1535 → DRM-51 → DRM-95 → DRM-97, and DRM-97 blocks DRM-96 and DRM-52. On 2026-11-17 Austin moved DRM-96 to its own milestone, 1.4.0 (below), and pulled two lever-pass P0s into 1.3.2, DRM-98 and DRM-99; both block DRM-97. Austin also asked the same day for every command, flag and setting to be tested "until we know its working as well as it can". That lever pass runs alongside this milestone, against the released 1.3.1 binary in containers. Its findings go to 1.5 unless Austin pulls one into 1.3.2.
-
-45. **DRM-51** (T131-01): a daemon keeps writing a store deleted under it. `git clean -fdX` removes the gitignored `/.agent/.dreamd/`, and that reaches it, boot project included; so do setup's Undo lines followed by setup again.
-    - On its own, new appends go unindexed until a restart.
-    - With a second writer (`dream --no-commit`, or `init` re-creating the store), acked appends are lost, and `watch` will not restart until `doctor --repair`.
-    - The fix needs a store-identity check before a runtime is reused.
-    - Decisions (Austin, 2026-11-16, recorded on the ticket):
-      - the daemon reopens the project itself, the boot project included;
-      - in-process `dreamd mcp` stops writing and returns a clear error, and does not reopen;
-      - the docs say what `git clean -fdX` deletes.
-    - Split the same day. DRM-51 makes a stale runtime stop writing: a store-identity check in every writer, and the MCP error. **DRM-95**, which comes next, reopens the project (map and boot routing, the handler retry) and adds the docs.
-    - **On `main`** (`c1eb9e6`, plus `ed5a8bd` for Amendment 1's `docs/http-api.md` row). `writer_lock::StoreGuard` records the locked lockfile's (dev, ino); `check` stats it before every write and trips for good when the file is gone or another inode, logging one `WARN`. Every clone of a lock and its `Ledger` shares one guard. The coordinator (append, prepare, commit), the indexer (add, commit, coverage, lessons), the WAL and the ledger refuse with a `StoreReplaced` error that names the store and the next step.
-    - LANDED 2026-11-17 (`assignments/reports/DRM-51.landed/LANDED.md`): the production code equals the PM reference build (7 files whole, the production slice of the other 5); M0–M22 on `HEAD` each fail exactly their row; the container e2e ran a `c1eb9e6` binary. The verified tree's hash record was lost in that day's reboot (it was in the scratchpad). Spec: `assignments/DRM-51.v2.md` (Amendment 1).
-87. **DRM-95** — on `main` (`67ba26c`, one commit with DRM-98 and DRM-99; its message names none of them). A running `watch` reopens a project whose `.agent/.dreamd/` was deleted or replaced under it, the boot project included, with no restart:
-    - Routing follows DRM-51's sticky flag. `AppState::live_primary` serves the boot pair only while its guard has not tripped, and `live_runtime` takes a tripped map runtime out of the map and releases it. A retired boot root is then an ordinary map entry.
-    - The request that meets the replaced store is refused by its own DRM-51 check and sent once more: learn on `CoordinatorError::StoreReplaced`, recall on `IndexError::StoreReplaced`, dream on the new `DreamCycleError::StoreReplaced` (at prepare and at commit). The `watch` remedy text says to send the request again.
-    - Docs: README's `.agent/.dreamd/` row, a troubleshooting entry on what `git clean -fdX` deletes and what can't come back, and a paragraph in `docs/http-api.md`.
-    - The PM built it (Austin, 2026-11-17: "I build, fresh agent reviews"). A fresh agent reviewed the diff with only the code and the tickets (spec Amendment 2). It found no double write and no lost ack; its finding 1 became part of DRM-99, and findings 7–10 were fixed.
-    - PM verification: workspace 1525 / 0 / 0; all features 1528 / 1 / 0, the 1 being `weg12`'s small-payload budget under load (17.3 s), which passed 3 of 3 alone; clippy and fmt clean. Mutants R1–R10 fail exactly their rows (`assignments/reports/DRM-95.mutants/`, `DRM-95.final/`). The container e2e (`assignments/reports/DRM-95.verify.e2e.txt`): after `git clean -fdX` a learn answers 201 and recalls with no restart, with and without a second writer. `67ba26c`'s tree equals the snapshot the final mutant run used.
-    - The first mutant run had R1, R3 and R6 surviving under load, because the tests raced the indexer (drift entry `a-test-that-deletes-a-store-quiesces-its-indexer-first`, Amendment 1).
-    - Held for later (spec §5): H1, the retired boot pair stays allocated until `watch` exits; H2, only `writer.lock` replaced with `index/` kept; H3, a dream refused at commit calls the model again; H4, `/health` and salience answer from the old pair until a learn, recall or dream; H6, a `.dreamd/` moved away and back leaves the boot project at 500 until restart; H7, a dedup key resent after the reopen writes again; H8, a delete between the commit's two checks gets a 500 with no retry.
-
-    Spec: `assignments/DRM-95.v2.md` (Amendments 1–2).
-90. **DRM-98** (LP-HTTP-01) — on `main` (`67ba26c`). An empty or all-whitespace dedup key (`X-Client-Dedup-Key`, `append_node`'s `client_dedup_key`) counts as no key: `handle_append` filters it first. Before, the first such learning was written and every later one answered 201 with its id and wrote nothing. Test `an_empty_or_blank_dedup_key_is_no_key`, mutant R7. Austin pulled it into 1.3.2 from the lever pass on 2026-11-17; the contract is the ticket.
-91. **DRM-99** (LP-CONFIG-01) — on `main` (`67ba26c`). `watch`'s bind (`uds::bind_socket_raw`) removes a path that refuses the connect only when `symlink_metadata` says it is a socket. Anything else, a symlink included, is `UdsBindError::NotASocket` with doctor's text. The review found the same bug in `update` and `uninstall` (`lifecycle_cleanup::remove_socket_within`), which now return `SocketRemoval::NotASocket` and warn. The `update_cmd` and `uninstall_cmd` fixtures bind a real orphaned socket instead of writing an empty file. Mutants R8–R10. Doctor's own check (`is_unix_socket`) still follows a symlink. Austin pulled it into 1.3.2 on 2026-11-17; the contract is the ticket.
-89. **DRM-97**: 1.3.2 release prep (hitl). The number is 1.3.2: Austin moved DRM-96, which adds an install mode, to milestone 1.4.0 on 2026-11-17. The bump is `assignments/reports/DRM-97.pm-reference.py`. `main`'s 5 commits since `v1.3.1` change no behaviour and ship with it. Tag and publish stay human.
-
-**Milestone 1.4.0** (tracker milestone, filed 2026-11-17 at Austin's call). DRM-96 on its own: an install mode is a minor release. DRM-97 blocks it.
-
-88. **DRM-96**: `dreamd setup` installs per user (Austin, 2026-11-16).
-    - Setup writes Claude Code's user-level MCP config, Cursor's global `~/.cursor/mcp.json` and a user-level habit block once, so every project and session gets dreamd, and a repo cleanup can't remove it. That reverses the rule that setup writes only inside the project (`Harness::config_targets`).
-    - Why: setup had run in this repo twice. Its untracked `.mcp.json`, `.cursor/mcp.json` and `CLAUDE.md` block were gone, while the gitignored `.agent/` survived. Nothing outside `setup` checks for those files, so `doctor` and `status` stayed green.
-    - `AgentRoot::discover` must skip the daemon home. It stops at the first ancestor that has `.agent/`, so a folder under `$HOME` with no store of its own resolves to `$HOME`, and `~/.agent/` already held a project store that a `watch` had opened.
-    - In a folder with no store of its own, both tools answer that the folder isn't set up and name the setup command. Nothing is written (Austin, 2026-11-16). Today the in-process `search_nodes` answers `{"results":[]}`, which reads as "no memories".
-    - The open questions are on the ticket: per-user as the default or a flag, what becomes of the project files, Cursor's user rules, the stray store in `~/.agent/`, the Undo lines, and Windows.
-
-**Milestone 1.5** (tracker milestone, target 2026-12-06). It was "1.3.2 patch" until 2026-11-15, when Austin decided that no 1.3.2 ships and moved these tickets here. On 2026-11-16 he asked for a quick 1.3.2 after all, and DRM-51 and DRM-95 moved to it (above). The rest are the other findings of the 1.3.1 container torture, all also in 1.3.0. Same rules: one ticket at a time, in `blockedBy` order, and the v2 spec is the contract. The chain is DRM-97 → DRM-52 → … → DRM-57 → DRM-90. 1.4.0 is DRM-96 (above).
-
-46. **DRM-52** (T131-03): every project reopen leaks a `tantivy-warm-gc` thread. The cause is upstream: in tantivy 0.27.0, `reader/warming.rs:149-161`'s `gc_loop` never exits after its reader drops.
-47. **DRM-53** (T131-05, T131-09, T131-13): doctor and recovery gaps.
-    - A corrupt `state.json` is blamed on the WAL, and `doctor --repair` refuses it (v1.2 F03).
-    - A broken `config.toml` stops doctor before its other checks.
-    - Doctor gives no warning for a log id ahead of the clock.
-48. **DRM-54** (T131-04, T131-06, T131-14): setup.
-    - The Undo lines never stop the daemon setup started.
-    - `--dry-run` needs `--yes` without a TTY.
-    - `--no-write-mcp` still writes the habit files.
-49. **DRM-55** (T131-07, T131-08): `update`'s contract never says to start `watch` again, and `status` and doctor report a version-mismatched daemon as healthy.
-50. **DRM-56** (T131-10, T131-11, T131-15): `archive` logs an unpin before writing it, `dreamd.log` is 0644 (v1.2 F05), and EPIPE exits 1 or panics.
-51. **DRM-57** (T131-12): README's `git revert` of a dream cycle fails while the log is modified (docs).
-52. **DRM-90** — 1.5 release prep (hitl).
-
-**Milestone 1.6 source receipts** (tracker project **deep-recall**, target 2027-01-10). Planned: none of it is in the tree. DRM-90 blocks DRM-66, and the rest run in this order:
-
-53. **DRM-66** — exact recall: no recency term, and it searches the decay archive.
-54. **DRM-64** — spec: SPEC v0.3 source pointers, computed tiers, supersession and the observation store.
-55. **DRM-65** — an event with a code pointer recalls as CITED.
-56. **DRM-67** — every recall hit shows the cue it matched and any conflicting record.
-57. **DRM-68** — `dreamd capture`: store a content-hashed blob and record an observation that points at it.
-58. **DRM-69** — `dreamd setup` installs a Claude Code hook that captures tool output and diffs.
-59. **DRM-70** — export and import source blobs for another machine.
-60. **DRM-71** — record the 1.6 demo: a 90-day-old detail recalled with its source span and tier.
-61. **DRM-91** — 1.6 release prep (hitl).
-
-The planned tiers are VERBATIM (captured bytes), CITED (the pointer resolves and its hash matches; the claim itself is not checked), REPORTED, and INFERRED (every lesson). A tier is computed at recall, not stored. Until DRM-91 ships them, "Trust labels are direction, not shipped" at the top of this file stands: do not describe a tier as shipped.
-
-**Milestone 1.7 outcome trace and declared loss** (tracker project **deep-recall**, target 2027-02-14). Planned. DRM-58 to DRM-61 moved here from 1.5 on 2026-11-15. DRM-91 blocks DRM-58.
-
-62. **DRM-58** — record which lessons a search served.
-63. **DRM-59** — report success or failure against a serve.
-64. **DRM-60** — `blame --outcome` names the lessons a failure was served.
-65. **DRM-61** — quarantine a lesson so recall drops it, and undo that.
-66. **DRM-62** — quarantine a cluster so a re-promoted lesson stays hidden. Blocked by DRM-61 only; it blocks nothing.
-67. **DRM-63** — design: revise a bad lesson (rewrite it, unpin its citations, or forget its exemplar). Blocked by DRM-61 only; it blocks nothing.
-68. **DRM-72** — design: the lesson ledger entry (declared invariant, per-event survival, error budget). Blocked by DRM-61.
-69. **DRM-73** — every new lesson gets a ledger entry with its entity survival.
-70. **DRM-74** — `dreamd doctor --ledger` recomputes the lesson ledger from the files.
-71. **DRM-75** — an error budget per cluster: report the spend in the dream response and in doctor.
-72. **DRM-76** — capture tool output in Cursor, as far as Cursor allows.
-73. **DRM-77** — capture tool output in Cline, as far as Cline allows.
-74. **DRM-92** — 1.7 release prep (hitl).
-
-**Milestone Benchmark v0** (tracker project **deep-recall**, target 2027-02-28). Planned. It runs alongside the releases: DRM-78 has no blocker.
-
-75. **DRM-78** — register the deep recall benchmark's predictions and scoring rules.
-76. **DRM-79** — generate coding-agent histories with planted details and ground truth.
-77. **DRM-80** — score dreamd 1.3.0 and raw-transcript BM25 end to end.
-78. **DRM-81**, **DRM-82**, **DRM-83** — one benchmark adapter or baseline each: Mem0 open source, Palinode, and Memorilla on a rented GPU. Each is blocked by DRM-80 only.
-79. **DRM-84** — score dreamd 1.6 against 1.3.0. Blocked by DRM-80 and DRM-91, so a 1.6 slip moves it.
-80. **DRM-85** — publish the harness, the results and the write-up on the same day. Blocked by DRM-81 to DRM-84.
-
-**Milestone 2.0 trust tiers** (tracker project **deep-recall**, target 2027-04-30). Planned. DRM-92 blocks DRM-86.
-
-81. **DRM-86** — promote the source fields into the schema, with a migration.
-82. **DRM-87** — design: one gate for every change to a lesson or a source, with refusals recorded.
-83. **DRM-88** — design: source rules for memory shared between agents.
-84. **DRM-89** — sign the ledger root and the forget receipt.
-85. Then **BZR-1246** (item 17, Milestone 2.0 removal below), which DRM-89 blocks.
-86. **DRM-93** — 2.0 release prep (hitl). Blocked by BZR-1246.
-
-**Decided, not in the loop:** **BZR-1474** (one daemon socket per user or per project), Done 2026-11-06. Austin decided on 2026-11-04 that one socket per user stays, and BZR-1519 shipped the follow-up work.
-
-**Milestone 2.0 removal**
-
-17. **BZR-1246** (DRM-17 in the tracker) — remove the deprecated surfaces. Scheduled on 2026-11-15: it ships with 2.0, after DRM-89 and before DRM-93 (Milestone 2.0 trust tiers above).
-
-**Not in the order:** **BZR-1247** is a design issue for one runtime topology (MCP host election). It needs the AILAB-210 founder decision first. Do not implement it.
-
----
-
-## Remaining build order — 2026-09-24
-
-**Complete.** Every item below is on `main`. The live order is the dreamd-hardening section above. This section stays as the record of what shipped and where.
-
-Locked 2026-09-24 for the finish race. Re-checked against `origin/main` (`2e34181`) and the tracker on 2026-09-30. Items 1–27 are on `origin/main`. The tracker marks the late ones Done on **dreamd-eng**: 158 was already Done; 151, 188, 181, 182, 177, and 157 moved from R&D Backlog to dreamd-eng Done on 2026-09-30. The dreamd issues still Backlog on **R&D** are 149, 152, 207, and 210, and they are not claimable. One ticket at a time per agent. The user runs commits. The August 27 queue numbers are not the order. Live issue ids are `BZR-<n>`.
-
-**Do not start a ticket until every ticket above it in this list has landed.** One ticket at a time.
-
-An empty backlog query on `dreamd-eng` is that move. Milestone progress there is not evidence a v0.2 ticket shipped. The dreamd-eng description body still says RFC-011 is proposed; the project summary and BZR-1075 record it **accepted** (2026-09-26). BZR-1077 (the local docs pointer) is Done, commit `312983b`.
-
-1. **BZR-187** — on `main` (`fe331bd`). `POST /api/v1/migrate` returns 501 only after the existing auth stack. Spec: `assignments/BZR-187.v2.md`. Unix missing peer UID is 403; Windows missing bearer is 401; missing `X-Agent-Root` is 400. Body schema token is episodic `RECORD_SCHEMA_VERSION` `"1.0.0"`, never daemon `"1.0"`. Documented in `docs/http-api.md`. Does not call `MigrationRegistry` and does not `.bak` the store.
-2. **BZR-173** — on `main` (`adb7a40`). `MemoryStore` in `memory_store.rs`: in-process `send().await`, daemon proxy parses `LearnResponse`. HTTP recall stays on `with_index_handle` and shares `recall_to_json`. HTTP learn stays `try_send` → 503. Placeholder body is `LearnIngress::placeholder_learning` (`RECORD_SCHEMA_VERSION`, placeholder `EventId`). Direct dep `async-trait` (already in the lockfile). Off-Unix `DaemonStore::tcp` has not been compiled on this machine. That same commit also added `docs/provenance.md` (BZR-154).
-3. **BZR-172** — on `main` (`979ddc3`, with BZR-168). `dream_cycle::run_guarded_cycle` is the only sequencer. The coordinator still runs only filesystem phases and reopens the append fd. `consolidation::DreamCycleError` is `LessonPhaseError`. CLI in-process now hits the 409 guard: a leftover `in_progress` blocks `dreamd dream` until `dreamd watch` runs `recover_on_startup` (that recovery keys off the WAL file). BZR-1232 superseded that: taking the project writer lock resets a no-WAL `in_progress` and runs recovery in every writer. HTTP opens the index sender before dispatch.
-4. **BZR-168** — on `main` (`979ddc3`, with BZR-172). `layout::home_dir` is the one resolver: empty `HOME` is unset, no password-database fallback, `USERPROFILE` only when `windows` is true. `init` takes `&DaemonHome`. Registry writes go through `registry::update_registry`. `find_project_root` lives next to `discover`. The Windows MCP arm (`mcp/mod.rs:649`) still calls `dirs::home_dir()`. Do not add a second liveness probe.
-5. **BZR-170** — on `main` (`4bb3509`, with BZR-183). Freshness is `server/index_freshness.rs`. The indexer actor, including the semantic pass, prune, and recurrence sidecar, is `server/indexer_actor.rs`. `tantivy_handle.rs` keeps `open` / `flush` / `shutdown` / `close` and re-exports the moved public items. `IndexError::SchemaIncompatible` is the wipe gate. `SCHEMA_VERSION` stays `index/1.3`. Health stayed the on-disk watermark until BZR-1243, which moved Unix `/health` to in-memory marks.
-6. **BZR-183** — on `main` (`4bb3509`, with BZR-170). `LettaStore` in `letta.rs` delegates to an inner `MemoryStore`. No MemFS layout and no MCP wiring. `lib.rs` adds `pub mod letta` in alphabetical order, just above `memory_store`. Deleted by BZR-1244 (`9bfd00b`); not reopened.
-7. **BZR-827** — on `main` (`187cc50`). `GrantedStore` / `ContextGrant` in `context_grant.rs` filter recall by `source` (`episodic` / `semantic`) and refuse an append when episodic is not granted. `ContextGrant::both()` returns the inner recall string unchanged. MCP is not wired. Spec: `assignments/BZR-827.v2.md`. Doc: `docs/context-grant.md`. Do not claim momo `MemoryRegion` objects. Do not reopen it. Deleted by BZR-1244 (`9bfd00b`), with its doc.
-8. **BZR-198** — on `main` (`f400d82`). `explain=1` on `GET /api/v1/recall` adds a `citations` array; every other caller, including MCP `search_nodes`, keeps the body with no `citations` key. Spec: `assignments/BZR-198.v2.md`. Doc: `docs/observability.md`. Do not reopen it.
-9. **BZR-193** — on `main` (`63791b9`). `dreamd blame <query>` prints id, timestamp, skill_action, content, bm25, salience, total, layer. Default `-k` is 5. `--explain` reuses `explain_factors`. `--json` is one compact array. `dreamd recall` stays `-k` 10. Spec: `assignments/BZR-193.v2.md`. Do not start a second copy.
-10. **BZR-194** — on `main` (`260f37d`). `dreamd recall --without` / `--without-cluster`, and repeatable `exclude=` on `GET /api/v1/recall`. The filter ran inside the collector before the top-k heap; since BZR-1243 it is `MustNot` clauses of the query. MCP `search_nodes` and `dreamd blame` do not take it. Spec: `assignments/BZR-194.v2.md`.
-11. **BZR-195** — on `main` (`806b764`). `GET /api/v1/observability/salience` and `dreamd salience-drift`. Score is `salience()` with no BM25. Drift reads only the snapshot dated exactly seven UTC days earlier. Spec: `assignments/BZR-195.v2.md`.
-12. **BZR-159** — on `main` (`fe331bd`). Branch format spec. Spec: `assignments/BZR-159.v2.md`. Docs only (`docs/branching.md`). Objects go under `.dreamd/branches/`, never the decay archive `.dreamd/snapshots/<date>.jsonl`.
-13. **BZR-160** — on `main` (`806b764`). `snapshot::create_autosnap` writes `branches/objects/<id>/` and a `snap-*` ref. It does not write `HEAD`. There is no `dreamd memory snapshot` command. Spec: `assignments/BZR-160.v2.md`.
-14. **BZR-150** — on `main` (`702636a`). `dreamd memory branch|checkout|branches|delete`. Refs are two-line files under `branches/refs/`. `HEAD` is `branches/HEAD`. Checkout refuses while the daemon socket exists. Spec: `assignments/BZR-150.v2.md`.
-15. **BZR-156** — on `main`. Library `memory_diff::diff_objects` in `702636a`. Command `dreamd memory diff` in `13ae1ca` (same commit as BZR-146). `--json` is one line and ignores `--unified`. The command reads objects and does not check out or test the daemon socket. Spec: `assignments/BZR-156.cli.v2.md`.
-16. **BZR-153** — on `main` (`e3b7ecf`). `dreamd memory bisect`. Search range is `snap-*` refs by the timestamp line. No parent pointer. State is `branches/bisect`, beside `HEAD`. Spec: `assignments/BZR-153.v2.md`.
-17. **BZR-146** — on `main` (`13ae1ca`, same commit as the diff command). `docs/branching-guide.md` and `scripts/branch-demo.sh`. No screencast and no `docs/competitor-comparison.md`. The guide does not document memory diff flags. The script resolves `dreamd` to an absolute path before `cd` and sets `HOME` to its temp directory. Spec: `assignments/BZR-146.v2.md`.
-18. **BZR-154** — on `main` (`adb7a40`, same commit as BZR-173). Merkle ledger spec. Spec: `assignments/BZR-154.v2.md`. Docs only (`docs/provenance.md`). Ledger under `.dreamd/provenance/`, never `snapshots/` or `branches/`. No verifier program in this ticket.
-19. **BZR-155** — on `main` (`260f37d`). Provenance recording. Leaf hash is SHA-256 of the event id's UTF-8 bytes. `index_doc` is appended from `commit_and_persist` and from `TantivyIndexHandle::open`. The learn path does not open the ledger. No `embedding` edge.
-20. **BZR-148** — on `main`. `provenance::verify` is `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (on `origin/main`). The flag prints that report and fails the run on orphans, missing edges, or corrupt lines. `skipped_unknown_kind` is printed and does not fail the check. `--repair` stays the Tantivy rebuild. Spec: `assignments/BZR-148.cli.v2.md` (local; `assignments/` is gitignored). Tracker: Done on dreamd-eng.
-21. **BZR-158** — on `origin/main` (`e656211`). `forget::cascade` removes one live event under the dream-cycle WAL, drops or unlinks the lesson that names it, and leaves old ledger lines in place. The coordinator message `MemoryCoordinatorMsg::Forget` that shipped with it had no production sender and was removed in BZR-1231. Spec: `assignments/BZR-158.v2.md`. Tracker: Done on dreamd-eng (2026-09-30).
-22. **BZR-151** — on `origin/main` (`29ffdba`). `dreamd forget <id>` calls `forget::cascade`, refuses while the daemon probes live, and `--dry-run` writes nothing. `--proof` writes a `forget-receipt/1.0` file. Spec: `assignments/BZR-151.v2.md`. Tracker: Done on dreamd-eng (2026-09-30).
-23. **BZR-188** — on `origin/main` (`40ff05a`). Feature `vectors` is off by default (`fastembed` 5.17.4, Apache-2.0). `#[cfg(feature = "vectors")] pub mod vectors` names `BAAI/bge-small-en-v1.5` and does not call `TextEmbedding::try_new`. Spec: `assignments/BZR-188.v2.md`. Tracker: Done on dreamd-eng (2026-09-30).
-24. **BZR-181** — on `origin/main` (`f786bff`). `dreamd vectors enable` downloads the model only on a `--features vectors` build and exits 2 on the default binary. `dreamd version` / `--version` report `vectors:on` or `vectors:off`. Stripped default `dreamd` is 20,674,976 bytes. The feature build is 46,589,208 bytes and is informational (`size-report-vectors`). Spec: `assignments/BZR-181.v2.md`. Tracker: Done on dreamd-eng (2026-09-30).
-25. **BZR-182** — on `origin/main` (`edf7869`). `rrf::fuse` fuses two best-first id lists, `RRF_K = 60`, 1-based ranks. Recall does not call it. No ANN, no config table, no benchmark. Spec: `assignments/BZR-182.v2.md`. Tracker: Done on dreamd-eng (2026-09-30). Deleted by BZR-1244 (`9bfd00b`); not reopened.
-26. **BZR-177** — on `origin/main` (`f48d8e0`). Sample-percentile printer and `docs/benchmarks.md`. Spec: `assignments/BZR-177.v2.md`. Tracker: Done on dreamd-eng (2026-09-30).
-27. **BZR-157** — on `origin/main` (`2e34181`). Workspace version `0.2.0-alpha.1`, changelog section, and `RELEASING.md` row 7 for the three path-dependency versions. Manifest shas are `PENDING_*`. There is no `v0.2.0-alpha.1` tag. Spec: `assignments/BZR-157.v2.md`. Tracker: Done on dreamd-eng (2026-09-30) for the bump. The tag, the draft GitHub release, npm publish, and the MCP registry stay human steps.
-
-**Not claimable**
-
-- **BZR-147** is Done (2026-09-24). The error rename landed in BZR-172 (`LessonPhaseError`) and the learn/recall seam landed in BZR-173. The leftovers — deleting `server/http/types.rs`, merging `client.rs` with `daemon_client.rs`, collapsing the HTTP status mappers — were not done. Do not reopen 147 for them. Open a new ticket if those are still wanted.
-- **BZR-171** is Done (2026-09-24). It was the parent epic. Do not implement it as its own change.
-- **BZR-207** is not a gate. `rust-toolchain.toml` and `daemon_state::DaemonState` already exist. BZR-168 took `init(&DaemonHome)`. The `state_json()` rerun sentinel was left as-is: scaffold is one atomic rename. Do not reopen 207 to chase that sentinel.
-- **BZR-210** stays held until a `watch` remap exists. Do not implement the ticket's AC.
-- **BZR-149** and **BZR-152** are research. Do not schedule them. The CRDT ticket fights the single-writer log.
-
-**Parallel agents**
-
-- Claim one ticket and its file list before editing. One writer per file.
-- Through **BZR-168** the spine is on `main`: 187 (`fe331bd`), 173 (`adb7a40`), 172 and 168 (`979ddc3`). Do not reopen them. **BZR-159** (`docs/branching.md`) landed in `fe331bd`. **BZR-154** (`docs/provenance.md`) landed in `adb7a40`. Their code tickets landed later: 160 in `806b764`, 155 in `260f37d`.
-- **BZR-170** and **BZR-183** are on `main` (`4bb3509`). Do not reopen them. 170 owns the Tantivy split (`server/index_freshness.rs`, `server/indexer_actor.rs`, `server/tantivy_handle.rs`, `server/mod.rs`, `server/index_map.rs`, `collector.rs`, `handlers/health.rs`, the cadence test in `http/tests.rs`). 183 owns `letta.rs`, the `pub mod letta` line in `lib.rs`, and `adapters/letta/README.md`.
-- **BZR-827** is on `main` (`187cc50`). Do not reopen it. **BZR-198** is on `main` (`f400d82`). Do not reopen it. **BZR-193** is on `main` (`63791b9`). **BZR-194** is on `main` (`260f37d`). **BZR-195** and **BZR-160** are on `main` (`806b764`). **BZR-155** is on `main` (`260f37d`). **BZR-150** and the **BZR-156** library are on `main` (`702636a`). **BZR-153** and **BZR-148**'s `provenance::verify` are on `main` (`e3b7ecf`). **BZR-156**'s command and **BZR-146** are on `main` (`13ae1ca`). `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main`. The tracker marks 151, 188, 181, 182, 177, and 157 Done on dreamd-eng. Do not reopen them. The 1.0.0 bump is `bb84721`, tagged `v1.0.0` at `dacd95d`. Manifest shas are filled (`42e8e62`). The docs pass is `41e4ee5` and `0064355` (`origin/main`). There is no next implement ticket. Do not cut another tag or publish npm from an agent session. Behaviour bugs, founder decisions, and doc gaps left after that docs pass are listed in `context/audits/v1.0.0-docs-audit-remaining-2026-10-02.md` (gitignored; none of those items have tickets). Do not file them unless asked.
-
-Windows atomic writes is on `ROADMAP.md` and has no ticket in this list. Do not invent that work inside one of these tickets.
-
----
-
-## Paired-dev-loop drift catalog
-
-### privacy-disclosure-tracks-the-shipped-network-story
-
-- **Rule:** `DR413_DISCLOSURE` in `privacy.rs` is the first-run banner printed by `dreamd init` and first MCP spawn. `tests/fixtures/init.golden.txt` is byte-locked to it. When whether the daemon can make network calls changes, rewrite **both** in the same commit. Never leave "planned for v0.X.Y" in the banner after that version is tagged.
-- **Why:** The v0.1.1 honesty pass updated README / ROADMAP / SECURITY but missed this string. Users who ran init from the then-published npm package still saw "LLM-assisted dream cycles … planned for v0.1.1" after that release had shipped the LLM path.
-- **How to apply:** Edit the const and the golden together; `cargo test -p dreamd --test init_golden` is the gate. Do not rewrite historical CHANGELOG `[0.1.0]` bullets that also said `--dry` was planned (`changelog-historical-entries-stay-put`).
-- **Cross-refs:** `changelog-historical-entries-stay-put`
-
-### coordinator-not-mutex-file
-
-- **Rule:** All JSONL mutations go through `MemoryCoordinator` actor messages (`AppendLearning` / `PrepareCycle` / `CommitCycle` / `Shutdown`). There is no `Mutex<File>` writer. A dream cycle's model call runs between `PrepareCycle` and `CommitCycle`, outside the actor (BZR-1241).
-- **Why:** Older tickets and docs still say “Mutex&lt;File&gt; + fdatasync”; live code serializes via `&mut self` on the actor run loop (`coordinator.rs`, ARCHITECTURE.md §1).
-- **How to apply:**
-  - Spawn via `MemoryCoordinator::open` / `open_at` + `tokio::spawn(coordinator.run())`, or `Supervisor::start`.
-  - Send `MemoryCoordinatorMsg::AppendLearning { learning, client_dedup_key, response_tx }`.
-  - Prefer `tx.send(...).await` in torture tests; HTTP handlers use `Supervisor::try_send` (100 ms timeout → 503).
-- **Cross-refs:** `weg12-direct-channel-not-http-hammer`
-
-### weg12-direct-channel-not-http-hammer
-
-- **Rule:** WEG-12 / DR-110 concurrency torture uses the **direct coordinator channel**, not real UDS HTTP / `POST /api/v1/learn`.
-- **Why:** Default coordinator capacity is 256 and HTTP `try_send` times out at 100 ms (`lifecycle.rs`); a naïve 1000-way HTTP hammer returns many 503s and cannot assert “exactly 1000 lines” without retries/capacity gymnastics. The ticket's AC explicitly allows the direct channel for v0.1.
-- **How to apply:**
-  - Integration test under `crates/dreamd-core/tests/` with `#![cfg(unix)]`.
-  - Fan out 1000 `AppendLearning` with `client_dedup_key: None` (or unique keys).
-  - Validate with raw bytes + `episodic::assess_log_health` / parse-as-`AgentLearning`.
-- **Cross-refs:** `coordinator-not-mutex-file`, `agentlearning-placeholder-id`
-
-### agentlearning-placeholder-id
-
-- **Rule:** Callers construct `AgentLearning` with a valid placeholder `EventId` (`evt_` + 26 Crockford chars); the coordinator overwrites `id`, `schema_version`, and `timestamp` on durable write.
-- **Why:** `EventId` rejects invalid strings at parse/serde time; tests historically use `evt_01ARZ3NDEKTSV4RRFFQ69G5FAV` or `evt_00000000000000000000000000`.
-- **How to apply:**
-  - See `LearnIngress::build_agent_learning` and coordinator unit tests.
-  - Direct-channel tests may use any `skill_action` string (no ingress gate). Prefer `::` form for consistency.
-- **Cross-refs:** none
-
-### jsonl-torn-tail-validation
-
-- **Rule:** “No torn lines” means the file ends with `\n`, `assess_log_health(...).torn_tail_bytes == 0`, and every `\n`-terminated non-empty line deserializes as `AgentLearning`.
-- **Why:** `episodic::scan` skips mid-file corrupt `\n`-terminated lines but treats a final no-`\n` fragment as a torn tail (WEG-378).
-- **How to apply:** Prefer `dreamd_core::episodic::{read_all, assess_log_health}` over ad-hoc `lines()` alone; also assert unique `id`s.
-- **Cross-refs:** none
-
-### npm-dreamd-mcp-unscoped
-
-- **Rule:** The npx package is unscoped `dreamd-mcp`, never `@dataprime1/dreamd-mcp`. Use the **floating** form `npx -y dreamd-mcp` (and `["-y", "dreamd-mcp"]` in MCP configs) in ALL user-facing docs and `.mcp.json.example` files — npx re-resolves the `latest` dist-tag on each fresh spawn (verified npm 10.9.4: `GET registry.npmjs.org/dreamd-mcp … cache revalidated`), so a floating config never goes stale. Do **not** hard-pin a version in copy-paste examples (a hard pin is the one form that never tracks new releases); pin only to reproduce a specific build.
-- **Why:** WEG-91's AC still cited `@dataprime1/…`; live `package.json` is `"name": "dreamd-mcp"` with `mcpName: "io.github.botzrDev/dreamd"`. WEG-91 left examples on `rc.2` while the package was already `rc.3`; the 2026-07-19 pin-sweep (`assignments/adapter-pin-sweep.v2.md`) brought consumer-facing pins to `@0.1.0-rc.3` without bumping the Rust binary train (`Cargo.toml` still `0.1.0-rc.2`).
-- **How to apply:** Grep for `@dataprime1/dreamd-mcp` before shipping adapter/docs copy. Check version via `packages/dreamd-mcp/package.json` or `npm view dreamd-mcp version`. Do not conflate npm pin with workspace crate version.
-- **Cross-refs:** none
-
-### migrate-from-to-is-record-schema
-
-- **Rule:** `dreamd migrate --from` / `--to` take **episodic** `RECORD_SCHEMA_VERSION` (`"1.0.0"`), never daemon `STATE_SCHEMA_VERSION` (`"1.0"` / `dreamd version` display), never `index::SCHEMA_VERSION` (`"index/1.3"`). Index self-heals; migrate does not bak or rewrite it.
-- **Why:** WEG-133's ticket AC said `"1.0"`; three independent streams exist on disk. Registering `"1.0"→"1.0"` would teach the wrong token.
-- **How to apply:**
-  - Registry identity via `dreamd_protocol::RECORD_SCHEMA_VERSION` (see `dreamd-core::migrate`).
-  - CLI `.bak` only `episodic_jsonl()` + `state_json()`; report index read-only.
-  - Docs: `docs/migrate.md`.
-- **Cross-refs:** none
-
-### doc-first-append-via-uds-learn
-
-- **Rule:** Non-MCP / documentation-pattern adapters teach durable append via UDS `POST /api/v1/learn` (placeholder `EventId` / `timestamp` / `schema_version`), never hand-edit or `echo >>` of `AGENT_LEARNINGS.jsonl`. There is no `dreamd learn` CLI in v0.1.
-- **Why:** WEG-128's ticket AC said “append … JSONL directly”; that fights `coordinator-not-mutex-file` and `agentlearning-placeholder-id`. Shipped fix: `adapters/aider/CONVENTIONS.md.template` + README.
-- **How to apply:**
-  - Copy curl shape from `docs/http-api.md` `POST /api/v1/learn`; set reserved `source_harness` (e.g. `"aider"`).
-  - Recall = `/read` (or equivalent) of `LESSONS.md` / JSONL; append requires a live daemon (`dreamd watch` preferred default).
-  - Anti-pattern: any new adapter doc that instructs editing the JSONL file by hand.
-- **Cross-refs:** `coordinator-not-mutex-file`, `agentlearning-placeholder-id`
-
-### cargo-run-dreamd-needs-bin
-
-- **Rule:** Always `cargo run -p dreamd --bin dreamd -- …` (and the same `--bin dreamd` for any help/CLI smoke). Never bare `cargo run -p dreamd -- …`.
-- **Why:** Package `dreamd` (`crates/dreamd-cli`) ships two bins — `dreamd` and `generate_man`. Bare `cargo run -p dreamd` errors with “could not determine which binary to run” and prints nothing on stdout; piping to `grep -c` then yields `0` as a **false pass** (caught in AILAB-495 report-back).
-- **How to apply:** Put `--bin dreamd` in every bare-prompt / v2 verify block that runs the CLI via cargo. Prefer `cargo test -p dreamd --test cli_help` for snapshot gates (no bin ambiguity). Unit tests for CLI modules live under **`--lib`**, not `--bin dreamd` — `main.rs` is a thin shim, so `cargo test -p dreamd --bin dreamd` reports `0 passed` and exits 0 (silent false pass; caught in AILAB-550). Use `cargo test -p dreamd --lib <module>` (e.g. `setup_mcp`) or `--test <integration>`.
-- **Cross-refs:** none
-
-### no-hoisted-stdio-lock-across-tantivy
-
-- **Rule:** Never hold `stdout.lock()` / `stderr.lock()` across `TantivyIndexHandle::open`, `writer.commit()`, or any path that can block on Tantivy’s `segment_updater` while tracing’s console layer may write to stderr.
-- **Why:** AILAB-575 / AILAB-561 — `run_doctor` hoisted StdoutLock/StderrLock for the whole run; `open`’s commit blocked the main thread waiting on `segment_updater`, which logged via tracing → stderr and deadlocked on the same process-wide lock. In-process unit tests (Vec&lt;u8&gt; writers) stayed green; only the real CLI / `tests/doctor_repair.rs` hung. The earlier `handle.shutdown()` “fix” never reached.
-- **How to apply:**
-  - Pass unlocked `std::io::stdout()` / `stderr()` (per-`writeln!` lock/release) for any CLI arm that can open a writer-spawning index — see `cli.rs` `run_doctor` + comment on `run_repair`.
-  - Regression guard: `crates/dreamd-cli/tests/doctor_repair.rs` spawn + 30s kill timeout with `DREAMD_LOG=info` pinned (off would disarm the trigger).
-  - Other `run_*` arms may still hoist locks today if they never wait on a logging Tantivy writer thread; do not cargo-cult unlock everywhere without a trigger, but do not reintroduce a hoisted lock on doctor.
-  - Every arm that still hoists carries an inline `// lock-ok (AILAB-583):` rationale naming why it never opens an index, and any new or changed arm that can open one must use unlocked handles instead.
-- **Cross-refs:** none
-
-### layer-semantic-is-not-embeddings
-
-- **Rule:** `Layer::Semantic` / `layer=semantic` names the **LESSONS.md document layer** in the Tantivy index. It is not vector/embedding semantics. Anything indexed under it is still scored by lexical BM25 × salience.
-- **Why:** AILAB-205 (DR-211) is a pure-Tantivy ticket with no new dependencies, but `AGENTS.md` §"v0.1 scope" lists "semantic/embedding recall" as one deferred item, and the tracker backlog files DR-211 next to the genuine vector tickets (AILAB-188 `fastembed-rs`, AILAB-182 RRF fusion, AILAB-181 vector opt-in). A dev or PM reading "semantic indexing pipeline" plausibly reaches for embeddings and pulls in a dependency the ticket never wanted.
-- **How to apply:**
-  - `index.rs:56-67` — the `Layer` enum is `Episodic | Semantic`, two document layers in one index.
-  - Embedding work is AILAB-188/182/181 and is *not* on the v0.2 Consolidation row of `context/planning/future-directions.md`.
-  - Anti-pattern grep for any DR-211-adjacent ticket: `! grep -rniE 'fastembed|embedding|vector|cosine' crates/dreamd-core/src/ --include='*.rs'`.
-- **Cross-refs:** `semantic-docs-need-inherited-pain-importance`
-
-### semantic-docs-need-inherited-pain-importance
-
-- **Rule:** Any document indexed into Tantivy MUST carry non-zero `pain` and `importance`, or it is unrankable. `collector.rs:114-115` reads both with `.unwrap_or(0.0)` and `salience()` multiplies by `(pain/10) × (importance/10)`, so a missing fastfield collapses the whole score to `0.0`.
-- **Why:** AILAB-205 — the AC asked for "dual-document scoring: episodic and semantic docs ranked together" without saying where a lesson's pain/importance comes from. A lesson has neither natively. The failure is silent: the document indexes fine, commits fine, matches the BM25 query fine, and then scores 0.0 and never appears in results. `test_zero_pain_produces_zero_score` (`collector.rs:400-413`) already pins the behavior.
-- **How to apply:**
-  - Lessons inherit **pain and importance** from the exemplar event named by `Lesson.id` (`lessons.rs:24`). Since BZR-1242 a lesson's `recurrence` is the subtree count of its `cluster_key`, read from the recurrence table like any other document. It used to be the promoted-cluster size.
-  - Exemplar lookup is the live JSONL only; missing → skip + WARN. Do **not** add a snapshot fallback — cited exemplars are pinned and never decay (see `pin-is-the-decay-exemption`), so the recovery path it would buy is unreachable on the normal route.
-  - Never index with defaulted scores when the exemplar is unfindable — skip the document instead.
-  - Do not "fix" this by changing the formula: ARCHITECTURE.md decision #2 and `salience.rs:9-11` lock the arithmetic shape verbatim.
-- **Cross-refs:** `layer-semantic-is-not-embeddings`, `delete-term-must-target-a-unique-field`, `recency-of-a-derived-doc-is-its-derivation-time`
-
-### pin-is-the-decay-exemption
-
-- **Rule:** `pinned` is the decay-exemption mechanism, and the dream cycle applies it automatically. `consolidation::cited_pins` pins every cited record that is not already pinned, and never clears a pin (BZR-1234, BZR-1240), `should_decay` returns `false` immediately for pinned records (`decay.rs:33`), and `decay::plan_decay` skips every id the same plan pins (BZR-1240) — so a record this cycle cites is never archived by it. **A cited exemplar does not age out at 90 days.** Do not build a second exemption.
-- **Why:** AILAB-205 rev 2 specced a snapshot-fallback lookup on the premise that every exemplar decays at ~90 days, giving lessons a hard lifetime. The premise was false and the step was cut in rev 3. Cost: a scope expansion approved on bad evidence, plus in-flight dev work. The reasoning error was reading `should_decay`'s age and salience gates while skipping the `pinned` short-circuit three lines above them.
-- **How to apply:**
-  - Before claiming a record decays, check `pinned` first — it is the outermost gate in `should_decay`, ahead of both age and salience.
-  - `dreamd archive --force-unpin` (`cli.rs:87,132`) is the supported way to clear a pin, so "unpinned then pruned" is reachable — but it is an explicit operator action, not the default lifecycle.
-  - The real lifecycle gap runs the other way: nothing retires a stale lesson (AILAB-699). When reasoning about a derived artifact's lifetime, check the *never-removed* direction too.
-- **Cross-refs:** `semantic-docs-need-inherited-pain-importance`, `recency-of-a-derived-doc-is-its-derivation-time`
-
-### recency-of-a-derived-doc-is-its-derivation-time
-
-- **Rule:** A derived document's `timestamp_sec` is **when it was derived**, not the timestamp of the source record it was derived from. For a LESSONS.md lesson that is `LessonsFile.last_updated`, never the exemplar event's timestamp.
-- **Why:** AILAB-205 — I specced pain, importance, and timestamp as one "inherit from the exemplar" bundle. Wrong on the third. Salience decays as `exp(-age_days/14)`, which asks *how stale is this claim*; a lesson consolidated today from a 90-day-old exemplar is not a 90-day-old claim. Stamping the exemplar's timestamp yields `exp(-6.43) ≈ 0.0016`, so the document indexes, commits, matches the query, and then ranks two orders of magnitude below any fresh event — the same silent-burial failure as `semantic-docs-need-inherited-pain-importance`, just slower and harder to spot in a test that only asserts presence.
-- **How to apply:**
-  - Assert *rank*, not presence, when testing a derived document. A test that only checks the doc comes back passes under both the right and wrong timestamp.
-  - Do not add decay or expiry logic to derived docs. Retirement is structural: the dream cycle rewrites LESSONS.md wholesale, so a cluster that stops recurring drops out and its lesson vanishes at the next `delete_term(layer="semantic")`.
-  - Re-stamping a derived doc on every rebuild is correct, not a bug — the rewrite is evidence the pattern still recurs.
-- **Cross-refs:** `semantic-docs-need-inherited-pain-importance`
-
-### delete-term-must-target-a-unique-field
-
-- **Rule:** `writer.delete_term(...)` in the Tantivy path targets `fields.event_id` (unique per document) or `fields.layer` (whole-layer wholesale replace). **Never** `skill_action` / cluster key — episodic and semantic documents share it, so a cluster-keyed delete takes every event in the cluster with it.
-- **Why:** AILAB-205's AC said `delete_term(cluster_key)` then `add_document`. Episodic docs carry `skill_action` (`index.rs:52`, written at `index.rs:149`), so that would silently delete the cluster's entire event history on every dream cycle. Both shipped delete sites use `event_id` deliberately — see the WEG-45 rationale at `index.rs:47-49` ("resolves to exactly one document"), the decay pruner at `tantivy_handle.rs:477`, and the recurrence sidecar at `tantivy_handle.rs:588` (deleted in BZR-1242).
-- **How to apply:**
-  - Per-document delete → `Term::from_field_text(fields.event_id, id)`.
-  - Whole-layer replace (LESSONS.md is rewritten wholesale each cycle) → `Term::from_field_text(fields.layer, Layer::Semantic.as_str())`; `layer` is `STRING` so the match is exact and cannot touch episodic docs.
-  - Give non-event documents a distinct `event_id` namespace (e.g. `lsn_<lesson id>`), or the decay pruner will delete them as collateral. Before BZR-1242 the recurrence sidecar apply did the same, and re-added only the episodic doc.
-  - Any ticket adding a delete path needs a regression test asserting the *other* layer survives.
-- **Cross-refs:** `semantic-docs-need-inherited-pain-importance`, `shared-helper-dual-consumer-blast-radius`
-
-### display-name-grep-excludes-external-slugs
-
-- **Rule:** Zero-hit “retired display name” greps exclude external identifiers (the tracker's document URLs, registry URLs, etc.). Keep the href byte-identical unless product explicitly retitles the remote doc and mints a new slug.
-- **Why:** AILAB-593 — AC wanted zero hits on the retired benchmark display name *and* an unchanged bake-off doc URL whose slug still embeds that retired token. Mutually unsatisfiable without excluding the URL from the display-name gate.
-- **How to apply:** Filter the external host out with `grep -viE` (or equivalent) on rename ACs; do not invent a new doc URL; do not pad lines with “no longer” to cheat anti-pattern filters.
-- **Cross-refs:** none
-
-### open-ticket-can-already-be-on-main
-
-- **Rule:** Before queuing the only open ticket, grep the live tree for the feature. A Todo is not proof the work is unshipped.
-- **Why:** 2026-08-15 paired-dev pull: AILAB-205 was the sole dreamd-eng Todo, but `IndexerMsg::IndexSemanticLessons`, `lsn_`, and `tests/semantic_indexing.rs` (cases 01–10) were already on `main` (`787e957`, `5e66918`). Recurred 2026-08-23: AILAB-748 still **In Progress** in the tracker while `DRAIN_TIMEOUT` / `with_drain_timeout` around `drain_daemon` are on `main` (`5afb741`). Recurred 2026-08-24: AILAB-201 / 200 / 191 still **Backlog** and AILAB-748 still **In Progress** after `af256c1` (versioned prompt), `7e3c4b4` (citations), `2b12ae2` (MCP descriptions), `75f5a3f` (`--dry`), `5afb741` (drain timeout).
-- **How to apply:** Search for the ticket id, the new type/msg variant, and the named test file. If present and the spec's test cases exist, close the ticket and pick the next Backlog ticket instead of writing a second implement prompt. Status **Backlog** is not proof of unshipped either — check `main` before treating P0 Backlog as the next implement.
-- **Cross-refs:** none
-
-### changelog-historical-entries-stay-put
-
-- **Rule:** Keep a Changelog historical version sections are immutable. Correct a factual error from a shipped tag under `## [Unreleased]`, never by rewriting the old bullet.
-- **Why:** AILAB-698's AC cited `CHANGELOG.md:113`; live line is `:119` under `[0.1.0-rc.1]`, not `[0.1.0]`. Line numbers on CHANGELOG rot; the section heading is the identity.
-- **How to apply:** Identify the bullet by heading + wording, not by AC line number. Leave rc.* / released entries byte-identical unless the user explicitly authorizes a historical rewrite. An anti-pattern grep for a retired path (`docs/security.md`) will also hit those historical bullets — pair with `git diff` added lines, do not rewrite the old entry to satisfy the grep (`changelog-historical-entries-stay-put`).
-- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`
-
-### daemon-state-module-avoids-wal-autobiography-cycle
-
-- **Rule:** Shared `state.json` types (`DaemonState`, `AutobiographySkip`) live in a third module both `wal` and `autobiography` depend on. Do not put `DaemonState` in `wal.rs` and `AutobiographySkip` in `autobiography.rs`.
-- **Why:** AILAB-167 pre-flight: the typed writer must be callable from both modules, and `DaemonState` needs `Option<AutobiographySkip>`. Splitting those two types across `wal.rs` / `autobiography.rs` is a compile-time cycle.
-- **How to apply:**
-  - New `crates/dreamd-core/src/daemon_state.rs`; `pub mod daemon_state` in `lib.rs`.
-  - Move `STATE_SCHEMA_VERSION` there and `pub use` it from `wal.rs` so `crate::wal::STATE_SCHEMA_VERSION` citations keep compiling (`migrate-from-to-is-record-schema`).
-  - Re-export `AutobiographySkip` from `autobiography` so `doctor.rs` / `cli.rs` / `setup.rs` do not churn.
-- **Cross-refs:** `migrate-from-to-is-record-schema`
-
-### weg378-skip-midfile-halt-torn-tail
-
-- **Rule:** Episodic JSONL policy is SPEC §88 / WEG-378: skip `\n`-terminated blank or unparseable mid-file lines; halt only a no-`\n` torn tail (`episodic::scan` / `read_all` / `read_raw`). Halt-at-blank is a regression. Open-time `recover` uses the same scan and, since BZR-1235, ends a torn tail that parses as a record with `\n` rather than truncating it.
-- **Why:** AILAB-166's AC still said unify to halt-at-blank, but `read_all` + consolidation/decay/indexer already share that skip policy. Re-queuing 166 would have undone `read_all_skips_blank_midfile_line`. Closed as shipped 2026-08-18.
-- **How to apply:** Before queuing a JSONL-reader ticket, grep `fn read_all` and the skip tests. AILAB-163's quarantine-to-sidecar shipped and BZR-1235 removed it (`ailab-163-excise-skips-not-suffix`); do not bring it back as a reader change.
-- **Cross-refs:** `jsonl-torn-tail-validation`, `open-ticket-can-already-be-on-main`
-
-### ailab-162-drain-not-sigterm
-
-- **Rule:** SIGTERM + socket unlink shipped in AILAB-301 / WEG-268. The remaining AILAB-162 hole was the post-`select!` coordinator/indexer drain (the comment that named it WEG-283). That drain is now in the working tree: unlink first, then `drain_daemon` (coordinator `Shutdown`, then index `try_unwrap`→`shutdown` or `flush`). Do not re-queue "add SIGTERM".
-- **Why:** 2026-08-18 look-ahead almost re-queued SIGTERM over `weg268_sigterm_socket`. The drain itself shipped unbounded: until BZR-1241, `Shutdown` could sit behind a dream cycle's model call. Since then it waits at most behind one `PrepareCycle` or `CommitCycle`, which are file I/O. Bounding that drain is **AILAB-748**, not AILAB-210 — 210 is Mode-X client refcount / idle-exit (Backlog). Do not conflate the two grace windows.
-- **How to apply:** Clone `Arc<Supervisor>` / primary handle *before* `build_router`. `shutdown(self)` cannot run from `Drop`. Do not async-shutdown evicted map entries: `ProjectRuntime::release` (BZR-1232; `supervisor_map` is gone) drops the supervisor and `try_unwrap`→`close`s the index synchronously, and the tasks' lock clones keep the project held until both tasks end. Idle `systemctl stop` is the `try_unwrap` success arm (`select!` drops `serve_uds` + router + `AppState`); `flush` is the busy-daemon fallback because `uds_server` `tokio::spawn`s connection tasks that drop of the serve future does not cancel. Coordinator `Shutdown` is `rx.close()` then receive-and-discard: queued *ahead* lands, queued *behind* is dropped.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `no-hoisted-stdio-lock-across-tantivy`, `indexer-shed-is-not-replay-healed`, AILAB-748
-
-### indexerror-lives-in-index-map
-
-- **Rule:** `IndexError` is defined in `server/index_map.rs`, not `tantivy_handle.rs`. AILAB-161's ticket still names the handle file as the type's home.
-- **Why:** The tuple struct is the map's error type; `tantivy_handle` / `dream_cycle` / `http/state` only construct it. Queuing "change IndexError in tantivy_handle.rs" misses the definition and the other two construction files.
-- **How to apply:** Grep `pub struct IndexError` / `pub enum IndexError` first. AILAB-170 owns the typed `SchemaIncompatible` wipe-gate and the module split; a 161-sized enum is ChannelClosed vs terminal, not that split.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `indexer-shed-is-not-replay-healed`
-
-### replay-two-pass-already-filters
-
-- **Rule:** **Superseded by BZR-1236.** `replay_two_pass` is deleted. `TantivyIndexHandle::open` reads the log once (`read_jsonl_events`) and runs `index_coverage::cover`. Since BZR-1242 it counts nothing: recurrence comes from the warmer. Do not re-queue "remove the double-parse", and do not bring back a watermark filter.
-- **Why:** AILAB-161 item 2 (June audit) shipped with the WEG-378 shared scan, so one read already fed both passes. The `id > watermark` filter it kept missed events merged in below the watermark (audit V9). BZR-1236 replaced it with the set difference.
-- **How to apply:** Read `index_coverage::cover` before queuing any open-time or index-error cleanup. The remaining 161 work is the enum + registry lockfile.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `weg378-skip-midfile-halt-torn-tail`
-
-### indexer-shed-is-not-replay-healed
-
-- **Rule:** Since BZR-1236 the coverage pass heals any gap. `TantivyIndexHandle::open` and `IndexerMsg::Resync` compare log ids with indexed ids, so a missing event is indexed at the next open or resync, wherever its id sorts. Live appends still never shed: `handle_append` awaits `tx.send(IndexerMsg::Append)`, so a full 1024-slot indexer channel parks the coordinator instead of dropping. Backpressure is what keeps *live* recall whole between coverage passes.
-- **Why:** The pre-fix `try_send` + Full drop logged "recoverable via next-startup replay". That was false: until BZR-1236, startup replay kept `id > last_indexed_id`, so a gap followed by any indexed event was skipped forever. The shed fix closed the live hole by awaiting the send; BZR-1236 replaced the watermark filter.
-- **How to apply:** Keep the awaited send. A shed append would be missing from recall until the next open or resync. Do not bring back a watermark filter for what to index. HTTP 503 is **not** "coordinator parked": in-flight learns wait in the 256-slot inbox (`resp_rx.await` has no timeout); only overflow of that inbox trips `Supervisor::try_send`'s 100 ms timeout, and only on HTTP. In-process `dreamd mcp` sends on a raw coordinator clone with no timeout and waits. `Supervisor::drain`'s deadline-free `Shutdown` can now park behind the indexer and consume `DRAIN_TIMEOUT`, skipping the index flush (lost last commit → rebuild on next open, not JSONL loss). The indexer task never sends back to the coordinator, so coordinator→indexer is acyclic.
-- **Cross-refs:** `ailab-162-drain-not-sigterm`, `replay-two-pass-already-filters`, `spec-deadlock-fixture-names-must-match-the-tree`
-
-### spec-deadlock-fixture-names-must-match-the-tree
-
-- **Rule:** A §4 "fixture must be gone" grep that searches names the spec invented will pass green with the real fixtures intact. Pair the spec names with a live-tree grep of the functions those line numbers actually name.
-- **Why:** indexer-shed.v2 §1.6 named `coordinator_still_succeeds_when_indexer_channel_full` / `channel_full_leaves_recall_stale_until_restart_replay`. The tree had `coordinator_continues_when_indexer_channel_full` and `channel_saturation_stale_recall_until_restart_replay` at the cited lines. §4 grepped only the invented names.
-- **How to apply:** Before locking a negative test-name grep, `rg 'async fn'` the file around the cited lines. Grep both spellings if the spec and tree disagree.
-- **Cross-refs:** `indexer-shed-is-not-replay-healed`
-
-### gated-consumer-is-what-makes-a-full-channel-test-real
-
-- **Rule:** A capacity-1 pre-fill test is vacuous if an ungated forwarder/consumer drains the filler before the coordinator sends. Gate the consumer; assert delivery count or recall, not just "append Ok".
-- **Why:** indexer-shed first green pass: `full_indexer_channel_still_reaches_recall_after_flush` drained the pre-fill, never met a full channel, passed on `try_send`+drop. Mutation-injecting `try_send` + silent Full made the gated rewrite fail (`1 != 3`; recall assertion).
-- **How to apply:** Mutation-inject `try_send`+silent Full and require the test to fail. Current-thread runtime comments are not the proof; the count/recall assertion is.
-- **Cross-refs:** `indexer-shed-is-not-replay-healed`
-
-### git-diff-name-only-misses-untracked
-
-- **Rule:** An anti-pattern allowlist that is `git diff --name-only | grep -vE '^(allowed files)$'` cannot see untracked files. A new module the spec *requires* will not appear, and a new file the spec *forbids* will not fail the gate.
-- **Why:** AILAB-167 report-back: `daemon_state.rs` was `??` and the allowlist line was empty of it. The only red hit was PM-side `AGENTS.md`. The spec's own file-scope grep was structurally blind to the ticket's main deliverable.
-- **How to apply:** Pair `git diff --name-only` with `git ls-files --others --exclude-standard` (or `git status --porcelain`). Do not treat an empty `git diff --name-only` allowlist as proof that only the listed paths changed.
-- **`git grep` has the same blind spot (BZR-1531).** It searches tracked files only. §6 grep 1 (`git grep -n 'enum Launcher'`) printed nothing instead of the new `launcher.rs:9`, and grep 3 missed the `LAUNCHER_ENV` const in that file. The dev caught both. Any spec grep that must see a file the ticket creates uses `git grep --untracked` or `grep -rn`, and its dry run on the base is not proof it can see that file.
-- **Cross-refs:** none
-
-### init-is-a-create-only-statejson-writer
-
-- **Rule:** `dreamd init` has its own private `State` in `commands/init.rs` that scaffolds `state.json`. It is a third writer, but create-only — not a rebuild of an existing file. AILAB-167's "single writer" AC is `wal` + `autobiography` only.
-- **Why:** AILAB-167's ticket names those two files. Folding `init.rs` in would also retouch `init_golden.rs` (651 B stdout lock) without changing the eat-on-cycle bug.
-- **How to apply:** Do not queue `init.rs` onto a state.json RMW ticket unless the user expands scope. `fs::write` at scaffold time is acceptable; cycle mutations go through the typed RMW writer.
-- **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`
-
-### registry-flock-gates-on-registry-not-home-exists
-
-- **Rule:** `uninstall_project` may skip the registry flock only when `registry.toml` is absent (true no-op). Any RMW takes `lock_exclusive` first and re-checks existence under the lock. Never gate the flock on `daemon_home.exists()` alone.
-- **Why:** AILAB-161 report-back: `if daemon_home.exists() { Some(lock) } else { None }` left a TOCTOU against a concurrent first `dreamd init` that created the home+registry after uninstall skipped the lock, then ran the RMW unlocked.
-- **How to apply:** Probe `registry_toml()` for the early return; lock then re-probe before read/retain/write/chmod. Do not `create_dir_all` the daemon home from uninstall just to take the lock. Regression: `concurrent_first_init_and_uninstall_keeps_registered_root` in `commands/init.rs`.
-- **Cross-refs:** `indexerror-lives-in-index-map`
-
-### guards-vs-mandates-same-line
-
-- **Rule:** When a v2 §3 snippet shows a multi-line call and a §5 anti-pattern grep requires two tokens on the same physical line (e.g. `with_drain_timeout` and `drain_daemon(drain_supervisor`), the grep wins — write the call on one line (or rewrite the grep before queueing). Never ship a snippet that fails its own guard.
-- **Why:** AILAB-748 report-back (third instance logged by the implementing agent): copying the four-line §3 Step 2 form failed §5 grep #1; the single-line call site is semantically identical and rustfmt-stable.
-- **How to apply:** Before handing a bare prompt, dry-run every §5 line against the §3 snippets as if they were already in the tree. Prefer greps that match across `\n` (`rg -U`) only when intentional; otherwise keep call-site examples single-line when a same-line guard exists.
-- **Cross-refs:** none
-
-### config-llm-keys-are-flat
-
-- **Rule:** LLM settings on `Config` are flat (`provider`, `model`, `endpoint`, `cost_cap_usd`), not a nested `[dream.llm]` table. AILAB-204's ticket originally said `[dream.llm]`; the issue description was reconciled to flat keys when 204 moved to Done (2026-08-23).
-- **Why:** WEG-14 / DR-112 shipped flat keys and a commented template; a nested table would break `CONFIG_TEMPLATE` parse tests and every existing `config.toml`.
-- **How to apply:** Read `crates/dreamd-core/src/config.rs`. Do not add `[dream.llm]`. AILAB-196 has shipped: the dream cycle reads and enforces the flat `cost_cap_usd`; it did not introduce `max_cost_usd` or a nested table.
-- **Cross-refs:** `migrate-from-to-is-record-schema`
-
-### doctor-cluster-health-flag-already-exists
-
-- **Rule:** `dreamd doctor --cluster-health` already diffs `semantic/recurrence_counts.json` against `compute_promoted_clusters`. Tickets that "add cluster-health" must extend that flag's output, not invent a parallel flag. Since BZR-1242 the sidecar is only the promotion report; recall does not read it.
-- **Why:** AILAB-196's ticket AC (May 2026) asked to show estimated next-cycle cost on `dreamd doctor --cluster-health` as if the flag were new. The flag and sidecar-drift checks shipped earlier; 196 is additive `next_cycle_est_usd=` output. A new flag would split the doctor surface and miss existing tests.
-- **How to apply:** Call a sibling reporter from the existing `if flags.cluster_health` arm. Do not fold cost into `check_cluster_health`'s `bool`. Do not call `run_cluster_engine` (it writes the sidecar) or stage a plan from doctor's production path (`select-lesson-or-retire-unlinks`).
-- **Cross-refs:** `select-lesson-or-retire-unlinks`, `open-ticket-can-already-be-on-main`
-
-### no-llm-must-not-skip-daemon-proxy
-
-- **Rule:** `--no-llm` threads through `POST /api/v1/dream` as `x-dreamd-no-llm: 1`. It does not skip the daemon proxy. Only `--no-commit` skips the proxy (existing CI path).
-- **Why:** Skipping the proxy while `dreamd watch` owns the JSONL races the coordinator (WEG-271). AILAB-204's ticket asked for a CLI flag without an HTTP channel; the live proxy POSTs an empty body.
-- **How to apply:** `client::proxy_dream_cycle(..., no_llm)` sets the header. Since BZR-1241, `post_dream` passes `no_llm` to `dispatch_cycle`, which hands it to `dream_cycle::compose` in the handler's task. The coordinator's `CommitCycle` carries the composed body, not the flag. See `assignments/AILAB-204.v2.md`.
-- **Cross-refs:** `coordinator-not-mutex-file`
-
-### nfr-2-stripped-binary-is-20mb
-
-- **Rule:** CI `size-gate` and `release.yml` fail if stripped `target/release/dreamd` is **> 24 MB** (`MAX_BYTES=$((24 * 1024 * 1024))`, 25,165,824 bytes; soft warn at 16 MB). The gate was 20 MB until 2026-10-29, when the first v1.2.0 release build measured musl at 20.23 MB and glibc at 19.99 MB, and the user raised it to 24 MB rather than exempt musl or ship with no headroom. Do not queue a crate that grows the binary until a measurement on this commit is under the gate.
-- **Why:** AILAB-204 report-back cited **16.77 MB** and the founder raised 15→20 MB on 2026-08-23. That 16.77 figure was never the CI number. AILAB-204's own commit (`580cc44`) already fails size-gate at **20.42 MB**; `217f15e` (current main) is **20.47 MB** on ubuntu-latest ([run 32768136453](https://github.com/botzrDev/dreamd/actions/runs/32768136453)) and **20.23 MB** stripped locally. Nightly stays green because that workflow does not run size-gate, which hid the red. Standalone/non-LTO tiktoken probes at ~+3.7 MB; fat LTO + a *reachable* `cl100k_base` is **+1.82 MB** (19.07 MB local / ~19.31 MB projected CI). The 3.7 MB number is the wrong planning input once the profile block ships.
-- **How to apply:** Strip and `stat` `target/release/dreamd` on the commit you are about to grow, or read the latest `size-gate` job log — do not reuse the 16.77 MB CHANGELOG/AGENTS number. Raising the gate again is a founder call. Soft warn is 16 MB and fires on every current main build. AILAB-196 ships `[profile.release] lto = "fat"` + `codegen-units = 1` (measured 17.25 MB without tiktoken, 19.07 MB with a *reachable* tokenizer locally). Shrink or cut, do not silently raise `MAX_BYTES`. A size number from a build that never calls the new code is a false pass (`fat-lto-dead-strips-unreferenced-tokenizer`).
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `config-llm-keys-are-flat`, `fat-lto-dead-strips-unreferenced-tokenizer`
-
-### fat-lto-dead-strips-unreferenced-tokenizer
-
-- **Rule:** Fat LTO will drop `tiktoken-rs` (and `cl100k_base`) from the stripped binary if nothing in a bin crate reaches the estimator. A size measurement taken after adding the dep but before `compose_lesson_body` calls `estimate_prompt_cost` is a false pass.
-- **Why:** AILAB-196 STOP: local fat-LTO + tiktoken was byte-identical to LTO-only (18,086,912) while `strings dreamd | grep -ciE 'cl100k|endoftext|tiktoken'` was 0. A `black_box(estimate_prompt_cost(…))` probe in `main.rs` made the assets link (20,000,192; +1.82 MB). The production reachability path is the compose gate, not a probe left in the CLI.
-- **How to apply:** Report NFR-2 from a build where the production caller exists. Confirm tokenizer markers with `strings`. Do not commit a `black_box` in `crates/dreamd-cli/src/main.rs`.
-- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`
-
-### rustdoc-trips-word-grep-that-meant-call-sites
-
-- **Rule:** An anti-pattern grep for a banned *API* (`count_tokens`, a URL path) will also match rustdoc that explains why that API is unused, unless comment lines are filtered. The `do not|don't|never` negation filter does not catch "we do not call X" if X is on a different sentence-shape.
-- **Why:** AILAB-196 §4 originally grepped `count_tokens|count-tokens|messages/count` in `llm.rs`. Phase 1 rustdoc explaining the rejected remote token-count endpoint tripped it. Same family as `guards-vs-mandates-same-line`.
-- **How to apply:** Grep call syntax / URLs (`\.count_tokens\(`, `messages/count`) and drop `///` / `//!` / `//` lines. Do not ban the English words in docs.
-- **Recurred on BZR-1243.** §4 grep 3 banned `std::fs|fs::read|canonicalize` anywhere in `router.rs`. The dev's own rustdoc ("canonicalizes the path") tripped it, and the dev reworded the comment to pass. Ban `canonicalize\(` and drop comment lines instead.
-- **Recurred on BZR-1468.** §6 grep 4a banned the token `lsn_` in `ingress/recall.rs`'s production slice, so the dev wrote that file's comments without it. The grep was after a stripping call; `trim_start_matches\("lsn_"\)` would have said so.
-- **Cross-refs:** `guards-vs-mandates-same-line`
-
-### spec-grep-file-wide-hits-the-tickets-own-fixtures
-
-- **Rule:** An anti-pattern grep over a whole `.rs` file will hit `#[cfg(test)]` fixtures that *must* call the banned production function. Narrow to production code (above `#[cfg(test)]`) or to `git diff` added lines — do not fail a ticket because pre-existing tests seed state with the helper the production path must not use.
-- **Why:** AILAB-196 §4 grep 3 (`select_lesson_or_retire|run_cluster_engine` in `commands/doctor.rs`) was already red at `d2d5fa9` on three drift-test lines (comment + two `run_cluster_engine` calls). Those tests need a real sidecar on disk. `head -n` of the `#[cfg(test)]` line (784) was empty; `git diff` added lines naming the symbols all carried `never` / `rather than`. Weakening the fixtures to satisfy the grep would delete the only proof the sidecar-diff arm works.
-- **How to apply:** Pair a file-wide grep with (1) a production-only slice through the first `#[cfg(test)]` and (2) `git diff -- path | grep -E '^\+.*(banned)'`. Same family as `spec-grep-count-guard-contradicts-ac-test-code` / `guards-vs-mandates-same-line`.
-- **Cross-refs:** `select-lesson-or-retire-unlinks`, `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`
-
-### spec-grep-status-word-hits-interpolation
-
-- **Rule:** An anti-pattern grep `systemctl.*status` will match a `Display` impl that interpolates `{status}` (the child's exit status), not the banned `systemctl status` verb. Pair with `git diff` added lines and a tighter pattern (`"systemctl".*"status"|systemctl --user status`).
-- **Why:** AILAB-178 §5 grep 2 was red on a pre-existing byte-identical line: `"systemctl --user {args} failed ({status}): {}`". No added line in the 178 diff matched. Same family as `rustdoc-trips-word-grep-that-meant-call-sites`.
-- **How to apply:** Ban the argv (`status dreamd.service`, `systemctl --user status`), not the English word `status`. Confirm with `git diff -- path | grep '^+' | grep -E 'banned'` so a HEAD-identical Display string cannot fail a new ticket.
-- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`, `service-status-is-not-dreamd-status`
-
-### v2-beats-ticket-ac
-
-- **Rule:** For dreamd-eng tickets that have `assignments/AILAB-*.v2.md`, implement the v2, not the ticket's AC as written.
-- **Why:** AILAB-204's ticket still said `genai`, `[dream.llm]`, and env-only after the v2 spec and the ship. The implementing tree followed the v2 file. Next tickets (201, 196, 200) inherit those reconciliations.
-- **How to apply:** If `assignments/AILAB-NNN.v2.md` exists, that file is the contract. Treat the ticket's bullets as historical. Do not re-introduce `[dream.llm]`, `tiktoken-rs` on 201, or env-only credentials.
-- **Cross-refs:** `config-llm-keys-are-flat`, `ailab-201-ac-is-pre-llm-module`
-
-### folded-ac-may-already-be-in-the-blocker
-
-- **Rule:** When the tracker folds a second story into a later ticket, grep the blocker before re-implementing the fold. The remaining ticket is only the unfinished half.
-- **Why:** AILAB-199's ticket still asks for `~/.config/dreamd/secrets.toml` mode `0600` (founder B9, folded 2026-05-10). AILAB-204 already shipped `resolve_llm_credentials`, env-then-secrets, and `NO_API_KEY_FALLBACK`. Re-doing that half would churn `llm.rs` and fight the 204 CHANGELOG bullet.
-- **How to apply:** Remaining 199 is `--share-personal` / `x-dreamd-share-personal` consent for `personal/` on the compose prompt. Do not add a second secrets reader. Same shape as `open-ticket-can-already-be-on-main`.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `v2-beats-ticket-ac`
-
-### ailab-201-ac-is-pre-llm-module
-
-- **Rule:** AILAB-201's AC names `crates/dreamd-core/src/dream/prompts/v1.1.txt`, per-lesson `LESSONS.md` frontmatter, and `prompt_version`. Live (shipped 2026-08-23): crate `dreamd-core`, `LESSON_PROMPT = include_str!("prompts/v1.1.txt")`, `VERSIONED_PROMPT_ID = "dream-cycle/v1.1@2026-08-23"`, artifact `.agent/semantic/LESSONS.md` with **file-level** `prompt_version`. `UNVERSIONED_PROMPT_ID` / `UNVERSIONED_LESSON_PROMPT` / `"llm-unversioned"` are gone from `crates/dreamd-core/src/`.
-- **Why:** May 2026 AC predates AILAB-204's `llm.rs` module and the shipped LESSONS.md schema. Implementing that AC as written would add a phantom `src/dream/` module and a second frontmatter shape.
-- **How to apply:** Do not re-introduce the throwaway constants. Citation validation and a `citations:` frontmatter key are AILAB-200. A prompt-byte edit must move `VERSIONED_PROMPT_ID` in the same commit (reviewer, not insta).
-- **Cross-refs:** `v2-beats-ticket-ac`, `posix-trailing-nl-widens-prompt-seam`
-
-### posix-trailing-nl-widens-prompt-seam
-
-- **Rule:** Moving a Rust `"` `\`-string into a `.txt` file adds a POSIX trailing newline the literal did not have. If the assembler still concatenates `"\n\nCluster: "`, the seam gains a blank line. insta's `trim_end` snapshot is blind to that.
-- **Why:** AILAB-201: HEAD literal 594 B → file 595 B (`+0x0a`). `build_lesson_prompt` kept `"\n\nCluster: "`, so `prose\n\nCluster:` became `prose\n\n\nCluster:`. Spec allowed the newline; a dedicated `ends_with("...\n") && !ends_with("\n\n")` test pinned the seam.
-- **How to apply:** When extracting prompt/config bytes into a file, assert the assembler seam, not only an insta snapshot. Do not `.trim_end()` in `build_lesson_prompt` to hide it.
-- **Cross-refs:** `ailab-201-ac-is-pre-llm-module`
-
-### required-struct-field-forces-out-of-allowlist-literal-sites
-
-- **Rule:** Adding a required field to a public struct forces a literal at every existing struct-literal construction site. An allow-list that names only the product files will miss those compile-fix sites; `git diff --name-only` plus `git ls-files --others --exclude-standard` is the gate, not an empty allow-list.
-- **Why:** AILAB-200 added `LessonsFile.citations: Vec<String>`. Product work stayed in the allow-list, but `server/tantivy_handle.rs` and `tests/semantic_indexing.rs` each gained a one-line `citations: Vec::new()` so test helpers still compiled. That is not scope creep; omitting the field does not compile.
-- **How to apply:** When a v2 adds a required field, expect helper/test literals outside the product allow-list. Prefer `Default` only if the crate already uses it for that type. Do not fail 200-style tickets for those one-line fills; do fail new product logic in those files.
-- **Cross-refs:** `git-diff-name-only-misses-untracked`
-
-### cargo-test-lib-filter-is-substring
-
-- **Rule:** `cargo test -p dreamd-core --lib llm` is a **substring** filter on test names, not “the `llm` module.” It also runs `dream_cycle` / HTTP tests whose names contain `llm`.
-- **Why:** AILAB-200 report-back: `--lib llm` printed 35 passed (311 filtered) because `llm_success_writes_model_text…` and friends matched. That extra coverage is real; it is not proof the command was scoped to `llm.rs` alone.
-- **How to apply:** For a module-only gate use `cargo test -p dreamd-core --lib -- llm::`. Read the “filtered” count. Do not treat a 35-pass `--lib llm` paste as “35 tests in llm.rs.” The filter is a contiguous substring of the full path, so `cli::parses_blame` matches nothing: those tests are `cli::tests::parses_blame_*` (BZR-193). Use `cli::tests::parses_blame`.
-- **Cross-refs:** `cargo-run-dreamd-needs-bin`
-
-### search-nodes-layer-filter-does-not-exist
-
-- **Rule:** MCP `search_nodes` takes `query` + `k` only (`SearchNodesParams`). HTTP `GET /api/v1/recall` takes `q` + `k`. Both call `recall`, which has no layer argument since BZR-1244. Hits already carry `source` (`"episodic"` | `"semantic"` via `Layer::as_str`). There is no `layer` / `layer=` argument on either surface.
-- **Why:** AILAB-191's AC says “`layer=` filter narrows.” Documenting that would teach agents to pass a param rmcp will reject. Adding the param is a new feature, not “just better descriptions.”
-- **How to apply:** Rewrite descriptions to tell agents to read `source`. Do not add `SearchNodesParams.layer`. Do not unify MCP `query` with HTTP `q`. `explain=1` on `GET /api/v1/recall` is the BZR-198 citation gate; it is not a layer filter, and `search_nodes` still does not take it. `index.rs` rustdoc still says every v0.1 doc is `Layer::Episodic` — stale after AILAB-205; do not “fix” it on a copy ticket.
-- **Cross-refs:** `v2-beats-ticket-ac`, `layer-semantic-is-not-embeddings`
-
-### rmcp-tool-description-requires-string-literal
-
-- **Rule:** rmcp 1.7 parses `#[tool(description = ...)]` as a darling `Option<String>`, so the attribute takes a string **literal**, not a const. Keep the copy in a const for tests and duplicate the exact bytes into each `#[tool]`; assert `MemoryMcpServer::search_nodes_tool_attr().description` equals the const. `#[allow(dead_code)]` on the const is required because only `#[cfg(test)]` reads it — same shape as the existing `tool_router` allow at `mcp/mod.rs:151`.
-- **Why:** AILAB-191 v2 asked to use consts in all three attributes. That does not compile on rmcp 1.7. Duplicating without a round-trip test would let unix vs `not(unix)` `search_nodes` drift.
-- **How to apply:** Do not fight the macro. Do not `#[cfg(test)]` the const (hides rustdoc / `not(unix)` links). Do not add a layer param to “avoid” the duplication.
-- **Cross-refs:** `search-nodes-layer-filter-does-not-exist`
-
-### dry-skips-proxy-unlike-no-llm
-
-- **Rule:** `dreamd dream --dry` must skip the daemon proxy. `--no-llm` must not. `--no-commit` is the only write-path flag that skips the proxy today.
-- **Why:** `POST /api/v1/dream` runs the real cycle (WAL, LESSONS.md, JSONL pins, sidecar, index). A dry preview that proxies would write. `--no-llm` skipping the proxy while `dreamd watch` owns the JSONL races the coordinator (WEG-271).
-- **How to apply:** Dry is a separate CLI arm that calls a read-only preview and never `try_proxy_to_daemon`. The write path still sends `x-dreamd-no-llm: 1` through the proxy. `--dry --no-commit` is just `--dry` (nothing to commit). `--dry --auto` stays invalid.
-- **Cross-refs:** `no-llm-must-not-skip-daemon-proxy`, `coordinator-not-mutex-file`
-
-### select-lesson-or-retire-unlinks
-
-- **Rule:** Planning is pure and staging writes. Since BZR-1240, `select_lesson_or_retire` is gone: `consolidation::select_lesson` and `plan::plan_cycle` read nothing and write nothing, and the retire (AILAB-699) is `LessonsChange::Unlink` in the plan, which `Stage::apply_plan` stages and the commit applies. `run_cluster_engine` still writes `recurrence_counts.json` directly; only tests and doctor's fixtures call it.
-- **Why:** A preview that reused a writing select/cluster path would mutate the store — the opposite of `--dry`.
-- **How to apply:** Dry uses `compute_promoted_clusters` (no disk) plus `preview_select_lesson`, which does not unlink. A preview may call `plan_cycle`. Do not call `wal::begin_cycle`, `Stage::apply_plan`, `run_cluster_engine`, the index, or autobiography on the dry path.
-- **Cross-refs:** `dry-skips-proxy-unlike-no-llm`
-
-### fixture-now-sec-is-not-the-corpus-clock
-
-- **Rule:** A “advance past the recurrence window” test must add the window to the fixture’s newest event timestamp, not to the test’s `NOW_SEC` constant.
-- **Why:** AILAB-341: `tests/fixtures/dream-cycle-snapshot/` is dated 2026-05, a year ahead of `NOW_SEC = 1_747_137_600` (2025-05-13). `NOW_SEC + 30d` still sits inside the window, so a naive retire-preview test keeps promoting.
-- **How to apply:** `newest_event_ts + WINDOW_30_DAYS_SEC + 1`. See `preview_without_promotion_reports_none_and_leaves_lessons_md` in `dream_cycle.rs`.
-- **Cross-refs:** `select-lesson-or-retire-unlinks`
-
-### ticket-ids-and-the-build-order
-
-- **Rule:** dreamd tickets filed from 2026-11-13 have `DRM-<n>` ids (DRM-49 is the first) and no `BZR-<n>`. Earlier ones are `BZR-<n>` (the same numbers as the retired `AILAB-<n>` ids), and the tracker still finds them by that id. Shipped work is project **dreamd-eng**, and live work is projects **dreamd-hardening** and **deep-recall**. Project **R&D** was canceled on 2026-10-21; do not file there or read it as the spine. The order of work is the dreamd-hardening build-order section of this file, which continues into deep-recall's milestones, not the tracker's milestone progress.
-- **Why:** 2026-08-27 look-ahead: a query by the wrong grouping found zero issues while the project still held them. On 2026-09-26 the open spine (827 through 157, plus 207, 210, 149, 152) moved to R&D, so dreamd-eng held only Done, Canceled and Duplicate, and its milestone bars read 100%. The dreamd-eng description still said RFC-011 was proposed; BZR-1075 accepted it the same day.
-- **How to apply:** For the next ticket, take the first item of the dreamd-hardening section that has not landed. Read `DRM-<n>`, or `BZR-<n>` for an older ticket, as the live id. Milestone progress is not evidence that a ticket shipped.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `remaining-build-order-2026-09-24`
-
-### ailab-210-ac-is-pre-watch-architecture
-
-- **Rule:** AILAB-210's AC (MCP-client refcount, 30s/90s application heartbeats, PID file, idle-exit of a shared writer) does not describe the live process model. Do not implement it as written.
-- **Why:** Live `dreamd mcp` is stdio (`Backend::Remote` HTTP-over-UDS or `Backend::Local` in-process). `dreamd watch` is the UDS HTTP daemon and exits only on SIGINT/SIGTERM (`AILAB-162` / `AILAB-748` `DRAIN_TIMEOUT` 30s). No PID file, no client registry, no heartbeat. Map idle 30 min is per-project index/supervisor eviction (`project_resource_map.rs`), not MCP clients. Cited `context/PRD.md` is gone. The tracker itself demoted 210 off the v0.1 short list (2026-07-20) and again to Backlog (2026-08-22).
-- **How to apply:** A v2 must remap onto UDS connection tracking on `watch` (scope change — ask) or skip until dogfood shows zombie writers. Do not add a PID file or MCP ping protocol to satisfy the May AC. Do not conflate 210 with `DRAIN_TIMEOUT`.
-- **Cross-refs:** `ailab-162-drain-not-sigterm`, `open-ticket-can-already-be-on-main`
-
-### ailab-163-excise-skips-not-suffix
-
-- **Rule:** **Superseded by BZR-1235.** Open-time `episodic::recover` does not quarantine and does not rewrite. Every `\n`-terminated line stays in the log, skipped ones included. A torn final line gets `\n` when it parses as a record and is truncated otherwise. Do not bring back the `.corrupt-<date>.jsonl` sidecar or an in-place rewrite, and do not delete or read the sidecars earlier versions left in users' trees.
-- **Why:** AILAB-163 (shipped in 0.1.1) moved mid-file bad lines to the sidecar and re-serialized the survivors in place. That removed lines SPEC §88 only asks readers to skip, such as a lowercase ULID (audit V7), and dropped unknown fields from every record. Its torn-tail path also truncated a final record that lacked only its `\n` (V15). AILAB-163's own rule, never quarantine the suffix from the first anomaly, survives in a stronger form: recovery removes no complete line at all.
-- **How to apply:**
-  - The repros `open_keeps_a_record_this_reader_skips` and `open_keeps_a_valid_final_record_without_newline` (`tests/bzr1230_audit_defects.rs`) guard this.
-  - `recover`'s only writes are `set_len(clean_len)` or one `\n`, each followed by `sync_data`. They go to the plain fd that `open_at` closes before it opens the `O_APPEND` fd.
-  - The torn-tail parse is `parse_record`, the rule `lines()` uses. Readers still never treat an unterminated line as a record.
-  - The `[0.1.1]` CHANGELOG bullet that describes the sidecar stays put (`changelog-historical-entries-stay-put`).
-  - Spec: `assignments/BZR-1235.v2.md`.
-- **Cross-refs:** `weg378-skip-midfile-halt-torn-tail`, `jsonl-torn-tail-validation`, `jsonl-rewrites-go-through-patch-lines`, `changelog-historical-entries-stay-put`, `v2-beats-ticket-ac`, `open-ticket-can-already-be-on-main`
-
-### wal-guarded-replace-owns-tmp-path
-
-- **Superseded by BZR-1239.** `wal::guarded_replace`, `GuardedReplaceKind`, `append_intent` and `episodic::rewrite_guarded` are deleted. A cycle stages its outputs (`stage::Stage::put` / `unlink`) and commits them with one redo WAL (`wal::commit_cycle`). Do not bring back per-replace intents. The rest of this entry is history.
-- **Rule:** Dream-cycle destructive replaces go through `wal::guarded_replace`. Callers never construct `WalIntent.temp_file_path`. The tmp path is the `&Path` `write_atomic_with_hook` passes into its hook after fsync, not a second `with_extension("tmp")` at the call site.
-- **Why:** AILAB-164's ticket still cited `consolidation.rs:226` and “three state.json getters.” Live pin/decay thread a closure through `rewrite_atomic` and recompute the tmp path; `write_selected_lesson` appends `ReplaceSemanticMemory` *before* `write_lessons_file` (intent can land with no tmp). AILAB-167 already owns the typed `state.json` writer; only `read_last_cycle_status` / `read_cycle_started_at` remain as `Value` parsers.
-- **How to apply:** Implement `assignments/AILAB-164.v2.md`. `apply_pin_unpin` / `run_decay_pruner` / `forget::cascade` use `episodic::rewrite_guarded` (Prune), which since BZR-1234 takes `patch_lines` bytes, not records. `write_selected_lesson` uses `guarded_replace` + `render_lessons_file` (Replace), not `write_lessons_file`. `archive.rs` keeps hook-free `rewrite_atomic`. `recover` must not call this seam (since BZR-1235 its only writes are a `set_len` or one `\n` on its own fd). Readers wrap `read_daemon_state`; do not add a third writer. Recovery tests drive `guarded_replace_crash_after_intent`, not hand-written WAL JSON.
-- **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`, `init-is-a-create-only-statejson-writer`, `ailab-163-excise-skips-not-suffix`, `v2-beats-ticket-ac`, `folded-ac-may-already-be-in-the-blocker`
-
-### tracelayer-default-span-is-debug
-
-- **Rule:** `TraceLayer::new_for_http()` without a custom MakeSpan emits DEBUG spans. `DREAMD_LOG` defaults to `info` (`observability.rs`), so those spans never appear. HTTP request spans must be `info_span!` (AILAB-189).
-- **Why:** The ticket's AC says `TraceLayer::new_for_http()` as if that were the whole job. The lockfile `tower-http 0.6.11` from reqwest does not even enable the `trace` feature. Peer UID lives on `Extension(PeerUid)` injected in `uds_server.rs`, not in `build_router`. Last `.layer()` is outermost — `SetRequestIdLayer` must sit outside TraceLayer or MakeSpan sees no `x-request-id`.
-- **How to apply:** Implement `assignments/AILAB-189.v2.md`. Direct `tower-http` with `default-features = false, features = ["trace", "request-id"]`. Do not change `init_tracing` or coordinator log levels. Measure stripped `dreamd` after `build_router` actually calls TraceLayer (`fat-lto-dead-strips-unreferenced-tokenizer`, `nfr-2-stripped-binary-is-20mb`). Stop if over 20 MB. An `info_span!` is not a log line — see `info-span-alone-logs-nothing-fmtspan-none`. `SetRequestIdLayer` must sit outside both `PropagateRequestIdLayer` and TraceLayer (`set-request-id-must-be-outside-propagate`).
-- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `fat-lto-dead-strips-unreferenced-tokenizer`, `v2-beats-ticket-ac`, `ailab-210-ac-is-pre-watch-architecture`, `info-span-alone-logs-nothing-fmtspan-none`, `set-request-id-must-be-outside-propagate`
-
-### info-span-alone-logs-nothing-fmtspan-none
-
-- **Rule:** `observability::init_tracing` uses `fmt::layer()` with the default `FmtSpan::NONE`. A span, even INFO, writes nothing until an *event* fires inside it. HTTP tracing therefore records onto the span *and* emits one `info!(parent: span, "http request")`. Do not treat "do not emit a second INFO event" as "do not emit any INFO event."
-- **Why:** AILAB-189 v2 §3 banned a second INFO line to stop `DefaultOnResponse` at INFO duplicating status/latency under different names. Literal reading would ship a correct INFO span that is silent under the shipping subscriber. Shipped (`968e67b`): one event into the span, fields on the span, not `DefaultOnResponse`.
-- **How to apply:** Do not flip `with_span_events` to `NEW|CLOSE` (two lines per request). Do not promote `on_request` to INFO (arrival + completion = two INFO lines). Leave `DefaultOnFailure` at ERROR for 5xx.
-- **Cross-refs:** `tracelayer-default-span-is-debug`
-
-### set-request-id-must-be-outside-propagate
-
-- **Rule:** Axum last `.layer()` is outermost. `SetRequestIdLayer` must sit **outside** both `PropagateRequestIdLayer` and `TraceLayer`. `PropagateRequestId::call` stashes `x-request-id` off the request it is handed; if it runs before the generator, the response has no header and MakeSpan records `"-"`.
-- **Why:** AILAB-189 v2 §3 snippet ordered Trace → SetRequestId → Propagate (Propagate outermost). That compiles and looks layered, but oneshot would see no `x-request-id`. Live (`968e67b`): Trace → Propagate → SetRequestId → Unix `peer_uid`.
-- **How to apply:** Inbound on Unix is `peer_uid` → `SetRequestId` → `Propagate` → `Trace` → `agent_root`. Do not "fix" it to match `ServiceBuilder` inner-first examples without flipping for axum.
-- **Cross-refs:** `tracelayer-default-span-is-debug`
-
-### macos-rss-is-ps-rss-not-phys-footprint
-
-- **Rule:** AILAB-176 measures macOS idle daemon memory with `ps -o rss=` (KiB). That is not `phys_footprint`. The CI job is informational: no macOS limit, not in `notify-failure`. Linux `idle-rss-gate` stays VmRSS < 30 MB.
-- **Why:** AILAB-176's ticket title said “< 30 MB on macOS” and the preamble equated `phys_footprint` with `ps -o rss=`. Those are different Mach metrics; a 30 MB fail on `macos-latest` would be an invented gate. Founder lock at queue time: informational job, `ps -o rss=` only, threshold later.
-- **How to apply:** Darwin branch in `scripts/idle-rss.sh` (reuse spawn/socket/cleanup; never `/proc`, never `LIMIT_MB` compare). New job `idle-rss-report-macos` copies `size-report-macos`. `PERF.md` macOS measured cell is pending first CI run — do not guess a number. Do not sample `task_info` / `memory_pressure` to “be more accurate.”
-- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `v2-beats-ticket-ac`
-
-### systemd-user-unit-is-foreground-watch
-
-- **Rule:** `dreamd service install` writes a systemd *user* unit that `ExecStart`s foreground `dreamd watch` (`Type=simple`). There is no daemonize path (BZR-1244 deleted `detach_double_fork`); do not add one. `WorkingDirectory=` is the `AgentRoot` project root discovered from cwd at install time.
-- **Why:** ARCHITECTURE.md §8.1 said the double-fork helper was “reserved for service install.” Under systemd that helper reparents the daemon so the unit tracks the wrong PID. `run_watch` also requires `AgentRoot::discover(cwd)` (`watch.rs:67–70`); a unit without WorkingDirectory exits 2. Founder lock at AILAB-190 queue: install-time project root, not `$HOME`, not first `registry.toml` entry.
-- **How to apply:** Nested clap like `reset` (`ServiceArgs` / `ServiceCommand::{Install,Start,Restart,Status,Uninstall}`). Probe `/run/systemd/system`; refuse with “run `dreamd watch`” otherwise. No `Environment=HOME=` (AILAB-584). `wants_daemon_log` stays Watch-only. LaunchAgent is AILAB-169 (same module, injected `launchctl`, same WorkingDirectory lock). `service status` is AILAB-178; `service restart` is AILAB-185 (bounce-only); `service uninstall` is AILAB-202 (unit/plist only; `--purge` is daemon home, not per-project stores). Tests must not require a live `systemctl --user`.
-- **Cross-refs:** `no-hoisted-stdio-lock-across-tantivy`, `cargo-run-dreamd-needs-bin`, `v2-beats-ticket-ac`, `ailab-210-ac-is-pre-watch-architecture`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `service-restart-is-not-update-restart`, `service-uninstall-is-not-dreamd-uninstall`
-
-### service-status-is-not-dreamd-status
-
-- **Rule:** `dreamd service status` is the OS supervisor (systemd `--user` / launchd). `dreamd status` is UDS daemon liveness + project + last dream cycle. Do not merge them. Do not call `systemctl status` (pager); query `systemctl show --no-pager -p …`.
-- **Why:** AILAB-178's ticket AC said `systemctl --user status` and “last 10 log lines” as if `dreamd status` did not exist. WEG-103 already tails 5 lines of `~/.agent/dreamd.log` without truncating it. The two commands can disagree (foreground `watch` live, no unit; unit running, socket dead).
-- **How to apply:** Nested `ServiceCommand::Status`. Log tail via `read_log_tail_n(path, 10)`; leave `LOG_TAIL_LINES = 5`. Four states: running / stopped / failed / not-installed. Exit 0 on a successful query including stopped. Inject a stdout-returning runner; never spawn live `systemctl` / `launchctl` in tests.
-- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `plist-must-not-redirect-dreamd-log`
-
-### service-restart-is-not-update-restart
-
-- **Rule:** `dreamd service restart` bounces the OS-supervised unit (`systemctl --user restart` / Darwin `kickstart -k`). It does not rewrite `ExecStart`. It is not `dreamd update --restart` (AILAB-552). Every `dreamd update` already SIGTERMs same-HOME `mcp`/`watch` (`--restart` only announces that stop); `Restart=on-failure` / `KeepAlive.SuccessfulExit=false` do not bring a clean SIGTERM back. Darwin `service start` already is `kickstart -k`; restart reuses that argv and prints `restarted`.
-- **Why:** AILAB-185's ticket AC named the Darwin kickstart line as if it were new, and the upgrade story is easy to collapse into `update --restart`. A first draft of 185 docs claimed update “leaves the supervised unit alone”; false — the unit inherits `HOME` (AILAB-584 forbids `Environment=HOME=`), so the stop pass matches it. An npx cache-path change still needs `service install` first.
-- **How to apply:** Nested `ServiceCommand::Restart`. Injected runners like `start`. Missing unit = same as `start` (supervisor fail, exit 1). `NoSystemd` stays exit 2. Docs: README one-liner plus `docs/install.md`; `update` stops, `service restart` brings the unit back.
-- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `launchd-supervises-foreground-watch`, `service-status-is-not-dreamd-status`, `npm-shim-must-list-new-subcommands`
-
-### service-uninstall-is-not-dreamd-uninstall
-
-- **Rule:** `dreamd service uninstall` removes the systemd user unit / LaunchAgent only. `dreamd uninstall` (AILAB-226) stops processes and clears caches. `--purge` deletes daemon home `~/.agent/` after `--yes` or typed `y` (`reset workspace` idiom), never per-project `.agent/`.
-- **Why:** AILAB-202's ticket AC named `--purge` + typed-Y and cited gone PRD/plan1.md. A merge into `Command::Uninstall` would pkill and cache-wipe. Store wipe of project `.agent/` is still the manual troubleshooting “Full fresh store”.
-- **How to apply:** Nested `ServiceCommand::Uninstall { purge, yes }`. Injected runners. Idempotent if the unit/plist is already gone. Confirm `--purge` before any mutation. Do not call `commands::uninstall::run` or `lifecycle_cleanup`. Daemon home is `home.join(".agent")`, never `resolve_daemon_home()` — that helper's HOME-unset fallback is a relative `.agent` under cwd (a project store). Confirmation copy lives in `ServiceError` Display; `service_exit` prints it once — no local `eprintln!` in `confirm_purge`. Darwin `bootout` is a mutation: a `--purge` test must pass `purge: true` on `run_launchd_uninstall_with` or confirm-before-bootout is unpinned.
-- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `service-restart-is-not-update-restart`, `npm-shim-must-list-new-subcommands`
-
-### windows-compile-is-not-the-port
-
-- **Rule:** AILAB-174 makes the crate compile on `windows-latest`. It does not ungate `pub mod server` / `client` / `daemon_client`, does not implement `write_atomic` on Windows, and does not drop `continue-on-error` on the Windows test job. AILAB-203 is the Windows schtasks logon task plus the `auth.json` token, not the port; **AILAB-192** (TCP + localhost + bearer) is the daemon/API port.
-- **Why:** AILAB-174's ticket AC offered Option A (compile) or Option B (intentional red). Option B already shipped (`continue-on-error` on `windows-latest`). The remaining holes are ungated `crate::server` / `daemon_client` imports in `mcp/mod.rs` plus CLI `watch` / `archive` / `cli.rs` `client::resolve_daemon_socket` sites — not “mcp only,” and not a reason to compile `Supervisor` on Windows. A half-written `#[cfg(not(unix))] Supervisor::start` branch never typechecks.
-- **How to apply:** `#[cfg(unix)]` those imports. Split `run_mcp_server`; Windows returns `McpRunError::Unsupported` (exit 2). Copy `run_doctor`'s socket idiom (`cli.rs` unix `resolve_daemon_socket` / not-unix `None`). If a test fails on Windows because it calls a unix-only API, `#[cfg(unix)]` the test. That advice is right for `tests/*.rs` (rustc synthesizes `main`) and **wrong** for `tests/bin/*.rs`: `cargo test --workspace` still builds every `[[bin]]`, and a crate-level `#![cfg(unix)]` strips `fn main` (`E0601`). Gate items individually and give `main` a `not(unix)` twin. Do not add `windows-sys`.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-ticket-ac`
-
-### launchd-supervises-foreground-watch
-
-- **Rule:** macOS `dreamd service install` writes `~/Library/LaunchAgents/dev.dreamd.dreamd.plist` that `ProgramArguments`s foreground `dreamd watch`. Do not daemonize (BZR-1244 deleted `detach_double_fork`). Do not set `AbandonProcessGroup`. `WorkingDirectory` is the install-time `AgentRoot` project root (same founder lock as the systemd unit).
-- **Why:** AILAB-169's ticket AC assumed a new command and `docs/install.md` (file was missing). Live clap is already `service install`/`start` from AILAB-190. Launchd tracking a double-forked grandchild is the same PID lie as systemd `Type=simple` plus `detach_double_fork`.
-- **How to apply:** Inject `launchctl` like `systemctl`; inject `uid` (production `id -u`, no `unsafe` / no CLI `nix` dep). `bootstrap gui/<uid> <plist>` on install; `--force` is the overwrite confirmation (no stdin) and does `bootout` then `bootstrap`; `start` is `kickstart -k gui/<uid>/dev.dreamd.dreamd`. Linux `NoSystemd` copy must still not contain `LaunchAgent`. Darwin-path tests must run on Linux CI via `run_*_with`, not only `cfg(macos)`.
-- **Cross-refs:** `systemd-user-unit-is-foreground-watch`, `plist-must-not-redirect-dreamd-log`, `npm-shim-must-list-new-subcommands`
-
-### plist-must-not-redirect-dreamd-log
-
-- **Rule:** The LaunchAgent plist omits `StandardOutPath` / `StandardErrorPath`. `~/.agent/dreamd.log` is owned by `watch`’s tracing file layer (`wants_daemon_log` is Watch-only; `init_tracing` truncates).
-- **Why:** AILAB-169's ticket said “logs to `~/.agent/dreamd.log`.” That is already true. Pointing launchd at the same file gives two writers and a truncate race with AILAB-184.
-- **How to apply:** `KeepAlive` / `SuccessfulExit=false` analogue of `Restart=on-failure`. Never `EnvironmentVariables` / empty `HOME`. One-shots stay console-only.
-- **Cross-refs:** `launchd-supervises-foreground-watch`, `systemd-user-unit-is-foreground-watch`
-
-### npm-shim-must-list-new-subcommands
-
-- **Rule:** Every new `dreamd` clap subcommand that users might type after `npx -y dreamd-mcp` must be added to `DREAMD_SUBCOMMANDS` in `packages/dreamd-mcp/bin/dreamd-mcp.js`. Unlisted tokens become `dreamd mcp <token>`.
-- **Why:** AILAB-190 shipped `service` on the binary and left the shim set unchanged, so `npx -y dreamd-mcp service install` silently starts MCP. The file comment already says keep in sync with `Command`.
-- **How to apply:** Add the token + a `packages/dreamd-mcp/test/route.test.js` case. Docs that show the npx form are a lie until the set includes it.
-- **Cross-refs:** `cargo-run-dreamd-needs-bin`, `launchd-supervises-foreground-watch`
-
-### windows-service-is-schtasks-foreground-watch
-
-- **Rule:** Windows `dreamd service install` writes a logon-triggered scheduled task whose action is foreground `dreamd watch` (`WorkingDirectory` = install-time `AgentRoot`) and mints `~/.agent/auth.json` (256-bit token, owner-only ACL via `icacls`). It does not `CreateProcess` detach, does not daemonize, does not write a PID file, and does not ungate `pub mod server`. Token rotation on `--force` / reinstall; AILAB-192 re-reads the file per request and never rotates at watch start. `watch` boots on Windows as of AILAB-192 (loopback TCP + bearer) and exits 1 when `auth.json` is missing.
-- **Why:** AILAB-203's ticket AC named `DETACHED_PROCESS`, heartbeat/refcount (AILAB-210’s model), PID stale-lock, CI-gating, 15 MB / 30 MB Windows gates. Live Unix is systemd/launchd supervising foreground `watch`.
-- **How to apply:** `ServiceBackend::Schtasks`; XML + `schtasks /Create /XML`; inject `schtasks` / `icacls` / SID like `launchctl` / `id -u`. Tests on Linux via `run_schtasks_*_with`. Do not add `windows-sys`. Do not `/Run` at install. Do not implement TCP/bearer here (AILAB-192).
-- **Cross-refs:** `windows-compile-is-not-the-port`, `launchd-supervises-foreground-watch`, `systemd-user-unit-is-foreground-watch`, `ailab-210-ac-is-pre-watch-architecture`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-ticket-ac`
-
-### windows-api-is-tcp-localhost-bearer
-
-- **Rule:** Windows `dreamd watch` binds `127.0.0.1:0`, writes `~/.agent/server.json`, and authenticates with `Authorization: Bearer` from `~/.agent/auth.json`. Unix stays UDS + `SO_PEERCRED`. `--bind` / `--insecure` (AILAB-197) gate this listener only; see `watch-insecure-is-bind-only`. `write_atomic` runs on Windows (temp file, flush, rename, parent flush). The parent flush is not a power-loss proof. Learn is not gated on it. The dream cycle and the Tantivy index run. `/health` stays on the on-disk watermark.
-- **Why:** AILAB-192's ticket folded DR-409 and a gating Windows smoke, and assumed a writer-process 174/203 still refused. Token mint is AILAB-203 install, not watch start.
-- **How to apply:** Bearer outermost on the Windows router only. `dreamd watch` opens `TantivyIndexHandle` and wires it to the coordinator. MCP Remote over TCP when `server.json` is live; no in-process Local. Tests bind `127.0.0.1` on Linux. Do not add `windows-sys` / `subtle`. File identity comes from `file-id`.
-- **Cross-refs:** `windows-compile-is-not-the-port`, `windows-service-is-schtasks-foreground-watch`, `nfr-2-stripped-binary-is-20mb`, `v2-beats-ticket-ac`
-
-### watch-insecure-is-bind-only
-
-- **Rule:** `dreamd watch --insecure` only lifts the non-loopback **bind** refuse. Unix UDS is unchanged (those flags exit 2). `read_server_json` still requires a loopback host. Bearer / `auth.json` still required. No DNS.
-- **Why:** AILAB-197's ticket AC named `--bind` including UDS paths, DNS “resolves”, and `docs/security.md`. Live 192 is Windows `127.0.0.1:0` + a client that must not dial a forged routable `server.json`.
-- **How to apply:** Gate on the requested `SocketAddr` before bind. Publish loopback in `server.json` even when listening on `0.0.0.0`. Streamable HTTP MCP (AILAB-206) is `dreamd mcp --bind`, not `watch`; see `mcp-streamable-http-is-not-watch-rest`.
-- **Cross-refs:** `windows-api-is-tcp-localhost-bearer`, `v2-beats-ticket-ac`, `changelog-historical-entries-stay-put`, `mcp-streamable-http-is-not-watch-rest`
-
-### mcp-streamable-http-is-not-watch-rest
-
-- **Rule:** Streamable HTTP MCP lives on `dreamd mcp --bind`, path `/mcp`. `dreamd watch` REST (`/api/v1`) stays a different server. Unix `watch --bind` still exits 2. No bearer on `/mcp`. No `server.json` for the MCP port. Default `dreamd mcp` is still stdio. The transport is behind the non-default `mcp-http` cargo feature (NFR-2: +~1.5 MB stripped); without it `--bind` exits 2 naming the feature.
-- **Why:** AILAB-206's ticket read as a watch `--insecure` transport and a HITL harness smoke. Live MCP is stdio; live `--insecure` is the 197 TCP bind gate.
-- **How to apply:** Reuse `bind_listen`. `--insecure` without `--bind` on mcp is exit 2. STOP if stripped binary > 24 MB. Do not add `mcp-http` to `default` features or to a release build without an explicit NFR-2 decision. Test HTTP with `--features mcp-http` (CI runs `--all-features`); a default-feature `mcp::http::` filter runs 0 tests.
-- **Cross-refs:** `watch-insecure-is-bind-only`, `nfr-2-stripped-binary-is-20mb`, `windows-api-is-tcp-localhost-bearer`, `v2-beats-ticket-ac`
-
-### episodic-1-0-is-not-state-1-0
-
-- **Rule:** The ticket's “no `schema_version` `1.0` anywhere” is a **won't-do**. Only episodic `AgentLearning` / JSONL events use `RECORD_SCHEMA_VERSION` `"1.0.0"`. Daemon `STATE_SCHEMA_VERSION`, WAL, and the recurrence sidecar stay `"1.0"`. `render_lessons_file` already matches live SPEC.md (YAML frontmatter + HTML-comment blocks); do not add `TODO(WEG-61)` or revert to `## <skill_action>` / `*Sources:*`.
-- **Why:** AILAB-209's AC (May 2026) treated `"1.0"` as a misspelled episodic token and assumed the dream-cycle LESSONS.md writer had not shipped. WEG-61 / AILAB-201 / AILAB-200 shipped. 209 stamped leftover episodic literals (`http/tests.rs` AgentLearning + raw JSONL seed + `dream-cycle-snapshot`) and added a rustdoc pointer.
-- **How to apply:** Gate AgentLearning **and** raw JSONL seeds (`"schema_version":"1.0"` in `b"…"` / `r#"` fixtures) — an `AgentLearning {` grep misses `fs::write` of a JSONL line (`raw-jsonl-seed-is-not-agentlearning-struct`). Keep the `SkillAction` “legacy dotted keys serde” sentence. Do not register a migrate `"1.0"`→`"1.0.0"`. Skip 210. 208 is in-repo `docs/spec/` (`spec-page-is-in-repo-not-dreamd-dev`), not a `dreamd.dev` deploy.
-- **Cross-refs:** `migrate-from-to-is-record-schema`, `v2-beats-ticket-ac`, `open-ticket-can-already-be-on-main`, `raw-jsonl-seed-is-not-agentlearning-struct`
-
-### raw-jsonl-seed-is-not-agentlearning-struct
-
-- **Rule:** An `AgentLearning {` grep does not see `fs::write` of a JSONL byte string. Search `"schema_version":"1.0"` in `b"…"` / `r#"` / `.jsonl` fixtures too.
-- **Why:** AILAB-209 §1.2 listed two episodic `"1.0"` sites. A third was `http/tests.rs:1397` (`dream_happy_path_returns_200`). Grep 1 stayed green with that seed still on `"1.0"`.
-- **How to apply:** Pair the struct grep with `rg '"schema_version":"1.0"' --glob '*.rs' --glob '*.jsonl'` and classify each hit as episodic vs state/WAL/sidecar before changing it.
-- **Cross-refs:** `episodic-1-0-is-not-state-1-0`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`
-
-### spec-grep-rg-e-is-encoding
-
-- **Rule:** ripgrep’s `-E` is `--encoding`, not grep’s extended-regex. `rg -viE "$FILT"` exits 2; a leading `!` turns that into a pass.
-- **Why:** AILAB-209 §5 grep 7. The same line also matches `/` in `///` markers and `crates/…` paths, so even `grep -viE` over full `rg -n` lines is not a skill_action check.
-- **How to apply:** Use `grep -viE` or `rg -vi`. For rustdoc, strip the `///` prefix and path before looking for `/`. Never `|| true` on an anti-pattern grep (`! cmd || true` cannot fail).
-- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`, `guards-vs-mandates-same-line`
-
-### spec-page-is-in-repo-not-dreamd-dev
-
-- **Rule:** AILAB-208 publishes two digest pages under `docs/spec/`. Root `SPEC.md` stays the canonical on-disk contract. Do not register `dreamd.dev` (AILAB-272 is Canceled). Do not wait on ANTH-143 (the issue id is gone). Do not move `SPEC.md`.
-- **Why:** The ticket's AC named `dreamd.dev/spec` and a best-citizen spike blocker. The 2026-07-20 status on the same issue already offered in-repo `docs/spec/` + a README link as the v0.1 cheap signal. Remaining-50 still queued it as Q17.
-- **How to apply:** Implement `assignments/AILAB-208.v2.md`. Page 1 = folder layout + per-project `.agent/` vs per-user `~/.agent/` daemon home. Page 2 = JSONL / LESSONS.md frontmatter (MAY `citations`) / promotion / redaction. `skills/` and `protocols/` are dreamd extras, not SPEC-required. Skip 210. Q18 is AILAB-180. 208 shipped on `main` at `7cc9418` while the ticket is still Backlog — do not re-queue it.
-- **Cross-refs:** `v2-beats-ticket-ac`, `doc-first-append-via-uds-learn`, `episodic-1-0-is-not-state-1-0`, `npm-dreamd-mcp-unscoped`, `open-ticket-can-already-be-on-main`
-
-### salience-14-is-efolding-not-half-life
-
-- **Rule:** The recency term is `exp(-age_days / 14)`, a 14-day **e-folding** time constant (`1/e` at 14 days). It is not a half-life. The half-life of that curve is `14 * ln(2) ≈ 9.7` days.
-- **Why:** AILAB-180's AC (May 2026) asked for “exponential decay over 14-day half-life.” `docs/architecture.md` Decay already names this a factual error. Teaching “half-life” in `docs/salience.md` would contradict the architecture notes and `--explain` (`exp(-age_days/14)`).
-- **How to apply:**
-  - Restate the formula from `salience.rs:87-93` / ARCHITECTURE.md decision #2.
-  - Say “e-folding” (or “time constant”) and explicitly “not a half-life.”
-  - Do not change the `14.0` literal; it is a product lock, not a fitted parameter and not Anderson’s `d`.
-- **Cross-refs:** `actr-park-are-lineage-not-the-formula`, `v2-beats-ticket-ac`
-
-### actr-park-are-lineage-not-the-formula
-
-- **Rule:** Anderson 2007 (ACT-R) and Park et al. 2023 (Generative Agents) are **lineage** for the salience *shape*. They are not the formula. ACT-R base-level activation is a power law (`t^{-d}`); Park retrieval is a weighted **sum** of recency + importance + relevance. dreamd is a **product** `BM25 × exp(-age/14) × (pain/10) × (importance/10) × (1 + ln(1 + d(recurrence)))`. The saturating `d(r)` is dreamd's own (BZR-1523), and it is not ACT-R's `d`.
-- **Why:** SPEC.md footnote ¹ already cites both. AILAB-180’s “defensible answer for engineers reading critically” fails if the page claims isomorphism. The ticket also wrote `ln(1+recurrence)` without the leading `1 +`, which would zero a first occurrence.
-- **How to apply:**
-  - Cite Anderson, *How Can the Human Mind Occur in the Physical Universe?* (2007) and Park et al., arXiv `2304.03442`.
-  - Contrast the arithmetic in the same sections that cite them.
-  - Keep the leading `1 +` in `1 + ln(1 + d(recurrence))`, so recurrence `0` → factor `1.0`.
-  - On a page that has both, write "Anderson's `d`" every time. `docs/salience.md` defines `d(r)` above its ACT-R section.
-- **Cross-refs:** `salience-14-is-efolding-not-half-life`, `layer-semantic-is-not-embeddings`
-
-### releasing-npm-is-human-passkey
-
-- **Rule:** `npm publish` for `dreamd-mcp` is human-only (`dataprime1` passkey / `npm login --auth-type=web`). CI must not publish, hold `NPM_TOKEN`, request `id-token`, or run `--provenance` / `dist-tag`. AILAB-179 is the **manifest write-back PR** only.
-- **Why:** AILAB-179's ticket asked to automate npm publish. `RELEASING.md` (post-0.1.1) forbids it: passkey 2FA cannot run in Actions. MCP Registry publish is the same posture. Founder remap 2026-09-18: keep step 6 human; have `release.yml` open a `chore/mcp-manifest-v*` PR after regenerating `manifest.json`.
-- **How to apply:**
-  - Generator stays `scripts/update-mcp-manifest.sh` (extracted-binary sha, three Unix shim platforms).
-  - Write-back is `gh pr create` to `main` with `GITHUB_TOKEN`; never `git push origin main`.
-  - Bot commit DCO trailer must be column 0 (`ci.yml` `^Signed-off-by:`). YAML-indented heredocs fail that. Prefer `git commit -m "subject" -m "Signed-off-by: …"`.
-  - `GITHUB_TOKEN` PRs do not trigger workflows. Do not invent `RELEASE_PR_TOKEN` without a founder ask.
-- **Cross-refs:** `npm-dreamd-mcp-unscoped`, `v2-beats-ticket-ac`, `changelog-historical-entries-stay-put`
-
-### remaining-build-order-2026-09-24
-
-- **Rule:** The 2026-09-24 finish order is complete; the live order is the section `Build order — dreamd-hardening (2026-10-24)` in this file. Do not implement from the August 27 remaining-50 queue numbers, and do not treat a tracker **Backlog** status as proof the ticket is unshipped.
-- **Why:** On 2026-09-24 the queue doc still named Q09 (`service restart`) as next, while `main` at `7d98716` had already landed Q09–Q19. Q20 **BZR-187** was the first ticket with no route in the tree. Parallel Claude and DeepSeek sessions will otherwise each pick a different "next" ticket and edit the same hot path.
-- **How to apply:** Claim one ticket from that section. One writer per file. 187 through 146, including the BZR-156 command, are on `main` at or before `13ae1ca`. `provenance::verify` is on `main` at `e3b7ecf`. `dreamd doctor --provenance` is `ed134e1` (BZR-148). The finish list through BZR-157 is on `origin/main`. The stripped default binary on `f786bff` is 20,674,976 bytes. Tag `v1.0.0` is `dacd95d`; `origin/main` is `0064355`. There is no next implement ticket. Do not cut another tag or publish npm from an agent session. 207, 210, 149, and 152 are not claimable implement tickets. dreamd-eng milestone bars at 100% do not mean those tickets shipped. Leftovers after the 1.0.0 docs pass have no tickets; the list is `context/audits/v1.0.0-docs-audit-remaining-2026-10-02.md`.
-- **Cross-refs:** `open-ticket-can-already-be-on-main`, `ticket-ids-and-the-build-order`, `nfr-2-stripped-binary-is-20mb`, `vectors-feature-stays-out-of-the-default-binary`, `ailab-210-ac-is-pre-watch-architecture`
-
-### vectors-feature-stays-out-of-the-default-binary
-
-- **Rule:** The `vectors` feature stays off the default build. Stripped `dreamd` on `29ffdba` / `40ff05a` is 20,670,912 bytes. After BZR-181 (`f786bff`), the default stripped binary is 20,674,976 bytes. The hard gate is 25,165,824 since 2026-10-29 (20,971,520 before). A default-build caller of `fastembed` fails that gate.
-- **Why:** BZR-188's AC asks for `dreamd vectors enable`, a model download, and a JSONL index. CI on `ed134e1` measured 20,615,600 bytes. `rustc 1.95.0` on `29ffdba` measured 20,670,912 after `strip`. Headroom is 300,608 bytes before BZR-181 and 296,544 after it. The seam (`fastembed` 5.17.4) compiles only with `--features vectors`. `ort-sys` fetches a prebuilt ONNX Runtime while that feature builds, so `--all-features` CI needs network at compile time. The size-gate job builds default features and does not fetch it. Fat LTO drops an unreferenced crate, so a strings count of zero is proof only together with a default-features build (no `fastembed` / `ort-sys` fingerprints under `target/release`). BZR-181's help text names `BAAI/bge-small-en-v1.5`, so a `bge-small-en` strings probe matches the default binary even when the embedder is not linked. The feature-build strip measured 46,589,208 bytes and 2028 `onnxruntime` hits.
-- **How to apply:** The seam is `assignments/BZR-188.v2.md`, on local `main` at `40ff05a`. `fastembed` stays optional. `TextEmbedding::try_new` is `download_model` in `vectors.rs`, compiled only with `--features vectors`, and no test calls it. The linkage probe on a default release binary is `fastembed|onnxruntime`, not `bge-small-en`. A spec grep of a directory without `-r` exits 2, and a leading `!` turns that into a pass. Re-run those greps with `-r`. An insta filter `vectors:\s*\S+` also eats the closing `)` on `VERSION_SHORT`; use `vectors:\s*(?:on|off)`.
-- **Cross-refs:** `nfr-2-stripped-binary-is-20mb`, `fat-lto-dead-strips-unreferenced-tokenizer`, `layer-semantic-is-not-embeddings`, `remaining-build-order-2026-09-24`
-
-### in-process-dream-now-honors-the-409-guard
-
-- **Rule:** `dreamd dream` with no daemon goes through `run_guarded_cycle`, which calls `ensure_not_in_progress` before `begin_cycle`. Since BZR-1232 a stale `in_progress` never reaches that guard: `WriterLock::acquire` resets it to `failed` when there is no WAL and runs `wal::recover_on_startup` when there is one. The guard now fires only for a cycle that is live inside the lock holder (HTTP 409 through the daemon). Since BZR-1241 the daemon's authoritative check is `PrepareCycle`, inside the actor. It refuses while another cycle's ticket is alive or `state.json` says `in_progress`.
-- **Why:** Before BZR-172 the in-process path never checked the guard, so `begin_cycle` overwrote a stale `in_progress`. BZR-172 made the 409 rule apply to the CLI, which left a no-WAL `in_progress` as a hand edit of `state.json`. BZR-1232 moved the reset into lock acquisition: a free lock proves no cycle is running.
-- **How to apply:** Do not remove the guard from `run_in_process`. Do not add a second stale-status reset outside `acquire`, and do not tell operators to hand-edit `state.json` (the 2026-10-25 docs amendment removed that advice). `ForgetCliError::InProgress` is effectively unreachable from the CLI; its test is a mapping unit test.
-- **Not a second reset (BZR-1532).** `wal::abort_uncommitted` sets `failed` when a cycle errors before its commit point. That is the failing cycle ending itself, in the process that began it, not a reset of someone else's stale status. `acquire` still handles what a crash leaves. In a lock holder, `in_progress` now means a cycle is live, or a commit whose roll-forward failed twice (spec §8 H1).
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
-
-### home-dir-does-not-consult-the-password-database
-
-- **Rule:** Daemon home comes from `layout::home_dir` / `resolve_home_from_vars`. Empty `HOME` is unset. Unix does not read `USERPROFILE`. There is no `dirs::home_dir()` fallback in `daemon_client.rs` or `server/watch.rs`. The Windows MCP arm in `mcp/mod.rs` still calls `dirs::home_dir()`.
-- **Why:** BZR-168 unified on the CLI rule. `dirs::home_dir()` on Unix falls through to the passwd entry when `HOME` is unset, so watch and MCP can disagree under Git-Bash.
-- **How to apply:** Do not put `dirs::home_dir()` back on the watch or daemon-client path. The Windows MCP call is still `mcp/mod.rs:649`. BZR-170 and BZR-183 left that file alone. A later ticket may switch it once `mcp/mod.rs` has a single writer.
-- **Cross-refs:** `remaining-build-order-2026-09-24`
-
-### replay-open-is-an-index-doc-writer
-
-- **Rule:** `index_doc` edges have one writer: `IndexerPersist::commit` (`server/indexer_actor.rs`). It is the one persist step every production Tantivy commit goes through: the commit, then edges for `pending` through the writer lock's `Ledger`, then the watermark. A coverage pass, at open and on `Resync`, puts every log id in `pending`, so it backfills any edge a crash or an older commit skipped.
-- **Why:** BZR-155's `open` committed its replay with no edges. Later, the three message commits (sidecar, prune, semantic) committed pending appends with no edges and no watermark, which widened R2's window. BZR-1236 folded all five commit sites into one step.
-- **How to apply:**
-  - A new commit path calls `persist.commit(&mut writer)`, never `writer.commit()`; BZR-1236 §4 grep 3 checks this.
-  - Semantic `lsn_` docs are not edges.
-  - The ledger append is idempotent on `(kind, from, to)`.
-  - `run_indexer` takes its state as one `IndexerState` argument: an eighth argument fails `cargo clippy -- -D warnings`.
-  - Since BZR-1243 the step ends by publishing the `CommitMark` that `/health` reads. A failure anywhere earlier, the ledger append included, publishes nothing.
-- **Cross-refs:** `indexer-shed-is-not-replay-healed`, `an-ordering-test-must-fail-the-step-it-orders`
-
-### bisect-searches-snap-refs-not-a-parent-graph
-
-- **Rule:** `dreamd memory bisect` searches `branches/refs/snap-*` by the timestamp on line 2 of the ref. There is no parent pointer on an object or a ref. A named branch is one point on that timeline, not a chain.
-- **Why:** BZR-153's text says "binary search across branch history" in the git sense. `write_ref` stores an object id and a UTC timestamp (`snapshot.rs`). Two refs with the same timestamp are not ordered by ancestry. Same-second autosnaps overwrite the ref name and leave the earlier object unnamed.
-- **How to apply:** Resolve endpoints through `refs/<name>` or a 64-hex id that some ref already names. Require the good timestamp string to be strictly less than the bad one. Do not invent a parent field. State lives at `branches/bisect`, beside `HEAD`, so `list_branches` does not show it. `dreamd memory diff` is a separate command (`13ae1ca`); do not fold it into a bisect change.
-- **Cross-refs:** `remaining-build-order-2026-09-24`
-
-### provenance-verify-does-not-rewrite-the-ledger
-
-- **Rule:** `provenance::verify` only reads. There is no stored Merkle root to compare against, and no `--repair`. An unknown `kind` is skipped. `embedding` is corrupt, not skipped. A JSONL id with no `index_doc` edge is not a missing edge.
-- **Why:** BZR-148's AC asks for hash mismatches against a root and for `--repair`. BZR-155 never writes the root. The format forbids rewriting ledger lines. Edges land after the index commit, so a live batch has none yet, and the next coverage pass backfills them (BZR-1236). "Every event has an index_doc" would flag healthy logs.
-- **How to apply:** Recompute the root from the good lines and return it. Report orphans (`from` absent from the live JSONL), missing `lesson_citation` / `recurrence` edges, and corrupt line numbers. The doctor flag is its own ticket now that `cli.rs` is free: print this report, and do not rebuild the ledger under `--repair` or any other flag name.
-- **Cross-refs:** `replay-open-is-an-index-doc-writer`, `remaining-build-order-2026-09-24`, `doctor-repair-is-the-index-rebuild`
-
-### memory-diff-reads-and-does-not-check-out
-
-- **Rule:** `dreamd memory diff` resolves refs and calls `diff_objects`. It does not call `checkout` and it does not look for the daemon socket. `--json` prints one line and returns before any `--unified` dump.
-- **Why:** BZR-156. Checkout and bisect refuse while the socket exists because they replace the live log. Diff only reads objects. A lessons dump on the JSON path would break the one-object contract.
-- **How to apply:** Resolve `name:<64-hex>` first (ref line 1 must equal that id; the error names both ids), then an existing ref, then a bare 64-hex id. `serde_json::to_string` plus one newline, then return. `FileChange` serializes `snake_case`. `diff_objects` itself stays free of `Serialize` logic beyond the derives.
-- **Cross-refs:** `bisect-searches-snap-refs-not-a-parent-graph`, `remaining-build-order-2026-09-24`
-
-### branch-demo-uses-an-absolute-binary-and-a-temp-home
-
-- **Rule:** `scripts/branch-demo.sh` resolves `dreamd` on `PATH` to an absolute path before `cd`, and exports `HOME` to the temp directory for the script process.
-- **Why:** `PATH="target/debug:$PATH"` is relative. After the script changes into its temp project, that entry no longer finds the binary. `dreamd init` writes `~/.agent/registry.toml`, and checkout refuses when `~/.agent/dreamd.sock` exists, so a demo that keeps the caller's `HOME` writes into the real registry and can be blocked by a running `dreamd watch`.
-- **How to apply:** `command -v dreamd`, prefix `$PWD` when the path is relative, then call that binary. Set `HOME` to the temp home before any `dreamd` invocation. The exit trap removes the temp directory, including that home. Two `memory branch` calls with unchanged live files share one object id.
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `memory-diff-reads-and-does-not-check-out`
-
-### doctor-repair-is-the-index-rebuild
-
-- **Rule:** `dreamd doctor --repair` rebuilds the Tantivy cache and unlinks an orphaned socket. It does not rewrite `provenance/ledger.jsonl`. Ledger repair is not a flag.
-- **Why:** BZR-148's AC asks `--repair` to rebuild the ledger from current state. The flag already shipped as the index rebuild (`run_repair` in `commands/doctor.rs`). Pointing it at the ledger would rewrite lines the format forbids, on a command operators already run.
-- **How to apply:** `dreamd doctor --provenance` (`assignments/BZR-148.cli.v2.md`) prints `provenance::verify` and fails the run on orphans, missing edges, and corrupt lines. `skipped_unknown_kind` is printed and does not fail the check. Do not call `append_edges` from doctor. Do not branch `run_repair` into the ledger. There is no stored Merkle root to mismatch against.
-- **Cross-refs:** `provenance-verify-does-not-rewrite-the-ledger`, `remaining-build-order-2026-09-24`, `forget-cascade-does-not-run-the-dream-cycle`
-
-### forget-cascade-does-not-run-the-dream-cycle
-
-- **Rule:** `forget::cascade` removes one event from the JSONL with the dream cycle's commit: it stages the log, the lesson change and the sidecar, then commits them with one redo WAL (BZR-1239). Its plan is `plan::plan_forget` (BZR-1240), which neither decays nor re-selects a lesson. It does not call `filesystem_phases` or `plan_cycle`.
-- **Why:** BZR-158's AC says to re-run the deterministic dream cycle and to hard-delete embeddings. The dream cycle also decays every other aged row, and `embedding` is not a kind this tree writes. A `kill -9` test is the wrong crash probe: the in-crate crash sweep (`crash_sweep_forget_*`) crashes at every stage and rename point.
-- **How to apply:** Spec `assignments/BZR-158.v2.md`. Drop a non-exemplar citation, or unlink `LESSONS.md` when the forgotten id is `Lesson.id`. `plan_forget` recounts the sidecar from the remaining records. Leave old ledger lines in place. There is no coordinator forget message: BZR-1231 removed `MemoryCoordinatorMsg::Forget`, which had no production sender. `dreamd forget` runs the cascade in-process, refuses while a daemon is live, and refreshes an existing index through `TantivyIndexHandle` (`prune_decayed_events`, `index_semantic_lessons`; BZR-1242 removed `apply_recurrence_sidecar`). Do not re-add a coordinator message for it without a caller. `dreamd forget` is BZR-151 (`assignments/BZR-151.v2.md`); the proof file it writes is the receipt in `forget-proof-is-a-receipt-not-a-signed-membership-proof`.
-- **Cross-refs:** `coordinator-not-mutex-file`, `delete-term-must-target-a-unique-field`, `provenance-verify-does-not-rewrite-the-ledger`, `select-lesson-or-retire-unlinks`, `remaining-build-order-2026-09-24`, `forget-proof-is-a-receipt-not-a-signed-membership-proof`
-
-### forget-proof-is-a-receipt-not-a-signed-membership-proof
-
-- **Rule:** `dreamd forget --proof` writes a `forget-receipt/1.0` file: event id, lesson effect, the root from `provenance::verify`, and the orphan edges whose `from` is that id. It does not write the signed membership proof in `docs/provenance.md`.
-- **Why:** BZR-151's AC asks for a Merkle path proving derivatives were removed, plus ed25519, a verifier crate, embeddings, and a second dream cycle. The format's proof shows an id is a leaf under the root (`docs/provenance.md` Proof object). After `forget::cascade` the id is still a leaf, because ledger lines are append-only and `verify` reports the old edges as orphans. No crate depends on ed25519, and the format leaves key storage unspecified. A membership path would show the opposite of removal.
-- **How to apply:** Spec `assignments/BZR-151.v2.md`. Call `forget::cascade`. Refuse a live daemon the way `dreamd archive` does. `--dry-run` writes nothing and does not probe. Refresh an existing index with `prune_decayed_events` and `index_semantic_lessons` (BZR-1242 removed the sidecar apply); do not create `.agent/.dreamd/index` when it is absent. Do not add a `signature` or `path` key to the receipt. Do not add an HTTP route. An id that is already absent prints `removed=false` and exits 0.
-- **Cross-refs:** `forget-cascade-does-not-run-the-dream-cycle`, `provenance-verify-does-not-rewrite-the-ledger`, `nfr-2-stripped-binary-is-20mb`, `remaining-build-order-2026-09-24`
-
-### public-benchmark-is-the-in-ram-recall-bench
-
-- **Rule:** BZR-177's public harness is the existing `cargo bench -p dreamd-core --bench recall` (`crates/dreamd-core/benches/recall.rs`, `Index::create_in_ram`). `scripts/benchmark/recall_summary.py` prints sample P50/P99 from `target/criterion/recall/n/{1000,10000,100000}/new/sample.json`. Divide `times[i]` by `iters[i]`. Do not read `estimates.json`. Do not add `benches/public`, a CI bench job, a LongMemEval score, a vectors install, or a dreamd.dev page. The no-argument printer always reads `<repo>/target/criterion`. Criterion 0.5.1 writes `$CRITERION_HOME` if set, otherwise `$CARGO_TARGET_DIR/criterion`, otherwise the target dir from `cargo metadata`, otherwise `./target/criterion`.
-- **Why:** BZR-177's ticket asks for `benches/public/`, LongMemEval mini scores (BZR-270), a vectors install, and CI publish to dreamd.dev. DR-208 already shipped the bench. The index is in RAM, so a disk-speed note is false. Criterion 0.5 stores iteration totals in `sample.json`, and its `median.point_estimate` is a bootstrap, not the sample percentile. Python `round` is banker's rounding; the index is `int((p / 100) * (n - 1) + 0.5)`. dreamd.dev is canceled. WasTrue (`scripts/benchmark/wastrue_bench.py`) is a different eval.
-- **How to apply:** Spec `assignments/BZR-177.v2.md`. Leave `benches/recall.rs` alone. Leave the PERF.md measured cells and the 2026-07-28 / `e8e27fd` stamp. Do not rewrite the µs table in `docs/architecture/tantivy-migration.md`. The full 100k bench is not a report-back gate; `cargo check -p dreamd-core --benches` is. A grep that bans the token `LongMemEval` also bans a sentence saying the page omits that eval. The shipped `docs/benchmarks.md` names vector recall and WasTrue and omits the token. The printer parses `sys.argv` (`json`, `pathlib`, `subprocess`, `sys`). Do not send either back.
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `vectors-feature-stays-out-of-the-default-binary`, `spec-page-is-in-repo-not-dreamd-dev`, `layer-semantic-is-not-embeddings`, `changelog-historical-entries-stay-put`, `subtree-bench-is-the-recurrence-gate`
-
-### subtree-bench-is-the-recurrence-gate
-
-- **Rule:** The recurrence gate is `cargo bench -p dreamd-core --bench recall_subtree`, not the public `recall` bench. `recall_subtree` indexes realistic nested `skill_action` keys and measures warm recall and `recurrence_cold`, a cold table build. BZR-1242's gate is a 10k P50 under 1 ms. The public `recall` bench writes no `skill_action`, so since 1.1.0 every doc in it has recurrence 0.
-- **Why:** BZR-1242 moved recurrence from a fastfield to a table that a `Warmer` builds per searcher. The public bench's corpus has no keys, so it cannot show what the table costs or how ranking changed. The PM's spec claimed its docs still carried `i % 5 + 1`. At `5b4f1e3` that value came from the fastfield, which is now written as 0; CLeetus caught it (verify r0, ruling 2). Measured on the BZR-1242 tree:
-  - `recall_subtree`: 1k 47,581, 10k 282,317, 100k 2,620,211 ns P50;
-  - `recurrence_cold`: 10k 215,636, 100k 750,621 ns.
-
-  The BZR-1243 PM ran the base (`8588449`) and HEAD one after the other on this machine, each with its own target dir. Sample P50 in ns, base → HEAD:
-  - `recall`: 1k 43,703 → 42,748, 10k 257,399 → 253,019, 100k 2,564,137 → 2,368,113;
-  - `recall_subtree`: 1k 45,075 → 43,019, 10k 264,435 → 253,916, 100k 2,432,317 → 2,303,330;
-  - `recurrence_cold`: 10k 211,398 → 211,962, 100k 739,854 → 729,638.
-
-  Run-to-run noise is several percent, so compare against a base run made in the same session.
-- **How to apply:**
-  - A ticket that touches the collector, the warmer, the reader or the query re-runs both benches with nothing else running and reports P50 per size against the numbers above.
-  - Leave the public bench's corpus alone (`public-benchmark-is-the-in-ram-recall-bench`). PERF.md and `docs/benchmarks.md` describe it.
-- **Cross-refs:** `public-benchmark-is-the-in-ram-recall-bench`, `nfr-2-stripped-binary-is-20mb`, `mutation-must-get-past-the-backstop`
-
-### alpha-tag-is-the-version-bump-not-the-publish
-
-- **Rule:** BZR-157 prepares `0.2.0-alpha.1` on the six `RELEASING.md` surfaces plus a changelog section. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`. Published binaries stay the default build (`cargo build --release`). `dreamd vectors enable` exits 2 on them. Recall stays BM25 × salience. `rrf::fuse` stays uncalled (BZR-1244 later deleted `rrf`). The bump commit belongs on `release/v0.2.0-alpha.1`, because `PENDING_*` shas fail `manifest.test.js` on `main`.
-- **Why:** BZR-157's ticket asks for a vectors-feature release asset, hybrid retrieval enabled, a one-paste installer check, and the BZR-271 blog post in the same tag. The feature build is 46,589,208 bytes. `release.yml` fails NFR-2 above 20,971,520 and builds the default binary only. A hyphenated tag is already a GitHub prerelease. npm publish is the `dataprime1` passkey. Hybrid recall is not in the tree.
-- **How to apply:** The 0.2.0-alpha.1 bump is `2e34181` and was never tagged. Manifest shas on `main` are the v1.0.0 release shas (`42e8e62`). Do not `git tag`, `git push`, or `npm publish` from an agent session. A bare path-dep `version = "0.1.0-rc.2"` is `^0.1.0-rc.2` and rejects `0.2.0-alpha.1`. The three fields in `crates/dreamd-core/Cargo.toml` and `crates/dreamd-cli/Cargo.toml` move with the workspace version. `RELEASING.md` step 1 row 7 names them.
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `releasing-npm-is-human-passkey`, `nfr-2-stripped-binary-is-20mb`, `vectors-feature-stays-out-of-the-default-binary`, `changelog-historical-entries-stay-put`, `v1-is-the-version-bump-of-the-current-tree`
-
-### v1-is-the-version-bump-of-the-current-tree
-
-- **Rule:** Product 1.0.0 is the version bump in `assignments/v1.0.0.v2.md`. `SPEC.md` stayed v0.1 for it; BZR-1523 later moved it to v0.2 because that ticket changed the formula. Episodic `schema_version` stays `"1.0.0"`. Recall stays BM25 × salience. The tag, the draft GitHub release, npm publish, and the MCP registry stay the human steps in `RELEASING.md`.
-- **Why:** On 2026-10-01 the finish list was empty and `context/planning/future-directions.md` still described identity, hypergraph, CRDT, and cryptographic deletion as later phases. The user chose to ship 1.0 from the tree on `main` (`2e34181`) rather than finish that document. There is no `v0.2.0-alpha.1` tag. `2e34181` has no Actions run. `release.yml` marks a tag as a prerelease only when the name contains `-`, so `v1.0.0` publishes as stable. The release notes are only the `## [1.0.0]` block.
-- **How to apply:** The bump is `bb84721`. Tag `v1.0.0` is `dacd95d` (published 2026-10-02, stable). Manifest shas are filled (`42e8e62`). npm `dreamd-mcp` 1.0.0 is on `latest` and `next`. Do not queue the bump again. Do not implement Windows `write_atomic`, add rank fusion to recall (BZR-1244 deleted `rrf`), or bump `SPEC.md` as part of a product version bump. Do not `git tag`, `git push`, or `npm publish` from an agent session.
-- **Cross-refs:** `alpha-tag-is-the-version-bump-not-the-publish`, `changelog-historical-entries-stay-put`, `vectors-feature-stays-out-of-the-default-binary`, `remaining-build-order-2026-09-24`
-
-### architecture-claims-false-until-dreamd-hardening
-
-- **Rule:** Until the named ticket lands, do not cite these ARCHITECTURE.md claims as facts:
-  - "`add_document` is idempotent; replay re-does at most one commit window" (§4). Resolved by BZR-1236: §4 now describes the upsert, the coverage pass and the persist step. Cite those.
-  - "`.agent/` must be either pre- or post-cycle, never mid-cycle" (§3). Resolved by BZR-1239: outputs are staged and committed with one redo WAL, recovery rolls it forward, and `crash_sweep.rs` pins the claim. Cite §3.
-  - Recall recurrence has "bounded staleness" (`RecurrenceContext::RecallIndexFastfield`). Resolved by BZR-1242: recurrence is the all-time subtree count, which `RecurrenceWarmer` derives per searcher, so there is no staleness to bound. `RecurrenceContext::RecallSubtreeCount` replaces the variant. Cite `docs/salience.md`.
-  - The coordinator is the only writer (§1, "Architectural conventions"). Resolved by BZR-1232: §1 now says only a process holding the project writer lock starts a coordinator. Cite the new sentence.
-- **Why:** The 2026-10-24 audit reproduced four defects on `c241538`:
-  - A `git merge` with the JSONL held open swaps the inode, and later appends land in the orphan.
-  - Replay after a lost watermark returns the same `event_id` twice.
-  - A sidecar keyed `rust::eh` with count 4 leaves the docs at recurrence 2.
-  - `Ulid::new()` gives about 50% adjacent inversions within one millisecond.
-
-  Mapping the code for the response turned up more: per-request WAL recovery for non-boot projects, a stale fd after a failed cycle, the pin pass dropping `x_` fields, and unlocked concurrent ledger appenders.
-
-  BZR-1233 fixed the inode swap, the `Ulid::new()` inversions and the stale fd after a failed cycle. BZR-1236 fixed the replay duplicates and the unlocked ledger appenders. BZR-1242 fixed the sidecar prefix miss.
-- **How to apply:**
-  - Each claim becomes true when its ticket lands, and that ticket rewrites the ARCHITECTURE sentence in the same commit.
-  - Each defect has an ignored test (`#[ignore = "BZR-<n>: …"]`) from BZR-1230. Un-ignore it in the fixing ticket; it must fail before the fix and pass after.
-  - Do not "fix" a test by weakening its assertion.
-- **Cross-refs:** `remaining-build-order-2026-09-24`, `indexer-shed-is-not-replay-healed`, `replay-open-is-an-index-doc-writer`, `ailab-163-excise-skips-not-suffix`, `wal-guarded-replace-owns-tmp-path`
-
-### deleted-variant-grep-needs-the-bare-name
-
-- **Rule:** When a ticket deletes an enum variant, message or function, the pre-flight and the §4 zero-hit grep search for the bare name inside backticks (`` `Forget` ``) across `ARCHITECTURE.md`, `docs/` and `docs/architecture/`, not only the qualified path (`MemoryCoordinatorMsg::Forget`).
-- **Why:** BZR-1231's spec searched qualified names and found three doc sentences. Prose lists name variants bare, so three more stale mentions survived:
-  - `docs/architecture.md:115` and `:165` (message lists);
-  - `docs/architecture/durability.md:31`.
-
-  The dev flagged two. The PM's bare-word search found the third.
-- **How to apply:**
-  - Grep the backticked bare name as well as the path.
-  - Check each hit by eye: unbackticked prose such as "Forget, branches, provenance" in `docs/architecture.md:41` is a module heading, not the variant.
-  - Same family as `spec-deadlock-fixture-names-must-match-the-tree` (the grep has to search the names the tree actually uses).
-- **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `rustdoc-trips-word-grep-that-meant-call-sites`
-
-### behaviour-change-needs-a-grep-for-the-old-behaviour
-
-- **Rule:** When a ticket changes a behaviour, the pre-flight searches the docs for the old behaviour's *consequences*, not only the sentences the AC names. That means its error strings, its workarounds ("by hand", "does not clear"), the functions it replaced, and where it said something runs.
-- **Why:** BZR-1232 moved WAL recovery into `WriterLock::acquire` and made every writer reset a stale `in_progress`. The spec's doc table was built from the AC's claims, so four stale descriptions survived and needed an amendment:
-  - `docs/troubleshooting.md:87`, which told operators to hand-edit `state.json`;
-  - `docs/architecture.md:504-512` ("an operator cleanup");
-  - `examples/crash-recovery/README.md:21` (recovery runs only at watch start or on a lazy open);
-  - two handler comments naming the deleted `index_map` (`recall.rs`, `salience.rs`).
-
-  Recurred on BZR-1235, which stopped recovery from truncating a valid final record. The pre-flight grepped for doctor's "truncated on daemon open". It missed `scan`'s rustdoc in the same file, which said `clean_len` stops "so [`recover`] can truncate". The dev caught it.
-  Recurred on BZR-1236, this time in test fixtures rather than docs: two MCP tests seeded the index without the log (`index-fixtures-must-write-the-log-first`).
-  Recurred on BZR-1531, in a file the spec ruled out of scope. PM call C2 stopped the client showing the daemon's 426 body, and §6 grep 6 listed `client.rs` as "not this ticket", because its production code only passes the sentence through. Its test `proxy_dream_cycle_version_mismatch_is_an_error_not_in_process` asserted that exact body, so it failed. The dev asked, and Austin approved a test-only change.
-- **How to apply:**
-  - List the old behaviour's observable effects, then grep `docs/`, `examples/`, `README.md`, `GUIDE.md` and comments next to the changed call sites for each one.
-  - Grep the tests too, for fixtures that only worked because of the old behaviour.
-  - Before a spec lists a file as "not this ticket", grep that file's tests for the old behaviour's output (here the fake body `from the daemon`). If you only need its production code unchanged, diff the production slice through the first `#[cfg(test)]` instead of the whole file.
-  - A §4 grep scoped to one file (`state.rs`) does not prove a removed name is gone from its neighbours.
-- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `spec-deadlock-fixture-names-must-match-the-tree`, `index-fixtures-must-write-the-log-first`, `spec-grep-file-wide-hits-the-tickets-own-fixtures`
-
-### banned-crate-grep-needs-a-word-boundary
-
-- **Rule:** A §4 grep that bans a crate path must anchor it. `grep -E 'nix::'` matches `std::os::unix::fs`, because `unix::` contains `nix::`. Use `'\bnix::'` (GNU grep) or `'(^|[^[:alnum:]_])nix::'`.
-- **Why:** BZR-1232 §4 grep 5 printed `writer_lock.rs:252: use std::os::unix::fs::MetadataExt;`. That import is the spec's own (dev, ino) check, not the banned `nix` crate.
-- **How to apply:** Dry-run every banned-token grep against the §3 snippets before queuing (`guards-vs-mandates-same-line`). Treat an unanchored hit like this as a spec bug, not a dev failure.
-- **Cross-refs:** `spec-grep-status-word-hits-interpolation`, `guards-vs-mandates-same-line`, `spec-grep-rg-e-is-encoding`
-
-### un-ignore-ac-can-name-tests-never-written
-
-- **Rule:** When a ticket's AC says "un-ignore the tests for V1, V3, …", grep for the ignores that actually exist before writing the spec. Any defect without a test is new work: the ticket writes that test and proves it red before the fix.
-- **Why:** BZR-1232's AC listed V1, V3, V8, V14 and V16. BZR-1230 had shipped one ignored test for those, V1 (`http/tests.rs`), and had moved V16 to BZR-1232 itself. A spec that only said "un-ignore" would have left four defects untested.
-- **How to apply:** `grep -rn 'ignore = "BZR-<n>' crates/` gives the real list. Each test the spec adds gets a mutation check in the report-back: break one part of the fix and name the test that fails.
-- **Cross-refs:** `architecture-claims-false-until-dreamd-hardening`, `open-ticket-can-already-be-on-main`
-
-### mutation-must-get-past-the-backstop
-
-- **Rule:** When a fix has two checks that both catch the same defect, a mutation that turns off one of them cannot fail an end-to-end repro the other check also covers. In the mutation table, name a test that only the disabled check covers. Fail the end-to-end repro with both checks off.
-- **Why:** BZR-1233's table said M4 (`ensure_live_log` returns at once) fails R1 (`appends_survive_an_inode_swap_of_the_log`). It passed, because `confirm_landed` found the swap after the write and appended the line to the new file. The dev flagged it. M4 alone fails `outside_replace_raises_the_minter_floor`, because the id is minted before any reopen. R1 fails with M4 and M5 together; the PM checked that on a scratch copy.
-- **How to apply:**
-  - For each mutation row, ask whether anything after the disabled step repairs the same fault, and if so, name a test of what only that step does.
-  - Run PM-side mutants in a copy of the repo, never in the dev's tree. Give each mutant its own `CARGO_TARGET_DIR`, or mutate one copy at a time. A second copy built into the same target dir ran without its own mutation. The cause: cargo hashes a workspace member by its path relative to the workspace root, so two copies of one workspace get the same `dreamd-<hash>` artifacts. On DRM-100 a red-first copy that shared the reference build's target dir compiled nothing and ran the fixed binary, passing two tests that fail on the base. Copying a warm target dir (`cp -a`) per copy is fine; sharing one is not.
-  - To reuse one copy, restore it with `rsync -rlp --checksum`, not `rsync -a`. `-a` puts back the snapshot's old mtimes, so when the next mutant edits a different crate, cargo does not rebuild the crate the last mutant changed and its mutation leaks into the next run (BZR-1468: M5 into M7, M8 into P5 and P7). Check each log for `Compiling <crate>`.
-  - A `git archive <base>` copy has the same problem. Extraction gives every file the commit's mtime, so in a target dir that already holds a newer build, cargo rebuilds nothing and runs that newer binary. The PM's first BZR-1534 red-first run passed on the fixed binary for this reason. Run `find crates -name '*.rs' -exec touch {} +` in the copy first, or give it a target dir of its own, and check the log for `Compiling`.
-  - Do not run `cargo test --workspace` while another build is compiling. `weg12_concurrency_torture`'s 10 s small-payload budget failed at 28 s under that load and passed in 2–3 s alone (WEG-511 is the same flake class).
-  - Describe each mutant by the rule it changes, and check that it compiles. BZR-1235's M4 said to parse the torn tail with `from_slice::<serde_json::Value>`, which cannot produce the `AgentLearning` that arm pushes. The dev matched on `Value` and pushed only when `parse_record` succeeded, so the mutant still accepted any JSON.
-- **Cross-refs:** `un-ignore-ac-can-name-tests-never-written`, `gated-consumer-is-what-makes-a-full-channel-test-real`
-
-### jsonl-rewrites-go-through-patch-lines
-
-- **Rule:** Any code that rewrites `AGENT_LEARNINGS.jsonl` reads it with `episodic::read_raw` and writes `episodic::patch_lines` output. Do not re-serialize `AgentLearning` records. Do not round-trip a line through `serde_json::Value`, and do not enable serde_json's `preserve_order` to make that work.
-- **Why:** BZR-1234's AC said pin flips are "patched through `serde_json::Value`". This graph has no `preserve_order`, so `Value`'s map is a `BTreeMap`. A pinned line would come back with its keys sorted (`content` first) and its numbers reformatted (`6.50` → `6.5`). `preserve_order` would fix that, but feature unification would reorder `json!` / `Value` output in every crate. The AC also listed three rewrites; `dreamd archive --force-unpin` was a fourth with the same loss.
-- **How to apply:**
-  - `patch_lines(raw, pins, drops)`:
-    - `pins` maps an id to the `pinned` value it should have, which lets archive unpin;
-    - a drop beats a pin;
-    - lines with no record, including a torn final line, are copied verbatim.
-  - A flipped line is rebuilt from `OrderedObject` (ordered `RawValue` members), so every other member keeps its position and bytes.
-  - A rewrite that changes nothing stages nothing, so the commit renames nothing (BZR-1239).
-  - BZR-1239 (staged outputs) and BZR-1240 (`plan_cycle`) build on these helpers.
-  - Since BZR-1235 `recover` rewrites nothing. It truncates a torn fragment or ends a final record with `\n` (`ailab-163-excise-skips-not-suffix`).
-  - The `read_all` readers that rewrite nothing stay on `read_all`.
-  - When an AC lists the call sites of a defect, grep for every writer of the path (`rewrite_atomic|write_atomic|stage.put`) before trusting the list.
-- **Cross-refs:** `wal-guarded-replace-owns-tmp-path`, `ailab-163-excise-skips-not-suffix`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `weg378-skip-midfile-halt-torn-tail`
-
-### index-fixtures-must-write-the-log-first
-
-- **Rule:** A test that seeds the index directly, through `IndexerMsg::Append`, `add_document` or a raw writer, writes the same records to the episodic log first, as the coordinator does. Since BZR-1236 the index is a function of the log. At the next open, the coverage pass deletes indexed ids the log lacks, or keeps them behind the mass-delete guard with a `WARN`.
-- **Why:** BZR-1236's mass-delete STOP condition fired in two `mcp/mod.rs` tests. They sent `IndexerMsg::Append` against an empty log and then reopened the index. The pre-flight had looked for tests that pinned the old watermark filter, but not for fixtures that relied on the index only ever growing.
-- **How to apply:**
-  - Before queuing a ticket that makes a derived store an exact function of its source, grep the tests for writes to the derived store that skip the source: `IndexerMsg::Append`, `add_document(` and `writer.add_document` under `#[cfg(test)]` and `tests/`.
-  - Write the log line, then send the message. `mcp/mod.rs`'s `append_to_log` helper is the shape.
-  - A test that deliberately builds a duplicate or a ghost doc (the `index_coverage` tests) uses a raw `writer.add_document` and says so.
-- **Cross-refs:** `behaviour-change-needs-a-grep-for-the-old-behaviour`, `replay-open-is-an-index-doc-writer`, `indexer-shed-is-not-replay-healed`
-
-### report-back-paste-can-be-truncated
-
-- **Rule:** A pasted report-back can arrive cut off. Before signing off, check that the last numbered item of the spec's §5 arrived. Every spec's §5 ends by asking the dev to finish the report with the line `END OF REPORT`, so a cut is visible.
-- **Why:** BZR-1234's paste stopped at §4 grep 4c. BZR-1236's stopped inside the mutation table at M12, which lost M13–M17, the NFR-2 size, the §4 outputs and the list of spec mismatches. Both times the PM re-ran what it could and reported the rest as unverified. BZR-1523's stopped at M17. The re-runs covered M17 and M18, but item 7 could only come from the dev, and it held the one thing no re-run could find: `d` meaning two things on `docs/salience.md`.
-- **How to apply:**
-  - Put "End the report with the line `END OF REPORT`." last in §5.
-  - The PM re-runs the §4 greps whatever the paste shows, because pasted output is not evidence.
-  - When the marker is missing, ask the user for the rest before signing off the rows that are missing.
-- **Cross-refs:** `mutation-must-get-past-the-backstop`, `git-diff-name-only-misses-untracked`
-
-### nan-safe-clamp-is-if-else
-
-- **Rule:** To clamp an `f64` that may be NaN to a range, use `if x >= lo { x.min(hi) } else { lo }`. Never use `x.max(lo).min(hi)`, which fails `clippy::manual_clamp` under `-D warnings`. Never use `x.clamp(lo, hi)`, the lint's own suggestion, which returns NaN for NaN.
-- **Why:** BZR-1237's AC needed salience bounded "for all inputs". Checked on clippy 0.1.95 in a scratch crate before queuing: the max/min chain fails the lint, and the fix it suggests breaks the bound for NaN. The if/else form maps NaN and `-inf` to the low bound and `+inf` to the high one.
-- **How to apply:**
-  - See `salience::clamp_score`.
-  - A §4 grep over the production slice can ban `\.clamp\(|\.max\(0\.0\)` (BZR-1237 grep 2).
-  - A mutation row that swaps in `.clamp(` must fail a test that passes NaN.
-- **Cross-refs:** `proptest-any-f64-excludes-nan`
-
-### proptest-any-f64-excludes-nan
-
-- **Rule:**
-  - A property that must hold "for all inputs" draws floats from `prop::num::f64::ANY`, not `any::<f64>()`.
-  - A failing proptest run writes `<test>.proptest-regressions` into the source tree. Delete it after red-first and mutation runs.
-  - A property over a `u64` with an edge at a small value mixes a small range in: `prop_oneof![0_u64..64, any::<u64>()]`.
-- **Why:**
-  - `any::<u64>()` is close to uniform, so it almost never draws 0. On BZR-1523 the first draft of the `dampen_recurrence` property used it, and it would not have failed a mutant that changes only `d(0)`.
-  - In proptest 1.11.0, `any::<f64>()` is `POSITIVE | NEGATIVE | ZERO | SUBNORMAL | NORMAL`: never NaN, never infinity (`arbitrary/primitives.rs:25-26`). `f64::ANY` adds `INFINITE` and `QUIET_NAN`; NaN's weight is 1/30.
-  - The regressions file uses `SourceParallel` persistence and is not gitignored. A stale one replays its seeds first on the next run.
-  - Both showed up on BZR-1237: the dev flagged the regressions file, and the PM deleted it between mutation runs.
-- **How to apply:**
-  - Name the strategy in the spec and grep for it (BZR-1237 grep 6).
-  - Check that `git ls-files --others --exclude-standard` is empty before sign-off.
-- **Cross-refs:** `nan-safe-clamp-is-if-else`, `mutation-must-get-past-the-backstop`
-
-### crash-sweep-oracle-is-the-image-not-the-wal
-
-- **Rule:** A crash sweep decides pre- vs post-cycle by comparing the recovered store with the pre and post images, not by whether the WAL file exists. Read `crash_fired()` before the next `arm_crash`, because arming resets the flag.
-- **Why:** BZR-1239's spec classified each crash by `wal_path().exists()`. The dev's pre-flight question showed that a crash after the WAL is deleted, or during the stage cleanup, leaves no WAL and the post image (Amendment 1 item 3). The spec's step order also disarmed before reading `crash_fired()`. The dev read the flag first, which kept the intent. The same spec's §4 grep 4 counted three `crash_point` definitions and missed the `#[cfg(not(test))]` no-op twin.
-- **How to apply:**
-  - `landed = image == post`; assert `landed || image == pre`; if a WAL was left, assert `landed`; the status follows `landed`.
-  - Require at least one crash point that did not land, one that landed with the WAL left, and every not-landed point before every landed one.
-  - Report the final `k` and the first landed `k` rather than fixing them in the spec. A ticket that changes how many files a cycle stages (BZR-1240) moves them.
-  - When a spec counts a function's definitions, count its `cfg` twins.
-  - Cleanup that the failing process runs itself must do nothing after an injected crash, or it hides recovery from the sweep. BZR-1532's `abort_uncommitted` and `retry_roll_forward` each start with `if crash_point().is_err() { return … }`, and the crash sweep asserts the store was still `in_progress` with its stage at the crash.
-  - To test that in-process cleanup, use the error sweep (`arm_error`, BZR-1532): one I/O error at each point, then check the store in the same process with no recovery. Pre-cycle and `failed` before the commit point, post-cycle and `complete` after it, and exactly one landed point returns `Err`: the last one.
-- **Cross-refs:** `mutation-must-get-past-the-backstop`, `guards-vs-mandates-same-line`, `architecture-claims-false-until-dreamd-hardening`
-
-### refactor-oracle-is-byte-equivalence-with-the-base
-
-- **Rule:** When a ticket restructures code and promises no behaviour change, the PM's oracle is byte equivalence. Run the same stores, with the same clock, through the base commit and through the new tree, dump every `.agent/` file, and `diff -r` the dumps. Passing unit tests and unchanged snapshots are not enough.
-- **Why:** BZR-1240 rewrote every dream-cycle and forget phase into one pure plan. The insta snapshots cover three fixtures. The PM's harness covered 26 stores: promote and decay with `x_` members, `6.50` number text, skipped lines and torn tails; retire; no-ops; empty and skipped-only logs; duplicate ids; five model bodies; non-UTF-8 prior files; and forget of an exemplar, a citation and an absent id. It came out byte-identical, apart from a random tempdir name inside one error message.
-- **How to apply:**
-  - Write the harness yourself, not from the dev's equivalence test.
-  - Run each tree in its own copy (`git archive <base>` for the old one) with its own `CARGO_TARGET_DIR`.
-  - Leave out `writer.lock` and the stage dir, mask random tempdir names, and keep the result line of each operation in the dump.
-  - Include hostile inputs: unknown members, number text that does not round-trip, torn tails, duplicate ids, a forged lesson marker.
-  - Mark the model path with a marker string, so a dump proves the path ran.
-  - For a CLI comparison, copy both release binaries to the same name (`base/dreamd`, `head/dreamd`): clap prints `argv[0]` in every `Usage:` line, so differently named binaries differ on every `--help` (BZR-1244).
-  - Keep the fixture's `HOME` short, or use `dream --no-commit`. A scratch path makes `~/.agent/dreamd.sock` longer than `SUN_LEN`, and the daemon-proxy attempt then fails the command. For an in-process CLI run, pointing `DREAMD_SOCK` at a short path that does not exist also works: the proxy sees no daemon (BZR-1467 e2e).
-- **Cross-refs:** `in-memory-value-is-not-the-round-tripped-file`, `mutation-must-get-past-the-backstop`, `jsonl-rewrites-go-through-patch-lines`
-
-### in-memory-value-is-not-the-round-tripped-file
-
-- **Rule:** When a refactor replaces "write the file, then read it back" with "use the value in memory", check whether render-then-parse is the identity for every input. Where it is not, the refactor changes behaviour. Either round-trip on purpose, or treat the change as a behaviour change and gate it with the user.
-- **Why:** BZR-1240's first spec took the pins and edges from the `LessonsFile` in memory. Before that, the pin pass and the commit's edge reader parsed the rendered `LESSONS.md`. CLeetus's pre-flight found that a lesson body containing `<!-- /dreamd:lesson -->` parses back differently. That would have changed which id gets pinned, and whether the cycle fails. Amendment 1 made `plan_cycle` parse the rendered bytes back (tests 15 and 16, mutation M16). The marker injection itself is a latent defect with no ticket.
-- **How to apply:**
-  - List every value that used to come back from disk, and find the inputs where render and parse disagree. Free text that can hold the format's delimiters is the usual case.
-  - Pin the round trip with a test that feeds such an input and asserts the exact log bytes and edge list.
-- **Cross-refs:** `refactor-oracle-is-byte-equivalence-with-the-base`, `behaviour-change-needs-a-grep-for-the-old-behaviour`
-
-### mutate-each-check-of-a-compound-guard-alone
-
-- **Rule:** When a guard ORs several checks, the mutation table has one row per check that can be the only one to fire. Each row turns off that check alone and fails a test built so that every other check passes. A row that turns off all the checks at once proves only that the guard exists. A check that is redundant by design is named as redundant in the spec, not left untested without comment.
-- **Why:** BZR-1241's `log_since` refuses the tail read on any of five checks: the `outside_changes` counter, the identity at the path, dev/ino, length, and a line boundary. The spec's M5 turned off all five together and failed the rename test. PM-only P1 turned off only the counter, and the whole dreamd-core lib suite still passed (675). A probe showed what P1 breaks:
-  - an outside writer truncates and rewrites the log in place (same inode), and an actor append then handles that change;
-  - the identity, inode and length checks then all pass;
-  - the commit splices the rewritten bytes onto the prepared lines, which brings back a record the rewrite removed and loses one it added.
-
-  Round 1 added the test and M14. The gap was the spec's.
-
-  Recurred on BZR-1242. `check_store`'s recurrence check runs only when none of four coverage violations fired. The spec asked for one gate mutant (M13). Five PM mutants survived the whole suite: three each dropped one other gate term, one used the exact count instead of the subtree, and one skipped `lsn_` docs. Every test of those violations called `check_store(&root, None)`, which never reaches the gate. Round 1 added one test per term (M14–M18).
-- **How to apply:**
-  - For each OR term, build the input where every other term passes.
-  - For stat identity, three faults need three inputs: a rename (new inode), an in-place rewrite (same inode), and an append by another process (length).
-  - In `log_since`, the dev/ino and `len < at.len` terms are redundant with the counter: every identity change goes through `reopen_after_external_change` or the actor's own writes, and no open cycle spans a commit. Say so where a spec lists them.
-- **Cross-refs:** `mutation-must-get-past-the-backstop`, `un-ignore-ac-can-name-tests-never-written`, `crash-sweep-oracle-is-the-image-not-the-wal`
-
-### split-actor-protocol-needs-a-lease-and-a-spawned-handler
-
-- **Rule:** When an axum handler drives a multi-message actor protocol (prepare in the actor, work in the handler, commit in the actor), two things are needed:
-  - the in-progress state is a lease the caller owns: an `Arc` in the ticket and a `Weak` in the actor, not a flag the commit clears;
-  - the handler runs the sequence on `tokio::spawn` and awaits the `JoinHandle`.
-- **Why:**
-  - BZR-1241's AC asked for "an in-memory actor flag" between Prepare and Commit. axum drops a handler future when its client disconnects, so a flag set at Prepare would never be cleared, and every later `POST /dream` would get 409 until restart.
-  - The single `RunDreamCycle` message never had this problem: once it was in the inbox, the actor ran it whether or not the handler was still waiting.
-- **How to apply:**
-  - See `CycleTicket` / `OpenCycle` / `handle_prepare_cycle` in `coordinator.rs` and `post_dream` / `dispatch_cycle` in `handlers/dream.rs`.
-  - Put the ticket inside the commit message, so the lease stays alive while the commit is queued.
-  - Keep `.in_current_span()` on the spawned task so its logs keep the request id.
-  - A test drops the ticket and checks that the next prepare succeeds.
-- **Cross-refs:** `ailab-162-drain-not-sigterm`, `coordinator-not-mutex-file`
-
-### an-ordering-test-must-fail-the-step-it-orders
-
-- **Rule:** To test "X happens only after step Y succeeds", fail Y itself. A failpoint that fires before Y proves only that X waits for the earlier step. Write one test per step that X must follow.
-- **Why:** BZR-1243's persist step runs commit → `failpoint-after-commit` → ledger append → watermark → publish the `CommitMark`. H7 failed the persist through `failpoint-after-commit`, which returns before the ledger. A mutant that published right after that failpoint passed all 702 lib tests (PM P3), because no persist-level test failed the ledger append. The spec's own mutation row (M6) moved the publish above the failpoint, so it could not find the gap. CLeetus flagged the placement, and r1 added T17 with `failpoint-ledger-write`. The same round found a second surviving mutant: the coverage-pass rule (`committed_appends = received`), which needs an `add_document` failure that nothing could inject. A persist-level test that calls `receive()` without `push()` simulates it (T16).
-- **How to apply:**
-  - List the steps that come before the guarded action. For each one, the spec names a failpoint or a direct call that fails it, and a test asserting the action did not happen.
-  - When a row in the mutation table can only move code above an existing failpoint, add a row that moves it to between each later pair of steps.
-  - When a branch needs a failure the tree cannot inject, test the unit below it (here `IndexerPersist`) directly.
-- **Cross-refs:** `mutation-must-get-past-the-backstop`, `mutate-each-check-of-a-compound-guard-alone`, `replay-open-is-an-index-doc-writer`
-
-### mid-ticket-commit-keeps-the-ticket-base
-
-- **Rule:** When the user commits a ticket's tree before sign-off, the ticket's base sha does not move. Every diff, grep, red-first run and bench baseline still compares with the base. The dev resumes from `HEAD` as its own unverified work. If the dev session that wrote the code is gone, the new one reads every mutation site in the committed code before running anything, because the commit can capture a mutant left in place mid-run.
-- **Why:** It has happened on four tickets. On BZR-1242, `3a610fd` held a tree with two failing tests. On BZR-1243, `cd575af` was committed and pushed with no report, and that CLeetus session's context was lost when it restarted. On BZR-1244, `9bfd00b` was committed before the report, and its message described BZR-1243's work. On BZR-1467, `6db64aa` was committed during VERIFY, after the report, and it matched the verified tree. Once committed, `git status` no longer lists the ticket's files. Greps written as `git status --porcelain` or `git diff --name-only` with no range then see nothing, and pass.
-- **How to apply:**
-  - Append an amendment to the spec. It keeps the base, adds a range to every scope command (`git diff --name-status <base> HEAD`, plus `--diff-filter=A` for new files), and asks for the mutation-site audit.
-  - Red-first runs use `git archive <base>` into a scratch copy. Never `checkout` or `restore`.
-  - Record the hash of every path changed since the base, not only the paths changed since `HEAD`, and check them at LANDED.
-  - Tell the user. A pushed partial commit means any rework lands as a follow-up commit.
-  - Read the commit message too. Flag one that names another ticket's work, or a sign-off line that is a template placeholder; amending or leaving it is the user's call.
-  - At the start of VERIFY, snapshot the tree you verify (the mutant source copy will do). If a commit lands mid-VERIFY, compare `git rev-parse HEAD:<p>` with `git hash-object` of the snapshot for every path in `git diff --name-only <base> HEAD`. When all of them match, SIGN-OFF and LANDED are one step.
-  - Keep that snapshot until LANDED. `git hash-object` without `-w` writes no object, so a recorded hash cannot be diffed with `git diff <hash> HEAD:<p>` ("bad object"). The snapshot copy is the only way to show what changed after sign-off.
-- **Also after sign-off (BZR-1469).** `47f8c94` held the signed-off code, plus docs edits the user made after sign-off: three signed-off docs and 16 files outside the ticket. The commit message named only BZR-1469. The LANDED hash check caught it. The PM diffed each snapshot copy with `HEAD`, re-checked every changed claim against the tree, and landed the ticket once every signed-off path held.
-- **Cross-refs:** `git-diff-name-only-misses-untracked`, `report-back-paste-can-be-truncated`
-
-### zsh-does-not-word-split-unquoted-variables
-
-- **Rule:** Spec grep blocks and PM harnesses run under zsh. An unquoted `$VAR` that holds several words is passed as one argument. Use `${=VAR}`, or write the words out in each command. An argument that starts with `=` (such as a `=====` separator) is `=cmd` expansion, so quote it.
-- **Why:** It bit three times on BZR-1244:
-  - the spec's first dry run passed `$EX` (a list of `--exclude-dir` flags) as one argument;
-  - the PM's check of today's CLI output passed `"memory branch x"` as one token, so every surface reported `unrecognized subcommand 'memory branch x'` instead of its real behaviour;
-  - an `echo =====` separator failed as a command lookup.
-
-  `rg -E` (`spec-grep-rg-e-is-encoding`) is the same family: a shell or tool quirk turns a grep into a false pass or a false fail.
-- **How to apply:**
-  - Write the excludes out in each §4 command, as BZR-1244 and BZR-1245 do.
-  - In a loop over command lines, split with `${=a}`.
-  - Dry-run every §4 command under zsh against the tree before queuing (`guards-vs-mandates-same-line`), and check that a "no output" grep can print something when the bad case is present.
-  - Write `"${t}:path"`, never `$t:path`. zsh reads `:c`, `:h`, `:t` and the other letters after a `:` as history modifiers. On DRM-49, `git show $t:crates/…` in a loop over tags printed nothing, so `grep -c` printed 0 for every tag, and the tags looked free of the bug.
-- **Cross-refs:** `spec-grep-rg-e-is-encoding`, `guards-vs-mandates-same-line`, `banned-crate-grep-needs-a-word-boundary`
-
-### spec-rustdoc-must-not-link-a-private-item
-
-- **Rule:** A doc comment the spec writes on a `pub` item must not intra-doc-link a `pub(crate)` or private item. Write the name as plain code. The PM's VERIFY compares `cargo doc -p <crate> --no-deps` warnings on base and `HEAD` as a (message, file) set; the ticket adds none.
-- **Why:** BZR-1244 §3.3 linked `[`bind_socket_raw`]` from the `pub` `try_connect_existing`. That raised `rustdoc::private_intra_doc_links`, which CLeetus found in r0 (Amendment 1 item 1). The crate already has 66 rustdoc warnings, so a raw count change is easy to miss; the set diff is not.
-- **How to apply:**
-  - Before queuing, check every `[`…`]` link in a §3 doc snippet against the visibility of its target.
-  - In VERIFY, run `cargo doc` on a `git archive <base>` copy and on `HEAD`, each with its own target dir, then diff the sorted (message, file) pairs.
-  - Run `cargo doc` on the PM's reference build too, before the spec is queued. The reference build copies the spec's snippets, so it has the same bad link.
-- **Recurred on BZR-1533.** §3.1's rustdoc for the `pub` `render_lessons_file` linked the private `escape_body_line`. The PM's reference build had the same link and was never run through `cargo doc`. The dev wrote the name as plain code. By then dreamd-core had one rustdoc warning (BZR-1522's link to the private `rank_missing_tokens`), and a docs sweep in the same tree fixed it, so `cargo doc -p dreamd-core --no-deps` prints none.
-- **Cross-refs:** `rustdoc-trips-word-grep-that-meant-call-sites`
-
-### spec-test-expectations-follow-from-the-rule-text
-
-- **Rule:** Before queuing, work out every test expectation in §3 from the rule text as written, and treat a test whose expected result comes out differently as a spec bug. Pay most attention to the exceptions: "always keep X", "does not push another one out", "counted once".
-- **Why:** BZR-1245 §3.4 said `staged` is always kept and that "a kept name that is not among the newest 20 does not push another one out". Its test 3 (20 live refs, all newer than `staged`) expected one prune, which only holds if `staged` takes one of the 20 slots. Read literally, the rules gave an empty result and left 21 refs. CLeetus caught it before writing `retention.rs` (r0 Q1, Amendment 1). Only test 3 told the two readings apart.
-- **How to apply:**
-  - Work through each test's input by hand against the rules, the edge cases especially: the clock running backwards, a same-name collision, a pinned name outside the window.
-  - If a test is the only thing that pins an exception, say so in the spec, and give the mutation that breaks it.
-  - Same family as `guards-vs-mandates-same-line`: the spec has to pass its own checks.
-  - When a test pins exact bytes, work out which serializer writes them. Here serde_json has no `preserve_order`, so `json!` and `to_value` sort keys, while a derive writes declaration order (internally tagged: the tag first).
-  - When a ticket adds an early return (such as "no empty commits"), run each existing test's input through it.
-- **Recurred on BZR-1467.** CLeetus's pre-flight found two such expectations, and Amendment 1 fixed both:
-  - test 24 asked for a 200 body "exactly" in an order that `json!` cannot produce;
-  - test 18 kept `commit_cycle_clears_prior_skip_marker`'s `Committed` assertion on a tree that D7 now reports as `Unchanged`.
-- **Cross-refs:** `guards-vs-mandates-same-line`, `mutate-each-check-of-a-compound-guard-alone`, `derived-serde-struct-accepts-a-json-array`
-
-### every-stated-rule-in-section-3-gets-a-mutation-row
-
-- **Rule:** Every "never", "always", "only warns" or "includes" sentence in a spec's §3 gets a row in the §5 mutation table, with a test that only that rule makes pass. That covers the wiring around a function too, not only the function's own logic.
-- **Why:** BZR-1245's table had a row for each `plan_ref_prune` / `collect_objects` branch, but none for four rules §3.4 stated about the wiring:
-  - dot-prefixed temp refs are read;
-  - a prune error only warns;
-  - a collection error never fails a committed cycle;
-  - `commit` keeps the one-hour grace.
-
-  Four PM mutants, one per rule, each survived the whole lib suite (709 / 0). One of them made a corrupt `branches/bisect` fail every dream cycle. Amendment 3 (r2) added tests 21–24.
-- **How to apply:**
-  - Before queuing, list §3's rule sentences and point each at a mutation row.
-  - At VERIFY, mutate the call site as well as the callee: swap a `warn` arm for `panic!`, drop a constant from an expression, skip one input class.
-  - Same family as `an-ordering-test-must-fail-the-step-it-orders` and `mutate-each-check-of-a-compound-guard-alone`.
-- **Recurred on BZR-1469.** The spec moved the spawn-failure copy into a pure helper so it could be tested (test 8), but left the call site's `req.launcher` argument untested. PM mutant P1, which passes `Launcher::Binary` there, survived every suite. No test can make `spawn_watch` fail, so it was held as H6 instead of adding a spawner seam. When a spec splits copy into a helper because the caller is unreachable, it says so in §11 from the start.
-- **Recurred on BZR-1470.** §3.1 said `init_tracing` reads `DREAMD_LOG_FORMAT`, and that `DREAMD_LOG` replaces both defaults for `watch`. Every §5 row mutated `build_subscriber` or the filter constants, which the unit tests call directly. Two PM mutants, P4 (ignore `DREAMD_LOG_FORMAT`) and P6 (the file-path call passes `None` for `dreamd_log`), survived 1,416 / 0 / 0. Test 12 covered `DREAMD_LOG` only on the console-only path `mcp` uses. When a pure builder is split out for unit tests, the spec also needs one integration test per env input, through the binary, on each caller's path.
-- **Cross-refs:** `an-ordering-test-must-fail-the-step-it-orders`, `mutate-each-check-of-a-compound-guard-alone`, `mutation-must-get-past-the-backstop`
-
-### error-text-names-its-crate-by-grep-not-by-guess
-
-- **Rule:** When a ticket says which library produced an error string, grep that library's source under `~/.cargo/registry/src/` for the exact string before the spec decides where the fix goes.
-- **Why:** BZR-1301's text said hyper's "uri too long" reached the MCP caller, and asked for a length guard so it never reaches the daemon. The string comes from the `http` crate: `Uri`'s `MAX_LEN` is 65,534, and `build_recall_request` hit it on the client while parsing the URI. No request was sent. hyper's own server limit at the same length answers `414` with an empty body and no text. A guard on the daemon alone would have left the client error in place.
-- **How to apply:**
-  - `grep -rn 'uri too long' ~/.cargo/registry/src/*/http-1.*/src/ ~/.cargo/registry/src/*/hyper-1.*/src/`.
-  - Name the crate, file and line in the spec's pre-flight facts.
-  - Check both ends of a client/server pair: the client's builder can fail before the server sees anything.
-- **Cross-refs:** `v2-beats-ticket-ac`, `rmcp-tool-description-requires-string-literal`
-
-### a-proxy-checks-what-it-converts-before-it-converts
-
-- **Rule:** A client that forwards raw fields for the server to validate checks, itself, every field it converts lossily on the way. `memory_store::build_learn_request` runs `LearnIngress::validate_optional_pain` and `validate_optional_importance` before `placeholder_learning` casts both to `f32`.
-- **Why:** BZR-1301. The proxy's rustdoc said the daemon re-checks every field, which was true of what arrived. But `placeholder_learning` cast `f64` to `f32` first. A probe on `52c38e9` showed the result:
-  - `pain: 1e40` became infinity, `serde_json` wrote it as `null`, axum answered `422`, and the caller got `-32603` `daemon error 422 …: pain: invalid type: null` instead of `pain must be in 0.0..=10.0`;
-  - `pain: 10.0000001` rounded to `10.0` and landed;
-  - in-process, both gave the right text.
-- **How to apply:**
-  - List each `as` cast and narrowing conversion between the caller's type and the wire type. For each one, either the server checks the caller's value, or the client runs the same validator before converting.
-  - Call the shared validator, not a copy, so both modes print the same text.
-  - Test a value just past the bound (`10.000_000_1`) and one that overflows the narrow type (`1e40`).
-- **Cross-refs:** `agentlearning-placeholder-id`, `doc-first-append-via-uds-learn`, `mcp-error-code-is-who-can-fix-it`
-
-### mcp-error-code-is-who-can-fix-it
-
-- **Rule:** `MemoryStoreError` has three kinds, one per JSON-RPC code:
-  - `InvalidParams` (`-32602`): an argument the caller can fix;
-  - `InvalidRequest` (`-32600`): project state that changing the arguments will not fix (an unregistered root, a rejected content type, an index that will not open in-process);
-  - `Internal` (`-32603`): everything else.
-
-  A new caller-input error is `InvalidParams` in both modes, with one message.
-- **Why:** BZR-1301's AC asked for `-32602` "as rmcp maps it today". rmcp does that only for its own parameter deserialization (`failed to deserialize parameters: …`). dreamd's errors went through `From<MemoryStoreError> for McpError`, which had no `-32602` arm. So every input error was `-32600`, and three caller-caused paths were `-32603`: the long query, `pain: 1e40`, and an in-process oversize learning.
-- **How to apply:**
-  - Before citing what a library "does today", find the code path the dreamd error actually takes.
-  - `docs/http-api.md` "MCP tool errors" is the table; a new message gets a row there.
-- **Cross-refs:** `a-proxy-checks-what-it-converts-before-it-converts`, `search-nodes-layer-filter-does-not-exist`
-
-### derived-serde-struct-accepts-a-json-array
-
-- **Rule:** To read one member of a JSON object, parse `serde_json::Value` and call `.get("name")`. Do not `from_slice` into a `#[derive(Deserialize)] struct { name: String }`.
-- **Why:** serde's derived visitor also accepts a sequence, so `["x"]` deserializes as `{ name: "x" }`. BZR-1301's `daemon_error_message` must give the generic label for any body that is not the daemon's `{"error": …}` envelope. Mutant M3 (the derived struct) fails test 3 on the `["error"]` body.
-- **How to apply:** See `memory_store::daemon_error_message`. A test of an envelope reader includes a JSON array body.
-- **Also an internally tagged enum (BZR-1467).** `#[serde(tag = "outcome")]` accepts a sequence whose first element is the tag, so `["unchanged"]` deserializes as `Unchanged`. `client::parse_autobiography` takes `.get("autobiography")`, filters `is_object`, then deserializes. Mutant M25 drops the filter and fails test 26.
-- **Cross-refs:** `mutate-each-check-of-a-compound-guard-alone`
-
-### daemon-recall-tests-run-without-the-test-coordinator
-
-- **Rule:** In `mcp/mod.rs` tests, a daemon-mode `search_nodes` test calls `spawn_test_daemon(.., false)`. With `true`, the fixture holds the project writer lock for its own coordinator and wires no primary index handle. The daemon's lazy index open for recall then cannot take the lock, and every recall answers `500` `index open failed: project writer lock is held by pid … (watch)`.
-- **Why:** BZR-1301's first base probe sent appends and searches to one `spawn_test_daemon(.., true)` daemon. Every search came back `-32603` with that lock message, which hid the real answers: a `500` for a parser rejection, and success for a 20 KB query. A production daemon serves its booted project from the pinned primary handle, so only the fixture behaves this way.
-- **How to apply:** Use a daemon with `true` for appends and a second one, on its own root, with `false` for recall, as `test_remote_search_nodes_refuses_a_query_over_the_limit` does.
-- **Cross-refs:** `index-fixtures-must-write-the-log-first`
-
-### autobiography-check-is-content-not-git-status
-
-- **Rule:** The autobiography start check decides by bytes, never by git status. `LESSONS.md` and the episodic log are compared with HEAD's blob and with `state.json`'s per-file `autobiography_baseline`. The commit builds its tree from HEAD's tree in an in-memory `git2::Index` that holds only the two tracked paths. Never use `repo.index().write_tree()` for it.
-- **Why:** Before BZR-1467, `status_file` flagged every write dreamd makes itself: the untracked log after setup, the previous cycle's pin rewrite, and every append. A cycle therefore never committed in normal use. The repo-index tree would also have swept the user's staged files into dreamd's commit. The first PM design held the whole baseline when either file was dirty. That would have made the user commit dreamd's own log rewrite to release a `LESSONS.md` hold, so the baseline advances per file (§11 H1, oracle-checked).
-- **How to apply:**
-  - A write to the tracked files outside a dream cycle holds the commit by design until the user commits that file. That covers `forget`, `archive --force-unpin` and `memory checkout`. Do not "fix" this by advancing the baseline from those commands without a user decision.
-  - Any path that runs a cycle and writes the tracked files goes through `dream_cycle::run_guarded_cycle`, so the baseline is recorded after the dispatch.
-  - `update_daemon_state` is an unlocked read-modify-write. The post phases run after the cycle's ticket is released (BZR-1467 §11 H5).
-  - BZR-1467 §6 greps 1–2 guard the status calls and the repo-index tree.
-- **Cross-refs:** `daemon-state-module-avoids-wal-autobiography-cycle`, `split-actor-protocol-needs-a-lease-and-a-spawned-handler`, `spec-test-expectations-follow-from-the-rule-text`
-
-### search-after-append-tests-retry-past-the-commit-bound
-
-- **Rule:** A test that appends and then searches in-process retries its first search, a bounded number of times, when it checks something other than freshness. `search_nodes` waits at most 1 s for the index to commit pending appends (BZR-1437). Under disk load the first search can answer from the last commit and come back empty.
-- **Why:** BZR-1468's test 9 (`tests/search_nodes_id.rs`) checks that a hit's id works with `blame` and `forget`. It failed once in about 26 PM runs, with `search_nodes must find the append: []`, while a local etcd and a parallel build loaded the disk. The spec had asked for one search. Amendment 1 (r1) added the retry: 10 tries, 200 ms apart, in the same session. Red-first still fails at the id assertion.
-- **How to apply:**
-  - Retry only the first search, and fail with the last results and the original message.
-  - Leave the freshness bound to the BZR-1437 tests, and do not raise the 1 s bound to make a test pass.
-  - A timing flake in an unrelated test (`weg12`) under the same load is not evidence against the diff: compare base and head, alternating, in one scratch copy.
-- **Cross-refs:** `weg12-direct-channel-not-http-hammer`, `mutation-must-get-past-the-backstop`
-
-### a-ranking-gate-is-an-inequality-compute-it-first
-
-- **Rule:** When a ticket changes a ranking term so a gate row passes, work out the row's inequality from its fixture and measure the candidates before the spec names a term. What the passing terms cost is a product decision, so it goes to the user.
-- **Why:** BZR-1523's AC asked for "a deterministic dampening". On the `hub_drown` fixture BM25 ties, so the child passes only if `F(41) / F(1) < 7/6`.
-  - `ln`, `sqrt`, `r^(1/4)` and `r^(1/6)` all fail.
-  - `r^(1/8)` and `r^(1/10)` pass at r=41 and flip back near r=55 and r=151.
-  - `min(r, 64/r)` leaves r=9 to r=38 drowned and breaks monotonicity.
-  - A term that holds at every hub size has to cap the boost below 16.7%. That makes recurrence close to a tie-breaker in every recall, which the AC never said.
-- **How to apply:**
-  - Test several hub sizes, not only the fixture's. BZR-1523's test 6 uses 8, 40 and 500 parents.
-  - Grep every caller of the shared function before saying what changes. `salience()` also ranks a dream cycle's clusters.
-  - Publish the cost and the case the fix does not cover. A parent still wins at equal pain, and a child 6.5 against 6 still loses at a large hub.
-  - The result can pass the gate and still be untested on real stores. Say so in the docs.
-- **Cross-refs:** `spec-test-expectations-follow-from-the-rule-text`, `every-stated-rule-in-section-3-gets-a-mutation-row`, `actr-park-are-lineage-not-the-formula`
-
-### a-public-docs-ruling-gets-a-tree-wide-grep
-
-- **Rule:** When a ruling removes a claim from the public docs, grep every tracked path for it on the day of the ruling, not only the file the ruling names. A link check compares against `git ls-files`, not the file system.
-- **Why:** The 2026-11-04 ruling removed the README's section on a larger product (`9c7aedb`). `ROADMAP.md`, `llms.txt`, `SECURITY.md` and `docs/provenance.md` kept the same text until 2026-11-06, and `AGENTS.md` still pointed at the deleted section. `scripts/benchmark/README.md` linked a gitignored file, which exists locally, so a file-system link check reported 0 broken. `llms.txt` and `llms-full.txt` said 1.0.0 through three releases, because `RELEASING.md`'s version list did not name them.
-- **How to apply:**
-  - `git grep -nEi '<terms>' -- . ':!CHANGELOG.md'`, and read each hit. A case-insensitive search for an ordinary phrase matches prose, so search for its distinctive terms.
-  - A version statement no test checks goes on `RELEASING.md`'s list the day it is added.
-- **Cross-refs:** `deleted-variant-grep-needs-the-bare-name`, `behaviour-change-needs-a-grep-for-the-old-behaviour`, `changelog-historical-entries-stay-put`
-
-### match-ok-underscore-keeps-the-probe-connection-open
-
-- **Rule:** `match UnixStream::connect(p).await { Ok(_) => { … serve().await } }` does not close the connection. `Ok(_)` moves nothing out of the scrutinee, and the temporary `Result` lives until the whole `match` ends, so the stream stays open until `serve` returns. A fake daemon in a test must serve each connection on its own thread.
-- **Why:** BZR-1531's dev found it in `run_mcp_server` (`mcp/mod.rs:567`). The spec said `dreamd mcp`'s reachability probe "closes first". A fake daemon with one accept loop blocked reading the probe, and test 12 timed out at 30 s. The comment at `:569` says "The connect only probes reachability", but every daemon-mode `dreamd mcp` holds one idle connection to the daemon for its whole session. The daemon's `serve_connection` (`uds_server.rs:75`) has no timer, so nothing times it out. BZR-1534 fixed the probe; the daemon still has no timer.
-- **How to apply:**
-  - A fake daemon for an integration test: one thread per accepted connection, and a connection that closes before `\r\n\r\n` gets no answer (`tests/version_mismatch_launcher.rs`).
-  - To probe and drop, bind the value and drop it: `Ok(stream) => { drop(stream); … }`.
-  - Read a probe's scope from the code, not from its comment.
-- **Cross-refs:** `daemon-recall-tests-run-without-the-test-coordinator`
-
-### spec-counts-come-from-a-grep-of-the-base
-
-- **Rule:** A number a spec states about the tree, such as "11 calls to update" or "4 literals", comes from a grep of the base commit that the spec quotes. Never count the entries of the PM's reference script or patch.
-- **Why:** DRM-50's fact 6 and §3.6 said 11 resolver calls in `server/http/tests.rs` needed `.await`. That was the number of replacement entries in `DRM-50.pm-reference.py`, and two of those entries each covered a pair of calls. The base had 13 (`grep -cE '\.(resolve_supervisor|with_index_handle|recall_target|live_marks)\(' crates/dreamd-core/src/server/http/tests.rs`). The dev caught it in r0, and Amendment 1 corrected it. The build would have caught a missed call anyway, but a wrong count makes the dev doubt a correct tree.
-- **How to apply:**
-  - Put the counting command next to each count in §1, and run it on `git show <base>:<path>`, not on the working tree.
-  - When a reference script does the edit, compare its result with that grep before the spec is queued.
-- **Recurred on DRM-100, for line numbers and fixtures.** Fact 3 put the `index/` wipe at `doctor.rs:1029`; the base has it at `:1057`. Fact 6 said the `setup_cmd` tests use an empty `.git` file as the no-repo sentinel. They create an empty `.git` directory, and an empty `.git` file is a malformed gitfile, a git error rather than no repo. The dev caught both (Amendment 1). Cite a line from `git show <base>:<path> | grep -n`, and name a fixture from a grep of the tests that use it.
-- **Cross-refs:** `spec-deadlock-fixture-names-must-match-the-tree`, `spec-test-expectations-follow-from-the-rule-text`
-
-### a-test-that-deletes-a-store-quiesces-its-indexer-first
-
-- **Rule:** A test that deletes or replaces `.agent/.dreamd/` under a running indexer, to see what a request does next, first sends that indexer an acknowledged `IndexerMsg::Resync`. Run its mutants under load, never only on a quiet machine.
-- **Why:** DRM-95's tests deleted the store as soon as recall found the seed event. On a quiet machine the request under test met the replaced store and the retry ran. Under three parallel mutant builds the indexer got there first, by one of two checks:
-  - after the commit that recall sees, `IndexerPersist::commit` still appends the `index_doc` edges, and `Ledger::append` checks the store;
-  - `make_routing_state` opens the boot index before the log exists, so the first tick after the seed runs a resync, which checks the store.
-
-  Either one tripped the guard, the request was routed to a fresh runtime, and the retry never ran. Mutants R1, R3 and R6 (no learn retry, no dream retry, an untyped prepare refusal) survived, though a probe showed R1 failing test 1 every time on a quiet machine.
-- **How to apply:**
-  - See `seed_then_clean` in `server/http/tests.rs`. After the resync ack the indexer has nothing pending, no edge to write, and the log identity it holds is the log's.
-  - A recall that finds a document proves the commit landed, not that the indexer is idle.
-  - When a mutant survives, probe it alone with a backtrace where the guard trips before blaming the test or the code.
-- **Cross-refs:** `mutation-must-get-past-the-backstop`, `index-fixtures-must-write-the-log-first`, `mutate-each-check-of-a-compound-guard-alone`
