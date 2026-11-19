@@ -99,6 +99,14 @@ The daemon home is deliberately never inside a project store: co-locating them
 would let a repo's git history leak the auth token. `dreamd service uninstall
 --purge` removes the daemon home and, by design, no project's memory.
 
+For the same reason the daemon home is never a project store. dreamd's walk up
+from a folder skips an ancestor whose `.agent/` is `~/.agent/` and keeps going,
+so a folder under your home with no store of its own finds none, and
+`dreamd init` and `dreamd setup` refuse a project root whose store would be
+`~/.agent/` (a git repo at your home directory, for example). A second
+implementation may resolve these paths its own way, but it must not write
+project memory into its daemon home.
+
 ## dreamd's extras
 
 Everything dreamd adds beyond the four directories is either under the hidden

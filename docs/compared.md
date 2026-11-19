@@ -1,13 +1,13 @@
 # dreamd compared
 
-Honest comparison of the current tree (dreamd column re-checked for 1.2.1; competitor cells and star counts are as dated in the table). Concede competitor strengths; name our gaps.
+Honest comparison of the current tree (dreamd column re-checked for 1.3.2; competitor cells and star counts are as dated in the table, 2026-07-14, and were not refreshed). Concede competitor strengths; name our gaps.
 For the product story, see [marketing.md](./marketing.md). For install and usage, see the [README](../README.md).
 
 ---
 
 ## TL;DR
 
-| Dimension | dreamd 1.2.1 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
+| Dimension | dreamd 1.3.2 | Mem0 | Letta Code | Anthropic MCP memory (ref) | Cline Memory Bank |
 |---|---|---|---|---|---|
 | Cross-harness portability | ✓ Claude Code / Cursor / Cline share one `.agent/` | ✓ MCP + broad framework integrations; hosted path common | — harness-native (stateful Letta agent) | ✓ any MCP-capable client | — Cline-native markdown ritual |
 | Salience-aware recall | ✓ BM25 × published formula ([SPEC.md](../SPEC.md)); `dreamd recall --explain` / `dreamd blame` / `dreamd score --explain` | extraction + retrieval (managed / hosted options) | agent-managed memory / sleep-time reflection | string search over knowledge-graph nodes | LLM reads structured markdown; no ranking formula |
@@ -29,6 +29,7 @@ Pulled from [AGENTS.md](../AGENTS.md) scope — not a marketing softener:
 - **No vector embeddings.** Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer. Embedding / hybrid recall is not shipped; the optional `vectors` build feature only downloads a model and does not rank ([vectors.md](./vectors.md)).
 - **Windows runs learn, the dream cycle, and the Tantivy index** over loopback TCP. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt `dreamd-mcp` Windows binary. See [windows.md](./windows.md).
 - **No auto dream cycle.** `dream_cycle_mode = "auto"` makes `dreamd watch` hard-error; cycles run when you invoke them (`dreamd dream` / `npx -y dreamd-mcp dream`, or `POST /api/v1/dream`). There is no MCP dream tool. See [configuration.md](./configuration.md).
+- **`dreamd memory` is deprecated.** Every subcommand (`branch`, `checkout`, `branches`, `delete`, `diff`, `bisect`) still runs and is removed in 2.0. Branch the `.agent/` files with git. See [branching-guide.md](./branching-guide.md).
 - **Provenance is unsigned.** The ledger records which event fed which index document and lesson, and `dreamd doctor --provenance` re-checks it, but nothing is signed, `source_harness` is caller-asserted, and `dreamd forget --proof` writes a receipt, not a cryptographic proof. See [provenance.md](./provenance.md).
 
 Maturity is also a gap: dreamd is a small open-source project (star count date-stamped in the table). On dense-vector recall benchmarks today, we lose — that is intentional substrate work, not a denied shortfall. See [marketing.md](./marketing.md) on natural language vs embeddings.

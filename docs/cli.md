@@ -10,7 +10,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 
 | Command | What it does | Detail |
 |---|---|---|
-| `init` | Scaffold `.agent/` and register the project. An existing `.agent/` is left as-is; if it is missing from the registry, init registers it. `init --uninstall-project` removes the registry entry and leaves the store; `dreamd init` puts the entry back | [GUIDE.md](../GUIDE.md) §1 |
+| `init` | Scaffold `.agent/` and register the project. An existing `.agent/` is left as-is; if it is missing from the registry, init registers it. Refuses, exit 2, writing nothing, when the project root's `.agent/` would be the daemon home `~/.agent/` (a git repo at your home directory). `init --uninstall-project` removes the registry entry and leaves the store; `dreamd init` puts the entry back | [GUIDE.md](../GUIDE.md) §1 |
 | `setup` | `init`, plus harness MCP config and next steps | [below](#setup) |
 | `watch` | Foreground daemon until SIGINT/SIGTERM | [http-api.md](./http-api.md), [install.md](./install.md) |
 | `mcp` | MCP server, stdio by default | [mcp-transports.md](./mcp-transports.md) |
@@ -36,7 +36,7 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 
 ## status
 
-Prints six lines. Exit 0 when the daemon answers, exit 1 when it does not (the lines are still printed).
+Prints six lines, or seven while the daemon home holds a project store. Exit 0 when the daemon answers, exit 1 when it does not (the lines are still printed).
 
 ```text
 daemon: running | not running
@@ -49,6 +49,8 @@ recent log: (none) | recent log (last 5 lines):
 
 With no `.agent/` in the working directory, the project line is `project: no .agent/ store in CWD`, the cycle line is `last_dream_cycle: (no store)`, and the git line is `memory_in_git: (no store)`. `not committed` names the command that commits the store, which `git clean -fd` can otherwise delete. Off Unix the address label is `server_json`, not `socket`. This is not `dreamd service status`.
 
+While `~/.agent/` holds a project store (an `episodic/` directory a dreamd before 1.3.3 could leave there), a seventh line comes before the log tail: `daemon_home_store: <home> holds a project store (events: N)  [WARNING: …]`. It says how to move the store, or, with `events: 0`, which directories to remove. `dreamd doctor` prints the same line and fails its run. See [troubleshooting.md](./troubleshooting.md#a-project-store-in-the-daemon-home).
+
 ## score
 
 `dreamd score [-n N] [--explain]` lists up to `N` documents (default 100) with no query text. Every row is scored as if BM25 were 1, so the printed `bm25` is about 1 and `score` is the salience multiplier. `--explain` adds the same factor block as `dreamd recall --explain`.
@@ -56,6 +58,8 @@ With no `.agent/` in the working directory, the project line is `project: no .ag
 ## setup
 
 `dreamd setup` scaffolds `.agent/` and writes harness MCP config.
+
+Like `init`, it refuses with exit 2 when the project root's `.agent/` would be the daemon home `~/.agent/`, before any prompt, plan line or write, `--dry-run` included. Run it in a project folder below your home directory.
 
 | Flag | Effect |
 |---|---|

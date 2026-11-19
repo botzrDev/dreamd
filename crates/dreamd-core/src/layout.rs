@@ -53,11 +53,29 @@ impl AgentRoot {
     /// must operate against the *existing* store rather than the project-root
     /// sentinel set `dreamd init` uses. Symlinks in the walk are followed via
     /// `Path::exists`.
+    ///
+    /// The daemon home (`$HOME/.agent`, [`home_dir`]) is never a project
+    /// store, so the walk skips it and goes on (DRM-101). Without the skip,
+    /// every folder under `$HOME` with no store of its own would bind to
+    /// `$HOME`, and a write there would land in the daemon home.
     pub fn discover(start: &Path) -> Result<Self, LayoutError> {
+        let daemon_home = home_dir().map(|home| home.join(".agent"));
+        Self::discover_with(start, daemon_home.as_deref())
+    }
+
+    /// [`Self::discover`] with the daemon home passed in, so a test can use a
+    /// fake one. An ancestor whose `.agent/` is `daemon_home` ([`same_dir`])
+    /// is skipped. `None` skips nothing.
+    pub fn discover_with(start: &Path, daemon_home: Option<&Path>) -> Result<Self, LayoutError> {
         for dir in start.ancestors() {
-            if dir.join(".agent").exists() {
-                return Ok(Self::new(dir));
+            let agent = dir.join(".agent");
+            if !agent.exists() {
+                continue;
             }
+            if daemon_home.is_some_and(|home| same_dir(&agent, home)) {
+                continue;
+            }
+            return Ok(Self::new(dir));
         }
         Err(LayoutError::NotFound)
     }
@@ -237,6 +255,29 @@ impl std::fmt::Display for AgentRoot {
     }
 }
 
+/// `true` when `a` and `b` name the same directory, however each is spelled:
+/// relative or absolute, through a symlink or not (DRM-101).
+///
+/// A path that exists compares by its canonical form. A path that does not
+/// exist yet compares by its canonical parent plus its last component, so
+/// `dreamd init` can tell that the store it would create is the daemon home
+/// before either exists. Two paths that cannot both be resolved are not the
+/// same.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    fn key(path: &Path) -> Option<PathBuf> {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return Some(canonical);
+        }
+        let absolute = std::path::absolute(path).ok()?;
+        let parent = std::fs::canonicalize(absolute.parent()?).ok()?;
+        Some(parent.join(absolute.file_name()?))
+    }
+    match (key(a), key(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Repo sentinels [`find_project_root`] looks for.
 const ROOT_SENTINELS: &[&str] = &[".git", "Cargo.toml", "package.json", "pyproject.toml"];
 
@@ -396,6 +437,16 @@ impl DaemonHome {
     /// asks again on the next setup.
     pub fn star_asked(&self) -> PathBuf {
         self.home.join("star-asked")
+    }
+
+    /// `~/.agent/episodic/`: a store's log dir, here only if a dreamd before 1.3.3 used it (DRM-101).
+    pub fn stray_episodic_dir(&self) -> PathBuf {
+        self.home.join("episodic")
+    }
+
+    /// `~/.agent/episodic/AGENT_LEARNINGS.jsonl`: that stray store's log (DRM-101).
+    pub fn stray_episodic_jsonl(&self) -> PathBuf {
+        self.stray_episodic_dir().join("AGENT_LEARNINGS.jsonl")
     }
 }
 
@@ -559,6 +610,105 @@ mod tests {
             AgentRoot::discover(&nested),
             Err(LayoutError::NotFound)
         ));
+    }
+
+    /// DRM-101 test 1: the daemon home is never a project store. A folder
+    /// below it with no store, and the home itself, find none; with no daemon
+    /// home the walk is the old one and finds the home.
+    #[test]
+    fn discover_skips_the_daemon_home() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon_home = home.path().join(".agent");
+        std::fs::create_dir(&daemon_home).unwrap();
+        let folder = home.path().join("r02/src");
+        std::fs::create_dir_all(&folder).unwrap();
+        for start in [folder.as_path(), home.path()] {
+            assert!(
+                matches!(
+                    AgentRoot::discover_with(start, Some(&daemon_home)),
+                    Err(LayoutError::NotFound)
+                ),
+                "{}",
+                start.display()
+            );
+        }
+        let old = AgentRoot::discover_with(&folder, None).expect("the old walk");
+        assert_eq!(old.project_root(), home.path());
+    }
+
+    /// DRM-101 test 2: a project below the daemon home finds its own store,
+    /// from the project and from a folder inside it.
+    #[test]
+    fn discover_finds_a_store_below_the_daemon_home() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon_home = home.path().join(".agent");
+        std::fs::create_dir(&daemon_home).unwrap();
+        let proj = home.path().join("proj");
+        std::fs::create_dir_all(proj.join(".agent")).unwrap();
+        std::fs::create_dir_all(proj.join("src/deep")).unwrap();
+        for start in [proj.clone(), proj.join("src/deep")] {
+            let root = AgentRoot::discover_with(&start, Some(&daemon_home)).expect("discover");
+            assert_eq!(root.project_root(), proj, "{}", start.display());
+        }
+    }
+
+    /// DRM-101 test 3: the skip compares real directories. A daemon home
+    /// spelt through `..`, through a symlink or with `./` is still skipped,
+    /// and so is the home reached from a start through the symlink.
+    #[cfg(unix)]
+    #[test]
+    fn discover_skips_the_daemon_home_however_it_is_spelt() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".agent")).unwrap();
+        let folder = home.path().join("r02");
+        std::fs::create_dir(&folder).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("home-link");
+        std::os::unix::fs::symlink(home.path(), &link).unwrap();
+        for daemon_home in [
+            folder.join("../.agent"),
+            link.join(".agent"),
+            home.path().join("./.agent"),
+        ] {
+            assert!(
+                matches!(
+                    AgentRoot::discover_with(&folder, Some(&daemon_home)),
+                    Err(LayoutError::NotFound)
+                ),
+                "{}",
+                daemon_home.display()
+            );
+        }
+        assert!(matches!(
+            AgentRoot::discover_with(&link.join("r02"), Some(&home.path().join(".agent"))),
+            Err(LayoutError::NotFound)
+        ));
+    }
+
+    /// DRM-101 test 4: `same_dir` compares the directory, not the spelling.
+    #[cfg(unix)]
+    #[test]
+    fn same_dir_compares_the_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let link = tmp.path().join("link-to-a");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert!(same_dir(&a, &a), "same");
+        assert!(same_dir(&a, &link), "symlink");
+        assert!(same_dir(&b.join("../a"), &a), "..");
+        assert!(!same_dir(&a, &b), "different");
+        // A leaf that does not exist yet compares by its real parent.
+        assert!(same_dir(&a.join("new"), &link.join("new")), "missing leaf");
+        assert!(
+            !same_dir(&a.join("new"), &b.join("new")),
+            "missing leaf elsewhere"
+        );
+        // Neither side can be resolved: not the same, even spelt alike.
+        let nowhere = tmp.path().join("no/such/dir");
+        assert!(!same_dir(&nowhere, &nowhere), "unresolvable");
     }
 
     #[test]

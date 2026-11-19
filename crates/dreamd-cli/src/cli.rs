@@ -819,7 +819,16 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     };
     let agent_root = match discover_store_or_exit(&cwd) {
         Ok(r) => r,
-        Err(code) => return code,
+        Err(code) => {
+            // DRM-101: the store this folder used to reach may be the one in
+            // the daemon home, which discovery now skips.
+            if let Some(line) =
+                home_dir().and_then(|h| commands::daemon_home_store::report_line(&h.join(".agent")))
+            {
+                eprintln!("{line}");
+            }
+            return code;
+        }
     };
     let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
     // Socket via the shared resolver ($DREAMD_SOCK else the daemon-home
@@ -1028,7 +1037,8 @@ fn run_init(args: InitArgs) -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
+        Err(commands::init::InitError::NoProjectRoot)
+        | Err(commands::init::InitError::DaemonHome) => ExitCode::from(2),
         Err(commands::init::InitError::Io(e)) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)
@@ -1386,6 +1396,7 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
         // Usage — no project root to set up, or nowhere to ask the questions
         // (both messages are already on stderr).
         Err(commands::setup::SetupError::NoProjectRoot)
+        | Err(commands::setup::SetupError::DaemonHome)
         | Err(commands::setup::SetupError::NotATty) => ExitCode::from(2),
         // Conflict / malformed / unwritable MCP config (message already on
         // stderr, with the --force remedy where one exists).
@@ -1702,7 +1713,8 @@ fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
 /// refusals — no supported backend on this host, no project root under cwd,
 /// an existing LaunchAgent plist or scheduled-task XML without `--force`, and
 /// the two `service uninstall --purge` confirmation refusals (non-tty stdin
-/// without `--yes`, and a declined prompt) — exit 2 exactly like `dreamd
+/// without `--yes`, and a declined prompt), and `--purge` while the daemon
+/// home holds a project store (DRM-101) — exit 2 exactly like `dreamd
 /// watch` without a project root; every other failure (service file write,
 /// `systemctl` / `launchctl` / `schtasks` / `icacls` / `id -u` /
 /// `whoami /user` spawn or non-zero exit) is a runtime error and exits 1. The
@@ -1717,7 +1729,8 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
             | ServiceError::PlistExists(_)
             | ServiceError::TaskExists(_)
             | ServiceError::NotATty
-            | ServiceError::Declined),
+            | ServiceError::Declined
+            | ServiceError::DaemonHomeHoldsStore { .. }),
         ) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(2)

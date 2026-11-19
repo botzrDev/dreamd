@@ -2,7 +2,7 @@
 
 > **Deprecated.** The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0 (BZR-1245). Each one prints a one-line warning on stderr before it runs; nothing else about it changes. `.agent/` is plain files, so git can branch, diff and bisect it.
 
-This page covers how to use memory branches. The on-disk byte format (objects, refs, `HEAD`) is in [`branching.md`](branching.md).
+The commands below still run. New work should branch `.agent/` with git. The on-disk byte format (objects, refs, `HEAD`) is in [`branching.md`](branching.md).
 
 A branch is a named snapshot of a project's four live memory files: the episodic log, `LESSONS.md`, the recurrence sidecar, and `PREFERENCES.md`. There is one live store. A branch is a saved copy of it that you can return to.
 

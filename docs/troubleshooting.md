@@ -262,9 +262,9 @@ dreamd init
 
 ## No `.agent/` directory found
 
-**Symptom:** `dreamd: no .agent/ store found in … or any parent directory — run \`dreamd init\` first.` (`doctor`, `dream`), `dreamd: error — no .agent/ directory found. Run \`dreamd init\` first.` (`recall`, `migrate`, `service install`, …), `dreamd watch: no project root found from …`, or MCP `coordinator unavailable: no agent root found`. All but the MCP one exit 2.
+**Symptom:** `dreamd: no .agent/ store found in … or any parent directory — run \`dreamd init\` first.` (`doctor`, `dream`), `dreamd: error — no .agent/ directory found. Run \`dreamd init\` first.` (`recall`, `migrate`, `service install`, …), `dreamd watch: no project root found from …`, or, from both MCP tools, `this folder is not set up for dreamd: there is no .agent/ store in … or a folder above it. Run \`dreamd setup\` in the project folder, then restart this MCP server.` (`npx -y dreamd-mcp setup` under the npm shim). All but the MCP one exit 2.
 
-**Cause:** Project never initialized, or CWD is not inside a project with `.agent/`.
+**Cause:** Project never initialized, or CWD is not inside a project with `.agent/`. A store in `~/.agent/` does not count: that is the daemon home, and the walk up skips it, so a folder under your home with no store of its own finds none. If doctor or status also prints a `daemon_home_store:` line, see [A project store in the daemon home](#a-project-store-in-the-daemon-home).
 
 **Fix:**
 
@@ -275,7 +275,46 @@ dreamd init
 
 For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (see [adapters/cursor/README.md](../adapters/cursor/README.md)).
 
-**Prevention:** Run `dreamd init` once per repo; commit `.agent/` (except `.agent/.dreamd/` which is gitignored).
+**Prevention:** Run `dreamd init` once per repo; commit `.agent/` (except `.agent/.dreamd/` which is gitignored). After `dreamd setup` (or `init`) in a folder your harness already had open, restart its MCP server: one that started with no store keeps answering "not set up" until it starts again.
+
+---
+
+## A project store in the daemon home
+
+**Symptom:** `dreamd doctor` (which then exits 1) and `dreamd status` print:
+
+```text
+daemon_home_store: /home/you/.agent holds a project store (events: N)  [WARNING: …]
+```
+
+and `dreamd service uninstall --purge` exits 2 with `refusing to purge /home/you/.agent: it holds a project store (…)` or `… it holds the store of the registered project /home/you …`.
+
+**Cause:** `~/.agent/` is the daemon home: it holds `registry.toml`, the socket, `dreamd.log` and, on Windows, `auth.json`. It is never a project store. A dreamd before 1.3.3 could still use it as one: a folder under your home with no store of its own bound to your home directory, so an MCP append landed in `~/.agent/episodic/`, and `dreamd init` in a git repo at your home directory registered it. dreamd now skips that store. Nothing reads it, nothing moves it, and `--purge` will not delete it for you.
+
+**Fix with events (`events: N`, N > 0):** move the store into the project it belongs to, one that has no `.agent/` yet. Stop the daemon first: `systemctl --user stop dreamd.service`, or end `dreamd watch`. There is no `dreamd service stop`.
+
+```bash
+mkdir ~/your-project/.agent
+# Move the ones that exist:
+mv ~/.agent/episodic ~/.agent/semantic ~/.agent/personal ~/.agent/working ~/your-project/.agent/
+rm -rf ~/.agent/.dreamd          # derived state; the index rebuilds from the log
+cd ~/your-project
+dreamd init                      # registers the store it finds (npx -y dreamd-mcp init)
+grep -qxF '/.agent/.dreamd/' .gitignore || echo '/.agent/.dreamd/' >> .gitignore
+git add .agent .gitignore && git commit -m "Move dreamd memory into the project"
+```
+
+**Fix with `events: 0`:** nothing to keep. Remove it:
+
+```bash
+rm -rf ~/.agent/episodic ~/.agent/semantic ~/.agent/personal ~/.agent/working ~/.agent/.dreamd
+```
+
+**If your home directory is registered** (the purge refusal names `the registered project /home/you`), drop that entry from your home directory: `cd ~ && dreamd init --uninstall-project`.
+
+None of these touches `registry.toml`, the socket, `dreamd.log` or `auth.json`. Run `dreamd doctor` again: the `daemon_home_store:` line is gone.
+
+**Prevention:** Run `dreamd setup` or `dreamd init` in a project folder, never in your home directory; both now refuse there.
 
 ---
 

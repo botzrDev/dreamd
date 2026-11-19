@@ -108,6 +108,9 @@ pub enum SetupError {
     /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
     /// or `pyproject.toml`); `cli.rs` maps this to exit code 2.
     NoProjectRoot,
+    /// The project root's `.agent/` would be the daemon home (DRM-101); the
+    /// message is already on stderr and nothing was written. Exit code 2.
+    DaemonHome,
     /// No TTY to prompt on and no `--yes`. Refusing beats silently accepting
     /// defaults that write files; `cli.rs` maps this to `2`.
     NotATty,
@@ -130,6 +133,7 @@ impl From<InitError> for SetupError {
     fn from(e: InitError) -> Self {
         match e {
             InitError::NoProjectRoot => Self::NoProjectRoot,
+            InitError::DaemonHome => Self::DaemonHome,
             InitError::Io(e) => Self::Io(e),
         }
     }
@@ -139,6 +143,7 @@ impl std::fmt::Display for SetupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoProjectRoot => write!(f, "no project root"),
+            Self::DaemonHome => write!(f, "the project's store would be the daemon home"),
             // Byte-identical to `ResetError::NotATty` on purpose — one refusal
             // vocabulary across commands. A test pins the pair.
             Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
@@ -211,6 +216,16 @@ pub fn run(
             return Err(SetupError::NoProjectRoot);
         }
     };
+
+    // DRM-101: before the prompt, the plan and any write.
+    if dreamd_core::layout::same_dir(&project_root.join(".agent"), req.daemon_home) {
+        writeln!(
+            err,
+            "dreamd: error \u{2014} {}",
+            init::daemon_home_refusal(&project_root, req.daemon_home)
+        )?;
+        return Err(SetupError::DaemonHome);
+    }
 
     writeln!(
         out,

@@ -355,6 +355,14 @@ Because it is destructive it asks first, like `dreamd reset workspace`: pass
 `--yes`, or answer `y` at the prompt. Without `--yes` on a non-interactive
 stdin it refuses and changes nothing.
 
+`--purge` also refuses, before the prompt and with `--yes` too, while the
+daemon home holds a project store: an `episodic/` directory in `~/.agent/`, or
+a registry entry for your home directory itself. A dreamd before 1.3.3 could
+leave one there. It exits 2, changes nothing, and points at
+[A project store in the daemon home](./troubleshooting.md#a-project-store-in-the-daemon-home),
+which says how to move that store or remove it. `dreamd doctor` and
+`dreamd status` print a `daemon_home_store:` line while it is there.
+
 Note this is not `dreamd uninstall`, which is a different verb: that one stops
 running `dreamd` processes, drops the socket, unregisters the current project,
 and clears the download cache. It asks first (`y` on a tty, or `--yes`).

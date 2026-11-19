@@ -1,6 +1,6 @@
 # dreamd-mcp
 
-**Agent memory you can trace and undo.** Every lesson cites the events it came from. `blame` shows which memories drove an answer. `forget` removes a bad memory and the lesson state built on it, with a receipt. `git revert` rolls back a whole learning cycle.
+**Shared memory across coding agents, in files you can trace and undo.** Every lesson cites the events it came from. `blame` shows which memories drove an answer. `forget` removes a bad memory and the lesson state built on it, with a receipt. `git revert` rolls back a whole learning cycle.
 
 dreamd is local-first, long-term memory for AI agents, served over MCP to Claude Code, Cursor, Cline and other MCP-aware harnesses. Memory lives in `.agent/` in your repo as JSONL and Markdown and is committed with your code (`setup` prints the commit command), so you review what agents learned the way you review code.
 
@@ -46,7 +46,7 @@ After a `forget`, `doctor --provenance` reports the removed event's old ledger e
 
 ## How agents learn
 
-Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries an `id` (`evt_` for an event, `lsn_` for a lesson) and its source harness. A learning cycle (`dreamd dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo as `dreamd: cycle YYYY-MM-DD`. That commit is skipped when a file holds a change no dream cycle wrote (a hand edit, `forget`, or `archive --force-unpin`). Appends and a cycle's own rewrites do not hold it. Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
+Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries an `id` (`evt_` for an event, `lsn_` for a lesson) and its source harness. A learning cycle (`npx -y dreamd-mcp dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo as `dreamd: cycle YYYY-MM-DD`. Nothing runs that cycle on a timer, and there is no MCP tool for it. That commit is skipped when a file holds a change no dream cycle wrote (a hand edit, `forget`, or `archive --force-unpin`). Appends and a cycle's own rewrites do not hold it. Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
 
 ## Install
 

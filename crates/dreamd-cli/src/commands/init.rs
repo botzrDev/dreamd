@@ -13,6 +13,7 @@ use dreamd_core::config::CONFIG_TEMPLATE;
 // Re-exported for `setup` / `uninstall`, which must agree with init on where
 // the project is. The walk itself lives in `layout` next to `discover`.
 pub(crate) use dreamd_core::layout::find_project_root;
+use dreamd_core::layout::same_dir;
 use dreamd_core::privacy::DR413_DISCLOSURE;
 use dreamd_core::registry::{update_registry, ProjectEntry};
 use dreamd_core::{AgentRoot, DaemonHome, DEFAULT_WORKSPACE_MD, GITIGNORE_SNIPPET};
@@ -29,6 +30,9 @@ pub enum InitError {
     /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
     /// or `pyproject.toml`); the message is already on stderr. Exit code 2.
     NoProjectRoot,
+    /// The project root's `.agent/` would be the daemon home (DRM-101); the
+    /// message is already on stderr and nothing was written. Exit code 2.
+    DaemonHome,
     /// Writing output, scaffolding the store, or reading or writing the
     /// registry failed. Exit code 1.
     Io(std::io::Error),
@@ -44,6 +48,7 @@ impl std::fmt::Display for InitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoProjectRoot => write!(f, "no project root"),
+            Self::DaemonHome => write!(f, "the project's store would be the daemon home"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -82,7 +87,9 @@ struct State {
 /// temp dir; the final rename is atomic within a single filesystem.
 ///
 /// Returns [`InitError::NoProjectRoot`] if no sentinel (`.git/`,
-/// `Cargo.toml`, etc.) is found walking up from `cwd`.
+/// `Cargo.toml`, etc.) is found walking up from `cwd`, and
+/// [`InitError::DaemonHome`], having written nothing, when the project root's
+/// `.agent/` would be the daemon home (DRM-101).
 pub fn run(
     cwd: &Path,
     daemon_home: &DaemonHome,
@@ -100,6 +107,17 @@ pub fn run(
             return Err(InitError::NoProjectRoot);
         }
     };
+
+    // DRM-101: a store at the home directory would be the daemon home. Checked
+    // before the store-exists branch, which would register it.
+    if same_dir(&project_root.join(".agent"), daemon_home.root()) {
+        writeln!(
+            err,
+            "dreamd: error \u{2014} {}",
+            daemon_home_refusal(&project_root, daemon_home.root())
+        )?;
+        return Err(InitError::DaemonHome);
+    }
 
     let agent = AgentRoot::new(&project_root);
 
@@ -159,6 +177,19 @@ pub fn run(
     }
 
     Ok(InitOutcome::Scaffolded)
+}
+
+/// Why `init` and `setup` refuse a project root whose `.agent/` would be the
+/// daemon home (DRM-101). One sentence for both, without the `dreamd: error`
+/// prefix.
+pub(crate) fn daemon_home_refusal(project_root: &Path, daemon_home: &Path) -> String {
+    format!(
+        "the project root here is {}, so its store would be the daemon home {}, which holds \
+         dreamd's registry, socket and log. Run this in a project folder below it. Nothing \
+         was written.",
+        project_root.display(),
+        daemon_home.display()
+    )
 }
 
 /// Remove the current project's entry from `~/.agent/registry.toml`.

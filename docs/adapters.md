@@ -29,8 +29,10 @@ For any MCP-capable harness:
    > First run prints a local-only privacy disclosure. `setup` prompts for harness choice when it has a TTY.
    This scaffolds `.agent/` and writes the dreamd MCP block for the harness you
    pick (`--harness claude|cursor|both|none`; `--yes` for non-interactive shells).
-   Harnesses that require an existing `.agent/` (e.g. Cline) fail with
-   `no agent root found` until this runs. `npx -y dreamd-mcp init` (or
+   Until this runs, both tools answer `this folder is not set up for dreamd`
+   and name the setup command; restart the MCP server after setup so it finds
+   the new store. `~/.agent/` is the daemon home, never a project store.
+   `npx -y dreamd-mcp init` (or
    `dreamd init`) is the scaffold-only primitive — store, no harness config.
 2. Register an MCP server whose `command` is `npx` with `args` `["-y", "dreamd-mcp"]`.
    `setup` writes exactly this block for the harnesses it targets; do it by hand

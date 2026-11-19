@@ -34,11 +34,11 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 
 ## Memory branches, provenance, and forgetting
 
-Shipped commands. Both format pages describe trees under the gitignored `.agent/.dreamd/`, outside the v0.2 `SPEC.md` contract.
+`dreamd memory` was deprecated in 1.2.0 and is removed in 2.0. Branch `.agent/` with git. The format pages describe trees under the gitignored `.agent/.dreamd/`, outside the v0.2 `SPEC.md` contract.
 
 | Document | Audience | Purpose |
 |---|---|---|
-| [branching-guide.md](./branching-guide.md) | Users | How to use `dreamd memory branch` / `checkout` / `branches` / `delete` / `diff` / `bisect` |
+| [branching-guide.md](./branching-guide.md) | Existing installs | Deprecated `dreamd memory branch` / `checkout` / `branches` / `delete` / `diff` / `bisect`. Removed in 2.0. New work uses git |
 | [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) under `.agent/.dreamd/branches/` — objects, refs, `HEAD`, the per-dream-cycle `snap-*` refs, `memory diff` and `memory bisect` |
 | [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) under `.agent/.dreamd/provenance/`. Edge recording, the read-only `dreamd doctor --provenance` check, and `dreamd forget` (with its `forget-receipt/1.0` file) are implemented; the signed proof and a standalone verifier are **not** |
 
@@ -53,7 +53,7 @@ Shipped commands. Both format pages describe trees under the gitignored `.agent/
 | Document | Audience | Purpose |
 |---|---|---|
 | [marketing.md](./marketing.md) | Evaluators, press | Product story, positioning, the "moment it earns its name" demo |
-| [compared.md](./compared.md) | Evaluators, HN | Comparison vs Mem0 / Letta Code / MCP-ref / Cline Memory Bank (dreamd column re-checked for 1.2.1; competitor cells dated in the table) |
+| [compared.md](./compared.md) | Evaluators, HN | Comparison vs Mem0 / Letta Code / MCP-ref / Cline Memory Bank (dreamd column re-checked for 1.3.2; competitor cells and star counts dated 2026-07-14) |
 | [../ROADMAP.md](../ROADMAP.md) | Evaluators, contributors | Direction: what shipped and what is next, without dates |
 
 ## Architecture deep-dives

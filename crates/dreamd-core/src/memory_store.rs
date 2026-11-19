@@ -24,6 +24,11 @@
 //! Wire shapes stay single-sited in [`crate::ingress`]: the recall envelope is
 //! [`RecallIngress::to_json`], the learn body is [`LearnResponse`], and the
 //! default `k` is [`crate::ingress::DEFAULT_RECALL_K`].
+//!
+//! A third store answers in a folder with no project store: on Unix,
+//! `dreamd mcp` serves [`NotSetUpStore`] there in daemon and in-process mode
+//! alike, and both tools answer [`not_set_up_message`] (DRM-101). It reads
+//! nothing, writes nothing and calls no daemon.
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -338,6 +343,51 @@ impl MemoryStore for InProcessStore {
             })?;
 
         Ok(LearnResponse::from_append_outcome(&outcome))
+    }
+}
+
+// No project store (DRM-101)
+
+/// What both MCP tools answer in a folder with no project store (DRM-101).
+/// `start` is where discovery began; `launcher` picks the setup command.
+pub fn not_set_up_message(start: &std::path::Path, launcher: crate::launcher::Launcher) -> String {
+    format!(
+        "this folder is not set up for dreamd: there is no .agent/ store in {} or a folder \
+         above it. Run `{}` in the project folder, then restart this MCP server.",
+        start.display(),
+        launcher.command("setup")
+    )
+}
+
+/// The store a Unix `dreamd mcp` serves in a folder with no project store,
+/// in daemon and in-process mode alike (DRM-101). `search_nodes` and
+/// `append_node` both answer [`not_set_up_message`] as `InvalidRequest`
+/// (`-32600`): the arguments are fine, and the project needs setting up.
+/// Nothing is written and no daemon is called.
+#[cfg(unix)]
+pub struct NotSetUpStore {
+    message: String,
+}
+
+#[cfg(unix)]
+impl NotSetUpStore {
+    /// The store for a `dreamd mcp` whose discovery started at `start`.
+    pub fn new(start: &Path, launcher: crate::launcher::Launcher) -> Self {
+        Self {
+            message: not_set_up_message(start, launcher),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoryStore for NotSetUpStore {
+    async fn recall_json(&self, _query: &str, _k: u32) -> Result<String, MemoryStoreError> {
+        Err(MemoryStoreError::invalid(self.message.clone()))
+    }
+
+    async fn append(&self, _req: AppendRequest) -> Result<LearnResponse, MemoryStoreError> {
+        Err(MemoryStoreError::invalid(self.message.clone()))
     }
 }
 
@@ -683,6 +733,51 @@ mod tests {
         assert_eq!(resp.timestamp, "2026-09-24T00:00:00+00:00");
         assert!(!resp.deduplicated);
         assert_eq!(*stub.seen_append.lock().unwrap(), Some(req));
+    }
+
+    /// DRM-101 test 5: with no project store, both tools answer the exact
+    /// not-set-up message as `InvalidRequest`, and the command it names follows
+    /// the launcher.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn not_set_up_store_refuses_both_tools() {
+        use crate::launcher::Launcher;
+        let start = Path::new("/work/r02");
+        let expected = "this folder is not set up for dreamd: there is no .agent/ store in \
+                        /work/r02 or a folder above it. Run `dreamd setup` in the project \
+                        folder, then restart this MCP server.";
+        let store = NotSetUpStore::new(start, Launcher::Binary);
+        assert_eq!(
+            store.recall_json("rust tokio", 5).await.unwrap_err(),
+            MemoryStoreError::InvalidRequest(expected.to_string())
+        );
+        let req = AppendRequest {
+            content: "a learning".to_string(),
+            source_harness: "test-harness".to_string(),
+            skill_action: "rust::test".to_string(),
+            pain: None,
+            importance: None,
+            client_dedup_key: None,
+            pinned: false,
+        };
+        assert_eq!(
+            store.append(req.clone()).await.unwrap_err(),
+            MemoryStoreError::InvalidRequest(expected.to_string())
+        );
+
+        let npx = NotSetUpStore::new(start, Launcher::Npx);
+        for err in [
+            npx.recall_json("q", 1).await.unwrap_err(),
+            npx.append(req).await.unwrap_err(),
+        ] {
+            let MemoryStoreError::InvalidRequest(msg) = err else {
+                panic!("not InvalidRequest: {err:?}");
+            };
+            assert!(
+                msg.contains("Run `npx -y dreamd-mcp setup` in the project folder"),
+                "{msg}"
+            );
+        }
     }
 
     // ── BZR-1301: daemon status map and the client's checks ─────────────────

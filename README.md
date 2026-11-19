@@ -7,9 +7,9 @@
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
-**Agent memory you can audit. When a memory goes bad, trace it to its source, see what it fed, and remove it.**
+**Local-first shared memory across coding agents, in files you can audit.** Claude Code, Cursor, and Cline read and write one `.agent/` folder in your repo. When a memory goes bad, trace it to its source, see what it fed, and remove it.
 
-dreamd is local-first, long-term memory for AI agents. Every memory is a line in a file in your repo, every lesson your agents learn cites the events it came from, and each dream cycle commits its lessons to git. When an agent acts on something wrong, you can find the memory that caused it, see which lessons it fed, and take it out, with a receipt.
+Every memory is a line in a file. Every lesson cites the events it came from, and each dream cycle commits its lessons to git. When an agent acts on something wrong, you can find the memory that caused it, see which lessons it fed, and take it out, with a receipt.
 
 ```bash
 npx -y dreamd-mcp setup   # scaffold .agent/ and wire your harness
@@ -20,56 +20,7 @@ npx -y dreamd-mcp         # MCP server (stdio): what the harness spawns
 
 Recorded live on dreamd 1.2.0, sped up 1.5x: `blame` finds the event behind a bad answer, `forget` removes it with a receipt, and the same query comes back without it. Tape: [docs/assets/blame-forget.tape](docs/assets/blame-forget.tape).
 
-Works today with Claude Code, Cursor, Cline and other MCP-aware harnesses. Self-hosted, single binary, Apache-2.0 core.
-
-If you want agent memory you can trace and undo, star the repo to follow releases. When a memory goes wrong, an issue with the `blame` output helps us fix it.
-
----
-
-## Why auditable memory
-
-Memory is the layer of an agent stack you usually can't see into. A prompt can be read and a model can be swapped, but when memory goes wrong there is rarely a way to tell what the agent believed, where that belief came from, or what else it touched.
-
-That matters more now that memory is an attack surface. The OWASP Top 10 for Agentic Applications lists **memory and context poisoning (ASI06)**: an attacker, a bad tool result or a plain mistake plants a "fact" that the agent keeps acting on in later sessions. The defenses OWASP points to start with knowing the source of every memory and being able to remove one cleanly ([OWASP agentic top 10](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026)).
-
-dreamd is built for that response:
-
-| You need to | dreamd gives you |
-|---|---|
-| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
-| Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
-| Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
-| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state that names it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
-| Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
-| Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
-
-**What dreamd does not do.** It does not detect or block poisoned writes, and it does not filter injected lesson content ([SECURITY.md](./SECURITY.md)). `source_harness` is asserted by the caller, not verified. The provenance ledger and the forget receipt are unsigned, and there are no trust labels yet. dreamd makes bad memory traceable and removable; it does not make it impossible. See [Roadmap](#roadmap) for what comes next.
-
----
-
-## The audit loop in four commands
-
-Say an agent keeps repeating advice you know is wrong.
-
-```bash
-# 1. Find the memories behind it
-npx -y dreamd-mcp blame "deploy without tests" --explain
-
-# 2. Check the lesson it came from and what that lesson cites
-cat .agent/semantic/LESSONS.md
-npx -y dreamd-mcp doctor --provenance
-
-# 3. Preview, then remove the bad event (stop the daemon, `npx -y dreamd-mcp watch`, first; forget refuses while it runs)
-npx -y dreamd-mcp forget evt_... --dry-run
-npx -y dreamd-mcp forget evt_... --proof forget-receipt.json
-
-# 4. Review the change like code
-git diff .agent/
-```
-
-After a `forget`, `doctor --provenance` reports the removed event's old ledger edges as orphans and exits 1. That is expected: the ledger is append-only, so it keeps the record that the event once existed.
-
-To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit with the daemon stopped, then run `npx -y dreamd-mcp doctor --repair` to rebuild the recall index.
+Self-hosted, single binary, Apache-2.0. Other MCP-aware harnesses use the same two tools.
 
 ---
 
@@ -81,6 +32,8 @@ To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit wit
 npx -y dreamd-mcp setup   # scaffold .agent/ and write the harness MCP config
 npx -y dreamd-mcp         # MCP server (stdio): your harness spawns this
 ```
+
+The npm package downloads a prebuilt binary for Linux x86_64 and macOS. On native Windows the shim exits 1 and names WSL2. A `dreamd.exe` built from source, or taken from a GitHub release asset, runs learn, the dream cycle, and the Tantivy index there. See [docs/windows.md](./docs/windows.md).
 
 stdio is the default transport. `dreamd mcp --bind 127.0.0.1:<port>` is an opt-in Streamable HTTP server at `/mcp`. It is unauthenticated, and it is only in source builds with `--features mcp-http`. See [docs/mcp-transports.md](./docs/mcp-transports.md).
 
@@ -137,9 +90,56 @@ Recorded live, sped up 1.5x: Claude Code writes the lesson, OpenCode reads it ba
 
 ---
 
+## Why auditable memory
+
+Memory is the layer of an agent stack you usually can't see into. A prompt can be read and a model can be swapped, but when memory goes wrong there is rarely a way to tell what the agent believed, where that belief came from, or what else it touched.
+
+That matters more now that memory is an attack surface. The OWASP Top 10 for Agentic Applications lists **memory and context poisoning (ASI06)**: an attacker, a bad tool result or a plain mistake plants a "fact" that the agent keeps acting on in later sessions. The defenses OWASP points to start with knowing the source of every memory and being able to remove one cleanly ([OWASP agentic top 10](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026)).
+
+dreamd is built for that response:
+
+| You need to | dreamd gives you |
+|---|---|
+| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
+| Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
+| Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
+| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state that names it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
+| Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
+| Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
+
+**What dreamd does not do.** It does not detect or block poisoned writes, and it does not filter injected lesson content ([SECURITY.md](./SECURITY.md)). `source_harness` is asserted by the caller, not verified. The provenance ledger and the forget receipt are unsigned, and there are no trust labels yet. dreamd makes bad memory traceable and removable; it does not make it impossible. See [Roadmap](#roadmap) for what comes next.
+
+---
+
+## The audit loop in four commands
+
+Say an agent keeps repeating advice you know is wrong.
+
+```bash
+# 1. Find the memories behind it
+npx -y dreamd-mcp blame "deploy without tests" --explain
+
+# 2. Check the lesson it came from and what that lesson cites
+cat .agent/semantic/LESSONS.md
+npx -y dreamd-mcp doctor --provenance
+
+# 3. Preview, then remove the bad event (stop the daemon, `npx -y dreamd-mcp watch`, first; forget refuses while it runs)
+npx -y dreamd-mcp forget evt_... --dry-run
+npx -y dreamd-mcp forget evt_... --proof forget-receipt.json
+
+# 4. Review the change like code
+git diff .agent/
+```
+
+After a `forget`, `doctor --provenance` reports the removed event's old ledger edges as orphans and exits 1. That is expected: the ledger is append-only, so it keeps the record that the event once existed.
+
+To undo a whole dream cycle instead, `git revert` its `dreamd: cycle` commit with the daemon stopped, then run `npx -y dreamd-mcp doctor --repair` to rebuild the recall index.
+
+---
+
 ## How agents learn
 
-Agents write episodes (what happened, how painful it was, how important) through MCP `append_node`. The **dream cycle** clusters episodes by `skill_action` and promotes a recurring pattern into a lesson in `LESSONS.md`. With an API key it composes the lesson with an LLM under a $0.10 per-cycle spend cap; without one it writes a deterministic lesson and makes no network call. Either way the lesson cites the events it came from, and every output is staged and committed through one redo WAL, so a crash leaves the store as it was or rolls the cycle forward.
+Agents write episodes (what happened, how painful it was, how important) through MCP `append_node`. The **dream cycle** clusters episodes by `skill_action` and promotes a recurring pattern into a lesson in `LESSONS.md`. You run it with `npx -y dreamd-mcp dream`. Nothing runs it on a timer, and there is no MCP tool for it. With an API key it composes the lesson with an LLM under a $0.10 per-cycle spend cap; without one it writes a deterministic lesson and makes no network call. Either way the lesson cites the events it came from, and every output is staged and committed through one redo WAL, so a crash leaves the store as it was or rolls the cycle forward.
 
 Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Recall is deliberately lexical; vector recall is not shipped ([docs/vectors.md](./docs/vectors.md)). Formula: [docs/salience.md](./docs/salience.md).
 
@@ -221,7 +221,7 @@ Full notes: [CHANGELOG.md](./CHANGELOG.md).
 
 **Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand; durable appends should go through the daemon or MCP so there is one writer.
 
-**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` asks for `y` on a tty (`--yes` in a script) before it stops processes and clears caches. `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store ([docs/install.md](./docs/install.md)).
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` asks for `y` on a tty (`--yes` in a script) before it stops processes and clears caches. `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store; it refuses while `~/.agent/` holds one, which a dreamd before 1.3.3 could leave there ([docs/install.md](./docs/install.md)).
 
 **Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt npm binary for Windows. Details: [docs/windows.md](./docs/windows.md).
 
@@ -281,7 +281,7 @@ The prebuilt Linux x86_64 binary is one static build with no glibc requirement, 
 
 ## Support dreamd
 
-dreamd is open source under Apache-2.0 and built by a small team. Sponsorship funds its core maintenance. You can sponsor dreamd on:
+dreamd is open source under Apache-2.0 and built by a small team. A star on the repo helps others find it. When a memory goes wrong, an issue with the `blame` output helps us fix it. Sponsorship funds core maintenance. You can sponsor dreamd on:
 
 - [GitHub Sponsors](https://github.com/sponsors/botzrDev)
 - [Patreon](https://www.patreon.com/c/dreamd_dev)

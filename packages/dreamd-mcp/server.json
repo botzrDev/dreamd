@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.botzrDev/dreamd",
-  "description": "Auditable agent memory: lessons cite their sources, and bad memories can be traced and removed.",
+  "description": "Shared memory for Claude Code, Cursor, and Cline, in files you can audit. Lessons cite their sources, and a bad memory can be traced and removed.",
   "repository": {
     "url": "https://github.com/botzrDev/dreamd",
     "source": "github"

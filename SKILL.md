@@ -137,7 +137,7 @@ append_node({
 
 ## The dream cycle
 
-dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. Clusters with ≥ 3 events in a 7- or 30-day window are promotion candidates; each cycle writes **one** lesson — the highest-salience exemplar from the top cluster. Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install).
+dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. Clusters with ≥ 3 events in a 7- or 30-day window are promotion candidates; each cycle writes **one** lesson — the highest-salience exemplar from the top cluster. Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install). Nothing runs it for you. There is no MCP tool for it, and `dream_cycle_mode = "auto"` makes `watch` fail.
 
 You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Hand-edits are visible until the next dream cycle, which replaces the file wholesale. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
 
@@ -177,6 +177,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 | No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |
 | Writing vague content                                   | One concrete fact per node; vague content scores low on recall                      |
 | Not calling `search_nodes` at session start             | You will re-discover things already known; call it first                            |
+| Waiting for a lesson after `append_node`               | Lessons are written by `npx -y dreamd-mcp dream`, which does not run on its own     |
 
 ---
 

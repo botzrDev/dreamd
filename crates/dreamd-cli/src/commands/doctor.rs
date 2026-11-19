@@ -31,6 +31,10 @@
 //! `memory_in_git:` says whether git has a commit of the episodic log, and
 //! warns while it does not and the log holds events (DRM-100).
 //!
+//! `daemon_home_store:` warns, and fails the run, while the daemon home
+//! (`~/.agent/`) holds a project store, which discovery skips: it says how to
+//! move it, or that it can be removed when its log is empty (DRM-101).
+//!
 //! `--cluster-health` recomputes the clusters the dream cycle would promote
 //! and compares them against the recurrence sidecar it last wrote.
 //!
@@ -343,6 +347,7 @@ pub fn run(
     all_ok &= check_memory_in_git(agent_root, events, out)?;
 
     all_ok &= check_registry(registry, out)?;
+    all_ok &= check_daemon_home_store(registry, out)?;
     all_ok &= check_schema_index(agent_root, out)?;
     all_ok &= check_orphaned_uds(socket, out)?;
     #[cfg(unix)]
@@ -551,6 +556,22 @@ fn check_future_timestamps(
         lines_head(&flagged)
     )?;
     Ok(false)
+}
+
+/// Warn while the daemon home holds a project store (DRM-101). `registry` is
+/// [`DaemonHome::registry_toml`](dreamd_core::layout::DaemonHome::registry_toml),
+/// so its parent is the daemon home. Prints nothing when it holds none.
+fn check_daemon_home_store(registry: Option<&Path>, out: &mut impl Write) -> io::Result<bool> {
+    match registry
+        .and_then(Path::parent)
+        .and_then(super::daemon_home_store::report_line)
+    {
+        Some(line) => {
+            writeln!(out, "{line}")?;
+            Ok(false)
+        }
+        None => Ok(true),
+    }
 }
 
 /// Report a daemon-home `registry.toml` that does not parse as a [`Registry`],

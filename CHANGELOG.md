@@ -6,8 +6,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **The public docs lead with install, and they stop teaching `dreamd memory` as the way to branch.** README's install and quick start now come before the audit essay, and the opening names shared memory and the audit loop together. The npm install note says which platforms have a prebuilt binary. `llms.txt` and `llms-full.txt` match that pitch, and `llms-full.txt` no longer says `recall`, `score`, `status`, `archive`, and `migrate` need a separate binary (the shim has forwarded them since 1.2.1). GUIDE's walkthrough branches `.agent/` with git. `SKILL.md` says the dream cycle runs only when invoked. The npm package description, the MCP registry description, and the Claude plugin description name both jobs. The memory-branch pages stay, marked deprecated. `docs/compared.md`'s dreamd column is re-checked for 1.3.2; its star counts stay dated 2026-07-14.
+
 ### Fixed
 
+- **On native Windows, `npx -y dreamd-mcp` no longer says the dream cycle and the Tantivy index are Unix-only.** They run in a `dreamd.exe` built from source or taken from a release `windows-x86_64.tar.gz`. The shim still exits 1 and names WSL2 for the npx path. Prebuilt npm binaries stay Linux x86_64 and macOS.
 - **`git clean -fd` can no longer turn into deleted memory unnoticed** (DRM-100). `.agent/` is meant to be committed, but nothing said so, so the episodic log stayed untracked and `git clean -fd` deleted it. The index still held the events. Doctor called that ordinary drift and advised `dreamd doctor --repair`, which rebuilt the index from the empty log and deleted the last copy. Now:
   - while git has no commit of the episodic log, `dreamd setup`'s card prints the command that commits `.agent/` and `.gitignore`, and README's quick start shows it;
   - `dreamd doctor` and `dreamd status` print `memory_in_git:`. Doctor warns, and fails the run, while git has no commit of a log that holds events. A repo that ignores `.agent/` is reported as `ignored`;
@@ -15,6 +20,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `dreamd doctor --repair` refuses in that case, and `--allow-empty-log` rebuilds anyway.
 
   Library: new `autobiography::{log_git_state, LogGitState, commit_store_command}`.
+- **The daemon home is never a project store** (DRM-101). `~/.agent/` holds dreamd's registry, socket and log, but the walk up from a folder took the first `.agent/` it found. So every folder under your home with no store of its own bound to your home directory: an in-process `append_node` wrote `~/.agent/episodic/`, a literal `--project-root "~/x"` started in your home did the same, and `dreamd init` or `setup` in a git repo at your home directory registered the daemon home as a project. Now:
+  - the walk skips an ancestor whose `.agent/` is the daemon home, comparing real directories, so a folder under your home with no store finds none;
+  - `dreamd init` and `dreamd setup` exit 2 and write nothing when the project root's `.agent/` would be the daemon home. `init --uninstall-project` still runs there, so an old `$HOME` entry can be removed;
+  - `dreamd mcp` in a folder with no store answers `search_nodes` and `append_node` alike with `-32600`: the folder is not set up, run `dreamd setup` (or `npx -y dreamd-mcp setup`) in the project folder and restart the MCP server. It writes nothing, and in daemon mode it no longer calls the daemon with the working directory as `X-Agent-Root`. This replaces `coordinator unavailable: no agent root found` and the empty `{"results":[]}`;
+  - `dreamd doctor` and `dreamd status` print `daemon_home_store:` while `~/.agent/` holds a project store, with the event count and how to move it (or, with no events, what to remove). Doctor fails its run on it, and prints the line on stderr when it finds no store at all. `docs/troubleshooting.md` has the steps;
+  - `dreamd service uninstall --purge` refuses, before its prompt and with `--yes`, while the daemon home holds a project store or is a registered project's store.
+
+  A `dreamd service` unit installed from a folder whose only store was the daemon home ran `watch` on it. That `watch` now finds no store and exits 2; reinstall the service from the project.
+
+  Library: new `layout::same_dir`, `AgentRoot::discover_with`, `DaemonHome::{stray_episodic_dir, stray_episodic_jsonl}`, `memory_store::{NotSetUpStore, not_set_up_message}` and `MemoryMcpServer::not_set_up`.
 
 ## [1.3.2] - 2026-11-17
 

@@ -247,7 +247,7 @@ ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 
 ## 8. Inspect and undo
 
-These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the npm shim (1.0.0 and later); `recall` and `score` are forwarded from 1.2.1.
+These need dreamd 1.0.0 or later. `blame`, `salience-drift`, and `forget` are forwarded by the npm shim (1.0.0 and later); `recall` and `score` are forwarded from 1.2.1.
 
 See why a query ranked the way it did:
 
@@ -258,15 +258,7 @@ dreamd blame "axum error"              # id, timestamp, skill_action, content, b
 
 After section 4 the lesson shows up as its own row with an `lsn_evt_…` id and layer `semantic`, next to the episodic events it was promoted from.
 
-Branch the memory files before an experiment, then compare. The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0; `.agent/` is plain files, so git can do the same job:
-
-```bash
-dreamd memory branch before-experiment   # snapshots the live files, prints the object id
-dreamd memory branches                   # `*` marks the current branch; snap-* are the automatic ones
-dreamd memory diff <older-ref> <newer-ref>
-```
-
-`memory checkout <name>` replaces the live memory files with that snapshot. It and `memory bisect` refuse while `dreamd watch` is running, so stop the daemon first. Checkout does not rebuild the recall index; `dreamd recall` can keep returning the store you left until `dreamd doctor --repair`. Full walkthrough: [docs/branching-guide.md](./docs/branching-guide.md). Bisect is in that guide too; there is no `memory bisect reset`.
+To keep a copy of memory before an experiment, commit `.agent/` and branch it with git. The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0. They still run. [docs/branching-guide.md](./docs/branching-guide.md) describes them for an install that already uses them.
 
 Remove one event (stop the daemon first — `forget` refuses while it is running):
 

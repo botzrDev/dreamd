@@ -11,7 +11,7 @@ cd ~/your-project
 npx -y dreamd-mcp init
 ```
 
-Cline must open a project that already has `.agent/`. Without it, `append_node` errors with `coordinator unavailable: no agent root found`.
+Cline must open a project that already has `.agent/`. Without it, `search_nodes` and `append_node` both answer `this folder is not set up for dreamd` and name the setup command. `~/.agent/` is the daemon home and does not count as a project store. Restart the MCP server in Cline after setup.
 
 ## 2. MCP config
 

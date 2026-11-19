@@ -41,7 +41,8 @@ BM25 × salience.
 - **Memory branches** — `dreamd memory branch | checkout | branches | delete |
   diff | bisect` over snapshots stored under `.agent/.dreamd/branches/`; every
   dream cycle also leaves a `snap-*` snapshot
-  ([`docs/branching-guide.md`](docs/branching-guide.md)).
+  ([`docs/branching-guide.md`](docs/branching-guide.md)). Deprecated in 1.2.0
+  and removed in 2.0. Branch `.agent/` with git.
 - **Provenance ledger** — derivation edges recorded under
   `.agent/.dreamd/provenance/`, checked read-only by `dreamd doctor --provenance`.
   Unsigned; no stored root; records derivation, not trust

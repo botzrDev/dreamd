@@ -4,6 +4,8 @@
 //! the project resolved from `$CWD` and whether it is registered with the
 //! daemon, the last dream cycle recorded in per-project state, whether git has
 //! a commit of the episodic log (DRM-100), and the tail of the daemon log.
+//! While the daemon home holds a project store, which discovery skips, a
+//! `daemon_home_store:` line before the log tail says so (DRM-101).
 //!
 //! Liveness is always a bounded *connect* probe, never file presence, so a stale
 //! address file left behind by a `SIGKILL`ed daemon reports `not running`
@@ -138,6 +140,15 @@ pub fn run(
             writeln!(out, "last_dream_cycle: (no store)")?;
             writeln!(out, "memory_in_git: (no store)")?;
         }
+    }
+
+    // DRM-101: a project store in the daemon home, which discovery skips. The
+    // registry path is `DaemonHome::registry_toml`, so its parent is the home.
+    if let Some(line) = registry_path
+        .and_then(Path::parent)
+        .and_then(crate::commands::daemon_home_store::report_line)
+    {
+        writeln!(out, "{line}")?;
     }
 
     // Tail of the daemon log, pre-read by the caller (see `read_log_tail_n`);

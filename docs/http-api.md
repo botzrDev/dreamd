@@ -612,6 +612,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32602` | `query exceeds 16384 bytes; pass a shorter query` | `search_nodes`' `query` is over 16384 bytes |
 | `-32602` | `recall failed: …` | The query parser rejected `query` (an unbalanced `"` or `(`, or a `skill_action` pasted as the query). Both modes give the same text |
 | `-32602` | the daemon's `error` string, or `daemon rejected the request (HTTP 400)` | Daemon mode only: any other `400` from the daemon |
+| `-32600` | `` this folder is not set up for dreamd: there is no .agent/ store in <folder> or a folder above it. Run `dreamd setup` in the project folder, then restart this MCP server. `` | Both tools, in both modes: no project store at or above the folder `dreamd mcp` started in (`--project-root` when given). `~/.agent/` is the daemon home and never counts as one. Nothing is written and no daemon is called. Under the npm shim the command is `npx -y dreamd-mcp setup`. The server keeps this answer until the harness restarts it |
 | `-32600` | `project not registered with daemon; run dreamd init` | Daemon mode only: the project root is not in `~/.agent/registry.toml` |
 | `-32600` | `recall failed: …` | In-process only: the search failed for a reason other than the query |
 | `-32600` | `index open failed: …` | In-process only: the index could not be opened |
@@ -620,7 +621,6 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |
 | `-32603` | `` version mismatch: client …, daemon …. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version. `` | Daemon mode only: the daemon runs another dreamd version. `daemon unknown` in place of a version means it sent none. Under the npm shim the fix names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, then a harness reload |
-| `-32603` | `coordinator unavailable: no agent root found` | In-process only: `append_node` with no `.agent/` store at or above the working directory. Run `dreamd init` |
 
 ---
 

@@ -300,8 +300,8 @@ async function main() {
     if (process.platform === 'win32') {
       process.stderr.write(
         `This npm package has no Windows binary.\n` +
-          `A dreamd.exe built from source, or taken from a GitHub release windows-x86_64.tar.gz when that release has one, can watch and learn over loopback.\n` +
-          `The dream cycle and the Tantivy index stay Unix-only. For the full product, use WSL2 or a Linux/macOS host.\n` +
+          `A dreamd.exe built from source, or taken from a GitHub release windows-x86_64.tar.gz when that release has one, runs learn, the dream cycle, and the Tantivy index over loopback. Start dreamd watch before dreamd mcp.\n` +
+          `For npx -y dreamd-mcp, use WSL2 or a Linux/macOS host.\n` +
           `Prebuilt shim binaries ship for linux-x64, darwin-x64, and darwin-arm64 only.\n`
       );
     } else {

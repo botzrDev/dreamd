@@ -4,6 +4,10 @@ This file is read by Claude Code, Cursor, Cline, Codex, and other MCP-aware codi
 agents when working in this repository. It describes what this project builds, how to
 navigate and work in it, and the conventions that govern the codebase.
 
+An agent deciding whether to install dreamd in some other project should read
+`README.md` and `SKILL.md` and stop here. This file is the manual for changing
+this repository.
+
 The release record is `CHANGELOG.md`. The version is `Cargo.toml`. Ticket history
 lives in the tracker, not here.
 
@@ -49,8 +53,6 @@ CONTRIBUTING.md            Dev setup, PR workflow, DCO sign-off.
 SECURITY.md                Threat model and disclosure policy.
 CHANGELOG.md               What shipped, by version.
 docs/                      Operator and HTTP docs. `docs/windows.md` for Windows.
-assignments/               Ticket specs (`<id>.v2.md`), written against the
-                           live tree. Not a substitute for this file.
 ```
 
 `dreamd --help` is the command list. `ARCHITECTURE.md` is the map of the
@@ -224,8 +226,8 @@ slashes are then rejected.
 
 Recall is Tantivy BM25 × salience, including the `LESSONS.md` document layer.
 Shipped with that: the dream cycle (deterministic, and opt-in LLM with a
-deterministic fallback), forget, memory branches, the provenance ledger, and
-`dreamd service` on Linux, macOS, and Windows.
+deterministic fallback), forget, the provenance ledger, and `dreamd service`
+on Linux, macOS, and Windows.
 
 Deprecated since 1.2.0 and removed in 2.0 (`commands/deprecation.rs`): every
 `dreamd memory` subcommand (`branch`, `checkout`, `branches`, `delete`, `diff`,

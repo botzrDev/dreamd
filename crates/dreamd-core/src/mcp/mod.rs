@@ -13,6 +13,10 @@
 //!   2. If the daemon is not running, fall back to an in-process MCP server
 //!      that answers tool calls directly ([`InProcessStore`]).
 //!
+//! Before either, a folder with no project store gets
+//! [`NotSetUpStore`]: both tools answer
+//! that the folder is not set up, and no daemon is called (DRM-101).
+//!
 //! Both paths expose identical tools: `search_nodes` performs recall (WEG-78)
 //! and `append_node` writes the learning durably (WEG-79).
 //!
@@ -49,7 +53,7 @@ use tokio::sync::mpsc;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::ingress::DEFAULT_RECALL_K;
 #[cfg(unix)]
-use crate::memory_store::{new_index_map, PinnedIndex, SharedIndexMap};
+use crate::memory_store::{new_index_map, NotSetUpStore, PinnedIndex, SharedIndexMap};
 use crate::memory_store::{
     AppendRequest, DaemonStore, InProcessStore, MemoryStoreError, SharedMemoryStore,
 };
@@ -333,6 +337,23 @@ impl MemoryMcpServer {
         }
     }
 
+    /// A server for a folder with no project store: both tools answer that
+    /// the folder is not set up and name the setup command (DRM-101),
+    /// for this process's launcher. Nothing is written and no daemon is
+    /// called. `start` is where discovery began.
+    #[cfg(unix)]
+    pub fn not_set_up(start: &Path) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            store: Arc::new(NotSetUpStore::new(
+                start,
+                crate::launcher::Launcher::from_env(),
+            )),
+            #[cfg(test)]
+            index_map: new_index_map(),
+        }
+    }
+
     /// Create a daemon-backed server off Unix: tool calls are proxied to the
     /// running daemon over loopback TCP, authenticated with `token`
     /// ([`DaemonStore::tcp`], AILAB-192). Mirrors `Self::with_remote`;
@@ -516,6 +537,12 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 
 /// Start the MCP server process.
 ///
+/// Not set up (DRM-101): if no project store is found from `cwd` upward (the
+/// daemon home never counts), serve [`MemoryMcpServer::not_set_up`] in both
+/// modes. Both tools answer that the folder is not set up, nothing is written,
+/// and the daemon socket is never connected. `DREAMD_SOCK` is still checked
+/// first, so a bad one fails the start in every folder.
+///
 /// Daemon proxy ([`DaemonStore::uds`]): if the daemon socket is
 /// reachable, serve the MCP tool surface over stdio backed by an HTTP-over-UDS
 /// client to the daemon ([`MemoryMcpServer::with_remote`]) and return when the
@@ -544,7 +571,7 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 /// stdio transport described above. `Some` binds through `bind_listen`
 /// *before* anything else — no disclosure, no socket probe, no Tantivy — so a
 /// refused address is [`McpRunError::Bind`] with nothing opened; then the same
-/// choice (daemon store, in-process store, or a store with no project) is
+/// choice (daemon store, in-process store, or the not-set-up store) is
 /// served over Streamable HTTP
 /// (`http::serve_streamable_http`) until Ctrl-C or SIGTERM, not stdin EOF. In a
 /// build without the `mcp-http` feature `Some` is
@@ -553,14 +580,27 @@ fn resolve_sock_path() -> Result<PathBuf, McpRunError> {
 pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(), McpRunError> {
     let transport = Transport::bind(listen).await?;
 
-    // Emit privacy disclosure to stderr if no .agent/ store is found.
-    // This is the "first run" signal for MCP harness users.
-    if AgentRoot::discover(cwd).is_err() {
+    // One discovery decides the store; the daemon home never counts (DRM-101).
+    // With no store, the privacy disclosure is the "first run" signal for MCP
+    // harness users.
+    let found = AgentRoot::discover(cwd);
+    if found.is_err() {
         eprintln!("{DR413_DISCLOSURE}");
     }
 
-    // Resolve daemon socket path.
+    // Resolve daemon socket path. A bad `DREAMD_SOCK` fails the start with or
+    // without a store.
     let sock_path = resolve_sock_path()?;
+
+    // No store: both tools answer that the folder is not set up, in daemon
+    // mode too. Nothing is written and no daemon is called (DRM-101).
+    let Ok(root) = found else {
+        eprintln!(
+            "dreamd mcp: no .agent/ store in {} or a folder above it — answering \"not set up\"",
+            cwd.display()
+        );
+        return transport.serve(MemoryMcpServer::not_set_up(cwd)).await;
+    };
 
     // Daemon proxy: if reachable over UDS, serve MCP backed by the daemon
     // store.
@@ -573,19 +613,15 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
             // the whole session (BZR-1534).
             drop(probe);
 
-            // Derive the X-Agent-Root header from
-            // the discovered project root, canonicalized to match
-            // `RegistryCache::resolve`'s server-side lookup (registry roots are
-            // stored canonicalized — see registry.rs). No `.agent/` in ancestry
-            // → send the cwd; proxied calls will 404, which is the correct
-            // "not registered" signal.
-            let agent_root_header: String = match AgentRoot::discover(cwd) {
-                Ok(root) => std::fs::canonicalize(root.project_root())
-                    .unwrap_or_else(|_| root.project_root().to_path_buf())
-                    .to_string_lossy()
-                    .into_owned(),
-                Err(_) => cwd.to_string_lossy().into_owned(),
-            };
+            // Derive the X-Agent-Root header from the discovered project
+            // root, canonicalized to match `RegistryCache::resolve`'s
+            // server-side lookup (registry roots are stored canonicalized —
+            // see registry.rs). A folder with no store never gets here
+            // (DRM-101).
+            let agent_root_header: String = std::fs::canonicalize(root.project_root())
+                .unwrap_or_else(|_| root.project_root().to_path_buf())
+                .to_string_lossy()
+                .into_owned();
             eprintln!(
                 "dreamd mcp: daemon reachable at {} — serving Remote (daemon proxy), agent root: {agent_root_header}",
                 sock_path.display()
@@ -603,31 +639,25 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
         }
     }
 
-    // In-process MCP server over the chosen transport.
-    // When an agent root is found, open the project's runtime the way
-    // `run_watch` boots its project: the project writer lock (which recovers a
-    // crashed cycle), one Tantivy handle for live append indexing and
-    // search_nodes reuse (WEG-252), and a coordinator wired to it so
-    // append_node dispatches durably. The runtime outlives the serve call and
-    // is shut down after the transport returns (stdio: svc.waiting(); HTTP:
-    // the shutdown signal). A project another dreamd writes is refused here.
-    match AgentRoot::discover(cwd) {
-        Ok(root) => {
-            let runtime = ProjectRuntime::open(&root, WriterKind::Mcp)
-                .map_err(|e| McpRunError::Service(e.to_string()))?;
-            let server = MemoryMcpServer::with_coordinator_and_index(
-                root,
-                runtime.supervisor(),
-                Arc::clone(runtime.index()),
-            );
-            let served = transport.serve(server).await;
-            runtime.shutdown().await;
-            served?;
-        }
-        Err(_) => {
-            transport.serve(MemoryMcpServer::new()).await?;
-        }
-    }
+    // In-process MCP server over the chosen transport, on the store found
+    // above (a folder with no store was answered "not set up" before the
+    // probe, DRM-101). Open the project's runtime the way `run_watch` boots
+    // its project: the project writer lock (which recovers a crashed cycle),
+    // one Tantivy handle for live append indexing and search_nodes reuse
+    // (WEG-252), and a coordinator wired to it so append_node dispatches
+    // durably. The runtime outlives the serve call and is shut down after the
+    // transport returns (stdio: svc.waiting(); HTTP: the shutdown signal). A
+    // project another dreamd writes is refused here.
+    let runtime = ProjectRuntime::open(&root, WriterKind::Mcp)
+        .map_err(|e| McpRunError::Service(e.to_string()))?;
+    let server = MemoryMcpServer::with_coordinator_and_index(
+        root,
+        runtime.supervisor(),
+        Arc::clone(runtime.index()),
+    );
+    let served = transport.serve(server).await;
+    runtime.shutdown().await;
+    served?;
     Ok(())
 }
 
