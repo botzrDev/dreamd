@@ -2,8 +2,8 @@
 //!
 //! Prints a structured plain-text block: daemon liveness, the daemon's address,
 //! the project resolved from `$CWD` and whether it is registered with the
-//! daemon, the last dream cycle recorded in per-project state, and the tail of
-//! the daemon log.
+//! daemon, the last dream cycle recorded in per-project state, whether git has
+//! a commit of the episodic log (DRM-100), and the tail of the daemon log.
 //!
 //! Liveness is always a bounded *connect* probe, never file presence, so a stale
 //! address file left behind by a `SIGKILL`ed daemon reports `not running`
@@ -17,6 +17,7 @@
 use std::io::{self, Write};
 use std::path::Path;
 
+use dreamd_core::autobiography::{self, LogGitState};
 use dreamd_core::layout::AgentRoot;
 use dreamd_core::{registry, wal};
 
@@ -116,10 +117,26 @@ pub fn run(
                 Some(at) => writeln!(out, "last_dream_cycle: {at} ({status})")?,
                 None => writeln!(out, "last_dream_cycle: never run ({status})")?,
             }
+
+            // DRM-100: whether git has a commit of the episodic log.
+            let project = root.project_root();
+            match autobiography::log_git_state(project) {
+                Ok(LogGitState::NoRepo) => writeln!(out, "memory_in_git: no git repo")?,
+                Ok(LogGitState::Committed) => writeln!(out, "memory_in_git: committed")?,
+                Ok(LogGitState::Ignored) => writeln!(out, "memory_in_git: ignored")?,
+                Ok(LogGitState::NotCommitted) => writeln!(
+                    out,
+                    "memory_in_git: not committed  (`git clean -fd` can delete it; commit it \
+                     from the project root: {})",
+                    autobiography::commit_store_command(project)
+                )?,
+                Err(e) => writeln!(out, "memory_in_git: error ({e})")?,
+            }
         }
         Err(_) => {
             writeln!(out, "project: no .agent/ store in CWD")?;
             writeln!(out, "last_dream_cycle: (no store)")?;
+            writeln!(out, "memory_in_git: (no store)")?;
         }
     }
 
@@ -219,6 +236,73 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(!live, "absent socket must report the daemon down");
         assert!(out.contains("daemon: not running"), "got: {out}");
+    }
+
+    /// DRM-100 test 22: the sixth line says whether git has a commit of the
+    /// episodic log, from no store through a broken HEAD.
+    #[test]
+    fn status_reports_whether_git_has_a_commit_of_the_log() {
+        fn git_line(cwd: &Path) -> String {
+            let mut buf = Vec::new();
+            run(
+                cwd,
+                None,
+                Some(Path::new("/no/registry.toml")),
+                &[],
+                &mut buf,
+            )
+            .unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            let lines: Vec<&str> = out
+                .lines()
+                .filter(|line| line.starts_with("memory_in_git:"))
+                .collect();
+            assert_eq!(lines.len(), 1, "one memory_in_git line; got:\n{out}");
+            lines[0].to_string()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(git_line(dir.path()), "memory_in_git: (no store)");
+
+        let project = dir.path().join("proj");
+        let root = AgentRoot::new(&project);
+        fs::create_dir_all(root.episodic_dir()).unwrap();
+        fs::write(root.episodic_jsonl(), b"").unwrap();
+        assert_eq!(git_line(&project), "memory_in_git: no git repo");
+
+        let repo = git2::Repository::init(&project).unwrap();
+        assert_eq!(
+            git_line(&project),
+            "memory_in_git: not committed  (`git clean -fd` can delete it; commit it from \
+             the project root: git add .agent && git commit -m \"Add dreamd memory\" -- .agent)"
+        );
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(Path::new(".agent/episodic/AGENT_LEARNINGS.jsonl"))
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("user", "user@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "commit the store", &tree, &[])
+            .unwrap();
+        assert_eq!(git_line(&project), "memory_in_git: committed");
+
+        // HEAD's branch now names an object the repo does not hold.
+        let branch = repo
+            .find_reference("HEAD")
+            .unwrap()
+            .symbolic_target()
+            .unwrap()
+            .expect("HEAD is symbolic")
+            .to_string();
+        fs::write(
+            repo.path().join(branch),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        let line = git_line(&project);
+        assert!(line.starts_with("memory_in_git: error ("), "got: {line}");
     }
 
     #[test]

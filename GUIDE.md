@@ -34,6 +34,14 @@ npx -y dreamd-mcp setup
 
 `setup` prompts when it has a TTY; pass `--yes` (with `--harness claude|cursor|both|none`) in scripts. `npx -y dreamd-mcp init` is the lower-level scaffold primitive — it creates the store and writes no harness config, which is also what `npx -y dreamd-mcp setup --no-write-mcp` gives you. A second `init` where `.agent/` already exists and the project is already registered prints `already initialized` and returns before the `.gitignore` append. If `.agent/` exists but the registry entry is missing — after `dreamd init --uninstall-project`, a lost `registry.toml`, or a moved `HOME` — `dreamd init` registers it and does not rewrite the store. `dreamd init --uninstall-project` removes only the registry entry; run `dreamd init` again to put it back.
 
+Then commit the store. `setup` prints this command while git has no commit of `.agent/`:
+
+```bash
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+```
+
+Only `.agent/.dreamd/` is gitignored. The episodic log and `LESSONS.md` are meant to be committed, and until they are, `git clean -fd` deletes them. The `--` paths keep anything else you had staged out of this commit. To keep memory out of git instead, add `.agent/` to `.gitignore`.
+
 Verify:
 
 ```bash
@@ -41,7 +49,7 @@ ls -la .agent/
 npx -y dreamd-mcp doctor
 ```
 
-`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Last cycle status is `npx -y dreamd-mcp status` (1.2.1 and later; the 1.2.0 shim did not forward `status`); it exits 1 while no daemon is running.
+`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Its `memory_in_git:` line says whether git has a commit of the episodic log, and warns while git has none and the log holds events. Last cycle status is `npx -y dreamd-mcp status` (1.2.1 and later; the 1.2.0 shim did not forward `status`); it exits 1 while no daemon is running.
 
 ---
 

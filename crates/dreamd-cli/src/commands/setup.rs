@@ -326,6 +326,13 @@ pub fn run(
         // Once per daemon home. A second project, and a rerun of this one,
         // keep the source line and do not ask again.
         let ask_star = !star_already_asked(&home);
+        // DRM-100: name the commit while git has no commit of the log. A git
+        // error prints no line; doctor's `memory_in_git:` reports it.
+        let commit = matches!(
+            dreamd_core::autobiography::log_git_state(&project_root),
+            Ok(dreamd_core::autobiography::LogGitState::NotCommitted)
+        )
+        .then(|| dreamd_core::autobiography::commit_store_command(&project_root));
         let card = Card {
             init: init_outcome,
             wired: &wired,
@@ -335,6 +342,7 @@ pub fn run(
             lesson: lesson.as_ref(),
             launcher: req.launcher,
             ask_star,
+            commit: commit.as_deref(),
         };
         write_card_and_mark(&card, out, &home)?;
     }
@@ -729,6 +737,7 @@ fn report_doctor(cwd: &Path, launcher: Launcher, out: &mut dyn Write) -> std::io
             repair: false,
             cluster_health: false,
             provenance: false,
+            allow_empty_log: false,
         },
         now_sec,
         &mut report,
@@ -776,6 +785,9 @@ struct Card<'a> {
     /// Print the one star line under the source line. The caller sets this
     /// from the daemon home; the card itself does not look at the filesystem.
     ask_star: bool,
+    /// The command that commits the store, while git has no commit of the
+    /// episodic log (DRM-100). The caller reads git; the card does not.
+    commit: Option<&'a str>,
 }
 
 fn write_undo_line(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
@@ -850,6 +862,16 @@ fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<(
     };
     write_card_row(out, "daemon", &daemon)?;
     writeln!(out)?;
+
+    if let Some(command) = card.commit {
+        writeln!(
+            out,
+            "  Commit: git has no commit of .agent/ yet, and `git clean -fd` deletes it."
+        )?;
+        writeln!(out, "          From the project root, run:")?;
+        writeln!(out, "          {command}")?;
+        writeln!(out)?;
+    }
 
     if card.wired.is_empty() {
         // Same rule as `write_next_steps`: name the files the chosen harness
@@ -1581,6 +1603,7 @@ mod tests {
             lesson: None,
             launcher,
             ask_star,
+            commit: None,
         })
     }
 
@@ -2024,6 +2047,38 @@ mod tests {
         assert_eq!(eof, None, "EOF skips the sentence");
     }
 
+    /// DRM-100 test 23: while git has no commit of the log, the card names the
+    /// commit between the daemon row and `Next:`.
+    #[test]
+    fn card_names_the_commit_while_git_has_no_commit_of_the_log() {
+        let command =
+            "git add .agent .gitignore && git commit -m \"Add dreamd memory\" -- .agent .gitignore";
+        let rendered = render(&Card {
+            init: InitOutcome::Scaffolded,
+            wired: &[".mcp.json"],
+            habits: &[HABIT_CLAUDE],
+            harness: Harness::Claude,
+            daemon_live: false,
+            lesson: None,
+            launcher: Launcher::Binary,
+            ask_star: false,
+            commit: Some(command),
+        });
+        let command_line = format!("          {command}");
+        let block = [
+            "  daemon       not running \u{2014} start it with: dreamd watch",
+            "",
+            "  Commit: git has no commit of .agent/ yet, and `git clean -fd` deletes it.",
+            "          From the project root, run:",
+            command_line.as_str(),
+            "",
+            "  Next: reload Claude Code, then ask your agent:",
+            "",
+        ]
+        .join("\n");
+        assert!(rendered.contains(&block), "{rendered}");
+    }
+
     #[test]
     fn card_with_a_lesson_names_the_sentence_and_the_id() {
         let lesson = RecordedLesson {
@@ -2039,6 +2094,7 @@ mod tests {
             lesson: Some(&lesson),
             launcher: Launcher::Binary,
             ask_star: false,
+            commit: None,
         });
         assert!(
             rendered.contains("axum handlers need IntoResponse"),
@@ -2227,6 +2283,7 @@ mod tests {
             lesson: None,
             launcher: Launcher::Binary,
             ask_star,
+            commit: None,
         }
     }
 

@@ -177,6 +177,30 @@ The episodic log (`.agent/episodic/`) and `LESSONS.md` are not ignored, so they 
 
 ---
 
+## `git clean -fd` deleted the episodic log
+
+**Symptom:** `dreamd doctor` prints `episodic_log: missing  [WARNING: …]` or `episodic_log: no records  [WARNING: …]`, and its `index_freshness` line says the index holds events the episodic log does not.
+
+**Why:** `git clean -fd` deletes untracked files, and `.agent/` stays untracked until you commit it. `git reset --hard` deletes a log that is only staged. Only `.agent/.dreamd/` is gitignored; the episodic log and `LESSONS.md` are meant to be committed. `dreamd setup` prints the commit command, and `dreamd doctor` and `dreamd status` print `memory_in_git: not committed` until git has a commit of the log.
+
+**What to do:**
+
+1. Stop `dreamd watch` and your agents. The next dreamd writer starts a new, empty log, and after one new event dreamd's next index check deletes the old events from the index when there are fewer than 64 of them.
+2. Restore `.agent/episodic/AGENT_LEARNINGS.jsonl` from a backup or your editor's local history. If an earlier commit holds it, `git log --all -- .agent/episodic/AGENT_LEARNINGS.jsonl` finds that commit.
+3. Run `dreamd doctor` again. The warning goes once the log holds the events.
+
+If no copy is left, the events are lost: the index holds their text, but dreamd cannot write them back to the log. `dreamd doctor --repair` refuses while it would delete them from the index, and `dreamd doctor --repair --allow-empty-log` rebuilds an empty index.
+
+**Next time:** commit the store after setup:
+
+```bash
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+```
+
+Or add `.agent/` to `.gitignore` to keep memory out of git; doctor then prints `memory_in_git: ignored`. `git clean -fdx` (lowercase `x`) deletes ignored files too, so keep a backup in that case.
+
+---
+
 ## How do I reset or clear memory?
 
 | Goal | Command |
@@ -187,7 +211,7 @@ The episodic log (`.agent/episodic/`) and `LESSONS.md` are not ignored, so they 
 | Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
 | Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project`. The store stays. Run `dreamd init` again to put the registry entry back. |
 | Remove the login service (systemd unit / LaunchAgent / scheduled task) | `dreamd service uninstall` — see [install.md](./install.md#removing-the-service) |
-| Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair` (or use *Full fresh store* below for a clean slate) |
+| Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair --allow-empty-log`; `--repair` alone refuses while the index holds events the log does not (or use *Full fresh store* below for a clean slate) |
 | Full fresh store | Delete `.agent/` and re-run `dreamd init` |
 
 **Warning:** Deleting `.agent/` is destructive. Commit or back up first if the store has value. There is no `dreamd reset --all`.

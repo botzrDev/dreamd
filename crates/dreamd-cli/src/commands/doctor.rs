@@ -23,7 +23,13 @@
 //! its holder exits (WEG-24-A / AILAB-402; see `check_tantivy_locks`). When
 //! the dream-cycle WAL cannot be parsed or validated, taking the writer lock
 //! for the repair moves it aside to a `.corrupt-<date>` sidecar, and the
-//! repair then reports the store's invariant check.
+//! repair then reports the store's invariant check. Unless
+//! `--allow-empty-log`, it refuses when the episodic log is missing or holds
+//! no record while the index holds events, since the rebuild would delete
+//! them (DRM-100).
+//!
+//! `memory_in_git:` says whether git has a commit of the episodic log, and
+//! warns while it does not and the log holds events (DRM-100).
 //!
 //! `--cluster-health` recomputes the clusters the dream cycle would promote
 //! and compares them against the recurrence sidecar it last wrote.
@@ -59,6 +65,10 @@ pub struct DoctorFlags {
     /// Unlink an orphaned daemon socket, move an unparseable dream-cycle WAL
     /// aside, and rebuild the Tantivy cache.
     pub repair: bool,
+    /// With `repair`: rebuild even when the episodic log is missing or holds
+    /// no record while the index holds events, which deletes those events
+    /// from the index (DRM-100).
+    pub allow_empty_log: bool,
     /// Compare the clusters the dream cycle would promote against the
     /// recurrence sidecar.
     pub cluster_health: bool,
@@ -113,11 +123,39 @@ pub fn run(
     // AILAB-223 — hard integrity over the init-scaffolded subdirs.
     all_ok &= check_subdirs(agent_root, out)?;
 
+    // One read of the episodic log backs the index check, the log health
+    // lines, the record checks and --cluster-health; an absent log reads as
+    // no lines. `log_has_records` is false for a log that is missing or holds
+    // no record. An unreadable log counts as having records: doctor cannot
+    // say it is empty (DRM-100).
+    let episodic_path = agent_root.episodic_jsonl();
+    let log_present = episodic_path.exists();
+    let raw = dreamd_core::episodic::read_raw(&episodic_path);
+    let log_has_records = match &raw {
+        Ok(lines) => lines.iter().any(|line| line.parsed.is_some()),
+        Err(_) => true,
+    };
+
     // Index vs JSONL: the set difference between the log's ids and the
     // committed index's (BZR-1236), read without a writer or the lock.
     #[cfg(unix)]
+    let coverage = dreamd_core::server::assess_index_coverage(agent_root);
+    // Events only the index still holds, counted only while the log holds no
+    // record. With records in the log, `not_in_log` is the drift the next
+    // writer open re-covers (DRM-100).
+    #[cfg(unix)]
+    let only_in_index = match &coverage {
+        Ok(c) if !log_has_records => c.not_in_log,
+        _ => 0,
+    };
+    #[cfg(not(unix))]
+    let only_in_index = {
+        let _ = log_has_records;
+        0usize
+    };
+    #[cfg(unix)]
     {
-        match dreamd_core::server::assess_index_coverage(agent_root) {
+        match coverage {
             Ok(coverage) if !coverage.present => {
                 writeln!(
                     out,
@@ -130,6 +168,15 @@ pub fn run(
                     && coverage.duplicated == 0 =>
             {
                 writeln!(out, "index_freshness: ok")?;
+            }
+            Ok(_) if only_in_index > 0 => {
+                writeln!(
+                    out,
+                    "index_freshness: stale  [WARNING: the index holds {only_in_index} \
+                     event(s) the episodic log does not, and the log holds no record; see \
+                     episodic_log. Do not run `dreamd doctor --repair`: it would delete them]"
+                )?;
+                all_ok = false;
             }
             Ok(coverage) => {
                 writeln!(
@@ -193,11 +240,32 @@ pub fn run(
     }
 
     // Episodic log health: malformed `\n`-terminated lines and a torn tail
-    // (WEG-132).
-    let episodic_path = agent_root.episodic_jsonl();
-    if episodic_path.exists() {
+    // (WEG-132). A log that is missing or holds no record while the index
+    // still holds events is the last warning before they are lost (DRM-100).
+    if !log_present {
+        if only_in_index > 0 {
+            writeln!(
+                out,
+                "episodic_log: missing  [WARNING: AGENT_LEARNINGS.jsonl is gone, and the index \
+                 still holds {only_in_index} event(s) from it, as after `git clean -fd` deleted \
+                 a log git had no commit of. Stop `dreamd watch` and your agents before they \
+                 write a new log, then restore the file from git or a backup; `dreamd doctor \
+                 --repair` would delete these events]"
+            )?;
+            all_ok = false;
+        } else {
+            writeln!(
+                out,
+                "episodic_log: missing  (the next writer open creates it)"
+            )?;
+        }
+    } else {
         match dreamd_core::episodic::assess_log_health(&episodic_path) {
-            Ok(health) if health.malformed_line_count == 0 && health.torn_tail_bytes == 0 => {
+            Ok(health)
+                if health.malformed_line_count == 0
+                    && health.torn_tail_bytes == 0
+                    && only_in_index == 0 =>
+            {
                 writeln!(out, "episodic_log: ok")?;
             }
             Ok(health) => {
@@ -225,6 +293,16 @@ pub fn run(
                         health.torn_tail_bytes,
                     )?;
                 }
+                if only_in_index > 0 {
+                    writeln!(
+                        out,
+                        "episodic_log: no records  [WARNING: the index still holds \
+                         {only_in_index} event(s) this log does not, as after `git clean -fd` \
+                         deleted the log and a dreamd writer started a new one. Stop `dreamd \
+                         watch` and your agents, then restore the old file from git or a \
+                         backup; `dreamd doctor --repair` would delete these events]"
+                    )?;
+                }
                 all_ok = false;
             }
             Err(e) => {
@@ -234,28 +312,27 @@ pub fn run(
         }
     }
 
-    // One read of the episodic log backs the record-schema check, the three
-    // hand-edit checks and --cluster-health (an absent log reads as no records).
+    // The read above backs the record-schema check, the three hand-edit
+    // checks and --cluster-health (an absent log reads as no records).
     // `events` is what `read_all` returns, in the same order; `lines[i]` is the
     // file line of `events[i]`, the numbering `malformed line(s)` uses (blank,
     // malformed and torn lines count too).
-    let records: Option<(Vec<usize>, Vec<AgentLearning>)> =
-        match dreamd_core::episodic::read_raw(&episodic_path) {
-            Ok(raw) => Some(
-                raw.into_iter()
-                    .enumerate()
-                    .filter_map(|(i, line)| line.parsed.map(|record| (i + 1, record)))
-                    .unzip(),
-            ),
-            Err(e) => {
-                writeln!(
-                    out,
-                    "schema_record: error  [WARNING: could not read the episodic log: {e}]"
-                )?;
-                all_ok = false;
-                None
-            }
-        };
+    let records: Option<(Vec<usize>, Vec<AgentLearning>)> = match raw {
+        Ok(raw) => Some(
+            raw.into_iter()
+                .enumerate()
+                .filter_map(|(i, line)| line.parsed.map(|record| (i + 1, record)))
+                .unzip(),
+        ),
+        Err(e) => {
+            writeln!(
+                out,
+                "schema_record: error  [WARNING: could not read the episodic log: {e}]"
+            )?;
+            all_ok = false;
+            None
+        }
+    };
     if let Some((lines, events)) = &records {
         all_ok &= check_schema_record(events, out)?;
         all_ok &= check_score_range(lines, events, out)?;
@@ -263,6 +340,7 @@ pub fn run(
         all_ok &= check_future_timestamps(lines, events, now_sec, out)?;
     }
     let events = records.as_ref().map(|(_, events)| events.as_slice());
+    all_ok &= check_memory_in_git(agent_root, events, out)?;
 
     all_ok &= check_registry(registry, out)?;
     all_ok &= check_schema_index(agent_root, out)?;
@@ -298,7 +376,7 @@ pub fn run(
     all_ok &= check_dream_cycle_wal(agent_root, flags.repair, out)?;
 
     if flags.repair {
-        all_ok &= run_repair(agent_root, socket, out, err)?;
+        all_ok &= run_repair(agent_root, socket, flags.allow_empty_log, out, err)?;
     }
 
     Ok(all_ok)
@@ -944,6 +1022,96 @@ fn check_dream_cycle_wal(
     }
 }
 
+/// DRM-100: does git have a commit of the episodic log? No repo prints
+/// nothing, and a log git ignores is the user's choice. While git has no
+/// commit, the line warns once the log holds an event: `git clean -fd`
+/// deletes an untracked log, and the index alone cannot give it back.
+fn check_memory_in_git(
+    agent_root: &AgentRoot,
+    events: Option<&[AgentLearning]>,
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    use dreamd_core::autobiography::{commit_store_command, log_git_state, LogGitState};
+
+    let project = agent_root.project_root();
+    match log_git_state(project) {
+        Ok(LogGitState::NoRepo) => Ok(true),
+        Ok(LogGitState::Committed) => {
+            writeln!(out, "memory_in_git: committed")?;
+            Ok(true)
+        }
+        Ok(LogGitState::Ignored) => {
+            writeln!(
+                out,
+                "memory_in_git: ignored  (git ignores the episodic log, so it stays out of commits)"
+            )?;
+            Ok(true)
+        }
+        Ok(LogGitState::NotCommitted) => {
+            let command = commit_store_command(project);
+            let count = events.map_or(0, <[AgentLearning]>::len);
+            if count == 0 {
+                writeln!(
+                    out,
+                    "memory_in_git: not committed  (no events yet; commit the store with: {command})"
+                )?;
+                Ok(true)
+            } else {
+                writeln!(
+                    out,
+                    "memory_in_git: not committed  [WARNING: git has no commit of the episodic \
+                     log's {count} event(s), so `git clean -fd` can delete them. Commit the \
+                     store from the project root: {command}. Or add `.agent/` to .gitignore to \
+                     keep memory out of git]"
+                )?;
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            writeln!(
+                out,
+                "memory_in_git: error  [WARNING: could not read git: {e}]"
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+/// Why `--repair` must not rebuild (DRM-100): the episodic log is missing or
+/// holds no record while the committed index holds events, so the rebuild
+/// would delete the last copy of them. `None` when it loses nothing.
+///
+/// Runs under the writer lock, so no dreamd writer changes the log while it
+/// reads. An unreadable log is left to the rebuild, which fails on it.
+fn empty_log_refusal(agent_root: &AgentRoot) -> Option<String> {
+    let path = agent_root.episodic_jsonl();
+    let has_records = match dreamd_core::episodic::read_raw(&path) {
+        Ok(lines) => lines.iter().any(|line| line.parsed.is_some()),
+        Err(_) => return None,
+    };
+    if has_records {
+        return None;
+    }
+    let state = if path.exists() {
+        "holds no record"
+    } else {
+        "is missing"
+    };
+    match dreamd_core::server::assess_index_coverage(agent_root) {
+        Ok(coverage) if coverage.not_in_log == 0 => None,
+        Ok(coverage) => Some(format!(
+            "the episodic log {state}, and the index holds {} event(s) it does not; the \
+             rebuild would delete them. Restore .agent/episodic/AGENT_LEARNINGS.jsonl from \
+             git or a backup first, or pass --allow-empty-log to rebuild an empty index",
+            coverage.not_in_log
+        )),
+        Err(e) => Some(format!(
+            "the episodic log {state}, and the index could not be read to see what the \
+             rebuild would delete ({e}). Pass --allow-empty-log to rebuild an empty index"
+        )),
+    }
+}
+
 /// `--repair`: unlink an orphaned daemon socket, wipe the rebuildable index
 /// cache, and reopen the index to force a full replay of the episodic log
 /// (which repair only ever reads). Taking the writer lock as
@@ -954,10 +1122,13 @@ fn check_dream_cycle_wal(
 /// index directory: stop the daemon first, then this removes the directory
 /// and rebuilds it. Fails closed when a live daemon is detected — wiping the
 /// cache underneath its writer would race it — and when the project writer
-/// lock is held by any other writer.
+/// lock is held by any other writer. Unless `allow_empty_log`, it also
+/// refuses when the episodic log is missing or holds no record while the
+/// index holds events: the rebuild would delete them (DRM-100).
 fn run_repair(
     agent_root: &AgentRoot,
     socket: Option<&Path>,
+    allow_empty_log: bool,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<bool> {
@@ -1012,6 +1183,15 @@ fn run_repair(
                 )?;
                 return Ok(false);
             }
+        }
+    }
+
+    // DRM-100: under the lock, so no dreamd writer changes the log while
+    // this reads it, and before the wipe below, which would lose the events.
+    if !allow_empty_log {
+        if let Some(reason) = empty_log_refusal(agent_root) {
+            writeln!(err, "dreamd: error — doctor --repair refused: {reason}")?;
+            return Ok(false);
         }
     }
 
@@ -2948,5 +3128,429 @@ mod tests {
             "got:\n{output}"
         );
         assert!(!ok);
+    }
+
+    // ── DRM-100: a log `git clean -fd` deleted, and whether git has it ─────
+
+    /// Build the committed index from the log as it stands, the way a writer
+    /// open does, and close it.
+    #[cfg(unix)]
+    fn build_index_from_log(root: &AgentRoot) {
+        use dreamd_core::server::TantivyIndexHandle;
+        use dreamd_core::writer_lock::{WriterKind, WriterLock};
+
+        let lock = WriterLock::acquire(root, WriterKind::Watch).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                TantivyIndexHandle::open(root, &lock, std::time::Duration::from_secs(60))
+                    .unwrap()
+                    .shutdown()
+                    .await
+                    .unwrap();
+            });
+    }
+
+    /// Two events in the log and in the committed index built from it.
+    #[cfg(unix)]
+    fn two_indexed_events(label: &str) -> (AgentRoot, tempfile::TempDir) {
+        let (root, dir) = setup_agent_root(label);
+        seed_events(
+            &root,
+            &[
+                learning('1', "rust::eh", "1.0.0"),
+                learning('2', "rust::eh", "1.0.0"),
+            ],
+        );
+        build_index_from_log(&root);
+        assert_eq!(
+            index_coverage(&root).not_in_log,
+            0,
+            "precondition: the index covers the log"
+        );
+        (root, dir)
+    }
+
+    #[cfg(unix)]
+    fn index_coverage(root: &AgentRoot) -> dreamd_core::server::IndexCoverage {
+        dreamd_core::server::assess_index_coverage(root).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn repair_flags(allow_empty_log: bool) -> DoctorFlags {
+        DoctorFlags {
+            repair: true,
+            allow_empty_log,
+            ..Default::default()
+        }
+    }
+
+    /// The `index_freshness` line while the log holds no record and the index
+    /// holds `n` events.
+    #[cfg(unix)]
+    fn index_only_line(n: usize) -> String {
+        format!(
+            "index_freshness: stale  [WARNING: the index holds {n} event(s) the episodic \
+             log does not, and the log holds no record; see episodic_log. Do not run \
+             `dreamd doctor --repair`: it would delete them]"
+        )
+    }
+
+    /// The `episodic_log` line for a missing log while the index holds `n`.
+    #[cfg(unix)]
+    fn missing_log_line(n: usize) -> String {
+        format!(
+            "episodic_log: missing  [WARNING: AGENT_LEARNINGS.jsonl is gone, and the index \
+             still holds {n} event(s) from it, as after `git clean -fd` deleted a log git had \
+             no commit of. Stop `dreamd watch` and your agents before they write a new log, \
+             then restore the file from git or a backup; `dreamd doctor --repair` would \
+             delete these events]"
+        )
+    }
+
+    /// The `episodic_log` line for a log with no record while the index
+    /// holds `n`.
+    #[cfg(unix)]
+    fn no_records_line(n: usize) -> String {
+        format!(
+            "episodic_log: no records  [WARNING: the index still holds {n} event(s) this \
+             log does not, as after `git clean -fd` deleted the log and a dreamd writer \
+             started a new one. Stop `dreamd watch` and your agents, then restore the old \
+             file from git or a backup; `dreamd doctor --repair` would delete these events]"
+        )
+    }
+
+    /// `empty_log_refusal`'s text when the index holds `n` events.
+    #[cfg(unix)]
+    fn refusal_text(state: &str, n: usize) -> String {
+        format!(
+            "the episodic log {state}, and the index holds {n} event(s) it does not; the \
+             rebuild would delete them. Restore .agent/episodic/AGENT_LEARNINGS.jsonl from \
+             git or a backup first, or pass --allow-empty-log to rebuild an empty index"
+        )
+    }
+
+    /// DRM-100 test 9 (LP-JOURNEY-11): `git clean -fd` deleted the log and the
+    /// index still holds its events. Doctor says so and drops the `--repair`
+    /// advice.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_warns_when_the_log_is_missing_and_the_index_holds_events() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("cleaned-log");
+        fs::remove_file(root.episodic_jsonl()).unwrap();
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(&output, &index_only_line(2));
+        assert_has_line(&output, &missing_log_line(2));
+        assert!(
+            !output.contains("or run `dreamd doctor --repair`]"),
+            "got:\n{output}"
+        );
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 10: after the clean a writer started a new, empty log.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_warns_when_the_log_holds_no_record_and_the_index_holds_events() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("restarted-log");
+        fs::write(root.episodic_jsonl(), b"").unwrap();
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(&output, &index_only_line(2));
+        assert_has_line(&output, &no_records_line(2));
+        assert!(!output.contains("episodic_log: ok"), "got:\n{output}");
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 11: no log and nothing indexed is a store no writer has
+    /// opened yet. An info line, not a warning.
+    #[test]
+    fn doctor_reports_a_missing_log_without_a_warning_when_nothing_is_indexed() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("fresh-store");
+        assert!(!root.episodic_jsonl().exists(), "precondition: no log");
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(
+            &output,
+            "episodic_log: missing  (the next writer open creates it)",
+        );
+        assert!(ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 12: while the log holds records, an indexed event it lacks
+    /// is ordinary drift, and the stale line keeps its 1.3.2 text.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_keeps_the_stale_text_while_the_log_has_records() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("one-left");
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+
+        let (_, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(
+            &output,
+            "index_freshness: stale  [WARNING: 0 event(s) not indexed, 1 indexed event(s) \
+             not in the log, 0 duplicated; the next writer open re-covers the log, or run \
+             `dreamd doctor --repair`]",
+        );
+        assert_has_line(&output, "episodic_log: ok");
+    }
+
+    /// DRM-100 test 13: `--repair` will not rebuild from a missing log while
+    /// the index holds events, and changes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn repair_refuses_when_the_log_is_missing_and_the_index_holds_events() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("repair-cleaned");
+        fs::remove_file(root.episodic_jsonl()).unwrap();
+
+        let (ok, output, err) = run_with(&cfg, &root, None, None, repair_flags(false));
+
+        assert!(!ok);
+        assert_eq!(
+            err,
+            format!(
+                "dreamd: error — doctor --repair refused: {}\n",
+                refusal_text("is missing", 2)
+            )
+        );
+        assert!(
+            !output.lines().any(|line| line.starts_with("repair:")),
+            "a refused repair reports no action; got:\n{output}"
+        );
+        assert_eq!(
+            index_coverage(&root).not_in_log,
+            2,
+            "the index keeps its events"
+        );
+    }
+
+    /// DRM-100 test 14: the same for a log that holds no record.
+    #[cfg(unix)]
+    #[test]
+    fn repair_refuses_when_the_log_holds_no_record() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("repair-restarted");
+        fs::write(root.episodic_jsonl(), b"").unwrap();
+
+        let (ok, _, err) = run_with(&cfg, &root, None, None, repair_flags(false));
+
+        assert!(!ok);
+        assert!(
+            err.contains(
+                "doctor --repair refused: the episodic log holds no record, and the index \
+                 holds 2 event(s) it does not"
+            ),
+            "got:\n{err}"
+        );
+        assert_eq!(
+            index_coverage(&root).not_in_log,
+            2,
+            "the index keeps its events"
+        );
+    }
+
+    /// DRM-100 test 15: `--allow-empty-log` rebuilds, and the rebuilt index
+    /// holds nothing the log does not.
+    #[cfg(unix)]
+    #[test]
+    fn repair_with_allow_empty_log_rebuilds_an_empty_index() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("repair-forced");
+        fs::remove_file(root.episodic_jsonl()).unwrap();
+
+        let (_, output, err) = run_with(&cfg, &root, None, None, repair_flags(true));
+
+        assert!(
+            output.contains("rebuilt index from the episodic log"),
+            "got:\n{output}\n{err}"
+        );
+        let after = index_coverage(&root);
+        assert!(
+            after.present,
+            "the rebuild commits an index; got: {after:?}"
+        );
+        assert_eq!(after.not_in_log, 0, "got: {after:?}");
+    }
+
+    /// DRM-100 test 16: with records in the log, `--repair` rebuilds as in
+    /// 1.3.2, even when the index holds more than the log.
+    #[cfg(unix)]
+    #[test]
+    fn repair_rebuilds_when_the_log_has_records_and_the_index_has_more() {
+        let cfg = Config::default();
+        let (root, _dir) = two_indexed_events("repair-partial");
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+
+        let (_, output, err) = run_with(&cfg, &root, None, None, repair_flags(false));
+
+        assert!(
+            output.contains("rebuilt index from the episodic log"),
+            "got:\n{output}\n{err}"
+        );
+        assert!(!err.contains("refused"), "got:\n{err}");
+        assert_eq!(
+            index_coverage(&root),
+            dreamd_core::server::IndexCoverage {
+                present: true,
+                missing: 0,
+                not_in_log: 0,
+                duplicated: 0,
+            }
+        );
+    }
+
+    /// What doctor names for a project root with no `.gitignore`.
+    const BARE_COMMIT_COMMAND: &str =
+        "git add .agent && git commit -m \"Add dreamd memory\" -- .agent";
+
+    /// Commit the project's episodic log as a test user.
+    fn commit_log(repo: &git2::Repository) {
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(Path::new(".agent/episodic/AGENT_LEARNINGS.jsonl"))
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("user", "user@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "commit the store", &tree, &[])
+            .unwrap();
+    }
+
+    /// DRM-100 test 17: git has no commit of a log that holds events.
+    #[test]
+    fn memory_in_git_warns_while_git_has_no_commit_of_the_logs_events() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("untracked-store");
+        git2::Repository::init(root.project_root()).unwrap();
+        seed_events(
+            &root,
+            &[
+                learning('1', "rust::eh", "1.0.0"),
+                learning('2', "rust::eh", "1.0.0"),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_only_warning(
+            &output,
+            &format!(
+                "memory_in_git: not committed  [WARNING: git has no commit of the episodic \
+                 log's 2 event(s), so `git clean -fd` can delete them. Commit the store from \
+                 the project root: {BARE_COMMIT_COMMAND}. Or add `.agent/` to .gitignore to \
+                 keep memory out of git]"
+            ),
+        );
+        assert!(!ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 18: right after setup the log holds nothing to lose.
+    #[test]
+    fn memory_in_git_does_not_warn_before_the_first_event() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("empty-untracked-store");
+        git2::Repository::init(root.project_root()).unwrap();
+        fs::write(root.episodic_jsonl(), b"").unwrap();
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert_has_line(
+            &output,
+            &format!(
+                "memory_in_git: not committed  (no events yet; commit the store with: \
+                 {BARE_COMMIT_COMMAND})"
+            ),
+        );
+        assert!(ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 19: a committed log passes, and so does one git ignores.
+    #[test]
+    fn memory_in_git_passes_when_committed_or_ignored() {
+        let cfg = Config::default();
+
+        let (root, _dir) = setup_agent_root("committed-store");
+        let repo = git2::Repository::init(root.project_root()).unwrap();
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+        commit_log(&repo);
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert_has_line(&output, "memory_in_git: committed");
+        assert!(ok, "got:\n{output}");
+
+        let (root, _dir) = setup_agent_root("ignored-store");
+        git2::Repository::init(root.project_root()).unwrap();
+        fs::write(root.project_root().join(".gitignore"), b".agent/\n").unwrap();
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+        let (ok, output, _) = run_default(&cfg, &root, None);
+        assert_has_line(
+            &output,
+            "memory_in_git: ignored  (git ignores the episodic log, so it stays out of commits)",
+        );
+        assert!(ok, "got:\n{output}");
+    }
+
+    /// DRM-100 test 20: outside git there is nothing to say.
+    #[test]
+    fn memory_in_git_prints_nothing_without_a_repo() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("no-git");
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        assert!(!output.contains("memory_in_git"), "got:\n{output}");
+        assert!(ok, "got:\n{output}");
+    }
+
+    /// Point HEAD's branch at an object the repo does not hold, so reading
+    /// HEAD's commit fails.
+    fn point_head_at_a_missing_object(repo: &git2::Repository) {
+        let head = repo.find_reference("HEAD").unwrap();
+        let branch = head
+            .symbolic_target()
+            .unwrap()
+            .expect("HEAD is symbolic")
+            .to_string();
+        fs::write(
+            repo.path().join(branch),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+    }
+
+    /// DRM-100 test 26: doctor cannot say whether git has the log, so it warns
+    /// and fails the run.
+    #[test]
+    fn memory_in_git_reports_a_git_error_and_fails_the_run() {
+        let cfg = Config::default();
+        let (root, _dir) = setup_agent_root("broken-head");
+        let repo = git2::Repository::init(root.project_root()).unwrap();
+        seed_events(&root, &[learning('1', "rust::eh", "1.0.0")]);
+        point_head_at_a_missing_object(&repo);
+
+        let (ok, output, _) = run_default(&cfg, &root, None);
+
+        let warnings: Vec<&str> = output
+            .lines()
+            .filter(|line| line.contains("WARNING"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "got:\n{output}");
+        assert!(
+            warnings[0].starts_with("memory_in_git: error  [WARNING: could not read git: "),
+            "got:\n{output}"
+        );
+        assert!(!ok, "got:\n{output}");
     }
 }

@@ -8,7 +8,10 @@ Usage: doctor [OPTIONS]
 
 Options:
       --repair
-          Rebuild the search index from the episodic log, unlink an orphaned daemon socket, and move aside a dream-cycle WAL that cannot be parsed. Wipes the whole derived index directory, including any .tantivy-*.lock inside it, and never targets lock files on their own. Does not modify AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the project
+          Rebuild the search index from the episodic log, unlink an orphaned daemon socket, and move aside a dream-cycle WAL that cannot be parsed. Wipes the whole derived index directory, including any .tantivy-*.lock inside it, and never targets lock files on their own. Does not modify AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the project, and while the episodic log is missing or holds no record and the index holds events, since the rebuild would delete them
+
+      --allow-empty-log
+          With --repair: rebuild even when the episodic log is missing or holds no record while the index holds events. The rebuild deletes those events from the index
 
       --cluster-health
           Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift

@@ -114,9 +114,15 @@ pub struct DoctorArgs {
     /// Wipes the whole derived index directory, including any .tantivy-*.lock
     /// inside it, and never targets lock files on their own. Does not modify
     /// AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the
-    /// project.
+    /// project, and while the episodic log is missing or holds no record and
+    /// the index holds events, since the rebuild would delete them.
     #[arg(long)]
     pub repair: bool,
+    /// With --repair: rebuild even when the episodic log is missing or holds
+    /// no record while the index holds events. The rebuild deletes those
+    /// events from the index.
+    #[arg(long, requires = "repair")]
+    pub allow_empty_log: bool,
     /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
     #[arg(long)]
     pub cluster_health: bool,
@@ -839,6 +845,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let mut err = std::io::stderr();
     let flags = commands::doctor::DoctorFlags {
         repair: args.repair,
+        allow_empty_log: args.allow_empty_log,
         cluster_health: args.cluster_health,
         provenance: args.provenance,
     };
@@ -2668,6 +2675,24 @@ mod tests {
         let bare = Cli::try_parse_from(["dreamd", "--version"]).unwrap();
         assert!(bare.command.is_none());
         assert!(!wants_daemon_log(bare.command.as_ref()));
+    }
+
+    /// DRM-100 test 21: `--allow-empty-log` only makes sense with `--repair`.
+    #[test]
+    fn allow_empty_log_needs_repair() {
+        assert!(
+            Cli::try_parse_from(["dreamd", "doctor", "--allow-empty-log"]).is_err(),
+            "--allow-empty-log without --repair must not parse"
+        );
+        let both = Cli::try_parse_from(["dreamd", "doctor", "--repair", "--allow-empty-log"])
+            .expect("--repair --allow-empty-log parses");
+        match both.command {
+            Some(Command::Doctor(args)) => {
+                assert!(args.repair);
+                assert!(args.allow_empty_log);
+            }
+            _ => panic!("expected Doctor"),
+        }
     }
 
     #[test]

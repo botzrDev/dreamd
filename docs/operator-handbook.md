@@ -11,7 +11,7 @@ the pages for the other maintenance commands.
 | `dreamd archive --force-unpin` | Clear `pinned` so decay can remove an entry | yes | below |
 | `dreamd forget <id>` | Remove one episodic event and the lesson state that names it (`--dry-run`, `--proof <PATH>`) | yes (`--dry-run` does not check) | [provenance.md](./provenance.md) |
 | `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Snapshot, name, compare and restore the memory files | `checkout` and `bisect` only | [branching-guide.md](./branching-guide.md) |
-| `dreamd doctor [--repair\|--cluster-health\|--provenance]` | Health checks; `--repair` rebuilds the Tantivy index and unlinks an orphaned socket | `--repair` only | [troubleshooting.md](./troubleshooting.md) |
+| `dreamd doctor [--repair [--allow-empty-log]\|--cluster-health\|--provenance]` | Health checks; `--repair` rebuilds the Tantivy index and unlinks an orphaned socket. It refuses while the episodic log is missing or holds no record and the index holds events; `--allow-empty-log` rebuilds anyway | `--repair` only | [troubleshooting.md](./troubleshooting.md) |
 | `dreamd migrate --from 1.0.0 --to 1.0.0` | Schema migration stub (takes `.bak` copies) | no | [migrate.md](./migrate.md) |
 | `dreamd salience-drift`, `dreamd blame <query>` | Reports on salience and recall ranking (`salience-drift` also writes today's snapshot under `.agent/.dreamd/observability/`) | no | [observability.md](./observability.md) |
 | `dreamd service …` | Login service for `dreamd watch` | n/a | [install.md](./install.md) |

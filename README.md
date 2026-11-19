@@ -40,7 +40,7 @@ dreamd is built for that response:
 | Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
 | Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
 | Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state that names it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
-| Review what agents learned | `.agent/` is committed with your code, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
+| Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
 | Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
 
 **What dreamd does not do.** It does not detect or block poisoned writes, and it does not filter injected lesson content ([SECURITY.md](./SECURITY.md)). `source_harness` is asserted by the caller, not verified. The provenance ledger and the forget receipt are unsigned, and there are no trust labels yet. dreamd makes bad memory traceable and removable; it does not make it impossible. See [Roadmap](#roadmap) for what comes next.
@@ -108,9 +108,14 @@ If `~/your-project` is a brand-new folder, run `git init` first.
 cd ~/your-project
 npx -y dreamd-mcp setup
 
+# Commit the store, so `git clean -fd` cannot delete memory (setup prints this)
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+
 # Optional: shared daemon, recommended when several agents write
 npx -y dreamd-mcp watch
 ```
+
+`.agent/` holds the memory, and only `.agent/.dreamd/` is gitignored. To keep memory out of git instead, add `.agent/` to `.gitignore`.
 
 Reload your harness. `setup` already wired the dreamd MCP server, so the harness spawns `npx -y dreamd-mcp` itself.
 

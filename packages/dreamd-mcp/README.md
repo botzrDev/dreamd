@@ -2,7 +2,7 @@
 
 **Agent memory you can trace and undo.** Every lesson cites the events it came from. `blame` shows which memories drove an answer. `forget` removes a bad memory and the lesson state built on it, with a receipt. `git revert` rolls back a whole learning cycle.
 
-dreamd is local-first, long-term memory for AI agents, served over MCP to Claude Code, Cursor, Cline and other MCP-aware harnesses. Memory lives in `.agent/` in your repo as JSONL and Markdown and is committed with your code, so you review what agents learned the way you review code.
+dreamd is local-first, long-term memory for AI agents, served over MCP to Claude Code, Cursor, Cline and other MCP-aware harnesses. Memory lives in `.agent/` in your repo as JSONL and Markdown and is committed with your code (`setup` prints the commit command), so you review what agents learned the way you review code.
 
 Source, docs and issues: **[github.com/botzrDev/dreamd](https://github.com/botzrDev/dreamd)**
 
@@ -56,6 +56,12 @@ Requires a project root sentinel (`.git/`, `Cargo.toml`, `package.json`, or `pyp
 npx -y dreamd-mcp setup   # 1. scaffold .agent/ and wire your harness's MCP config
 npx -y dreamd-mcp watch   # 2. shared daemon, recommended when several agents write
                           # 3. reload the harness: it now spawns `npx -y dreamd-mcp` itself
+```
+
+While git has no commit of `.agent/`, `setup` prints the command that commits it, because `git clean -fd` deletes untracked memory:
+
+```sh
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
 ```
 
 `setup` prompts when it has a TTY; in scripts pass `--yes` with `--harness claude|cursor|both|none`. It rewrites each MCP config as 2-space pretty-printed JSON, so an existing `.mcp.json` or `.cursor/mcp.json` can come back reformatted; other MCP servers in the file are kept. `npx -y dreamd-mcp init` scaffolds the store only, same as `setup --no-write-mcp`. Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor) · [Cline](https://github.com/botzrDev/dreamd/tree/main/adapters/cline)

@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git clean -fd` can no longer turn into deleted memory unnoticed** (DRM-100). `.agent/` is meant to be committed, but nothing said so, so the episodic log stayed untracked and `git clean -fd` deleted it. The index still held the events. Doctor called that ordinary drift and advised `dreamd doctor --repair`, which rebuilt the index from the empty log and deleted the last copy. Now:
+  - while git has no commit of the episodic log, `dreamd setup`'s card prints the command that commits `.agent/` and `.gitignore`, and README's quick start shows it;
+  - `dreamd doctor` and `dreamd status` print `memory_in_git:`. Doctor warns, and fails the run, while git has no commit of a log that holds events. A repo that ignores `.agent/` is reported as `ignored`;
+  - doctor warns when the episodic log is missing, or holds no record, while the index holds events, and says to stop dreamd's writers and restore the file. It no longer advises `--repair` then;
+  - `dreamd doctor --repair` refuses in that case, and `--allow-empty-log` rebuilds anyway.
+
+  Library: new `autobiography::{log_git_state, LogGitState, commit_store_command}`.
+
 ## [1.3.2] - 2026-11-17
 
 A patch release. `git clean -fdX` deletes the gitignored `.agent/.dreamd/`, and a dreamd process that was running kept writing as if nothing had happened. Now every dreamd process stops writing to a store that was deleted or replaced under it, and `dreamd watch` opens the project again on the next request, with no restart. An empty dedup key no longer drops learnings, and `dreamd watch` no longer deletes a file at `DREAMD_SOCK` that is not a socket. Recall is still BM25 × salience. No store migration or index rebuild is needed.

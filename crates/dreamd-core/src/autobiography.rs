@@ -41,6 +41,11 @@
 //! committed. A cycle that leaves the tree unchanged makes no commit
 //! ([`AutobiographyOutcome::Unchanged`]). A project nested below its repo's
 //! root checks and commits its own `.agent/` files.
+//!
+//! **Whether git has the log (DRM-100).** [`log_git_state`] says whether
+//! HEAD's tree holds the episodic log. Doctor, `dreamd status` and setup's
+//! card read it to warn while a repo clean can delete memory, and they print
+//! [`commit_store_command`]. Neither function writes to git.
 
 use std::path::{Path, PathBuf};
 
@@ -291,6 +296,60 @@ fn check_path(
         return Ok(None);
     }
     Ok((!rule(&bytes, head.as_deref(), baseline)).then_some(rel))
+}
+
+/// Where git stands on a project's episodic log (DRM-100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogGitState {
+    /// No git repo at or above the project root.
+    NoRepo,
+    /// HEAD's tree holds the log, so `git clean` leaves it.
+    Committed,
+    /// HEAD's tree does not hold the log, and git's ignore rules match it:
+    /// the user keeps memory out of git.
+    Ignored,
+    /// HEAD's tree does not hold the log and git does not ignore it.
+    /// `git clean -fd` deletes it while it is untracked, and
+    /// `git reset --hard` while it is only staged.
+    NotCommitted,
+}
+
+/// Where git stands on `project_root`'s episodic log.
+///
+/// Decided by path, not by bytes: a log whose path HEAD's tree holds is
+/// [`LogGitState::Committed`] even when appends since that commit are not in
+/// it, or when the file is gone. The file need not exist. A staged log is
+/// [`LogGitState::NotCommitted`].
+pub fn log_git_state(project_root: &Path) -> Result<LogGitState, AutobiographyError> {
+    let Some(view) = open_repo(project_root)? else {
+        return Ok(LogGitState::NoRepo);
+    };
+    let rel = view.prefix.join(LOG_PATH);
+    if let Some(commit) = head_commit(&view.repo)? {
+        match commit.tree()?.get_path(&rel) {
+            Ok(_) => return Ok(LogGitState::Committed),
+            Err(e) if e.code() == ErrorCode::NotFound => {}
+            Err(e) => return Err(AutobiographyError::Git(e)),
+        }
+    }
+    if view.repo.is_path_ignored(&rel)? {
+        return Ok(LogGitState::Ignored);
+    }
+    Ok(LogGitState::NotCommitted)
+}
+
+/// The shell command that commits the store, run from the project root.
+///
+/// It names `.gitignore` when the project root has one (setup adds
+/// `/.agent/.dreamd/` to it). The `--` paths make `git commit` take only those
+/// paths, so the user's other staged files stay staged and out of the commit.
+pub fn commit_store_command(project_root: &Path) -> String {
+    let paths = if project_root.join(".gitignore").is_file() {
+        ".agent .gitignore"
+    } else {
+        ".agent"
+    };
+    format!("git add {paths} && git commit -m \"Add dreamd memory\" -- {paths}")
 }
 
 /// Check whether either tracked file holds bytes no dream cycle wrote. Called
@@ -1570,5 +1629,132 @@ mod tests {
 
         assert_eq!(dir.path().join(TRACKED_PATHS[0]), root.lessons_md());
         assert_eq!(dir.path().join(TRACKED_PATHS[1]), root.episodic_jsonl());
+    }
+
+    // ── DRM-100: whether git has the episodic log ─────────────────────────
+
+    /// The one line `dreamd init` appends to `.gitignore`.
+    const INIT_GITIGNORE_LINE: &[u8] = b"/.agent/.dreamd/\n";
+
+    /// Stage `rel` in the repo index without committing it.
+    fn stage_only(repo: &Repository, rel: &str) {
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(rel)).unwrap();
+        index.write().unwrap();
+    }
+
+    /// DRM-100 test 1: a log with no repo above it.
+    #[test]
+    fn log_git_state_is_no_repo_outside_git() {
+        let dir = TempDir::new().unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::NoRepo);
+    }
+
+    /// DRM-100 test 2: setup ignores only `.agent/.dreamd/`, so in a new repo
+    /// the log is neither committed nor ignored.
+    #[test]
+    fn log_git_state_is_not_committed_after_setup() {
+        let dir = TempDir::new().unwrap();
+        Repository::init(dir.path()).unwrap();
+        put(dir.path(), ".gitignore", INIT_GITIGNORE_LINE);
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(
+            log_git_state(dir.path()).unwrap(),
+            LogGitState::NotCommitted
+        );
+    }
+
+    /// DRM-100 test 3: staged is not committed; `git reset --hard` deletes a
+    /// new file that is only staged.
+    #[test]
+    fn log_git_state_counts_a_staged_log_as_not_committed() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        stage_only(&repo, LOG_PATH);
+
+        assert_eq!(
+            log_git_state(dir.path()).unwrap(),
+            LogGitState::NotCommitted
+        );
+    }
+
+    /// DRM-100 test 4: decided by HEAD's tree, not the bytes on disk. Appends
+    /// after the commit, and a deleted file, still read as committed.
+    #[test]
+    fn log_git_state_is_committed_once_head_holds_the_log() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "commit the store");
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+
+        append(dir.path(), LOG_PATH, b"{\"id\":\"c\",\"pinned\":false}\n");
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+
+        std::fs::remove_file(dir.path().join(LOG_PATH)).unwrap();
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 5: a user who keeps memory out of git with `.agent/`.
+    #[test]
+    fn log_git_state_is_ignored_under_an_agent_dir_rule() {
+        let dir = TempDir::new().unwrap();
+        Repository::init(dir.path()).unwrap();
+        put(dir.path(), ".gitignore", b".agent/\n");
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Ignored);
+    }
+
+    /// DRM-100 test 6: a tracked file stays tracked when an ignore rule that
+    /// matches it is added later, and `git clean` leaves it.
+    #[test]
+    fn log_git_state_prefers_head_over_ignore_rules() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "commit the store");
+        put(dir.path(), ".gitignore", b".agent/\n");
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 7: a project below the repo root asks about its own log,
+    /// not the repo root's.
+    #[test]
+    fn log_git_state_checks_a_nested_projects_own_log() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "the root project's store");
+
+        let nested = dir.path().join("sub");
+        put(&nested, LOG_PATH, TWO_LINES);
+        assert_eq!(log_git_state(&nested).unwrap(), LogGitState::NotCommitted);
+
+        let nested_rel = format!("sub/{LOG_PATH}");
+        user_commit(&repo, &[nested_rel.as_str()], "the nested project's store");
+        assert_eq!(log_git_state(&nested).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 8: `.gitignore` is named only when the project root has
+    /// one, and the `--` paths keep the user's other staged files out.
+    #[test]
+    fn commit_store_command_names_gitignore_only_when_present() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            commit_store_command(dir.path()),
+            "git add .agent && git commit -m \"Add dreamd memory\" -- .agent"
+        );
+
+        put(dir.path(), ".gitignore", INIT_GITIGNORE_LINE);
+        assert_eq!(
+            commit_store_command(dir.path()),
+            "git add .agent .gitignore && git commit -m \"Add dreamd memory\" -- .agent .gitignore"
+        );
     }
 }
