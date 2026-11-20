@@ -301,6 +301,10 @@ fn mcp_below_home_with_no_store_writes_nothing() {
     std::fs::create_dir(&folder).unwrap();
     let before = tree(home.path());
 
+    // The message names the working directory as the OS resolves it: on
+    // macOS a temp dir under /var is /private/var.
+    let shown = std::fs::canonicalize(&folder).unwrap();
+
     let mut cmd = dreamd(&folder, home.path());
     cmd.arg("mcp");
     let mut mcp = spawn_mcp(cmd);
@@ -308,7 +312,7 @@ fn mcp_below_home_with_no_store_writes_nothing() {
         assert!(
             message.contains(&format!(
                 "store in {} or a folder above it",
-                folder.display()
+                shown.display()
             )),
             "{message}"
         );

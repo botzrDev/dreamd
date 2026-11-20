@@ -121,7 +121,9 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --all-features --workspace
+        # --no-fail-fast: one run lists every failing test binary, not only
+        # the first (macOS and Windows are only tested here).
+        run: cargo test --all-features --workspace --no-fail-fast
 
   # ── Windows replace probe ────────────────────────────────────────────────────
   # The matrix Windows job is continue-on-error and already red. This job runs
