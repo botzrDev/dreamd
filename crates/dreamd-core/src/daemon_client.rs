@@ -1328,9 +1328,16 @@ mod tests {
         let mut stream = held
             .recv_timeout(Duration::from_secs(1))
             .expect("the fake accepted the call");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        match stream.set_read_timeout(Some(Duration::from_secs(1))) {
+            Ok(()) => {}
+            // macOS answers setsockopt with EINVAL once the peer has closed
+            // the connection, which is the outcome this test checks. A
+            // connection left open sets the timeout and fails the read below.
+            Err(e) if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::InvalidInput => {
+                return;
+            }
+            Err(e) => panic!("set_read_timeout: {e}"),
+        }
         let mut seen = Vec::new();
         match stream.read_to_end(&mut seen) {
             Ok(_) => {}
