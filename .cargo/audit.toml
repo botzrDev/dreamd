@@ -3,4 +3,5 @@
 [advisories]
 ignore = [
     "RUSTSEC-2026-0462", # rmcp 1.7.0; its HTTP client transports are not compiled into dreamd
+    "RUSTSEC-2026-0543", # chrono 0.4.44; unmaintained, not vulnerable
 ]

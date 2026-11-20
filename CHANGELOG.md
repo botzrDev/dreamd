@@ -32,6 +32,7 @@ A minor release that hardens what 1.3.2 shipped. Recall takes any text, returns 
 
   Library: `llm::resolve_llm_credentials` takes the `Config` and returns `Result<ResolvedKey, NoKey>`, and `dream_cycle::cycle_notices` takes an `Option<&NoKey>` and a `KeyHolder`. New `llm::{NoKey, no_key_for}`, `KeyProvider::{env_var, secrets_key, vendor}` and `dream_cycle::{KeyHolder, no_key_notice}`. `dream_cycle::NO_API_KEY_NOTICE` is removed.
 - **`GET /api/v1/preferences` serves only a regular file inside `.agent/personal/`** (DRM-120). The route followed a `PREFERENCES.md` symlink anywhere, so a repo could point it at a file outside the store and an agent would be handed that file. It now serves only a regular file inside `.agent/personal/`, as the dream cycle already did. A symlink within `personal/` still works.
+- **The bundled zlib is updated** (RUSTSEC-2026-0544). `libz-sys`, which builds the zlib that libgit2 links for the dream cycle's git calls, moves from 1.1.31 to 1.1.33, past a heap buffer overflow in zlib's `gz_vacate()`.
 
 ### Added
 
