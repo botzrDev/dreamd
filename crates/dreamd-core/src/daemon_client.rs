@@ -31,6 +31,12 @@
 //!   [`tcp_daemon_is_live`] are the synchronous liveness probes the CLI's
 //!   `status` and `archive` guards use.
 //!
+//! Every call has a deadline (DRM-121): one timer covers the connect through
+//! the last byte of the response, and running out is
+//! [`DaemonTransportError::TimedOut`], never `Unreachable`. [`deadline_for`]
+//! picks it per [`CallKind`]; `DREAMD_CLIENT_TIMEOUT` replaces the learn,
+//! recall and dream deadlines.
+//!
 //! Both transports run the version handshake (BZR-1519): the request carries
 //! [`VERSION_HEADER`] with this binary's version, and a daemon of another
 //! version, or one that states none, is [`DaemonTransportError::VersionMismatch`].
@@ -100,6 +106,74 @@ pub enum DaemonTransportError {
     /// so the dream proxy must not run the cycle in-process beside it.
     #[error("{0}")]
     VersionMismatch(String),
+    /// The daemon did not finish answering within the call's deadline (DRM-121).
+    /// Not `Unreachable`: something holds the socket, so nothing runs in-process.
+    #[error("the daemon at {addr} did not answer within {}. Run `dreamd status`; if it says `not responding`, stop that `dreamd watch` and start it again.", span(.after))]
+    TimedOut { addr: String, after: Duration },
+}
+
+/// A deadline as the error prints it: whole seconds as `30 s`, anything else
+/// in milliseconds, as `200 ms`.
+fn span(after: &Duration) -> String {
+    if after.subsec_nanos() == 0 {
+        format!("{} s", after.as_secs())
+    } else {
+        format!("{} ms", after.as_millis())
+    }
+}
+
+/// A learn, recall or health call: connect to the last byte of the response (DRM-121).
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+
+/// A proxied dream cycle: the model's whole retry budget, plus 30 s for the cycle.
+pub const DREAM_DEADLINE: Duration = Duration::from_secs(
+    crate::llm::MAX_ATTEMPTS as u64 * crate::llm::REQUEST_TIMEOUT.as_secs() + 30,
+);
+
+/// `dreamd status`'s one request. Not changed by `DREAMD_CLIENT_TIMEOUT`.
+pub const STATUS_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Which deadline a call takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    /// A learn, recall or health call: [`REQUEST_DEADLINE`].
+    Request,
+    /// A proxied dream cycle: [`DREAM_DEADLINE`].
+    Dream,
+    /// `dreamd status`'s probe: [`STATUS_DEADLINE`].
+    Status,
+}
+
+/// `kind`'s deadline. `DREAMD_CLIENT_TIMEOUT` replaces `Request` and `Dream`.
+pub fn deadline_for(kind: CallKind) -> Duration {
+    match kind {
+        CallKind::Request => client_timeout().unwrap_or(REQUEST_DEADLINE),
+        CallKind::Dream => client_timeout().unwrap_or(DREAM_DEADLINE),
+        CallKind::Status => STATUS_DEADLINE,
+    }
+}
+
+/// `DREAMD_CLIENT_TIMEOUT`, read once per process. A value that does not parse
+/// logs one WARN and keeps the defaults.
+fn client_timeout() -> Option<Duration> {
+    static TIMEOUT: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let raw = std::env::var_os("DREAMD_CLIENT_TIMEOUT")?;
+        let value = raw.to_string_lossy();
+        let parsed = parse_client_timeout(&value);
+        if parsed.is_none() {
+            tracing::warn!(
+                "DREAMD_CLIENT_TIMEOUT is not a whole number of seconds (1 or more): {value}; using the defaults"
+            );
+        }
+        parsed
+    })
+}
+
+/// A `DREAMD_CLIENT_TIMEOUT` value: a whole number of seconds, 1 or more.
+fn parse_client_timeout(value: &str) -> Option<Duration> {
+    let secs: u64 = value.parse().ok()?;
+    (secs >= 1).then(|| Duration::from_secs(secs))
 }
 
 /// The header both sides stamp with their `CARGO_PKG_VERSION` (BZR-1519).
@@ -110,13 +184,46 @@ pub enum DaemonTransportError {
 /// parsed as semver.
 pub const VERSION_HEADER: &str = "x-dreamd-version";
 
+/// Every 400 `agent_root_middleware` gives starts with this (DRM-102). The
+/// MCP client maps those to `-32600`: the caller cannot fix them by changing
+/// a tool's arguments.
+pub const AGENT_ROOT_REJECTED_PREFIX: &str = "X-Agent-Root";
+
+/// How a project config that does not load is reported, in both modes
+/// (DRM-103). The MCP client answers it as `-32600`: the user fixes the file,
+/// not the tool's arguments.
+pub const CONFIG_LOAD_FAILED: &str = "config load failed";
+
 /// The sentence for a daemon whose version differs from this client's.
 ///
 /// A client builds it from the daemon's [`VERSION_HEADER`], naming the
 /// commands that work for its `launcher` (BZR-1531). The daemon puts the
 /// [`Launcher::Binary`] form in its 426 body, for callers such as curl that
 /// do not build their own.
+///
+/// The advice names the older side (DRM-122). When `compare_versions` finds
+/// the client older, restarting the daemon would start the same version
+/// again, so the sentence says to update the client, or under npx to remove a
+/// pin. Otherwise, the daemon older or a version that does not parse, it says
+/// to stop the other daemon, as before.
 pub fn version_mismatch_message(client: &str, daemon: &str, launcher: Launcher) -> String {
+    if compare_versions(client, daemon) == Some(std::cmp::Ordering::Less) {
+        return match launcher {
+            Launcher::Binary => format!(
+                "version mismatch: client {client}, daemon {daemon}. \
+                 This client is older than the daemon. \
+                 Install dreamd {daemon} and restart your MCP harness, \
+                 or point DREAMD_SOCK at a daemon of version {client}."
+            ),
+            Launcher::Npx => format!(
+                "version mismatch: client {client}, daemon {daemon}. \
+                 This client is older than the daemon. \
+                 If your MCP config pins `dreamd-mcp@{client}`, change it to `npx -y dreamd-mcp` \
+                 and reload your MCP harness. \
+                 Or point DREAMD_SOCK at a daemon of version {client}."
+            ),
+        };
+    }
     match launcher {
         Launcher::Binary => format!(
             "version mismatch: client {client}, daemon {daemon}. \
@@ -132,6 +239,25 @@ pub fn version_mismatch_message(client: &str, daemon: &str, launcher: Launcher) 
             launcher.command("watch"),
         ),
     }
+}
+
+/// `Some(Less)` when `client` is older than `daemon`, compared as numeric
+/// `major.minor.patch`. `None` when either does not parse, or when the two
+/// differ only after the patch number.
+fn compare_versions(client: &str, daemon: &str) -> Option<std::cmp::Ordering> {
+    fn parse(version: &str) -> Option<(u64, u64, u64)> {
+        let mut parts = version.split('.');
+        let mut number = || -> Option<u64> {
+            let part = parts.next()?;
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse().ok()
+        };
+        let triple = (number()?, number()?, number()?);
+        parts.next().is_none().then_some(triple)
+    }
+    Some(parse(client)?.cmp(&parse(daemon)?))
 }
 
 /// The sentence for a daemon that answered without [`VERSION_HEADER`]: a
@@ -155,6 +281,51 @@ pub fn version_unknown_message(client: &str, launcher: Launcher) -> String {
 
 /// This binary's version, the one value both sides of the handshake send.
 const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `GET /api/v1/health` with no `X-Agent-Root`, the request `dreamd status`
+/// sends (DRM-121). The daemon's own middleware answers it `400` and opens no
+/// project, so any answer shows that its HTTP stack runs.
+pub fn health_probe_request() -> hyper::Request<Full<Bytes>> {
+    let mut req = hyper::Request::new(Full::new(Bytes::new()));
+    *req.uri_mut() = hyper::Uri::from_static("/api/v1/health");
+    req.headers_mut().insert(
+        hyper::header::HOST,
+        hyper::header::HeaderValue::from_static("localhost"),
+    );
+    req
+}
+
+/// Ask the daemon its version before the first call that could write (DRM-122):
+/// `GET /api/v1/health` with no `X-Agent-Root`, which a current daemon answers
+/// `400` with `x-dreamd-version` and without opening a project. `Ok` means the
+/// same version, or an auth refusal (as `check_daemon_version`).
+///
+/// A transport error, `Unreachable` included, is returned as is.
+#[cfg(unix)]
+pub async fn preflight_version(sock_path: &Path) -> Result<(), DaemonTransportError> {
+    send_one_within(
+        sock_path,
+        health_probe_request(),
+        deadline_for(CallKind::Request),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// [`preflight_version`] over loopback TCP, with the bearer credential.
+pub async fn preflight_version_tcp(
+    endpoint: &DaemonEndpoint,
+    token: &AuthToken,
+) -> Result<(), DaemonTransportError> {
+    send_one_tcp_within(
+        endpoint,
+        token,
+        health_probe_request(),
+        deadline_for(CallKind::Request),
+    )
+    .await
+    .map(|_| ())
+}
 
 /// Stamp [`VERSION_HEADER`] on an outbound request, replacing any value the
 /// caller set, so the daemon always compares this binary's version.
@@ -243,9 +414,23 @@ pub fn resolve_daemon_socket() -> Result<PathBuf, SockPathError> {
 }
 
 /// Open a fresh UDS connection to `sock_path`, drive one HTTP/1 request to
-/// completion, and return `(status, body)`. The connection task is spawned and
-/// runs until the stream closes. Connect `NotFound`/`ConnectionRefused` →
-/// `Unreachable`; all other stage failures carry the underlying message.
+/// completion, and return `(status, body)`, within
+/// `deadline_for(CallKind::Request)`. See [`send_one_within`].
+#[cfg(unix)]
+pub async fn send_one(
+    sock_path: &Path,
+    req: hyper::Request<Full<Bytes>>,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    send_one_within(sock_path, req, deadline_for(CallKind::Request)).await
+}
+
+/// [`send_one`] with an explicit `deadline` (DRM-121). One timer covers the
+/// connect, the HTTP/1 handshake, the send and the whole body; when it runs
+/// out, the connection task is aborted and awaited, so the stream is closed
+/// and no task outlives the call, and the answer is
+/// [`DaemonTransportError::TimedOut`].
+/// Connect `NotFound`/`ConnectionRefused` → `Unreachable`; all other stage
+/// failures carry the underlying message.
 ///
 /// The request carries [`VERSION_HEADER`], and a response from a daemon of
 /// another version, or of no stated version, is
@@ -254,37 +439,64 @@ pub fn resolve_daemon_socket() -> Result<PathBuf, SockPathError> {
 /// Unix-only (AILAB-192): `tokio::net::UnixStream` does not exist off Unix. The
 /// loopback-TCP sibling mirrors this function stage for stage.
 #[cfg(unix)]
-pub async fn send_one(
+pub async fn send_one_within(
     sock_path: &Path,
     mut req: hyper::Request<Full<Bytes>>,
+    deadline: Duration,
 ) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
     use hyper::client::conn::http1;
     use hyper_util::rt::TokioIo;
 
     stamp_version(&mut req);
 
-    let stream = match tokio::net::UnixStream::connect(sock_path).await {
-        Ok(s) => s,
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Err(DaemonTransportError::Unreachable);
-        }
-        Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
+    let mut connection: Option<tokio::task::JoinHandle<()>> = None;
+    let call = async {
+        let stream = match tokio::net::UnixStream::connect(sock_path).await {
+            Ok(s) => s,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Err(DaemonTransportError::Unreachable);
+            }
+            Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
+        };
+        // TokioIo wrap is required: a raw UnixStream does not implement
+        // hyper's IO trait.
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = http1::handshake(io)
+            .await
+            .map_err(|e| DaemonTransportError::Handshake(e.to_string()))?;
+        connection = Some(tokio::spawn(async move {
+            let _ = conn.await;
+        }));
+        collect_response(&mut sender, req).await
     };
-    // TokioIo wrap is required: a raw UnixStream does not implement hyper's IO
-    // trait.
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = http1::handshake(io)
-        .await
-        .map_err(|e| DaemonTransportError::Handshake(e.to_string()))?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    let outcome = tokio::time::timeout(deadline, call).await;
+    let Ok(result) = outcome else {
+        if let Some(task) = connection {
+            task.abort();
+            // Wait for the abort, so the stream is closed when this returns.
+            let _ = task.await;
+        }
+        return Err(DaemonTransportError::TimedOut {
+            addr: sock_path.display().to_string(),
+            after: deadline,
+        });
+    };
+    let (status, daemon, body) = result?;
+    check_daemon_version(status, daemon.as_ref(), &body, Launcher::from_env())?;
+    Ok((status, body))
+}
 
+/// Send `req` on `sender` and collect the response: its status, its
+/// [`VERSION_HEADER`] and its whole body. Shared by both transports.
+async fn collect_response(
+    sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    req: hyper::Request<Full<Bytes>>,
+) -> Result<(hyper::StatusCode, Option<hyper::header::HeaderValue>, Bytes), DaemonTransportError> {
     let resp = sender
         .send_request(req)
         .await
@@ -296,8 +508,7 @@ pub async fn send_one(
         .await
         .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
         .to_bytes();
-    check_daemon_version(status, daemon.as_ref(), &body, Launcher::from_env())?;
-    Ok((status, body))
+    Ok((status, daemon, body))
 }
 
 // ── Loopback TCP transport: bearer token, endpoint, client (AILAB-192) ──────
@@ -633,7 +844,8 @@ pub fn tcp_daemon_is_live(server_json: &Path) -> bool {
 /// per-call connect (no pool — daemon traffic is infrequent, WEG-78-A), the
 /// [`hyper_util::rt::TokioIo`] wrap a raw tokio stream needs before hyper will
 /// take it, `http1::handshake`, a spawned connection task that runs until the
-/// stream closes, `send_request`, then `collect` on the body. Keeping the two
+/// stream closes, `send_request`, then `collect` on the body, all within
+/// `deadline_for(CallKind::Request)` (see [`send_one_tcp_within`]). Keeping the two
 /// identical is what lets a caller map [`DaemonTransportError`] to an exit code
 /// without knowing which transport it got.
 ///
@@ -655,11 +867,24 @@ pub fn tcp_daemon_is_live(server_json: &Path) -> bool {
 /// that failed, carrying that stage's message: `Connect`, `Handshake`, `Send`
 /// (also used for the by-construction-impossible case of a credential that is
 /// not a legal header value), or `ReadBody`. `VersionMismatch` when the daemon
-/// runs another version or sent none.
+/// runs another version or sent none. `TimedOut` when the deadline runs out.
 pub async fn send_one_tcp(
     endpoint: &DaemonEndpoint,
     token: &AuthToken,
+    req: hyper::Request<Full<Bytes>>,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    send_one_tcp_within(endpoint, token, req, deadline_for(CallKind::Request)).await
+}
+
+/// [`send_one_tcp`] with an explicit `deadline` (DRM-121), with the same one
+/// timer as [`send_one_within`]: connect through the whole body, the
+/// connection task aborted on a timeout, and
+/// [`DaemonTransportError::TimedOut`] naming `host:port`.
+pub async fn send_one_tcp_within(
+    endpoint: &DaemonEndpoint,
+    token: &AuthToken,
     mut req: hyper::Request<Full<Bytes>>,
+    deadline: Duration,
 ) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
     use hyper::client::conn::http1;
     use hyper_util::rt::TokioIo;
@@ -675,43 +900,48 @@ pub async fn send_one_tcp(
             )
         })?;
 
-    let stream = match tokio::net::TcpStream::connect(endpoint.socket_addr()).await {
-        Ok(s) => s,
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Err(DaemonTransportError::Unreachable);
-        }
-        Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
-    };
-    // TokioIo wrap is required: a raw TcpStream does not implement hyper's IO
-    // trait, same as the UDS half.
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = http1::handshake(io)
-        .await
-        .map_err(|e| DaemonTransportError::Handshake(e.to_string()))?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
     req.headers_mut()
         .insert(hyper::header::AUTHORIZATION, credential);
     stamp_version(&mut req);
 
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| DaemonTransportError::Send(e.to_string()))?;
-    let status = resp.status();
-    let daemon = resp.headers().get(VERSION_HEADER).cloned();
-    let body = resp
-        .collect()
-        .await
-        .map_err(|e| DaemonTransportError::ReadBody(e.to_string()))?
-        .to_bytes();
+    let mut connection: Option<tokio::task::JoinHandle<()>> = None;
+    let call = async {
+        let stream = match tokio::net::TcpStream::connect(endpoint.socket_addr()).await {
+            Ok(s) => s,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Err(DaemonTransportError::Unreachable);
+            }
+            Err(e) => return Err(DaemonTransportError::Connect(e.to_string())),
+        };
+        // TokioIo wrap is required: a raw TcpStream does not implement hyper's
+        // IO trait, same as the UDS half.
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = http1::handshake(io)
+            .await
+            .map_err(|e| DaemonTransportError::Handshake(e.to_string()))?;
+        connection = Some(tokio::spawn(async move {
+            let _ = conn.await;
+        }));
+        collect_response(&mut sender, req).await
+    };
+    let outcome = tokio::time::timeout(deadline, call).await;
+    let Ok(result) = outcome else {
+        if let Some(task) = connection {
+            task.abort();
+            // Wait for the abort, so the stream is closed when this returns.
+            let _ = task.await;
+        }
+        return Err(DaemonTransportError::TimedOut {
+            addr: endpoint.socket_addr().to_string(),
+            after: deadline,
+        });
+    };
+    let (status, daemon, body) = result?;
     check_daemon_version(status, daemon.as_ref(), &body, Launcher::from_env())?;
     Ok((status, body))
 }
@@ -983,6 +1213,171 @@ mod tests {
             .expect("same version");
         assert_eq!(status, hyper::StatusCode::NOT_FOUND);
         assert_eq!(body.as_ref(), b"{\"error\":\"agent root not registered\"}");
+    }
+
+    /// A UDS fake that accepts each connection on its own thread and never
+    /// reads from it. Each accepted stream is handed to the receiver, so the
+    /// fake holds it open until the test drops it.
+    fn silent_daemon() -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::mpsc::Receiver<std::os::unix::net::UnixStream>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("silent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(stream);
+                });
+            }
+        });
+        (dir, sock, rx)
+    }
+
+    /// `fut` within 5 s, so a call with no deadline fails its test instead of
+    /// hanging it.
+    async fn bounded<T>(fut: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), fut)
+            .await
+            .expect("the call ran 5 s past its deadline")
+    }
+
+    /// DRM-121 test 1: a daemon that accepts and never answers is `TimedOut`
+    /// at the deadline, and the message names the socket and the deadline.
+    #[tokio::test]
+    async fn a_daemon_that_never_answers_times_out() {
+        let (_dir, sock, _held) = silent_daemon();
+        let started = std::time::Instant::now();
+        let err = bounded(send_one_within(
+            &sock,
+            health_probe_request(),
+            Duration::from_millis(200),
+        ))
+        .await
+        .expect_err("no answer");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "took {took:?}");
+        assert!(
+            matches!(err, DaemonTransportError::TimedOut { .. }),
+            "got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(&sock.display().to_string()), "{msg}");
+        assert!(msg.contains("200 ms"), "{msg}");
+    }
+
+    /// DRM-121 test 2: an answer that comes inside the deadline is a success.
+    #[tokio::test]
+    async fn an_answer_inside_the_deadline_succeeds() {
+        use std::io::{BufRead, Write};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("slow.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                        if line == "\r\n" {
+                            break;
+                        }
+                        line.clear();
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\n{VERSION_HEADER}: {THIS_VERSION}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                    );
+                });
+            }
+        });
+        let (status, body) = send_one_within(&sock, health_probe_request(), Duration::from_secs(2))
+            .await
+            .expect("an answer at 300 ms");
+        assert_eq!(status, hyper::StatusCode::OK);
+        assert_eq!(body.as_ref(), b"ok");
+    }
+
+    /// DRM-121 test 3: a timed-out call closes its connection, so the fake
+    /// reads to EOF. The read blocks this runtime's only thread, so the
+    /// connection must already be closed when the call returns.
+    #[tokio::test]
+    async fn a_timed_out_call_closes_its_connection() {
+        use std::io::Read;
+
+        let (_dir, sock, held) = silent_daemon();
+        let err = bounded(send_one_within(
+            &sock,
+            health_probe_request(),
+            Duration::from_millis(200),
+        ))
+        .await
+        .expect_err("no answer");
+        assert!(
+            matches!(err, DaemonTransportError::TimedOut { .. }),
+            "got {err:?}"
+        );
+        let mut stream = held
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the fake accepted the call");
+        match stream.set_read_timeout(Some(Duration::from_secs(1))) {
+            Ok(()) => {}
+            // macOS answers setsockopt with EINVAL once the peer has closed
+            // the connection, which is the outcome this test checks. A
+            // connection left open sets the timeout and fails the read below.
+            Err(e) if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::InvalidInput => {
+                return;
+            }
+            Err(e) => panic!("set_read_timeout: {e}"),
+        }
+        let mut seen = Vec::new();
+        match stream.read_to_end(&mut seen) {
+            Ok(_) => {}
+            Err(e) => panic!(
+                "the connection is still open 1 s after the timeout ({e}); read {} bytes",
+                seen.len()
+            ),
+        }
+    }
+
+    /// DRM-121 test 5: each deadline covers its call, and the env value
+    /// parses only as a whole number of seconds, 1 or more.
+    #[test]
+    fn the_deadlines_cover_their_calls() {
+        use crate::llm::{MAX_ATTEMPTS, REQUEST_TIMEOUT};
+
+        assert!(DREAM_DEADLINE >= REQUEST_TIMEOUT * MAX_ATTEMPTS + Duration::from_secs(30));
+        assert_eq!(REQUEST_DEADLINE, Duration::from_secs(30));
+        assert_eq!(STATUS_DEADLINE, Duration::from_secs(2));
+
+        // A developer's own DREAMD_CLIENT_TIMEOUT replaces the two it covers.
+        let env = std::env::var("DREAMD_CLIENT_TIMEOUT")
+            .ok()
+            .and_then(|v| parse_client_timeout(&v));
+        assert_eq!(
+            deadline_for(CallKind::Request),
+            env.unwrap_or(REQUEST_DEADLINE)
+        );
+        assert_eq!(deadline_for(CallKind::Dream), env.unwrap_or(DREAM_DEADLINE));
+        assert_eq!(deadline_for(CallKind::Status), STATUS_DEADLINE);
+        assert_eq!(
+            crate::client::DREAM_PROXY_CALL,
+            CallKind::Dream,
+            "the dream proxy takes the dream deadline"
+        );
+
+        assert_eq!(parse_client_timeout("7"), Some(Duration::from_secs(7)));
+        for bad in ["0", "-1", "1.5", "x", ""] {
+            assert_eq!(parse_client_timeout(bad), None, "{bad:?}");
+        }
     }
 
     /// The auth layer is outside the version layer, so a 401 or 403 carries
@@ -1354,6 +1749,53 @@ mod tcp_tests {
 
     // ── send_one_tcp ──────────────────────────────────────────────────────
 
+    /// DRM-121 test 4: test 1 over loopback TCP. The message names
+    /// `host:port`.
+    #[tokio::test]
+    async fn send_one_tcp_times_out() {
+        let listener =
+            std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        let (tx, held) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(stream);
+                });
+            }
+        });
+        let endpoint = DaemonEndpoint {
+            host: loopback(),
+            port,
+        };
+        let token = AuthToken([0xab_u8; 32]);
+        let started = std::time::Instant::now();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_one_tcp_within(
+                &endpoint,
+                &token,
+                health_probe_request(),
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("the call ran 5 s past its 200 ms deadline")
+        .expect_err("no answer");
+        let took = started.elapsed();
+        drop(held);
+        assert!(took < Duration::from_secs(1), "took {took:?}");
+        assert!(
+            matches!(err, DaemonTransportError::TimedOut { .. }),
+            "got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("127.0.0.1:{port}")), "{msg}");
+        assert!(msg.contains("200 ms"), "{msg}");
+    }
+
     #[tokio::test]
     async fn send_one_tcp_closed_port_is_unreachable() {
         let endpoint = DaemonEndpoint {
@@ -1597,8 +2039,8 @@ mod version_tests {
     #[test]
     fn binary_sentences_keep_their_bytes() {
         assert_eq!(
-            version_mismatch_message("1.3.0", "1.3.1", Launcher::Binary),
-            "version mismatch: client 1.3.0, daemon 1.3.1. Stop the other daemon and start \
+            version_mismatch_message("1.3.1", "1.3.0", Launcher::Binary),
+            "version mismatch: client 1.3.1, daemon 1.3.0. Stop the other daemon and start \
              this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."
         );
         assert_eq!(
@@ -1613,8 +2055,8 @@ mod version_tests {
     #[test]
     fn npx_sentences_name_npx_commands() {
         assert_eq!(
-            version_mismatch_message("1.3.0", "1.3.1", Launcher::Npx),
-            "version mismatch: client 1.3.0, daemon 1.3.1. Stop the other daemon with \
+            version_mismatch_message("1.3.1", "1.3.0", Launcher::Npx),
+            "version mismatch: client 1.3.1, daemon 1.3.0. Stop the other daemon with \
              `npx -y dreamd-mcp update`, start this one with `npx -y dreamd-mcp watch`, \
              then reload your MCP harness. Or point DREAMD_SOCK at a daemon of this version."
         );
@@ -1624,6 +2066,62 @@ mod version_tests {
              Stop it with `npx -y dreamd-mcp update`, start this version with \
              `npx -y dreamd-mcp watch`, then reload your MCP harness."
         );
+    }
+
+    /// DRM-122 test 1: the advice names the older side, comparing numeric
+    /// `major.minor.patch`; a version that does not parse keeps today's text.
+    #[test]
+    fn mismatch_advice_names_the_older_side() {
+        let binary_older = |c: &str, d: &str| {
+            format!(
+                "version mismatch: client {c}, daemon {d}. This client is older than the \
+                 daemon. Install dreamd {d} and restart your MCP harness, or point \
+                 DREAMD_SOCK at a daemon of version {c}."
+            )
+        };
+        let binary_today = |c: &str, d: &str| {
+            format!(
+                "version mismatch: client {c}, daemon {d}. Stop the other daemon and start \
+                 this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this \
+                 version."
+            )
+        };
+        assert_eq!(
+            version_mismatch_message("1.3.0", "1.3.3", Launcher::Binary),
+            "version mismatch: client 1.3.0, daemon 1.3.3. This client is older than the \
+             daemon. Install dreamd 1.3.3 and restart your MCP harness, or point \
+             DREAMD_SOCK at a daemon of version 1.3.0."
+        );
+        assert_eq!(
+            version_mismatch_message("1.3.0", "1.3.3", Launcher::Npx),
+            "version mismatch: client 1.3.0, daemon 1.3.3. This client is older than the \
+             daemon. If your MCP config pins `dreamd-mcp@1.3.0`, change it to \
+             `npx -y dreamd-mcp` and reload your MCP harness. Or point DREAMD_SOCK at a \
+             daemon of version 1.3.0."
+        );
+        assert_eq!(
+            version_mismatch_message("1.3.3", "1.3.0", Launcher::Binary),
+            "version mismatch: client 1.3.3, daemon 1.3.0. Stop the other daemon and start \
+             this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."
+        );
+        assert_eq!(
+            version_mismatch_message("1.3.3", "1.3.0", Launcher::Npx),
+            "version mismatch: client 1.3.3, daemon 1.3.0. Stop the other daemon with \
+             `npx -y dreamd-mcp update`, start this one with `npx -y dreamd-mcp watch`, \
+             then reload your MCP harness. Or point DREAMD_SOCK at a daemon of this version."
+        );
+        // A string compare puts "1.10.0" before "1.9.0".
+        assert_eq!(
+            version_mismatch_message("1.9.0", "1.10.0", Launcher::Binary),
+            binary_older("1.9.0", "1.10.0")
+        );
+        for daemon in ["1.3.3-rc1", "x"] {
+            assert_eq!(
+                version_mismatch_message("1.3.3", daemon, Launcher::Binary),
+                binary_today("1.3.3", daemon),
+                "{daemon}"
+            );
+        }
     }
 
     /// Test 4: a 426 gives the client's own sentence for its launcher, built

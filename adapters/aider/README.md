@@ -46,7 +46,7 @@
 
 - **No MCP tools inside Aider.** Aider cannot call `search_nodes` or `append_node` natively. Recall works by reading files (`/read`); append works by shelling out to `curl`.
 - **`LESSONS.md` appears only after a dream cycle promotes something.** On a fresh store `.agent/semantic/LESSONS.md` does not exist yet, so the `/read` in the template has nothing to load until `dreamd dream` has consolidated a recurring cluster. The episodic log is there from the first append.
-- **Never hand-edit `AGENT_LEARNINGS.jsonl`.** The daemon owns the episodic log. Always use `POST /api/v1/learn` for durable writes.
+- **Never `echo >>` a record onto `AGENT_LEARNINGS.jsonl`: durable appends go through the coordinator.** To fix a line by hand, stop dreamd's writer for the project first (`dreamd watch`, or the harness session running `dreamd mcp`), edit the line, then run `dreamd doctor --repair`. Until the repair, the index keeps the old text and scores, and `dreamd doctor` reports `index_freshness: stale content`.
 - **Daemon required for append.** Without `dreamd watch` there is no socket and the `curl` fails to connect (curl exit code 7). This is an honest limitation of the documentation pattern.
 
 ## Companion docs

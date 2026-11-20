@@ -1,6 +1,6 @@
 # crash-recovery
 
-A **frozen mid-cycle state** showing what a pre-1.1.0 dreamd left behind when a dream cycle was interrupted — a **legacy** (`intents`) WAL that 1.1.0 still recovers the old way — and how recovery cleans it up on the next start.
+A **frozen mid-cycle state**: a legacy (`intents`) WAL from before the redo WAL, a torn JSONL, and how recovery cleans it up on the next start. This is a contributor fixture, not a setup walkthrough.
 
 ## What's in this fixture
 

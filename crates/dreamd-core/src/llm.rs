@@ -37,7 +37,11 @@
 //!
 //! ## Credentials
 //!
-//! Environment first (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`), else
+//! The key follows the vendor the model goes to (DRM-113): `provider` when it
+//! names one, else genai's inference from `model`. Anthropic gets
+//! `ANTHROPIC_API_KEY`, else `secrets.toml`'s `anthropic_api_key`; OpenAI gets
+//! `OPENAI_API_KEY`, else `openai_api_key`. One vendor's key is never sent to
+//! the other, and any other adapter gets no key. The secrets file is
 //! `~/.config/dreamd/secrets.toml` at mode `0600`. A world- or group-readable
 //! secrets file is **ignored with a warning**, never parsed. There is no OS
 //! keychain path (`docs/v0.1.1-scope.md`, "Resolved implementation
@@ -122,13 +126,68 @@ pub trait LlmBackend: Send + Sync {
 
 // ── Credentials ──────────────────────────────────────────────────────────────
 
-/// Which provider a resolved key implies. The key variable / TOML field is the
-/// only provider signal at this layer; `Config.provider` may still override the
-/// adapter downstream in [`GenaiBackend`].
+/// The vendor a key belongs to. The key follows the vendor (DRM-113): the
+/// vendor the model goes to picks which variable and `secrets.toml` field are
+/// read, and [`GenaiBackend`]'s auth resolver sends the key only to an adapter
+/// of that vendor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyProvider {
     Anthropic,
     OpenAi,
+}
+
+impl KeyProvider {
+    /// `"ANTHROPIC_API_KEY"` or `"OPENAI_API_KEY"`.
+    #[must_use]
+    pub fn env_var(self) -> &'static str {
+        match self {
+            KeyProvider::Anthropic => "ANTHROPIC_API_KEY",
+            KeyProvider::OpenAi => "OPENAI_API_KEY",
+        }
+    }
+
+    /// `"anthropic_api_key"` or `"openai_api_key"`.
+    #[must_use]
+    pub fn secrets_key(self) -> &'static str {
+        match self {
+            KeyProvider::Anthropic => "anthropic_api_key",
+            KeyProvider::OpenAi => "openai_api_key",
+        }
+    }
+
+    /// `"Anthropic"` or `"OpenAI"`.
+    #[must_use]
+    pub fn vendor(self) -> &'static str {
+        match self {
+            KeyProvider::Anthropic => "Anthropic",
+            KeyProvider::OpenAi => "OpenAI",
+        }
+    }
+}
+
+/// Why a cycle that may call a model does not (DRM-113).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoKey {
+    /// The call would go to this vendor, and neither its variable nor its
+    /// `secrets.toml` key is set.
+    Missing(KeyProvider),
+    /// The call would go to a genai adapter that dreamd sends no key to;
+    /// the adapter's `as_str()`.
+    NoKeyRule(&'static str),
+}
+
+impl std::fmt::Display for NoKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoKey::Missing(v) => write!(
+                f,
+                "no {} and no {} in secrets.toml",
+                v.env_var(),
+                v.secrets_key()
+            ),
+            NoKey::NoKeyRule(a) => write!(f, "the {a} adapter gets no API key"),
+        }
+    }
 }
 
 /// Where a key came from. Carried for the INFO log only — never logged with the
@@ -175,40 +234,62 @@ struct SecretsToml {
     openai_api_key: Option<String>,
 }
 
-/// Resolve an API key: environment first, then `secrets.toml`, else `None`.
+/// The key for the vendor `config`'s model goes to (DRM-113).
 ///
-/// `None` is the signal to run the deterministic cycle — callers log
-/// [`NO_API_KEY_FALLBACK`] and carry on.
-pub fn resolve_llm_credentials() -> Option<ResolvedKey> {
+/// The vendor is decided once: `provider` when it names one, else
+/// genai's inference from `model`. That vendor's environment variable comes
+/// first, then its `secrets.toml` field. The other vendor's key is never
+/// returned. `Err` is the signal to run the deterministic cycle — callers log
+/// [`NO_API_KEY_FALLBACK`] and carry on — and says why.
+pub fn resolve_llm_credentials(config: &Config) -> Result<ResolvedKey, NoKey> {
+    let kind = effective_adapter(config);
+    let Some(vendor) = key_vendor(kind) else {
+        return Err(NoKey::NoKeyRule(kind.as_str()));
+    };
     resolve_credentials_from(
-        std::env::var("ANTHROPIC_API_KEY").ok(),
-        std::env::var("OPENAI_API_KEY").ok(),
+        vendor,
+        std::env::var(KeyProvider::Anthropic.env_var()).ok(),
+        std::env::var(KeyProvider::OpenAi.env_var()).ok(),
         secrets_toml_path().as_deref(),
     )
+    .ok_or(NoKey::Missing(vendor))
+}
+
+/// Why a cycle for the project at `project_root` would not call a model, or
+/// `None` when it has a key for its vendor.
+///
+/// The config is loaded the way the cycle loads it: a broken `config.toml`
+/// reads as the defaults. The notices call this after the cycle, so the
+/// answer is the one the cycle got.
+#[must_use]
+pub fn no_key_for(project_root: &Path) -> Option<NoKey> {
+    let config = crate::config::load_config(project_root).unwrap_or_default();
+    resolve_llm_credentials(&config).err()
 }
 
 /// Pure resolution core. Takes the env values as arguments rather than reading
 /// them so unit tests never mutate process-global state — `std::env::set_var`
 /// is racy under cargo's multi-threaded test runner and would make the
 /// precedence tests order-dependent.
+///
+/// Only `vendor`'s values are read: its environment value if non-empty, else
+/// its `secrets.toml` field if non-empty, else `None`.
 fn resolve_credentials_from(
+    vendor: KeyProvider,
     anthropic_env: Option<String>,
     openai_env: Option<String>,
     secrets_path: Option<&Path>,
 ) -> Option<ResolvedKey> {
+    let env = match vendor {
+        KeyProvider::Anthropic => anthropic_env,
+        KeyProvider::OpenAi => openai_env,
+    };
     // 1. Environment. Empty-string values count as unset: an exported-but-blank
     //    key is a misconfiguration, and treating it as present would send an
     //    unauthenticated request and burn the retry budget on 401s.
-    if let Some(v) = anthropic_env.filter(|v| !v.is_empty()) {
+    if let Some(v) = env.filter(|v| !v.is_empty()) {
         return Some(ResolvedKey {
-            provider: KeyProvider::Anthropic,
-            value: v,
-            source: KeySource::Env,
-        });
-    }
-    if let Some(v) = openai_env.filter(|v| !v.is_empty()) {
-        return Some(ResolvedKey {
-            provider: KeyProvider::OpenAi,
+            provider: vendor,
             value: v,
             source: KeySource::Env,
         });
@@ -216,21 +297,15 @@ fn resolve_credentials_from(
 
     // 2. secrets.toml, mode 0600 only.
     let secrets = read_secrets_toml(secrets_path?)?;
-    if let Some(v) = secrets.anthropic_api_key.filter(|v| !v.is_empty()) {
-        return Some(ResolvedKey {
-            provider: KeyProvider::Anthropic,
-            value: v,
-            source: KeySource::SecretsToml,
-        });
-    }
-    if let Some(v) = secrets.openai_api_key.filter(|v| !v.is_empty()) {
-        return Some(ResolvedKey {
-            provider: KeyProvider::OpenAi,
-            value: v,
-            source: KeySource::SecretsToml,
-        });
-    }
-    None
+    let file_value = match vendor {
+        KeyProvider::Anthropic => secrets.anthropic_api_key,
+        KeyProvider::OpenAi => secrets.openai_api_key,
+    };
+    file_value.filter(|v| !v.is_empty()).map(|v| ResolvedKey {
+        provider: vendor,
+        value: v,
+        source: KeySource::SecretsToml,
+    })
 }
 
 /// Read and parse `secrets.toml`, refusing anything not at mode `0600` on unix.
@@ -701,18 +776,47 @@ impl std::fmt::Debug for GenaiBackend {
 /// infer from the model name" — which is the default (`provider = ""`) and the
 /// correct answer for `claude-*` / `gpt-*` model ids.
 fn adapter_for_provider(provider: &str) -> Option<genai::adapter::AdapterKind> {
+    let forced = forced_adapter(provider);
+    if forced.is_none() && !provider.trim().is_empty() {
+        tracing::warn!(
+            provider = provider.trim().to_ascii_lowercase(),
+            "unknown provider in config; inferring from the model name instead"
+        );
+    }
+    forced
+}
+
+/// [`adapter_for_provider`]'s mapping, with no log: `"anthropic"` and
+/// `"openai"` (trimmed, any case) name their adapters, and anything else is
+/// `None`.
+fn forced_adapter(provider: &str) -> Option<genai::adapter::AdapterKind> {
     use genai::adapter::AdapterKind;
     match provider.trim().to_ascii_lowercase().as_str() {
-        "" => None,
         "anthropic" => Some(AdapterKind::Anthropic),
         "openai" => Some(AdapterKind::OpenAI),
-        other => {
-            tracing::warn!(
-                provider = other,
-                "unknown provider in config; inferring from the model name instead"
-            );
-            None
-        }
+        _ => None,
+    }
+}
+
+/// The adapter every call a backend built from `config` goes to, decided once
+/// before the backend is built (DRM-113 D4): `provider` when it names one,
+/// else genai's inference from `model`, else `Ollama` (genai's own fallback)
+/// if inference ever fails.
+fn effective_adapter(config: &Config) -> genai::adapter::AdapterKind {
+    forced_adapter(&config.provider).unwrap_or_else(|| {
+        genai::adapter::AdapterKind::from_model(&config.model)
+            .unwrap_or(genai::adapter::AdapterKind::Ollama)
+    })
+}
+
+/// The vendor whose key an adapter gets: `Anthropic` gets the Anthropic key,
+/// `OpenAI` and `OpenAIResp` the OpenAI key, and every other adapter none.
+fn key_vendor(kind: genai::adapter::AdapterKind) -> Option<KeyProvider> {
+    use genai::adapter::AdapterKind;
+    match kind {
+        AdapterKind::Anthropic => Some(KeyProvider::Anthropic),
+        AdapterKind::OpenAI | AdapterKind::OpenAIResp => Some(KeyProvider::OpenAi),
+        _ => None,
     }
 }
 
@@ -726,17 +830,33 @@ impl GenaiBackend {
         let mut builder = genai::Client::builder()
             .with_web_config(genai::WebConfig::default().with_timeout(REQUEST_TIMEOUT));
 
+        let forced_adapter = adapter_for_provider(&config.provider);
+
         // Auth runs before the service-target resolver (genai `ClientConfig::
         // resolve_service_target`), so the target handed to the resolver below
-        // already carries this key.
+        // already carries this key. That also means `model.adapter_kind` here is
+        // genai's inference from the model name, not the forced `provider`
+        // adapter, so the forced one is applied first. The key goes only to an
+        // adapter of its own vendor (DRM-113); any other answer is an error
+        // before a request is built, and the message never holds the key.
         let auth_value = key.value.clone();
+        let key_provider = key.provider;
         builder = builder.with_auth_resolver_fn(
-            move |_model: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
-                Ok(Some(AuthData::from_single(auth_value.clone())))
+            move |model: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
+                let kind = forced_adapter.unwrap_or(model.adapter_kind);
+                if key_vendor(kind) == Some(key_provider) {
+                    Ok(Some(AuthData::from_single(auth_value.clone())))
+                } else {
+                    Err(genai::resolver::Error::Custom(format!(
+                        "dreamd sends a {} key only to {}; this call goes to the {} adapter",
+                        key_provider.vendor(),
+                        key_provider.vendor(),
+                        kind.as_str()
+                    )))
+                }
             },
         );
 
-        let forced_adapter = adapter_for_provider(&config.provider);
         let endpoint_override = config.endpoint.trim().to_string();
         if forced_adapter.is_some() || !endpoint_override.is_empty() {
             builder =
@@ -801,14 +921,16 @@ impl LlmBackend for GenaiBackend {
 
 /// Resolve the production backend for this cycle, or `None` to run deterministic.
 ///
-/// `None` is returned — and [`NO_API_KEY_FALLBACK`] logged at INFO — when no
-/// usable credential exists. This is the single place that decision is made on
-/// the production path, so the fallback line has exactly one emitter.
+/// `None` is returned — and [`NO_API_KEY_FALLBACK`] logged at INFO with the
+/// [`NoKey`] reason — when there is no key for the vendor the model goes to,
+/// or the model goes to an adapter that gets no key. This is the single place
+/// that decision is made on the production path, so the fallback line has
+/// exactly one emitter.
 pub fn resolve_backend(config: &Config) -> Option<GenaiBackend> {
-    let key = match resolve_llm_credentials() {
-        Some(k) => k,
-        None => {
-            tracing::info!("{NO_API_KEY_FALLBACK}");
+    let key = match resolve_llm_credentials(config) {
+        Ok(k) => k,
+        Err(no_key) => {
+            tracing::info!(reason = %no_key, "{NO_API_KEY_FALLBACK}");
             return None;
         }
     };
@@ -919,33 +1041,50 @@ mod tests {
         let secrets = dir.join("secrets.toml");
         write_secrets(&secrets, "anthropic_api_key = \"from-file\"\n", 0o600);
 
-        let got =
-            resolve_credentials_from(Some("from-env".to_string()), None, Some(secrets.as_path()))
-                .expect("env key resolves");
+        let got = resolve_credentials_from(
+            KeyProvider::Anthropic,
+            Some("from-env".to_string()),
+            None,
+            Some(secrets.as_path()),
+        )
+        .expect("env key resolves");
 
         assert_eq!(got.value, "from-env");
         assert_eq!(got.provider, KeyProvider::Anthropic);
         assert_eq!(got.source, KeySource::Env);
     }
 
+    /// DRM-113: the base returned the Anthropic key first whatever the vendor.
     #[test]
-    fn anthropic_env_beats_openai_env() {
+    fn the_other_vendors_env_key_is_never_chosen() {
         let got = resolve_credentials_from(
+            KeyProvider::OpenAi,
             Some("anthropic".to_string()),
             Some("openai".to_string()),
             None,
         )
         .expect("resolves");
-        assert_eq!(got.provider, KeyProvider::Anthropic);
-        assert_eq!(got.value, "anthropic");
+        assert_eq!(got.provider, KeyProvider::OpenAi);
+        assert_eq!(got.value, "openai");
     }
 
     #[test]
     fn empty_env_value_is_treated_as_unset() {
-        let got = resolve_credentials_from(Some(String::new()), Some("oai".to_string()), None)
-            .expect("falls through the blank anthropic key");
-        assert_eq!(got.provider, KeyProvider::OpenAi);
-        assert_eq!(got.value, "oai");
+        let dir = unique_tmpdir("llm-env-empty");
+        let _g = DirGuard(dir.clone());
+        let secrets = dir.join("secrets.toml");
+        write_secrets(&secrets, "anthropic_api_key = \"from-file\"\n", 0o600);
+
+        let got = resolve_credentials_from(
+            KeyProvider::Anthropic,
+            Some(String::new()),
+            Some("oai".to_string()),
+            Some(secrets.as_path()),
+        )
+        .expect("falls through the blank anthropic key to the file");
+        assert_eq!(got.provider, KeyProvider::Anthropic);
+        assert_eq!(got.value, "from-file");
+        assert_eq!(got.source, KeySource::SecretsToml);
     }
 
     #[test]
@@ -955,8 +1094,9 @@ mod tests {
         let secrets = dir.join("secrets.toml");
         write_secrets(&secrets, "openai_api_key = \"sk-from-file\"\n", 0o600);
 
-        let got = resolve_credentials_from(None, None, Some(secrets.as_path()))
-            .expect("0600 secrets.toml is readable");
+        let got =
+            resolve_credentials_from(KeyProvider::OpenAi, None, None, Some(secrets.as_path()))
+                .expect("0600 secrets.toml is readable");
         assert_eq!(got.value, "sk-from-file");
         assert_eq!(got.provider, KeyProvider::OpenAi);
         assert_eq!(got.source, KeySource::SecretsToml);
@@ -971,7 +1111,8 @@ mod tests {
         write_secrets(&secrets, "anthropic_api_key = \"leaky\"\n", 0o644);
 
         assert!(
-            resolve_credentials_from(None, None, Some(secrets.as_path())).is_none(),
+            resolve_credentials_from(KeyProvider::Anthropic, None, None, Some(secrets.as_path()))
+                .is_none(),
             "world-readable secrets.toml must be ignored, not parsed"
         );
     }
@@ -981,8 +1122,12 @@ mod tests {
         let dir = unique_tmpdir("llm-secrets-missing");
         let _g = DirGuard(dir.clone());
         let secrets = dir.join("does-not-exist.toml");
-        assert!(resolve_credentials_from(None, None, Some(secrets.as_path())).is_none());
-        assert!(resolve_credentials_from(None, None, None).is_none());
+        for vendor in [KeyProvider::Anthropic, KeyProvider::OpenAi] {
+            assert!(
+                resolve_credentials_from(vendor, None, None, Some(secrets.as_path())).is_none()
+            );
+            assert!(resolve_credentials_from(vendor, None, None, None).is_none());
+        }
     }
 
     #[test]
@@ -991,7 +1136,283 @@ mod tests {
         let _g = DirGuard(dir.clone());
         let secrets = dir.join("secrets.toml");
         write_secrets(&secrets, "anthropic_api_key = \"\"\n", 0o600);
-        assert!(resolve_credentials_from(None, None, Some(secrets.as_path())).is_none());
+        for vendor in [KeyProvider::Anthropic, KeyProvider::OpenAi] {
+            assert!(
+                resolve_credentials_from(vendor, None, None, Some(secrets.as_path())).is_none()
+            );
+        }
+    }
+
+    /// DRM-113 test 1: each vendor gets only its own key, from the
+    /// environment first, then `secrets.toml`.
+    #[test]
+    fn each_vendor_gets_only_its_own_key() {
+        use KeyProvider::{Anthropic, OpenAi};
+        let dir = unique_tmpdir("llm-own-key");
+        let _g = DirGuard(dir.clone());
+        let only_openai = dir.join("only-openai.toml");
+        write_secrets(&only_openai, "openai_api_key = \"oai-file\"\n", 0o600);
+        let only_anthropic = dir.join("only-anthropic.toml");
+        write_secrets(&only_anthropic, "anthropic_api_key = \"ant-file\"\n", 0o600);
+
+        let s = |v: &str| Some(v.to_string());
+        type Row<'a> = (
+            KeyProvider,
+            (Option<String>, Option<String>),
+            Option<&'a Path>,
+            Option<(&'a str, KeySource)>,
+        );
+        let rows: Vec<Row<'_>> = vec![
+            (Anthropic, (None, s("oai")), None, None),
+            (OpenAi, (s("ant"), None), None, None),
+            (
+                OpenAi,
+                (s("ant"), s("oai")),
+                None,
+                Some(("oai", KeySource::Env)),
+            ),
+            (
+                Anthropic,
+                (s("ant"), s("oai")),
+                None,
+                Some(("ant", KeySource::Env)),
+            ),
+            (Anthropic, (None, None), Some(&only_openai), None),
+            (
+                OpenAi,
+                (None, None),
+                Some(&only_openai),
+                Some(("oai-file", KeySource::SecretsToml)),
+            ),
+            (
+                OpenAi,
+                (None, s("")),
+                Some(&only_openai),
+                Some(("oai-file", KeySource::SecretsToml)),
+            ),
+            (
+                Anthropic,
+                (s("ant"), None),
+                Some(&only_anthropic),
+                Some(("ant", KeySource::Env)),
+            ),
+        ];
+        for (i, (vendor, (ant, oai), file, want)) in rows.into_iter().enumerate() {
+            let got = resolve_credentials_from(vendor, ant, oai, file);
+            match want {
+                None => assert!(got.is_none(), "row {i}: {vendor:?} got {got:?}"),
+                Some((value, source)) => {
+                    let got = got.unwrap_or_else(|| panic!("row {i}: {vendor:?} got no key"));
+                    assert_eq!(got.value, value, "row {i}");
+                    assert_eq!(got.source, source, "row {i}");
+                    assert_eq!(got.provider, vendor, "row {i}");
+                }
+            }
+        }
+    }
+
+    /// DRM-113 test 2: the vendor is `provider` when it names one, else the
+    /// model's; any other adapter gets no key.
+    #[test]
+    fn the_vendor_follows_provider_then_model() {
+        let cfg = |provider: &str, model: Option<&str>, endpoint: &str| {
+            let default = Config::default();
+            Config {
+                provider: provider.to_string(),
+                model: model.map_or(default.model.clone(), str::to_string),
+                endpoint: endpoint.to_string(),
+                ..default
+            }
+        };
+        let rows: Vec<(Config, Option<KeyProvider>)> = vec![
+            (Config::default(), Some(KeyProvider::Anthropic)),
+            (cfg("", Some("gpt-4o-mini"), ""), Some(KeyProvider::OpenAi)),
+            (cfg("", Some("gpt-5-mini"), ""), Some(KeyProvider::OpenAi)),
+            (cfg("openai", None, ""), Some(KeyProvider::OpenAi)),
+            (cfg(" OpenAI ", None, ""), Some(KeyProvider::OpenAi)),
+            (
+                cfg("anthropic", Some("gpt-4o-mini"), ""),
+                Some(KeyProvider::Anthropic),
+            ),
+            (cfg("gemini", None, ""), Some(KeyProvider::Anthropic)),
+            (cfg("", Some("gemini-2.0-flash"), ""), None),
+            (cfg("", Some("llama3"), ""), None),
+            (cfg("", Some("groq::llama3"), ""), None),
+            (
+                cfg("", Some("gpt-4o-mini"), "http://127.0.0.1:1/v1/"),
+                Some(KeyProvider::OpenAi),
+            ),
+        ];
+        for (config, want) in rows {
+            assert_eq!(
+                key_vendor(effective_adapter(&config)),
+                want,
+                "provider={:?} model={:?} endpoint={:?}",
+                config.provider,
+                config.model,
+                config.endpoint
+            );
+        }
+    }
+
+    /// One request the fake provider received: the path and the two auth
+    /// headers.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        path: String,
+        x_api_key: Option<String>,
+        authorization: Option<String>,
+    }
+
+    /// `fakellm.py`'s Anthropic-style answer (`*/messages`).
+    const FAKE_MESSAGES_BODY: &str = r#"{"id": "msg_fake", "type": "message", "role": "assistant", "model": "fake", "content": [{"type": "text", "text": "FAKE-MODEL-LESSON: keep config errors loud.\ncitations: "}], "stop_reason": "end_turn", "usage": {"input_tokens": 100, "output_tokens": 20}}"#;
+
+    /// `fakellm.py`'s OpenAI-style answer (`*/chat/completions`).
+    const FAKE_CHAT_BODY: &str = r#"{"id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": "fake", "choices": [{"index": 0, "message": {"role": "assistant", "content": "FAKE-MODEL-LESSON: keep config errors loud.\ncitations: "}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}}"#;
+
+    /// A fake provider on `127.0.0.1:0`: records each request and answers
+    /// with `fakellm.py`'s body for its path. Returns the port and the log.
+    async fn fake_provider() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Seen>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the fake provider");
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let log = std::sync::Arc::clone(&log);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let header = |name: &str| {
+                        head.lines().skip(1).find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.trim()
+                                .eq_ignore_ascii_case(name)
+                                .then(|| v.trim().to_string())
+                        })
+                    };
+                    let len: usize = header("content-length")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < head_end + len {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string();
+                    let body = if path.ends_with("messages") {
+                        FAKE_MESSAGES_BODY
+                    } else {
+                        FAKE_CHAT_BODY
+                    };
+                    log.lock().unwrap().push(Seen {
+                        path,
+                        x_api_key: header("x-api-key"),
+                        authorization: header("authorization"),
+                    });
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    /// DRM-113 test 3: the auth resolver sends a key only to an adapter of
+    /// its own vendor, and refuses before any request otherwise.
+    #[tokio::test]
+    async fn the_auth_resolver_sends_a_key_only_to_its_vendor() {
+        let key = |provider: KeyProvider, value: &str| ResolvedKey {
+            provider,
+            value: value.to_string(),
+            source: KeySource::Env,
+        };
+        let config = |port: u16, provider: &str, model: Option<&str>| {
+            let default = Config::default();
+            Config {
+                provider: provider.to_string(),
+                model: model.map_or(default.model.clone(), str::to_string),
+                endpoint: format!("http://127.0.0.1:{port}/v1/"),
+                ..default
+            }
+        };
+
+        // (i) An Anthropic key with the default model.
+        let (port, seen) = fake_provider().await;
+        let cfg = config(port, "", None);
+        let backend = GenaiBackend::new(&key(KeyProvider::Anthropic, "fake-ant-i"), &cfg);
+        backend
+            .complete(&cfg.model, "hello")
+            .await
+            .expect("(i) the Anthropic call answers");
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "(i) one request: {got:?}");
+        assert_eq!(got[0].path, "/v1/messages", "(i) {got:?}");
+        assert_eq!(got[0].x_api_key.as_deref(), Some("fake-ant-i"), "(i)");
+        assert_eq!(got[0].authorization, None, "(i)");
+
+        // (ii) An OpenAI key with `provider = "openai"` and the default model.
+        let (port, seen) = fake_provider().await;
+        let cfg = config(port, "openai", None);
+        let backend = GenaiBackend::new(&key(KeyProvider::OpenAi, "fake-oai-ii"), &cfg);
+        backend
+            .complete(&cfg.model, "hello")
+            .await
+            .expect("(ii) the OpenAI call answers");
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "(ii) one request: {got:?}");
+        assert_eq!(got[0].path, "/v1/chat/completions", "(ii) {got:?}");
+        assert_eq!(
+            got[0].authorization.as_deref(),
+            Some("Bearer fake-oai-ii"),
+            "(ii)"
+        );
+        assert_eq!(got[0].x_api_key, None, "(ii)");
+
+        // (iii) An Anthropic key with an OpenAI model: refused, no request.
+        let (port, seen) = fake_provider().await;
+        let cfg = config(port, "", Some("gpt-4o-mini"));
+        let backend = GenaiBackend::new(&key(KeyProvider::Anthropic, "fake-ant-iii"), &cfg);
+        let err = backend
+            .complete(&cfg.model, "hello")
+            .await
+            .expect_err("(iii) the Anthropic key must not go to OpenAI");
+        let text = err.to_string();
+        assert!(text.contains("OpenAI"), "(iii) names OpenAI: {text}");
+        assert!(!text.contains("fake-ant-iii"), "(iii) holds no key: {text}");
+        // Give a stray request time to land before checking there was none.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let got = seen.lock().unwrap().clone();
+        assert!(
+            got.is_empty(),
+            "(iii) no request reaches the provider: {got:?}"
+        );
     }
 
     #[test]

@@ -128,14 +128,15 @@
 //!   the login session's, so the plist never carries `EnvironmentVariables`.
 //! - **The plist never sets `StandardOutPath` / `StandardErrorPath`** (AILAB-184):
 //!   the supervised `watch` already owns `~/.agent/dreamd.log` through the
-//!   tracing file layer, which truncates on open, so a second writer aimed at
-//!   the same file would clobber it. Likewise never `AbandonProcessGroup`:
-//!   launchd must keep tracking the PID it spawned.
-//! - **All five verbs are one-shots and stay console-only** (AILAB-184): the
-//!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
-//!   in `cli.rs` never grants it to `service`. The supervised `watch` still
-//!   gets the file layer, and its stderr additionally lands in the user
-//!   journal on Linux (text; JSON with `DREAMD_LOG_FORMAT=json`).
+//!   tracing file layer, so a second writer aimed at the same file would
+//!   interleave the console's text with its JSON lines. Likewise never
+//!   `AbandonProcessGroup`: launchd must keep tracking the PID it spawned.
+//! - **All five verbs are one-shots and stay console-only** (AILAB-184): only
+//!   the daemon writes `~/.agent/dreamd.log`, so `wants_daemon_log` in
+//!   `cli.rs` never grants the file layer to `service`. The supervised `watch`
+//!   still gets it, opened after the bind (DRM-119), and its stderr
+//!   additionally lands in the user journal on Linux (text; JSON with
+//!   `DREAMD_LOG_FORMAT=json`).
 //!
 //! Hosts with no backend at all (Linux without a reachable systemd --user
 //! manager: containers, most CI runners) get [`ServiceError::NoSystemd`] and
@@ -290,7 +291,8 @@ pub(crate) struct ServiceReport {
 
 /// Why a `dreamd service` verb failed. `cli::service_exit` maps the usage
 /// refusals (`NoSystemd`, `NoProjectRoot`, `PlistExists`, `TaskExists`,
-/// `NotATty`, `Declined`) to exit 2 and every other variant to exit 1.
+/// `NotATty`, `Declined`, `DaemonHomeHoldsStore`) to exit 2 and every other
+/// variant to exit 1.
 #[derive(Debug)]
 pub enum ServiceError {
     /// No supported backend: neither macOS nor Windows, and no systemd --user
@@ -311,6 +313,10 @@ pub enum ServiceError {
     /// `uninstall --purge` prompted on a tty and the answer was not `y` / `Y`.
     /// Nothing is mutated — the confirmation runs before any teardown.
     Declined,
+    /// `uninstall --purge` while the daemon home holds a project store, or is
+    /// a registered project's store (DRM-101). `what` names it. Checked before
+    /// the prompt, so `--yes` does not get past it, and nothing is mutated.
+    DaemonHomeHoldsStore { daemon_home: PathBuf, what: String },
     /// The `uninstall --purge` prompt could not be written or its answer could
     /// not be read. Nothing is mutated.
     Stdin(std::io::Error),
@@ -386,6 +392,14 @@ impl std::fmt::Display for ServiceError {
             ),
             Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
             Self::Declined => std::fmt::Display::fmt(&super::confirm::ConfirmError::Declined, f),
+            Self::DaemonHomeHoldsStore { daemon_home, what } => write!(
+                f,
+                "refusing to purge {}: it holds {what}, which --purge would delete. Move the \
+                 store into a project, or remove its episodic/, semantic/, personal/, working/ \
+                 and .dreamd/, then run this again (docs/troubleshooting.md, \"A project store \
+                 in the daemon home\").",
+                daemon_home.display()
+            ),
             Self::Stdin(e) => super::confirm::fmt_io(e, f),
             Self::CurrentExe(e) => write!(f, "could not resolve this binary's path: {e}"),
             Self::Io { path, source } => {
@@ -1280,8 +1294,10 @@ impl From<super::confirm::ConfirmError> for ServiceError {
 }
 
 /// The `--purge` gate, run before any mutation. A no-op without `--purge`
-/// (there is nothing destructive to confirm). `--yes` skips the prompt via
-/// [`super::confirm::confirm_destructive`]. The prompt stays
+/// (there is nothing destructive to confirm). While the daemon home holds a
+/// project store, or a registered project's store, it refuses before the
+/// prompt with [`ServiceError::DaemonHomeHoldsStore`] (DRM-101). `--yes`
+/// skips the prompt via [`super::confirm::confirm_destructive`]. The prompt stays
 /// `Delete the daemon home {path}? [y/N] `.
 ///
 /// Neither refusal is printed here. The wording is [`ServiceError`]'s
@@ -1295,6 +1311,13 @@ fn confirm_purge(
 ) -> Result<(), ServiceError> {
     if !purge {
         return Ok(());
+    }
+    // DRM-101: before the prompt, so `--yes` cannot get past it.
+    if let Some(what) = super::daemon_home_store::purge_blocker(daemon_home) {
+        return Err(ServiceError::DaemonHomeHoldsStore {
+            daemon_home: daemon_home.to_path_buf(),
+            what,
+        });
     }
     let prompt = format!("Delete the daemon home {}? [y/N] ", daemon_home.display());
     super::confirm::confirm_destructive(yes, &prompt, &mut |prompt: &str| match confirm(prompt) {
@@ -3435,6 +3458,87 @@ recent log (last 10 lines):
         );
         assert!(!unit_path(home.path()).exists());
         assert_eq!(calls.len(), 2, "teardown still ran: {calls:?}");
+    }
+
+    /// DRM-101 test 8: `--purge --yes` refuses while the daemon home holds a
+    /// project store, and while it is a registered project's store, before any
+    /// prompt or `systemctl`: the daemon home and the unit file stay. Without
+    /// `--purge` the teardown runs and the daemon home stays.
+    #[cfg(unix)]
+    #[test]
+    fn purge_refuses_while_the_daemon_home_holds_a_project_store() {
+        fn store(daemon_home: &Path) {
+            fs::create_dir_all(daemon_home.join("episodic")).unwrap();
+            fs::write(daemon_home.join("episodic/AGENT_LEARNINGS.jsonl"), "").unwrap();
+        }
+        fn registered(daemon_home: &Path) {
+            let user = daemon_home.parent().unwrap();
+            fs::write(
+                daemon_home.join("registry.toml"),
+                format!("[[projects]]\nroot = {:?}\n", user.display().to_string()),
+            )
+            .unwrap();
+        }
+        for case in ["a project store", "a registered home"] {
+            let (home, _project) = installed_home_and_project();
+            let daemon_home = home.path().join(".agent");
+            if case == "a project store" {
+                store(&daemon_home);
+            } else {
+                registered(&daemon_home);
+            }
+            let result = run_uninstall_with(
+                home.path(),
+                &daemon_home,
+                true,
+                true,
+                true,
+                &mut never_confirm,
+                &mut never_systemctl,
+            );
+            let Err(ServiceError::DaemonHomeHoldsStore {
+                daemon_home: named,
+                what,
+            }) = &result
+            else {
+                panic!("{case}: {result:?}");
+            };
+            assert_eq!(named, &daemon_home, "{case}");
+            let message = result.as_ref().unwrap_err().to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "refusing to purge {}: it holds {what}, which --purge would delete.",
+                    daemon_home.display()
+                )),
+                "{case}: {message}"
+            );
+            assert!(
+                daemon_home.join("dreamd.log").is_file(),
+                "{case}: daemon home"
+            );
+            assert!(unit_path(home.path()).is_file(), "{case}: unit file");
+
+            let mut calls: Vec<Vec<String>> = Vec::new();
+            let result = run_uninstall_with(
+                home.path(),
+                &daemon_home,
+                true,
+                false,
+                true,
+                &mut never_confirm,
+                &mut |args: &[&str]| {
+                    calls.push(args.iter().map(|s| s.to_string()).collect());
+                    Ok(())
+                },
+            );
+            assert!(result.is_ok(), "{case}: {result:?}");
+            assert_eq!(calls.len(), 2, "{case}: teardown ran: {calls:?}");
+            assert!(!unit_path(home.path()).exists(), "{case}: unit removed");
+            assert!(
+                daemon_home.join("dreamd.log").is_file(),
+                "{case}: daemon home kept"
+            );
+        }
     }
 
     /// `--purge` on a daemon home that is already gone is success, keeping the

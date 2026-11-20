@@ -16,7 +16,7 @@ pub struct LearnResponse {
     pub id: String,
     /// RFC 3339 timestamp stamped at durable append.
     pub timestamp: String,
-    /// `true` when `client_dedup_key` matched a prior append (no second write).
+    /// `true` when `client_dedup_key` and the learning matched a prior append (no second write).
     pub deduplicated: bool,
 }
 
@@ -37,7 +37,8 @@ impl LearnResponse {
 pub struct RecallParams {
     /// Free-text BM25 query.
     pub q: String,
-    /// Max hits to return; omit for [`DEFAULT_RECALL_K`].
+    /// Max hits to return, at most [`MAX_RECALL_K`]; omit for
+    /// [`DEFAULT_RECALL_K`].
     pub k: Option<u32>,
     /// `explain=1` adds a `citations` array to the response; any other value,
     /// including absent, omits it. HTTP-only — MCP `search_nodes` has no
@@ -52,6 +53,16 @@ pub struct RecallParams {
 
 /// Default max results for recall when `k` is omitted (HTTP and MCP).
 pub const DEFAULT_RECALL_K: u32 = 5;
+
+/// Largest recall `k` on every surface (DRM-109): HTTP `k`, MCP `k`, and the
+/// CLI `-k` of `dreamd recall` and `dreamd blame`.
+pub const MAX_RECALL_K: u32 = 100;
+
+/// The one message for a `k` over [`MAX_RECALL_K`]: HTTP 400 body, MCP
+/// -32602 in both modes, and the CLI's `-k` error.
+pub fn k_too_large_message() -> String {
+    format!("k must be at most {MAX_RECALL_K}")
+}
 
 /// Longest recall query, in UTF-8 bytes, that `GET /api/v1/recall` answers
 /// and MCP `search_nodes` accepts in either mode (BZR-1301). Percent-encoding
@@ -207,5 +218,12 @@ mod tests {
             query_too_long_message(),
             "query exceeds 16384 bytes; pass a shorter query"
         );
+    }
+
+    /// DRM-109 test 2: the only test that spells the `k` limit's number.
+    #[test]
+    fn k_limit_message() {
+        assert_eq!(MAX_RECALL_K, 100);
+        assert_eq!(k_too_large_message(), "k must be at most 100");
     }
 }

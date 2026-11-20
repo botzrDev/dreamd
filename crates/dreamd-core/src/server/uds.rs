@@ -61,6 +61,14 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
             match try_connect_existing(path) {
                 Ok(stream) => Err(UdsBindError::AlreadyBound(stream)),
+                // DRM-99: only a socket is an orphan, and removing anything
+                // else would delete a file that is not dreamd's. A regular
+                // file refuses the connect with ECONNREFUSED on Linux and
+                // ENOTSOCK on macOS, so the file type is checked first,
+                // whatever the connect error.
+                Err(_) if !is_socket_or_gone(path)? => {
+                    Err(UdsBindError::NotASocket(path.to_path_buf()))
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -72,13 +80,6 @@ pub(crate) fn bind_socket_raw(path: &Path) -> Result<UnixListener, UdsBindError>
                     // as orphaned too — a race where the file vanished
                     // between the AddrInUse bind and the connect attempt is
                     // safe to retry as a fresh bind.
-                    //
-                    // DRM-99: only a socket is an orphan. A regular file also
-                    // refuses the connect, and removing it would delete a file
-                    // that is not dreamd's.
-                    if !is_socket_or_gone(path)? {
-                        return Err(UdsBindError::NotASocket(path.to_path_buf()));
-                    }
                     std::fs::remove_file(path)?;
                     let l = UnixListener::bind(path)?;
                     chmod_0600(path)?;

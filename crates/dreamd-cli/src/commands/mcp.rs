@@ -17,10 +17,17 @@
 //! without `--insecure` exits 1. `--insecure` without `--bind` exits 2 — unlike
 //! `watch`, whose default listener is TCP, `mcp` has no listener to loosen until
 //! `--bind` asks for one.
+//!
+//! `--project-root` is resolved once, by `resolve_project_root`, before any
+//! transport or socket probe: it must name a folder that holds `.agent/`
+//! itself, and that `.agent/` must not be the daemon home. Otherwise `mcp`
+//! exits 2 and says why (DRM-102).
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
+use dreamd_core::launcher::Launcher;
+use dreamd_core::layout::same_dir;
 use dreamd_core::mcp::{run_mcp_server, McpRunError};
 use dreamd_core::server::WatchListen;
 
@@ -52,6 +59,54 @@ pub fn run(cwd: &Path, args: &McpArgs) -> ExitCode {
             ExitCode::from(exit_code_for(&e))
         }
     }
+}
+
+/// `--project-root` as `dreamd mcp` uses it (DRM-102): `raw` made absolute
+/// against `cwd`, which must hold `.agent/` itself, and whose `.agent/` is not
+/// `daemon_home`. `Err` is the usage message, exit 2. A leading `~` is not
+/// expanded: no shell reads this argument when a harness starts the server.
+pub(crate) fn resolve_project_root(
+    raw: &Path,
+    cwd: &Path,
+    daemon_home: Option<&Path>,
+    launcher: Launcher,
+) -> Result<PathBuf, String> {
+    // Not canonicalized: discovery and the X-Agent-Root derivation do that.
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd.join(raw)
+    };
+    let store = absolute.join(".agent");
+    if !store.is_dir() {
+        let mut msg = format!(
+            "--project-root {}: no .agent/ store in {}. Pass the folder that holds .agent/, \
+             or run `{}` there first.",
+            raw.display(),
+            absolute.display(),
+            launcher.command("setup")
+        );
+        let tilde = matches!(
+            raw.components().next(),
+            Some(Component::Normal(first)) if first.as_encoded_bytes().starts_with(b"~")
+        );
+        if tilde {
+            msg.push_str(
+                " A leading ~ is not expanded here, because no shell reads this argument; \
+                 write the full path.",
+            );
+        }
+        return Err(msg);
+    }
+    if daemon_home.is_some_and(|home| same_dir(&store, home)) {
+        return Err(format!(
+            "--project-root {}: {} is the daemon home, which holds dreamd's registry, socket \
+             and log, not a project store. Pass a project folder.",
+            raw.display(),
+            store.display()
+        ));
+    }
+    Ok(absolute)
 }
 
 /// Usage message for `--insecure` without `--bind` (exit 2).
@@ -207,6 +262,86 @@ mod tests {
         assert_eq!(
             run(Path::new("/nonexistent"), &args(Some("0.0.0.0:0"), false)),
             ExitCode::from(1)
+        );
+    }
+
+    /// `P` holding `.agent/` as a directory, with an empty `P/src`.
+    fn store_folder() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("P");
+        std::fs::create_dir_all(p.join(".agent")).unwrap();
+        std::fs::create_dir(p.join("src")).unwrap();
+        (dir, p)
+    }
+
+    /// DRM-102 test 7: a store folder is accepted however it is spelt, made
+    /// absolute against the cwd and not canonicalized.
+    #[test]
+    fn resolve_project_root_accepts_a_store_folder_however_spelt() {
+        let (_dir, p) = store_folder();
+        let src = p.join("src");
+        for (raw, cwd, want) in [
+            (p.clone(), Path::new("/nonexistent"), p.clone()),
+            (PathBuf::from("."), p.as_path(), p.join(".")),
+            (PathBuf::from(".."), src.as_path(), src.join("..")),
+        ] {
+            assert_eq!(
+                resolve_project_root(&raw, cwd, None, Launcher::Binary),
+                Ok(want),
+                "{} from {}",
+                raw.display(),
+                cwd.display()
+            );
+        }
+    }
+
+    /// DRM-102 test 8: a folder without `.agent/` of its own is refused,
+    /// naming the absolute folder and the launcher's setup command; only a
+    /// leading `~` adds the sentence that it is not expanded.
+    #[test]
+    fn resolve_project_root_refuses_a_folder_without_a_store() {
+        let (dir, p) = store_folder();
+        let src = p.join("src");
+        for launcher in [Launcher::Binary, Launcher::Npx] {
+            let err = resolve_project_root(Path::new("."), &src, None, launcher)
+                .expect_err("a subfolder of the store folder");
+            assert!(
+                err.contains(&format!("no .agent/ store in {}", src.display())),
+                "{err}"
+            );
+            assert!(err.contains(&launcher.command("setup")), "{err}");
+            assert!(!err.contains("~"), "{err}");
+        }
+        let err = resolve_project_root(Path::new("/nonexistent/x"), &src, None, Launcher::Binary)
+            .expect_err("a path that does not exist");
+        assert!(err.contains("no .agent/ store in /nonexistent/x."), "{err}");
+
+        // `B/.agent` sits one level above the cwd, the way `~/B` is meant.
+        std::fs::create_dir_all(dir.path().join("B/.agent")).unwrap();
+        let cwd = dir.path().join("c");
+        std::fs::create_dir(&cwd).unwrap();
+        let err = resolve_project_root(Path::new("~/B"), &cwd, None, Launcher::Binary)
+            .expect_err("~ is not expanded");
+        assert!(err.contains("A leading ~ is not expanded"), "{err}");
+        let err = resolve_project_root(Path::new("B"), &cwd, None, Launcher::Binary)
+            .expect_err("B is not in the cwd");
+        assert!(!err.contains("A leading ~"), "{err}");
+    }
+
+    /// DRM-102 test 9: a folder whose `.agent/` is the daemon home is
+    /// refused; with no daemon home to compare, the same folder is accepted.
+    #[test]
+    fn resolve_project_root_refuses_the_daemon_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = dir.path().join("H");
+        std::fs::create_dir_all(h.join(".agent")).unwrap();
+        let daemon_home = h.join(".agent");
+        let err = resolve_project_root(&h, dir.path(), Some(&daemon_home), Launcher::Binary)
+            .expect_err("the daemon home");
+        assert!(err.contains("is the daemon home"), "{err}");
+        assert_eq!(
+            resolve_project_root(&h, dir.path(), None, Launcher::Binary),
+            Ok(h.clone())
         );
     }
 

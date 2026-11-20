@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use super::handlers::PREFERENCES_SIZE_CAP;
 use super::router::{bearer_auth_middleware, request_trace_fields};
 use super::{build_router, AppState, PeerUid};
-use crate::config::Config;
 use crate::coordinator::MemoryCoordinatorMsg;
 use crate::layout::AgentRoot;
 use crate::registry::RegistryCache;
@@ -28,12 +27,10 @@ const SAMPLE_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 fn make_test_state(registry_path: PathBuf) -> AppState {
     let (supervisor, _rx) = Supervisor::for_backpressure_test();
-    let config = Config::default();
     AppState {
         registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
-        config: Arc::new(config),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
@@ -81,7 +78,6 @@ fn make_real_state_with_cadence(
         registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
-        config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
@@ -243,13 +239,15 @@ async fn version_mismatch_header_returns_426_naming_both_versions() {
                 crate::launcher::Launcher::Binary
             )
         );
+        // DRM-122: 0.0.0 is older than the daemon, so the sentence says to
+        // update the client, not to restart the daemon.
         if client == "0.0.0" {
             assert_eq!(
                 error,
                 format!(
-                    "version mismatch: client 0.0.0, daemon {DAEMON}. Stop the other daemon \
-                     and start this one with `dreamd watch`, or point DREAMD_SOCK at a \
-                     daemon of this version."
+                    "version mismatch: client 0.0.0, daemon {DAEMON}. This client is older \
+                     than the daemon. Install dreamd {DAEMON} and restart your MCP harness, \
+                     or point DREAMD_SOCK at a daemon of version 0.0.0."
                 )
             );
         }
@@ -309,6 +307,110 @@ async fn registered_agent_root_passes_middleware() {
 
     let resp = router.into_service().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+// DRM-102: the three `agent_root_middleware` 400 texts, written out so the
+// tests pin the wording, not the constants.
+const MISSING_AGENT_ROOT_TEXT: &str =
+    "X-Agent-Root header missing: send the absolute path of the folder that holds .agent/";
+const NOT_UTF8_AGENT_ROOT_TEXT: &str =
+    "X-Agent-Root is not UTF-8: send the absolute path of the folder that holds .agent/";
+const NOT_ABSOLUTE_AGENT_ROOT_TEXT: &str =
+    "X-Agent-Root must be the absolute path of the folder that holds .agent/";
+
+/// An empty-body learn POST with `agent_root` as the raw header bytes, or no
+/// header.
+fn learn_with_agent_root(agent_root: Option<&[u8]>) -> Request<Body> {
+    let mut builder = Request::builder().method("POST").uri("/api/v1/learn");
+    if let Some(bytes) = agent_root {
+        builder = builder.header(
+            "x-agent-root",
+            axum::http::HeaderValue::from_bytes(bytes).expect("a valid header value"),
+        );
+    }
+    with_peer_uid(builder.body(Body::empty()).unwrap())
+}
+
+/// DRM-102 test 1 (LP-HTTP-03): a relative or empty `X-Agent-Root` is 400,
+/// naming the rule and the value. Nothing is resolved against the daemon's
+/// working directory.
+#[tokio::test]
+async fn relative_or_empty_agent_root_is_400_naming_the_rule() {
+    let (_dir, _root_str, router) = mock_router_with_dir();
+    for v in [".", "../q", "", "relative/p"] {
+        let resp = router
+            .clone()
+            .into_service()
+            .oneshot(learn_with_agent_root(Some(v.as_bytes())))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{v:?}");
+        assert_eq!(
+            body_json(resp).await["error"],
+            format!("{NOT_ABSOLUTE_AGENT_ROOT_TEXT}; got {v:?}").as_str(),
+            "{v:?}"
+        );
+    }
+}
+
+/// DRM-102 test 2 (LP-MCP-02): a registered root with a non-ASCII letter,
+/// sent as its UTF-8 bytes, passes the middleware: an empty learn body is
+/// 415.
+#[tokio::test]
+async fn non_ascii_agent_root_passes_the_middleware() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("été").join("p");
+    std::fs::create_dir_all(&root).unwrap();
+    let root_str = root.to_str().expect("a UTF-8 tempdir").to_owned();
+    let registry_path = dir.path().join("registry.toml");
+    write_registry(&registry_path, &root_str);
+    let router = build_router(make_test_state(registry_path));
+
+    let resp = router
+        .into_service()
+        .oneshot(learn_with_agent_root(Some(root_str.as_bytes())))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+/// DRM-102 test 3: a missing header and one whose bytes are not UTF-8 are
+/// 400, each naming its rule.
+#[tokio::test]
+async fn missing_or_non_utf8_agent_root_names_the_rule() {
+    let (_dir, _root_str, router) = mock_router_with_dir();
+    let cases: [(Option<&[u8]>, &str); 2] = [
+        (None, MISSING_AGENT_ROOT_TEXT),
+        (Some(&b"/tmp/\xff"[..]), NOT_UTF8_AGENT_ROOT_TEXT),
+    ];
+    for (agent_root, want) in cases {
+        let resp = router
+            .clone()
+            .into_service()
+            .oneshot(learn_with_agent_root(agent_root))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{want}");
+        assert_eq!(body_json(resp).await["error"], want);
+    }
+}
+
+/// DRM-102 test 4: every middleware 400 starts with the prefix the MCP
+/// client maps to `-32600`, and each constant is the text tests 1 and 3 pin.
+#[test]
+fn agent_root_messages_share_the_client_prefix() {
+    use super::router::{AGENT_ROOT_MISSING, AGENT_ROOT_NOT_ABSOLUTE, AGENT_ROOT_NOT_UTF8};
+    for (constant, text) in [
+        (AGENT_ROOT_MISSING, MISSING_AGENT_ROOT_TEXT),
+        (AGENT_ROOT_NOT_UTF8, NOT_UTF8_AGENT_ROOT_TEXT),
+        (AGENT_ROOT_NOT_ABSOLUTE, NOT_ABSOLUTE_AGENT_ROOT_TEXT),
+    ] {
+        assert!(
+            constant.starts_with(crate::daemon_client::AGENT_ROOT_REJECTED_PREFIX),
+            "{constant}"
+        );
+        assert_eq!(constant, text);
+    }
 }
 
 #[tokio::test]
@@ -560,7 +662,6 @@ async fn learn_channel_full_returns_503() {
         registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(supervisor),
-        config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         opening: Default::default(),
         daemon_uid: nix::unistd::Uid::current().as_raw(),
@@ -679,6 +780,161 @@ async fn learn_score_out_of_range_returns_400() {
     }
 }
 
+/// DRM-104 test 1 (LP-HTTP-13): a score just over 10 is refused as sent. It
+/// is not read into `f32` first, where `10.0000001` would round to `10.0` and
+/// pass. Nothing is written.
+#[tokio::test]
+async fn http_learn_rejects_scores_just_over_ten() {
+    let (dir, root_str, router) = real_router_with_dir();
+    let agent_root = AgentRoot::new(dir.path());
+    let before = std::fs::read_to_string(agent_root.episodic_jsonl()).ok();
+
+    for (pain, importance, want) in [
+        (10.000_000_1, 5.0, "pain must be in 0.0..=10.0"),
+        (5.0, 10.000_000_4, "importance must be in 0.0..=10.0"),
+    ] {
+        let mut body = sample_body("rust::test", "just over ten");
+        body["pain"] = serde_json::json!(pain);
+        body["importance"] = serde_json::json!(importance);
+        let req = with_peer_uid(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/learn")
+                .header("x-agent-root", &root_str)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        );
+        let resp = router.clone().into_service().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "pain={pain} importance={importance}"
+        );
+        assert_eq!(body_json(resp).await, serde_json::json!({ "error": want }));
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(agent_root.episodic_jsonl()).ok(),
+        before,
+        "a refused learn writes nothing"
+    );
+}
+
+/// One `POST /api/v1/learn` of `body` for `root`, with `X-Client-Dedup-Key`
+/// set to the raw bytes `header` when given; returns the status and the JSON
+/// body.
+async fn post_learn_with(
+    router: &axum::Router,
+    root: &str,
+    body: &serde_json::Value,
+    header: Option<&[u8]>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/api/v1/learn")
+        .header("x-agent-root", root)
+        .header("content-type", "application/json");
+    if let Some(bytes) = header {
+        let value = axum::http::HeaderValue::from_bytes(bytes).expect("a valid header value");
+        builder = builder.header("x-client-dedup-key", value);
+    }
+    let req = with_peer_uid(
+        builder
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap(),
+    );
+    let resp = router.clone().into_service().oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// The episodic log's records for `dir`, or 0 when the file does not exist.
+fn log_records(dir: &std::path::Path) -> usize {
+    std::fs::read_to_string(AgentRoot::new(dir).episodic_jsonl())
+        .map(|raw| raw.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// DRM-106 test 3: a header key is read from its bytes, so a non-ASCII key
+/// (`clé-é`, UTF-8) dedups a retry.
+#[tokio::test]
+async fn learn_dedups_a_non_ascii_header_key() {
+    let (dir, root_str, router) = real_router_with_dir();
+    let body = sample_body("rust::test", "a non-ascii header key");
+    let key = "clé-é".as_bytes();
+
+    let (s1, j1) = post_learn_with(&router, &root_str, &body, Some(key)).await;
+    let (s2, j2) = post_learn_with(&router, &root_str, &body, Some(key)).await;
+    assert_eq!(
+        (s1, s2),
+        (StatusCode::CREATED, StatusCode::CREATED),
+        "{j1} {j2}"
+    );
+    assert_eq!(j1["deduplicated"], false, "{j1}");
+    assert_eq!(j2["deduplicated"], true, "the retry dedups: {j2}");
+    assert_eq!(j1["id"], j2["id"], "one id");
+    assert_eq!(log_records(dir.path()), 1, "one record");
+}
+
+/// DRM-106 test 4: a header key that is not UTF-8 is refused, and nothing
+/// is written.
+#[tokio::test]
+async fn learn_refuses_a_header_key_that_is_not_utf8() {
+    let (dir, root_str, router) = real_router_with_dir();
+    let body = sample_body("rust::test", "a header key that is not utf-8");
+
+    let (status, json) = post_learn_with(&router, &root_str, &body, Some(b"\xff\xfe")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(
+        json,
+        serde_json::json!({ "error": "X-Client-Dedup-Key is not UTF-8" })
+    );
+    assert_eq!(log_records(dir.path()), 0, "nothing is written");
+}
+
+/// DRM-106 test 5: the body's `client_dedup_key` is the key. A header with
+/// the same key is fine; a header with another key is refused, and nothing
+/// is written.
+#[tokio::test]
+async fn learn_reads_the_key_from_the_body() {
+    let (dir, root_str, router) = real_router_with_dir();
+    let mut body = sample_body("rust::test", "a body key");
+    body["client_dedup_key"] = serde_json::json!("body-key");
+
+    let (s1, j1) = post_learn_with(&router, &root_str, &body, None).await;
+    let (s2, j2) = post_learn_with(&router, &root_str, &body, None).await;
+    assert_eq!(
+        (s1, s2),
+        (StatusCode::CREATED, StatusCode::CREATED),
+        "{j1} {j2}"
+    );
+    assert_eq!(j1["deduplicated"], false, "{j1}");
+    assert_eq!(j2["deduplicated"], true, "a body key dedups: {j2}");
+    assert_eq!(j1["id"], j2["id"], "one id");
+
+    let (s3, j3) = post_learn_with(&router, &root_str, &body, Some(b"body-key")).await;
+    assert_eq!(s3, StatusCode::CREATED, "body and header equal: {j3}");
+    assert_eq!(
+        j3["id"], j1["id"],
+        "body and header equal: the same key: {j3}"
+    );
+
+    let (s4, j4) = post_learn_with(&router, &root_str, &body, Some(b"other-key")).await;
+    assert_eq!(s4, StatusCode::BAD_REQUEST, "body and header differ: {j4}");
+    assert_eq!(
+        j4,
+        serde_json::json!({
+            "error": "client_dedup_key in the body and X-Client-Dedup-Key differ"
+        })
+    );
+    assert_eq!(
+        log_records(dir.path()),
+        1,
+        "one record; the refusal wrote nothing"
+    );
+}
+
 /// The coordinator server-stamps `schema_version`: a client-supplied value
 /// is overwritten with `RECORD_SCHEMA_VERSION` on the durable write, so an
 /// HTTP client cannot choose the schema version its record is stored under.
@@ -727,7 +983,7 @@ async fn learn_server_stamps_schema_version() {
 
 /// AILAB-175: the wire body carries no `id` / `schema_version` / `timestamp`,
 /// so a body omitting all three is valid and the daemon mints the id. Before
-/// the `AppendLearningRequest` DTO these were required fields and their absence
+/// the `LearnRequest` DTO these were required fields and their absence
 /// 400'd at the axum extractor, before the handler body ever ran.
 #[tokio::test]
 async fn learn_without_id_returns_201_and_mints_id() {
@@ -1216,17 +1472,27 @@ async fn recall_refuses_a_query_over_the_shared_limit() {
     );
 }
 
-/// BZR-1301 test 21 (D1): a query the parser rejects is a 400 with a JSON
-/// error, not a 500.
+/// BZR-1301 test 21 (D1) asserted that a query the parser rejected was a 400
+/// with a JSON error, not a 500. DRM-108 changed the expectation: recall
+/// takes any text, so both queries are a 200 with a `results` array.
 #[tokio::test]
-async fn recall_parser_rejection_is_400() {
+async fn recall_takes_former_parse_errors() {
     for query in ["q=rust%3A%3Atokio", "q=%22unbalanced"] {
         let resp = recall_with_query(query).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(resp.status(), StatusCode::OK, "{query}");
         let json = body_json(resp).await;
-        let error = json["error"].as_str().expect("JSON error string");
-        assert!(error.starts_with("recall failed: "), "{query}: {error}");
+        assert!(json["results"].is_array(), "{query}: {json}");
     }
+}
+
+/// DRM-108 test 7: a `q` with an apostrophe, parentheses and a colon gets a
+/// 200 over HTTP, where the parser answered 400.
+#[tokio::test]
+async fn recall_takes_any_text_over_http() {
+    let resp = recall_with_query("q=What%27s%20parse_config()%3A").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["results"].is_array(), "{json}");
 }
 
 /// BZR-1301 test 20: above 65,534 URI bytes hyper refuses the request
@@ -1416,7 +1682,6 @@ async fn serve_uds_rejects_mismatched_daemon_uid() {
         registry: Arc::new(RegistryCache::new(registry_path.clone())),
         registry_path,
         supervisor: Arc::new(Supervisor::for_backpressure_test().0),
-        config: Arc::new(Config::default()),
         runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
         opening: Default::default(),
         daemon_uid: wrong_uid,
@@ -1597,6 +1862,155 @@ async fn preferences_large_file_returns_truncated() {
     );
 }
 
+/// A registry for a fresh project, its `personal/` folder, and a router.
+fn preferences_fixture() -> (tempfile::TempDir, String, std::path::PathBuf, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap().to_string();
+    write_registry(&registry_path, &root_str);
+    let pref_path = crate::layout::AgentRoot::new(dir.path()).preferences_md();
+    std::fs::create_dir_all(pref_path.parent().unwrap()).unwrap();
+    let router = build_router(make_test_state(registry_path));
+    (dir, root_str, pref_path, router)
+}
+
+/// `GET /api/v1/preferences` for `root`, with the time it took.
+async fn get_preferences_timed(
+    router: axum::Router,
+    root: &str,
+) -> (axum::response::Response, std::time::Duration) {
+    let req = with_peer_uid(
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/preferences")
+            .header("x-agent-root", root)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    (resp, started.elapsed())
+}
+
+/// The `error` string of a `500` answer.
+async fn error_text(resp: axum::response::Response) -> String {
+    let json = body_json(resp).await;
+    json["error"].as_str().unwrap_or_default().to_string()
+}
+
+/// DRM-120 test 5: a FIFO at `PREFERENCES.md` is refused at once. A helper
+/// opens the FIFO for writing from 3 s to 6 s, which frees an `open` that
+/// blocked on it, so the base fails this test instead of hanging.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_fifo_is_refused_at_once() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (_dir, root, pref_path, router) = preferences_fixture();
+    nix::unistd::mkfifo(&pref_path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+
+    let done = Arc::new(AtomicBool::new(false));
+    let helper = {
+        let done = Arc::clone(&done);
+        let fifo = pref_path.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(6) {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                if started.elapsed() >= std::time::Duration::from_secs(3) {
+                    // A writer frees a reader blocked in `open`; ENXIO while
+                    // no reader has it open.
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(nix::libc::O_NONBLOCK)
+                        .open(&fifo);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        })
+    };
+
+    let (resp, took) = get_preferences_timed(router, &root).await;
+    done.store(true, Ordering::Relaxed);
+    helper.join().unwrap();
+
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+/// DRM-120 test 6: a `PREFERENCES.md` symlink is followed only within
+/// `personal/`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_outside_personal_is_refused() {
+    let (dir, root, pref_path, router) = preferences_fixture();
+
+    // A regular file outside `personal/`.
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "private\n").unwrap();
+    std::os::unix::fs::symlink(&outside, &pref_path).unwrap();
+    let (resp, _) = get_preferences_timed(router.clone(), &root).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("resolves outside"), "{error}");
+
+    // A device outside `personal/`, answered at once.
+    std::fs::remove_file(&pref_path).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &pref_path).unwrap();
+    let (resp, took) = get_preferences_timed(router.clone(), &root).await;
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("resolves outside"), "{error}");
+
+    // A file within `personal/` is served.
+    std::fs::remove_file(&pref_path).unwrap();
+    let notes = pref_path.parent().unwrap().join("notes.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    std::os::unix::fs::symlink(&notes, &pref_path).unwrap();
+    let (resp, _) = get_preferences_timed(router, &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["body"], serde_json::json!("# Notes\n"));
+}
+
+/// DRM-120 test 7 (LP-HTTP-14): the body is UTF-8 cut at a character
+/// boundary, and `x-dreamd-lossy` marks replaced bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_body_is_bounded_utf8() {
+    let (_dir, root, pref_path, router) = preferences_fixture();
+
+    let mut content = "x".repeat(16_383);
+    content.push('€');
+    std::fs::write(&pref_path, &content).unwrap();
+    let (resp, _) = get_preferences_timed(router.clone(), &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let header = |resp: &axum::response::Response, name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    assert_eq!(header(&resp, "x-dreamd-truncated").as_deref(), Some("true"));
+    assert_eq!(
+        header(&resp, "x-dreamd-original-size").as_deref(),
+        Some("16386")
+    );
+    assert_eq!(header(&resp, "x-dreamd-lossy"), None);
+    let json = body_json(resp).await;
+    assert_eq!(json["body"].as_str().unwrap().len(), 16_383);
+
+    std::fs::write(&pref_path, b"ok \xff end\n").unwrap();
+    let (resp, _) = get_preferences_timed(router, &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header(&resp, "x-dreamd-lossy").as_deref(), Some("true"));
+}
+
 /// Missing X-Agent-Root header → 400.
 #[tokio::test]
 async fn preferences_missing_agent_root_header_400() {
@@ -1742,6 +2156,11 @@ async fn dream_reports_a_held_autobiography_commit() {
 
     let resp = router.into_service().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    // DRM-115: the cycle also kept the hand edit, and says so.
+    let held = crate::dream_cycle::LessonHold {
+        reason: "user_dirty_tree",
+        file: ".agent/semantic/LESSONS.md".to_string(),
+    };
     assert_eq!(
         body_json(resp).await,
         serde_json::json!({
@@ -1751,7 +2170,16 @@ async fn dream_reports_a_held_autobiography_commit() {
                 "reason": "user_dirty_tree",
                 "files": [".agent/semantic/LESSONS.md"],
             },
+            "lesson_held": {
+                "reason": "user_dirty_tree",
+                "file": ".agent/semantic/LESSONS.md",
+            },
+            "notices": [crate::dream_cycle::lesson_held_notice(&held)],
         })
+    );
+    assert_eq!(
+        std::fs::read(agent_root.lessons_md()).unwrap(),
+        b"my hand edit\n"
     );
     assert_eq!(
         repo.head()
@@ -2113,7 +2541,6 @@ async fn daemon_primary_handle_shares_index_between_append_and_recall() {
     let state = AppState::new(
         registry_path,
         supervisor,
-        Config::default(),
         nix::unistd::Uid::current().as_raw(),
     )
     .with_primary(canonical_root.clone(), Arc::clone(&primary));
@@ -2224,7 +2651,6 @@ fn make_routing_state() -> (
     let state = AppState::new(
         registry_path,
         supervisor,
-        Config::default(),
         nix::unistd::Uid::current().as_raw(),
     )
     .with_primary(canonical_a.clone(), primary);
@@ -2895,8 +3321,8 @@ async fn learn_to_boot_root_uses_primary_supervisor() {
 
 /// Idempotency is per-coordinator (each owns its own LRU keyed by its
 /// canonical root), so the same dedup key sent to A and to B yields two
-/// distinct records — no cross-project collision — while a repeat on B is
-/// still deduplicated within B.
+/// distinct records — no cross-project collision — while a retry of the
+/// same learning on B is still deduplicated within B.
 #[tokio::test]
 async fn dedup_key_does_not_collide_across_projects() {
     let (_dir_a, _dir_b, canonical_a, canonical_b, state) = make_routing_state();
@@ -2937,13 +3363,25 @@ async fn dedup_key_does_not_collide_across_projects() {
         body_json(resp).await
     }
 
-    let a = post_with_key(&router, canonical_a.to_str().unwrap(), "shared-key", "to A").await;
-    let b = post_with_key(&router, canonical_b.to_str().unwrap(), "shared-key", "to B").await;
+    let a = post_with_key(
+        &router,
+        canonical_a.to_str().unwrap(),
+        "shared-key",
+        "shared content",
+    )
+    .await;
+    let b = post_with_key(
+        &router,
+        canonical_b.to_str().unwrap(),
+        "shared-key",
+        "shared content",
+    )
+    .await;
     let b2 = post_with_key(
         &router,
         canonical_b.to_str().unwrap(),
         "shared-key",
-        "to B again",
+        "shared content",
     )
     .await;
 
@@ -3669,6 +4107,65 @@ async fn recall_of(router: &axum::Router, root: &str, q: &str) -> (StatusCode, s
         .unwrap();
     let status = resp.status();
     (status, body_json(resp).await)
+}
+
+/// DRM-109 test 3: a `k` over the limit is a 400 with the shared message,
+/// before any search; at the limit every match comes back, and `k=0` returns
+/// none. `k=101` goes first, so the base fails before the huge value.
+#[tokio::test]
+async fn recall_refuses_k_over_100() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state);
+    for content in ["drm109 one", "drm109 two", "drm109 three"] {
+        post_learn(&router, &root, content).await;
+    }
+
+    let recall_k = |k: &'static str| {
+        let router = router.clone();
+        let root = root.clone();
+        async move {
+            let resp = router
+                .into_service()
+                .oneshot(with_peer_uid(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/recall?q=drm109&k={k}"))
+                        .header("x-agent-root", &root)
+                        .body(Body::empty())
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            let status = resp.status();
+            (status, body_json(resp).await)
+        }
+    };
+
+    for k in ["101", "4294967295"] {
+        let (status, json) = recall_k(k).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "k={k}: {json}");
+        assert_eq!(
+            json,
+            serde_json::json!({ "error": "k must be at most 100" }),
+            "k={k}"
+        );
+    }
+
+    let (status, json) = recall_k("100").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["results"].as_array().map(Vec::len), Some(3), "{json}");
+
+    let (status, json) = recall_k("0").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["results"], serde_json::json!([]), "{json}");
 }
 
 /// BZR-1468 test 7: the `GET /api/v1/recall` hit for a learning carries the

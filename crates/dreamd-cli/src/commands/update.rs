@@ -1,15 +1,26 @@
-//! `dreamd update` — one safe path to land on `latest` (AILAB-226).
+//! `dreamd update` — one safe path to land on `latest` (AILAB-226, DRM-152).
 //!
 //! The Rust side never downloads anything — download + sha verification live
-//! only in the Node shim (`packages/dreamd-mcp`). This command stops local
-//! servers, removes the daemon socket, clears the *native binary* cache so a
-//! stuck binary can be replaced, and points the user at `npx -y dreamd-mcp`.
-//! The npx cache itself is deliberately untouched: floating npx re-resolves
-//! the package side on its own.
+//! only in the Node shim (`packages/dreamd-mcp`). This command:
+//!
+//! - stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` servers and
+//!   removes the daemon socket;
+//! - keeps this version's cached binary (`~/.cache/dreamd-mcp/<VERSION>/`) and
+//!   removes every older and newer one, which the shim downloads again if a
+//!   spawn needs it;
+//! - never contacts the network, so it cannot say whether a newer release
+//!   exists. It points the user at floating `npx -y dreamd-mcp`.
+//!
+//! The npx cache itself is deliberately untouched. For a bare `dreamd-mcp`,
+//! npx revalidates the package's registry metadata on every run
+//! (`libnpmexec` resolves it with `preferOnline`) and installs a newer
+//! version into its cache when one is published. A `dreamd-mcp` installed
+//! globally or in the project's `node_modules` runs instead, and a pinned
+//! `dreamd-mcp@<version>` stays on that version.
 //!
 //! Before/after version lines use `commands::version::VERSION_SHORT` — the
 //! running binary's version cannot change in-process, so "after" reports the
-//! same binary plus what was cleared.
+//! same binary.
 
 use std::io::Write;
 use std::path::Path;
@@ -17,12 +28,16 @@ use std::path::Path;
 use super::lifecycle_cleanup::{self, Stopper};
 use super::version::VERSION_SHORT;
 
+/// The cache directory this binary's own version uses: the shim keys
+/// `~/.cache/dreamd-mcp/<VERSION>/` by its package version, which
+/// `version-consistency.test.js` keeps equal to the crate's.
+const KEEP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Failure modes for `dreamd update`. Only real I/O failures (e.g. permission
 /// denied on the cache tree) are errors; everything else is guidance.
 #[derive(Debug)]
 pub enum UpdateError {
-    /// The native binary cache could not be removed; the message names the
-    /// path.
+    /// A cached version could not be removed; the message names the path.
     Io(std::io::Error),
 }
 
@@ -66,30 +81,68 @@ pub struct UpdateRequest<'a> {
     pub cargo_install_hint: Option<String>,
 }
 
-/// Step 2 of the restart contract: the harness holds the old binary open, so
-/// clearing the cache alone is not enough.
+/// Step 2 of the restart contract: the harness spawned the old binary, and
+/// only a reload makes it spawn the server again.
 const RELOAD_STEP: &str =
     "reload your MCP harness (Claude Code, Cursor, …) so it drops the old binary";
-/// Step 3: floating npx only — a hard version pin never picks up `latest`.
+/// Step 3: floating npx only. `update` cannot tell whether a newer release
+/// exists, so it promises no new binary (DRM-152).
 const RERUN_STEP: &str =
-    "re-run `npx -y dreamd-mcp` — the floating spawn re-resolves `latest` and fetches the new binary";
+    "re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp, and the shim downloads a binary only for a version it has not cached";
+/// Step 4: a hard version pin never picks up `latest`.
+const PIN_STEP: &str =
+    "an MCP config that pins `dreamd-mcp@<version>` stays on that version. Use `npx -y dreamd-mcp` to follow new releases";
 /// The whole contract on one line, for `--quiet`.
 const COMPRESSED_NEXT: &str =
     "next: reload your MCP harness, then run `npx -y dreamd-mcp` (floating)";
 
 /// Print the labeled restart contract. `step_one` states what happened (or
-/// would happen) to local `dreamd mcp` / `dreamd watch` processes; steps 2 and
-/// 3 are fixed.
+/// would happen) to local `dreamd mcp` / `dreamd watch` processes; steps 2
+/// to 4 are fixed.
 fn write_contract(out: &mut dyn Write, header: &str, step_one: &str) -> std::io::Result<()> {
     writeln!(out, "{header}")?;
     writeln!(out, "  1. {step_one}")?;
     writeln!(out, "  2. {RELOAD_STEP}")?;
-    writeln!(out, "  3. {RERUN_STEP}")
+    writeln!(out, "  3. {RERUN_STEP}")?;
+    writeln!(out, "  4. {PIN_STEP}")
+}
+
+/// Remove every entry directly under `cache_dir` whose file name is not
+/// `keep`, and return the removed names, sorted (DRM-152).
+///
+/// A missing `cache_dir` is an empty one. No symlink is followed: an entry
+/// that is a symlink is removed as a link. A name that is not UTF-8 is
+/// reported lossily.
+fn remove_other_versions(cache_dir: &Path, keep: &str) -> std::io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut removed = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == keep {
+            continue;
+        }
+        let path = entry.path();
+        // `file_type` does not follow a symlink, so a link is removed as one.
+        let removal = if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removal.map_err(|e| lifecycle_cleanup::io_with_path(e, &path))?;
+        removed.push(name.to_string_lossy().into_owned());
+    }
+    removed.sort();
+    Ok(removed)
 }
 
 /// `dreamd update` entry point. Order: before-version → (unless dry-run)
-/// stop servers → remove socket → clear native cache → restart contract →
-/// after-version.
+/// stop servers → remove socket → remove other cached versions → restart
+/// contract → after-version.
 pub fn run(
     req: &UpdateRequest<'_>,
     stop: Stopper<'_>,
@@ -104,7 +157,7 @@ pub fn run(
             match req.cache_dir {
                 Some(cache_dir) => writeln!(
                     out,
-                    "dry-run: would stop dreamd mcp/watch processes, remove the daemon socket, and clear {}",
+                    "dry-run: would stop dreamd mcp/watch processes, remove the daemon socket, and remove cached versions other than {KEEP_VERSION} from {}",
                     cache_dir.display()
                 )?,
                 None => writeln!(
@@ -115,7 +168,7 @@ pub fn run(
             if let Some(hint) = &req.cargo_install_hint {
                 writeln!(
                     out,
-                    "note: this dreamd binary looks cargo-installed ({hint}); clearing the cache does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
+                    "note: this dreamd binary looks cargo-installed ({hint}); `update` does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
                 )?;
             }
             if req.restart {
@@ -196,17 +249,30 @@ pub fn run(
         }
     }
 
-    // Clear the native binary cache. The npx cache is not touched on update.
-    let mut cache_cleared = false;
+    // Keep this version's cached binary and remove the others (DRM-152). The
+    // npx cache is not touched on update.
     match req.cache_dir {
         Some(cache_dir) => {
-            cache_cleared = lifecycle_cleanup::clear_dir_tree(cache_dir)
-                .map_err(|e| UpdateError::Io(lifecycle_cleanup::io_with_path(e, cache_dir)))?;
+            let removed =
+                remove_other_versions(cache_dir, KEEP_VERSION).map_err(UpdateError::Io)?;
             if !req.quiet {
-                if cache_cleared {
-                    writeln!(out, "cleared native binary cache {}", cache_dir.display())?;
+                let kept = cache_dir.join(KEEP_VERSION);
+                if kept.is_dir() {
+                    writeln!(
+                        out,
+                        "kept the cached dreamd {KEEP_VERSION} in {}",
+                        kept.display()
+                    )?;
+                }
+                if removed.is_empty() {
+                    writeln!(out, "no other cached versions in {}", cache_dir.display())?;
                 } else {
-                    writeln!(out, "no native binary cache at {}", cache_dir.display())?;
+                    writeln!(
+                        out,
+                        "removed {} other cached version(s): {}",
+                        removed.len(),
+                        removed.join(", ")
+                    )?;
                 }
             }
         }
@@ -224,7 +290,7 @@ pub fn run(
         if let Some(hint) = &req.cargo_install_hint {
             writeln!(
                 out,
-                "note: this dreamd binary looks cargo-installed ({hint}); clearing the cache does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
+                "note: this dreamd binary looks cargo-installed ({hint}); `update` does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
             )?;
         }
         // Step 1 reports the stop that already ran above. An unattempted stop
@@ -259,15 +325,11 @@ pub fn run(
         writeln!(out, "{COMPRESSED_NEXT}")?;
     }
 
-    // After line — the running binary cannot change in-process.
+    // After line — the running binary cannot change in-process, and update
+    // cannot know which version the next spawn resolves.
     writeln!(
         out,
-        "after: {VERSION_SHORT} (running binary unchanged until reinstall; native cache {})",
-        if cache_cleared {
-            "cleared"
-        } else {
-            "already clean"
-        }
+        "after: {VERSION_SHORT} (this process keeps its version; the next spawn runs the version npx resolves)"
     )?;
 
     Ok(())

@@ -21,11 +21,11 @@ Security fixes land on `main` and the latest release.
 
 | Version | Supported |
 |---|---|
-| `1.3.x` | Yes |
+| `1.4.x` | Yes |
 | `main` | Yes |
 | Anything else | No |
 
-`1.3.x` is the current release line. Fixes land on `main` and the latest release.
+`1.4.x` is the current release line. Fixes land on `main` and the latest release.
 
 ## Threat model (summary)
 
@@ -37,7 +37,7 @@ The reference implementation is local-first and single-tenant. It assumes:
 
 The daemon enforces:
 
-- **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected. The daemon log `~/.agent/dreamd.log` is a different file: it is created as mode `0o666` before the process umask (typically `0644`) and truncated each time `dreamd watch` starts.
+- **Unix:** binds to a Unix domain socket at `~/.agent/dreamd.sock` with `0600` permissions. Every request is authenticated by validating the connecting peer's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS); requests from any other UID are rejected. The daemon log `~/.agent/dreamd.log` (or `<socket>.log` for a daemon on another `DREAMD_SOCK`) is mode `0600`. `dreamd watch` appends to it after it binds the socket, and renames it to `dreamd.log.1` at a start once it reaches 8 MiB.
 
 - **`personal/` LLM exclusion.** `.agent/personal/` is never included in the dream-cycle composition prompt unless the operator passes `dreamd dream --share-personal` (or sends `x-dreamd-share-personal: 1` to `POST /api/v1/dream`). Consent is **per call**: there is no config key, no environment variable, and no sticky state — a cycle that was not asked, on that invocation, to share the personal layer does not read it. See [Personal-layer consent](#personal-layer-consent) below.
 - **LLM cost cap** ($0.10/cycle by default, `cost_cap_usd`) enforced *before* the request, with deterministic fallback.
@@ -66,7 +66,7 @@ Routing uses the `X-Agent-Root` header (project root path). With a per-user UDS,
 
 ## Privacy and redaction
 
-**The `dreamd` binary makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1.1: when `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment or `secrets.toml` in the platform config directory (`~/.config/dreamd/secrets.toml` on Linux; mode must be exactly `0600` or the file is ignored) holds a key, `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. With no usable key — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
+**The `dreamd` binary makes network calls only during the dream cycle, and only when an API key is present.** LLM-assisted composition shipped in v0.1.1: when there is a key for the vendor the configured model goes to — `ANTHROPIC_API_KEY` or `anthropic_api_key` for Anthropic, `OPENAI_API_KEY` or `openai_api_key` for OpenAI, from the environment or from `secrets.toml` in the platform config directory (`~/.config/dreamd/secrets.toml` on Linux; mode must be exactly `0600` or the file is ignored) — `dreamd dream` and `POST /api/v1/dream` send the promoted cluster's `AGENT_LEARNINGS.jsonl` event bodies to the configured model to compose the `LESSONS.md` body. Each key is sent only to its own vendor. With no usable key for that vendor — or with `--no-llm` — nothing leaves the device and the cycle writes the deterministic exemplar copy instead. Recall, append, indexing, and every other command make no network calls at all.
 
 Two things outside that sentence do use the network. The `npx -y dreamd-mcp` shim downloads the prebuilt binary from this repository's GitHub releases and verifies its SHA-256 before running it. And a binary you build yourself with the non-default `vectors` cargo feature downloads an embedding model when you run `dreamd vectors enable`; the prebuilt binaries are built without that feature, and the command exits 2 on them without touching the network.
 
@@ -85,7 +85,9 @@ Passing `dreamd dream --share-personal` — or sending `x-dreamd-share-personal:
 
 `GET /api/v1/preferences` is unaffected — it serves `PREFERENCES.md` to the local agent over the UDS and is not an LLM call.
 
-On every append — `POST /api/v1/learn` and MCP `append_node` alike — a pattern scrubber runs over `content` **before persistence** (on by default; disable with `redaction = false` in config). It replaces AWS access key ids (`AKIA…`), `Bearer <token>` values, `sk-…` / `sk-ant-…` keys, and `API_KEY=` / `SECRET=` / `TOKEN=` / `PASSWORD=` / `AWS_SECRET_ACCESS_KEY=` assignments with `[REDACTED]` — logging `redaction_hits` but not rejecting the request. It is a fixed pattern list, not a guarantee: a secret in any other shape is stored as written.
+On every append — `POST /api/v1/learn` and MCP `append_node` alike — a pattern scrubber runs over `content` **before persistence** (on by default; disable with `redaction = false` in config). It replaces the secret shapes listed in [configuration.md](docs/configuration.md#redaction) with `[REDACTED]` — logging `redaction_hits` but not rejecting the request. `dreamd doctor` lists the stored records that match, by line and event id. It is a fixed pattern list, not a guarantee: a secret in any other shape is stored as written.
+
+Redaction applies to what is stored, not to logs. With `DREAMD_LOG=debug` or `trace`, the MCP server's library logs each request in full, before redaction, so an `append_node` that holds a secret puts it on `dreamd mcp`'s stderr, which your harness may keep in its MCP log. Keep `DREAMD_LOG` at its default when a session may handle secrets.
 
 ## Untrusted-input caps
 

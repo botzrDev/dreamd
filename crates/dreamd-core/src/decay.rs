@@ -87,15 +87,26 @@ pub struct DecayPlan {
 /// A record decays when [`should_decay`] picks it (recurrence = 0; see the
 /// constant note above) and its id is not in `pins`. `should_decay` already
 /// spares a record whose stored flag is set; `pins` holds the pins the same
-/// plan sets, so a record this cycle cites is never archived. Lines with no
-/// record — skipped lines and a torn final line — never decay. Pure: reads
-/// nothing and writes nothing.
+/// plan sets, so a record this cycle cites is never archived. A pin covers
+/// its id: when any line with an id is pinned, no line with that id decays
+/// (DRM-157). Lines with no record — skipped lines and a torn final line —
+/// never decay. Pure: reads nothing and writes nothing.
 #[must_use]
 pub fn plan_decay(raw: &[RawLine], pins: &HashMap<EventId, bool>, now_sec: i64) -> DecayPlan {
     let records = || raw.iter().filter_map(|line| line.parsed.as_ref());
 
+    // A drop takes every line with the id, so an unpinned copy of a pinned id
+    // would take the pinned line with it.
+    let pinned: HashSet<&EventId> = records()
+        .filter(|event| event.pinned)
+        .map(|event| &event.id)
+        .collect();
     let drops: HashSet<EventId> = records()
-        .filter(|event| !pins.contains_key(&event.id) && should_decay(now_sec, event))
+        .filter(|event| {
+            !pins.contains_key(&event.id)
+                && !pinned.contains(&event.id)
+                && should_decay(now_sec, event)
+        })
         .map(|event| event.id.clone())
         .collect();
     let decayed_ids: Vec<EventId> = records()
@@ -344,6 +355,53 @@ mod tests {
         // The archive holds only the unpinned event; the log keeps the pinned one.
         assert_eq!(merge_archive(None, &plan.archived), line_of(&decayable));
         assert_eq!(pruned(&raw, &plan), line_of(&pinned));
+    }
+
+    /// DRM-157 test 1 (LP-GEARS-05): one old id on two lines, one pinned and
+    /// one not, in either order. The pin covers the id, so neither line
+    /// decays and the log is unchanged.
+    #[test]
+    fn plan_decay_keeps_every_line_of_a_pinned_id() {
+        let id = make_event_id('V');
+        let pinned = make_learning(id.clone(), OLD_TS, true);
+        let unpinned = make_learning(id, OLD_TS, false);
+        for (order, events) in [
+            ("pinned first", [pinned.clone(), unpinned.clone()]),
+            ("pinned last", [unpinned.clone(), pinned.clone()]),
+        ] {
+            let raw = raw_of(&events);
+            let plan = plan(&raw);
+            assert!(plan.drops.is_empty(), "{order}: {:?}", plan.drops);
+            assert!(
+                plan.decayed_ids.is_empty(),
+                "{order}: {:?}",
+                plan.decayed_ids
+            );
+            assert!(plan.archived.is_empty(), "{order}: {:?}", plan.archived);
+            assert_eq!(plan.kept_count, 2, "{order}");
+            let bytes: Vec<u8> = events.iter().flat_map(line_of).collect();
+            assert_eq!(pruned(&raw, &plan), bytes, "{order}");
+        }
+    }
+
+    /// DRM-157 test 2: the rule's other side. An old id on two unpinned lines
+    /// still decays, both lines, beside a pinned old id that stays.
+    #[test]
+    fn plan_decay_still_drops_an_id_with_no_pinned_line() {
+        let twice = make_event_id('W');
+        let first = make_learning(twice.clone(), OLD_TS, false);
+        let second = make_learning(twice.clone(), OLD_TS, false);
+        let kept = make_learning(make_event_id('X'), OLD_TS, true);
+        let raw = raw_of(&[first.clone(), kept.clone(), second.clone()]);
+
+        let plan = plan(&raw);
+
+        assert_eq!(plan.drops, HashSet::from([twice.clone()]));
+        assert_eq!(plan.decayed_ids, vec![twice.clone(), twice]);
+        assert_eq!(plan.kept_count, 1);
+        let archived: Vec<u8> = plan.archived.iter().flat_map(|l| l.bytes.clone()).collect();
+        assert_eq!(archived, [line_of(&first), line_of(&second)].concat());
+        assert_eq!(pruned(&raw, &plan), line_of(&kept));
     }
 
     // ── BZR-1234: byte-preserving rewrite and an idempotent archive ─────────

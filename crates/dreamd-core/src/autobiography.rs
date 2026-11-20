@@ -31,8 +31,17 @@
 //! `memory checkout`) holds the commit on every later cycle until the user
 //! commits that file. A store with no record whose files differ from HEAD skips
 //! once (`no_baseline`), then compares against the record that cycle wrote. The
-//! cycle itself still runs either way; only the commit is skipped, with a WARN
-//! naming the files.
+//! cycle itself still runs either way, with a WARN naming the files: the commit
+//! is skipped, and a `LESSONS.md` that held such bytes is kept as it is
+//! (DRM-115, [`crate::dream_cycle::LessonHold`]).
+//!
+//! **Where the commit may go (DRM-116).** The commit is made only when git's
+//! state is clean and HEAD names a branch (or an unborn one). A merge, rebase,
+//! `git am`, cherry-pick, revert or bisect in progress skips it with one reason
+//! per operation (`merge_in_progress` …), and then a detached HEAD skips it
+//! (`detached_head`); both checks run before the dirty-start hold. The cycle
+//! still runs, its changes stay in the working tree, and the baseline is still
+//! recorded, so the next cycle on a branch commits them.
 //!
 //! **What the commit holds.** Exactly the two tracked files, on top of HEAD's
 //! tree, built in an in-memory index: the user's other staged files stay staged
@@ -41,6 +50,11 @@
 //! committed. A cycle that leaves the tree unchanged makes no commit
 //! ([`AutobiographyOutcome::Unchanged`]). A project nested below its repo's
 //! root checks and commits its own `.agent/` files.
+//!
+//! **Whether git has the log (DRM-100).** [`log_git_state`] says whether
+//! HEAD's tree holds the episodic log. Doctor, `dreamd status` and setup's
+//! card read it to warn while a repo clean can delete memory, and they print
+//! [`commit_store_command`]. Neither function writes to git.
 
 use std::path::{Path, PathBuf};
 
@@ -99,9 +113,9 @@ pub enum AutobiographyOutcome {
     Unchanged,
     /// No git repo found at/above project root. Doctor surfaces; no WARN.
     NoRepo,
-    /// A tracked file held bytes no dream cycle wrote when the cycle started.
-    /// The cycle still ran; the skip holds the commit until the user commits
-    /// that file. WARN logged, naming the files.
+    /// A tracked file held bytes no dream cycle wrote when the cycle started,
+    /// or git is mid-operation or on a detached HEAD (DRM-116). The cycle
+    /// still ran; only the commit was skipped. WARN logged, naming the files.
     Skipped(SkipReason),
 }
 
@@ -116,6 +130,23 @@ pub enum SkipReason {
     NoBaseline { files: Vec<String> },
     /// Never constructed: a missing repo is [`AutobiographyOutcome::NoRepo`].
     NoRepo,
+    /// DRM-116: HEAD is detached (a checked-out tag or commit), so the commit
+    /// would be on no branch.
+    DetachedHead,
+    /// DRM-116: a merge is in progress (`MERGE_HEAD`).
+    MergeInProgress,
+    /// DRM-116: a rebase is in progress (`rebase-merge/`, or
+    /// `rebase-apply/rebasing`).
+    RebaseInProgress,
+    /// DRM-116: a `git am` or `git rebase --apply` is in progress
+    /// (`rebase-apply/`).
+    ApplyInProgress,
+    /// DRM-116: a cherry-pick is in progress (`CHERRY_PICK_HEAD`).
+    CherryPickInProgress,
+    /// DRM-116: a revert is in progress (`REVERT_HEAD`).
+    RevertInProgress,
+    /// DRM-116: a bisect is in progress (`BISECT_LOG`).
+    BisectInProgress,
 }
 
 impl SkipReason {
@@ -125,14 +156,29 @@ impl SkipReason {
             Self::UserDirtyTree { .. } => "user_dirty_tree",
             Self::NoBaseline { .. } => "no_baseline",
             Self::NoRepo => "no_repo",
+            Self::DetachedHead => "detached_head",
+            Self::MergeInProgress => "merge_in_progress",
+            Self::RebaseInProgress => "rebase_in_progress",
+            Self::ApplyInProgress => "apply_in_progress",
+            Self::CherryPickInProgress => "cherry_pick_in_progress",
+            Self::RevertInProgress => "revert_in_progress",
+            Self::BisectInProgress => "bisect_in_progress",
         }
     }
 
-    /// The repo-relative files the skip names.
+    /// The repo-relative files the skip names. Empty for a reason that is
+    /// git's state, not a file's bytes.
     pub fn files(&self) -> &[String] {
         match self {
             Self::UserDirtyTree { files } | Self::NoBaseline { files } => files,
-            Self::NoRepo => &[],
+            Self::NoRepo
+            | Self::DetachedHead
+            | Self::MergeInProgress
+            | Self::RebaseInProgress
+            | Self::ApplyInProgress
+            | Self::CherryPickInProgress
+            | Self::RevertInProgress
+            | Self::BisectInProgress => &[],
         }
     }
 }
@@ -293,6 +339,60 @@ fn check_path(
     Ok((!rule(&bytes, head.as_deref(), baseline)).then_some(rel))
 }
 
+/// Where git stands on a project's episodic log (DRM-100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogGitState {
+    /// No git repo at or above the project root.
+    NoRepo,
+    /// HEAD's tree holds the log, so `git clean` leaves it.
+    Committed,
+    /// HEAD's tree does not hold the log, and git's ignore rules match it:
+    /// the user keeps memory out of git.
+    Ignored,
+    /// HEAD's tree does not hold the log and git does not ignore it.
+    /// `git clean -fd` deletes it while it is untracked, and
+    /// `git reset --hard` while it is only staged.
+    NotCommitted,
+}
+
+/// Where git stands on `project_root`'s episodic log.
+///
+/// Decided by path, not by bytes: a log whose path HEAD's tree holds is
+/// [`LogGitState::Committed`] even when appends since that commit are not in
+/// it, or when the file is gone. The file need not exist. A staged log is
+/// [`LogGitState::NotCommitted`].
+pub fn log_git_state(project_root: &Path) -> Result<LogGitState, AutobiographyError> {
+    let Some(view) = open_repo(project_root)? else {
+        return Ok(LogGitState::NoRepo);
+    };
+    let rel = view.prefix.join(LOG_PATH);
+    if let Some(commit) = head_commit(&view.repo)? {
+        match commit.tree()?.get_path(&rel) {
+            Ok(_) => return Ok(LogGitState::Committed),
+            Err(e) if e.code() == ErrorCode::NotFound => {}
+            Err(e) => return Err(AutobiographyError::Git(e)),
+        }
+    }
+    if view.repo.is_path_ignored(&rel)? {
+        return Ok(LogGitState::Ignored);
+    }
+    Ok(LogGitState::NotCommitted)
+}
+
+/// The shell command that commits the store, run from the project root.
+///
+/// It names `.gitignore` when the project root has one (setup adds
+/// `/.agent/.dreamd/` to it). The `--` paths make `git commit` take only those
+/// paths, so the user's other staged files stay staged and out of the commit.
+pub fn commit_store_command(project_root: &Path) -> String {
+    let paths = if project_root.join(".gitignore").is_file() {
+        ".agent .gitignore"
+    } else {
+        ".agent"
+    };
+    format!("git add {paths} && git commit -m \"Add dreamd memory\" -- {paths}")
+}
+
 /// Check whether either tracked file holds bytes no dream cycle wrote. Called
 /// at cycle start, before the cycle runs, with `state.json`'s baseline.
 ///
@@ -351,7 +451,11 @@ pub fn capture_baseline(
 }
 
 /// D2: clean files advance to `captured`; a file dirty at start keeps `prev`'s entry.
-/// With no `prev`, everything advances (D3).
+/// With no `prev`, everything advances (D3), except a `LESSONS.md` dirty at
+/// start: the cycle kept that file (DRM-115), so its bytes are the user's,
+/// and `lessons_sha256` is `None`. `None` matches no file that exists, so the
+/// held file stays dirty until HEAD holds it or it is deleted. A held file
+/// never becomes the baseline.
 pub fn next_baseline(
     prev: Option<&AutobiographyBaseline>,
     mut captured: AutobiographyBaseline,
@@ -365,6 +469,8 @@ pub fn next_baseline(
             captured.log_len = prev.log_len;
             captured.log_sha256 = prev.log_sha256.clone();
         }
+    } else if start.lessons.is_some() {
+        captured.lessons_sha256 = None;
     }
     captured
 }
@@ -400,6 +506,11 @@ fn lesson_citations(agent_root: &AgentRoot) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the repo-relative `file` is `LESSONS.md`.
+fn names_lessons_md(file: &str) -> bool {
+    Path::new(file).file_name() == Some(std::ffi::OsStr::new("LESSONS.md"))
+}
+
 /// The one text for the WARN and the CLI (D9). `files` joined with ", ".
 pub fn skip_message(reason: &str, files: &[String]) -> String {
     let names = files.join(", ");
@@ -408,12 +519,90 @@ pub fn skip_message(reason: &str, files: &[String]) -> String {
             "no git commit for this cycle: {names} changed outside a dream cycle. \
              Commit those changes with git, and the next cycle commits again."
         ),
+        // DRM-115: a held LESSONS.md waits for the user's commit.
+        "no_baseline" if files.iter().any(|f| names_lessons_md(f)) => format!(
+            "no git commit for this cycle: {names} differ from HEAD, and dreamd has no \
+             record yet of what its last cycle wrote. Commit those files with git, and the \
+             next cycle commits again."
+        ),
         "no_baseline" => format!(
             "no git commit for this cycle: {names} differ from HEAD, and dreamd has no \
              record yet of what its last cycle wrote. The next cycle commits."
         ),
+        // DRM-116: git's state, not a file's bytes; `files` is empty.
+        "detached_head" => "no git commit for this cycle: HEAD is detached (a checked-out tag or \
+                            commit), so the commit would be on no branch. The cycle's changes \
+                            stay in the working tree; check out a branch, and the next cycle \
+                            commits them."
+            .to_string(),
+        "merge_in_progress" => in_progress("a merge", "the merge"),
+        "rebase_in_progress" => in_progress("a rebase", "the rebase"),
+        "apply_in_progress" => in_progress("a `git am` or `git rebase --apply`", "it"),
+        "cherry_pick_in_progress" => in_progress("a cherry-pick", "the cherry-pick"),
+        "revert_in_progress" => in_progress("a revert", "the revert"),
+        "bisect_in_progress" => "no git commit for this cycle: a git bisect is in progress, so \
+                                 HEAD is detached on purpose. The cycle's changes stay in the \
+                                 working tree; run `git bisect reset` when you are done, and the \
+                                 next cycle commits them."
+            .to_string(),
         other => format!("no git commit for this cycle ({other}): {names}"),
     }
+}
+
+/// The [`skip_message`] text for a git operation in progress (DRM-116):
+/// `what` is in progress, and `it` is what to finish or abort.
+fn in_progress(what: &str, it: &str) -> String {
+    format!(
+        "no git commit for this cycle: {what} is in progress. The cycle's changes stay in the \
+         working tree; finish or abort {it}, and the next cycle commits them."
+    )
+}
+
+/// DRM-116: why `repo` cannot take the cycle's commit now, or `None` when its
+/// state is clean and HEAD names a branch (an unborn branch is not detached).
+/// A git operation in progress is checked first, so a bisect, which detaches
+/// HEAD on purpose, says bisect; then a detached HEAD.
+fn git_state_skip(repo: &Repository) -> Result<Option<SkipReason>, AutobiographyError> {
+    use git2::RepositoryState as State;
+    let operation = match repo.state() {
+        State::Clean => None,
+        State::Merge => Some(SkipReason::MergeInProgress),
+        State::Rebase | State::RebaseInteractive | State::RebaseMerge => {
+            Some(SkipReason::RebaseInProgress)
+        }
+        State::ApplyMailbox | State::ApplyMailboxOrRebase => Some(SkipReason::ApplyInProgress),
+        State::CherryPick | State::CherryPickSequence => Some(SkipReason::CherryPickInProgress),
+        State::Revert | State::RevertSequence => Some(SkipReason::RevertInProgress),
+        State::Bisect => Some(SkipReason::BisectInProgress),
+    };
+    if operation.is_some() {
+        return Ok(operation);
+    }
+    Ok(repo.head_detached()?.then_some(SkipReason::DetachedHead))
+}
+
+/// Log the skip's WARN, record it in `state.json`, and return it.
+fn skip(
+    agent_root: &AgentRoot,
+    reason: SkipReason,
+) -> Result<AutobiographyOutcome, AutobiographyError> {
+    let files = reason.files().to_vec();
+    tracing::warn!(
+        dreamd_event = "autobiography_skipped",
+        reason = reason.as_str(),
+        files = ?files,
+        "{}",
+        skip_message(reason.as_str(), &files),
+    );
+    write_skip_marker(
+        agent_root,
+        AutobiographySkip {
+            at: now_seconds(),
+            reason: reason.as_str().to_string(),
+            files,
+        },
+    )?;
+    Ok(AutobiographyOutcome::Skipped(reason))
 }
 
 /// The autobiography outcome as `POST /api/v1/dream` reports it and the CLI prints it.
@@ -460,6 +649,10 @@ impl AutobiographyReport {
 /// have completed. `start` is the result of [`check_dirty_at_cycle_start`],
 /// taken before the cycle ran, so the hold is "cycle-start state", not
 /// "commit-time state".
+///
+/// The skips, in order: no repo (`NoRepo`); a git operation in progress, then
+/// a detached HEAD (DRM-116, checked now, at commit time); then a dirty start
+/// (`user_dirty_tree`, `no_baseline`). An unchanged tree makes no commit.
 pub fn commit_cycle(
     agent_root: &AgentRoot,
     cycle_date: &str,
@@ -479,34 +672,20 @@ pub fn commit_cycle(
     };
     let repo = &view.repo;
 
-    // 2. Hold the commit when a tracked file held bytes no cycle wrote at start.
+    // 2. DRM-116: no commit during a git operation or on a detached HEAD.
+    //    Then hold the commit when a tracked file held bytes no cycle wrote at
+    //    start.
+    if let Some(reason) = git_state_skip(repo)? {
+        return skip(agent_root, reason);
+    }
     if !start.is_clean() {
         let files = start.files();
         let reason = if start.had_baseline {
-            SkipReason::UserDirtyTree {
-                files: files.clone(),
-            }
+            SkipReason::UserDirtyTree { files }
         } else {
-            SkipReason::NoBaseline {
-                files: files.clone(),
-            }
+            SkipReason::NoBaseline { files }
         };
-        tracing::warn!(
-            dreamd_event = "autobiography_skipped",
-            reason = reason.as_str(),
-            files = ?files,
-            "{}",
-            skip_message(reason.as_str(), &files),
-        );
-        write_skip_marker(
-            agent_root,
-            AutobiographySkip {
-                at: now_seconds(),
-                reason: reason.as_str().to_string(),
-                files,
-            },
-        )?;
-        return Ok(AutobiographyOutcome::Skipped(reason));
+        return skip(agent_root, reason);
     }
 
     // 3. The commit's tree: HEAD's tree plus the two tracked paths, in an
@@ -1452,7 +1631,8 @@ mod tests {
         assert_eq!(
             skip_message("no_baseline", &files),
             "no git commit for this cycle: a/LESSONS.md, b/log.jsonl differ from HEAD, and \
-             dreamd has no record yet of what its last cycle wrote. The next cycle commits."
+             dreamd has no record yet of what its last cycle wrote. Commit those files with \
+             git, and the next cycle commits again."
         );
         assert_eq!(
             skip_message("mystery", &files),
@@ -1500,6 +1680,64 @@ mod tests {
         }
     }
 
+    /// DRM-115 test 2: a held `LESSONS.md` never becomes the baseline (D6).
+    #[test]
+    fn next_baseline_never_records_a_held_lessons_file() {
+        let prev = baseline_of(Some(b"lessons a cycle wrote"), b"old log\n");
+        let captured = baseline_of(Some(b"my hand edit"), b"new log\n");
+        let held = StartCheck {
+            lessons: Some(PathBuf::from(LESSONS_PATH)),
+            log: None,
+            had_baseline: false,
+        };
+
+        let next = next_baseline(None, captured.clone(), &held);
+        assert_eq!(
+            next.lessons_sha256, None,
+            "no prev: the held file is not recorded"
+        );
+        assert_eq!(
+            (next.log_len, &next.log_sha256),
+            (captured.log_len, &captured.log_sha256)
+        );
+
+        let held = StartCheck {
+            had_baseline: true,
+            ..held
+        };
+        let next = next_baseline(Some(&prev), captured.clone(), &held);
+        assert_eq!(
+            next.lessons_sha256, prev.lessons_sha256,
+            "prev's entry stays"
+        );
+        assert_eq!(
+            (next.log_len, &next.log_sha256),
+            (captured.log_len, &captured.log_sha256)
+        );
+    }
+
+    /// DRM-115 test 3: `no_baseline` naming `LESSONS.md` waits for the user's
+    /// commit; naming only the log, it keeps today's text.
+    #[test]
+    fn no_baseline_message_waits_for_a_commit_of_lessons() {
+        let both = vec![LESSONS_PATH.to_string(), LOG_PATH.to_string()];
+        assert_eq!(
+            skip_message("no_baseline", &both),
+            format!(
+                "no git commit for this cycle: {LESSONS_PATH}, {LOG_PATH} differ from HEAD, and \
+                 dreamd has no record yet of what its last cycle wrote. Commit those files with \
+                 git, and the next cycle commits again."
+            )
+        );
+        assert_eq!(
+            skip_message("no_baseline", &[LOG_PATH.to_string()]),
+            format!(
+                "no git commit for this cycle: {LOG_PATH} differ from HEAD, and dreamd has no \
+                 record yet of what its last cycle wrote. The next cycle commits."
+            )
+        );
+    }
+
     /// Test 16: the baseline advances per file (D2, §11 H1).
     #[test]
     fn next_baseline_holds_only_the_dirty_file() {
@@ -1538,7 +1776,10 @@ mod tests {
 
         assert_eq!(
             next_baseline(None, captured.clone(), &dirty_lessons),
-            captured,
+            AutobiographyBaseline {
+                lessons_sha256: None,
+                ..captured.clone()
+            },
             "with no prev, everything advances"
         );
     }
@@ -1570,5 +1811,320 @@ mod tests {
 
         assert_eq!(dir.path().join(TRACKED_PATHS[0]), root.lessons_md());
         assert_eq!(dir.path().join(TRACKED_PATHS[1]), root.episodic_jsonl());
+    }
+
+    // ── DRM-100: whether git has the episodic log ─────────────────────────
+
+    /// The one line `dreamd init` appends to `.gitignore`.
+    const INIT_GITIGNORE_LINE: &[u8] = b"/.agent/.dreamd/\n";
+
+    /// Stage `rel` in the repo index without committing it.
+    fn stage_only(repo: &Repository, rel: &str) {
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(rel)).unwrap();
+        index.write().unwrap();
+    }
+
+    /// DRM-100 test 1: a log with no repo above it.
+    #[test]
+    fn log_git_state_is_no_repo_outside_git() {
+        let dir = TempDir::new().unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::NoRepo);
+    }
+
+    /// DRM-100 test 2: setup ignores only `.agent/.dreamd/`, so in a new repo
+    /// the log is neither committed nor ignored.
+    #[test]
+    fn log_git_state_is_not_committed_after_setup() {
+        let dir = TempDir::new().unwrap();
+        Repository::init(dir.path()).unwrap();
+        put(dir.path(), ".gitignore", INIT_GITIGNORE_LINE);
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(
+            log_git_state(dir.path()).unwrap(),
+            LogGitState::NotCommitted
+        );
+    }
+
+    /// DRM-100 test 3: staged is not committed; `git reset --hard` deletes a
+    /// new file that is only staged.
+    #[test]
+    fn log_git_state_counts_a_staged_log_as_not_committed() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        stage_only(&repo, LOG_PATH);
+
+        assert_eq!(
+            log_git_state(dir.path()).unwrap(),
+            LogGitState::NotCommitted
+        );
+    }
+
+    /// DRM-100 test 4: decided by HEAD's tree, not the bytes on disk. Appends
+    /// after the commit, and a deleted file, still read as committed.
+    #[test]
+    fn log_git_state_is_committed_once_head_holds_the_log() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "commit the store");
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+
+        append(dir.path(), LOG_PATH, b"{\"id\":\"c\",\"pinned\":false}\n");
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+
+        std::fs::remove_file(dir.path().join(LOG_PATH)).unwrap();
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 5: a user who keeps memory out of git with `.agent/`.
+    #[test]
+    fn log_git_state_is_ignored_under_an_agent_dir_rule() {
+        let dir = TempDir::new().unwrap();
+        Repository::init(dir.path()).unwrap();
+        put(dir.path(), ".gitignore", b".agent/\n");
+        put(dir.path(), LOG_PATH, TWO_LINES);
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Ignored);
+    }
+
+    /// DRM-100 test 6: a tracked file stays tracked when an ignore rule that
+    /// matches it is added later, and `git clean` leaves it.
+    #[test]
+    fn log_git_state_prefers_head_over_ignore_rules() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "commit the store");
+        put(dir.path(), ".gitignore", b".agent/\n");
+
+        assert_eq!(log_git_state(dir.path()).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 7: a project below the repo root asks about its own log,
+    /// not the repo root's.
+    #[test]
+    fn log_git_state_checks_a_nested_projects_own_log() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        user_commit(&repo, &[LOG_PATH], "the root project's store");
+
+        let nested = dir.path().join("sub");
+        put(&nested, LOG_PATH, TWO_LINES);
+        assert_eq!(log_git_state(&nested).unwrap(), LogGitState::NotCommitted);
+
+        let nested_rel = format!("sub/{LOG_PATH}");
+        user_commit(&repo, &[nested_rel.as_str()], "the nested project's store");
+        assert_eq!(log_git_state(&nested).unwrap(), LogGitState::Committed);
+    }
+
+    /// DRM-100 test 8: `.gitignore` is named only when the project root has
+    /// one, and the `--` paths keep the user's other staged files out.
+    #[test]
+    fn commit_store_command_names_gitignore_only_when_present() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            commit_store_command(dir.path()),
+            "git add .agent && git commit -m \"Add dreamd memory\" -- .agent"
+        );
+
+        put(dir.path(), ".gitignore", INIT_GITIGNORE_LINE);
+        assert_eq!(
+            commit_store_command(dir.path()),
+            "git add .agent .gitignore && git commit -m \"Add dreamd memory\" -- .agent .gitignore"
+        );
+    }
+
+    // ── DRM-116: git's state holds the commit ───────────────────────────────
+
+    /// A committed store whose log a cycle then changed, for a clean start.
+    fn git_state_store() -> (TempDir, Repository, git2::Oid) {
+        let dir = TempDir::new().unwrap();
+        let repo = init_repo_with_files(&dir);
+        let head = make_initial_commit(&repo, &dir);
+        put(dir.path(), LOG_PATH, TWO_LINES);
+        (dir, repo, head)
+    }
+
+    /// The reason string of a skipped outcome; panics on any other outcome.
+    /// A string, not a variant, so the tests build against the base.
+    fn skipped_reason(outcome: AutobiographyOutcome) -> String {
+        match outcome {
+            AutobiographyOutcome::Skipped(reason) => reason.as_str().to_string(),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// DRM-116 test 1: a detached HEAD skips the commit and records why.
+    #[test]
+    fn a_detached_head_skips_the_commit() {
+        let (dir, repo, head) = git_state_store();
+        repo.set_head_detached(head).unwrap();
+        let agent_root = AgentRoot::new(dir.path());
+
+        let outcome = commit_cycle(&agent_root, "2026-11-20", &StartCheck::default()).unwrap();
+        assert_eq!(skipped_reason(outcome), "detached_head");
+        assert_eq!(
+            repo.head().unwrap().target(),
+            Some(head),
+            "HEAD did not move"
+        );
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent_root.state_json()).unwrap())
+                .unwrap();
+        assert_eq!(
+            state["last_autobiography_skip"]["reason"],
+            serde_json::json!("detached_head")
+        );
+        assert_eq!(
+            state["last_autobiography_skip"]["files"],
+            serde_json::json!([])
+        );
+    }
+
+    /// DRM-116 test 2: each git operation marker skips the commit with its
+    /// own reason, and git2 reads each marker as the spec's table says.
+    #[test]
+    fn a_git_operation_in_progress_skips_the_commit() {
+        use git2::RepositoryState as State;
+        // (paths created in the git dir, a trailing `/` for a directory; the
+        // state git2 reports; the reason)
+        let rows: [(&[&str], State, &str); 11] = [
+            (
+                &["rebase-merge/", "rebase-merge/interactive"],
+                State::RebaseInteractive,
+                "rebase_in_progress",
+            ),
+            (&["rebase-merge/"], State::RebaseMerge, "rebase_in_progress"),
+            (
+                &["rebase-apply/", "rebase-apply/rebasing"],
+                State::Rebase,
+                "rebase_in_progress",
+            ),
+            (
+                &["rebase-apply/", "rebase-apply/applying"],
+                State::ApplyMailbox,
+                "apply_in_progress",
+            ),
+            (
+                &["rebase-apply/"],
+                State::ApplyMailboxOrRebase,
+                "apply_in_progress",
+            ),
+            (&["MERGE_HEAD"], State::Merge, "merge_in_progress"),
+            (&["REVERT_HEAD"], State::Revert, "revert_in_progress"),
+            (
+                &["REVERT_HEAD", "sequencer/", "sequencer/todo"],
+                State::RevertSequence,
+                "revert_in_progress",
+            ),
+            (
+                &["CHERRY_PICK_HEAD"],
+                State::CherryPick,
+                "cherry_pick_in_progress",
+            ),
+            (
+                &["CHERRY_PICK_HEAD", "sequencer/", "sequencer/todo"],
+                State::CherryPickSequence,
+                "cherry_pick_in_progress",
+            ),
+            (&["BISECT_LOG"], State::Bisect, "bisect_in_progress"),
+        ];
+        for (paths, state, reason) in rows {
+            let (dir, repo, head) = git_state_store();
+            for p in paths {
+                let path = repo.path().join(p.trim_end_matches('/'));
+                if p.ends_with('/') {
+                    std::fs::create_dir_all(&path).unwrap();
+                } else if *p == "MERGE_HEAD" {
+                    std::fs::write(&path, format!("{head}\n")).unwrap();
+                } else {
+                    std::fs::write(&path, b"").unwrap();
+                }
+            }
+            assert_eq!(repo.state(), state, "git2 reads {paths:?}");
+
+            let agent_root = AgentRoot::new(dir.path());
+            let outcome = commit_cycle(&agent_root, "2026-11-20", &StartCheck::default()).unwrap();
+            assert_eq!(skipped_reason(outcome), reason, "{paths:?}");
+            assert_eq!(repo.head().unwrap().target(), Some(head), "{paths:?}");
+        }
+    }
+
+    /// DRM-116 test 3: each new reason's message, in full.
+    #[test]
+    fn skip_messages_say_what_to_finish() {
+        let cases = [
+            (
+                "detached_head",
+                "no git commit for this cycle: HEAD is detached (a checked-out tag or commit), \
+                 so the commit would be on no branch. The cycle's changes stay in the working \
+                 tree; check out a branch, and the next cycle commits them.",
+            ),
+            (
+                "merge_in_progress",
+                "no git commit for this cycle: a merge is in progress. The cycle's changes stay \
+                 in the working tree; finish or abort the merge, and the next cycle commits them.",
+            ),
+            (
+                "rebase_in_progress",
+                "no git commit for this cycle: a rebase is in progress. The cycle's changes stay \
+                 in the working tree; finish or abort the rebase, and the next cycle commits them.",
+            ),
+            (
+                "apply_in_progress",
+                "no git commit for this cycle: a `git am` or `git rebase --apply` is in progress. \
+                 The cycle's changes stay in the working tree; finish or abort it, and the next \
+                 cycle commits them.",
+            ),
+            (
+                "cherry_pick_in_progress",
+                "no git commit for this cycle: a cherry-pick is in progress. The cycle's changes \
+                 stay in the working tree; finish or abort the cherry-pick, and the next cycle \
+                 commits them.",
+            ),
+            (
+                "revert_in_progress",
+                "no git commit for this cycle: a revert is in progress. The cycle's changes stay \
+                 in the working tree; finish or abort the revert, and the next cycle commits them.",
+            ),
+            (
+                "bisect_in_progress",
+                "no git commit for this cycle: a git bisect is in progress, so HEAD is detached \
+                 on purpose. The cycle's changes stay in the working tree; run `git bisect reset` \
+                 when you are done, and the next cycle commits them.",
+            ),
+        ];
+        for (reason, text) in cases {
+            assert_eq!(skip_message(reason, &[]), text, "{reason}");
+        }
+    }
+
+    /// DRM-116 test 4: an operation outranks a detached HEAD, and a detached
+    /// HEAD outranks a dirty start.
+    #[test]
+    fn an_operation_outranks_a_detached_head_and_a_dirty_start() {
+        let (dir, repo, head) = git_state_store();
+        repo.set_head_detached(head).unwrap();
+        std::fs::write(repo.path().join("BISECT_LOG"), b"").unwrap();
+        let agent_root = AgentRoot::new(dir.path());
+        let outcome = commit_cycle(&agent_root, "2026-11-20", &StartCheck::default()).unwrap();
+        assert_eq!(skipped_reason(outcome), "bisect_in_progress");
+
+        let (dir, repo, head) = git_state_store();
+        repo.set_head_detached(head).unwrap();
+        let dirty = StartCheck {
+            lessons: Some(PathBuf::from(LESSONS_PATH)),
+            log: None,
+            had_baseline: true,
+        };
+        let agent_root = AgentRoot::new(dir.path());
+        let outcome = commit_cycle(&agent_root, "2026-11-20", &dirty).unwrap();
+        assert_eq!(skipped_reason(outcome), "detached_head");
     }
 }

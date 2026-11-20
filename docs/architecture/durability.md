@@ -58,9 +58,11 @@ For each `AppendLearning` message the coordinator runs the following steps
 **in order**:
 
 1. **Idempotency lookup.** If the message carries a `client_dedup_key`,
-   look up `(canonicalized AgentRoot path, key)` in the in-memory LRU.
-   On hit, return the cached `EventId` immediately — no second line is
-   appended.
+   look up `(canonicalized AgentRoot path, key, fingerprint)` in the
+   in-memory LRU. The fingerprint hashes the learning as ingress built it
+   (`content`, `skill_action`, `source_harness`, `pain`, `importance`,
+   `pinned`), taken before step 3 overwrites the placeholders. On hit,
+   return the cached `EventId` immediately — no second line is appended.
 2. **Stat check (Unix).** Compare the device, inode and length at the log's
    path with what the coordinator last wrote. On a difference (a
    `git checkout`, `merge` or `pull` replaced or edited the file), reopen the
@@ -95,8 +97,9 @@ For each `AppendLearning` message the coordinator runs the following steps
    it as in step 2, and append the line again unless the file now at the path
    already holds its id.
 10. **LRU insert.** Only on `sync_data` success and only if a
-    `client_dedup_key` was provided, insert `(root, key) -> EventId` into
-    the LRU. Insert-before-write would poison the cache on write failure
+    `client_dedup_key` was provided, insert
+    `(root, key, fingerprint) -> EventId` into the LRU. Insert-before-write
+    would poison the cache on write failure
     (a retry would see a phantom hit despite no durable bytes on disk).
 11. **Hand off to the indexer.** The coordinator awaits `send` of
     `IndexerMsg::Append` on the indexer channel, then replies. This is index
@@ -106,18 +109,26 @@ For each `AppendLearning` message the coordinator runs the following steps
 
 ## Idempotency LRU
 
-- Type: `LruCache<(PathBuf, String), IdempotencyEntry>`; an entry holds the
+- Type: `LruCache<(PathBuf, String, u64), IdempotencyEntry>`; an entry holds the
   `EventId` and the stamped `timestamp`, and a hit returns both with
   `deduplicated: true`.
 - Capacity: 1024 entries, per coordinator (so per project).
 - Lifetime: in-memory only; cleared on restart, and when the daemon evicts an
   idle project's coordinator.
-- Key: `(canonicalized AgentRoot path, client_dedup_key)`. One daemon serves
-  many project roots, each with its own coordinator and its own cache; the path
-  component keeps the key unambiguous regardless.
-- Over HTTP the key is the `X-Client-Dedup-Key` request header; MCP
-  `append_node` takes it as the optional `client_dedup_key` argument. It is not
-  written into the JSONL record.
+- Key: `(canonicalized AgentRoot path, client_dedup_key, learning
+  fingerprint)`. One daemon serves many project roots, each with its own
+  coordinator and its own cache; the path component keeps the key unambiguous
+  regardless.
+- The fingerprint is a `DefaultHasher` hash of `content`, `skill_action`,
+  `source_harness`, `pain`, `importance` and `pinned`, in that order. So a key
+  names one learning: the same key with a different learning is a different
+  entry, which is written with its own id, and a retry of either learning then
+  returns that learning's id (DRM-106). The hash only has to agree with itself
+  inside one process, because the cache never leaves it.
+- Over HTTP the key is the body's `client_dedup_key`, else the
+  `X-Client-Dedup-Key` request header (read as UTF-8 from its bytes). MCP
+  `append_node` takes it as the optional `client_dedup_key` argument, and in
+  daemon mode sends it in the body. It is not written into the JSONL record.
 
 Durable replay protection is **out of scope**. A restart drops the
 cache, so a client that retries across a restart can produce two durable

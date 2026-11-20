@@ -24,7 +24,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
   -X POST \
   -H "X-Agent-Root: $PROJECT" \
   -H "Content-Type: application/json" \
-  -H "X-Client-Dedup-Key: <first ~60 chars of content>" \
+  -H "X-Client-Dedup-Key: <a key derived from this content>" \
   -d '{
     "schema_version": "1.0.0",
     "id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -42,7 +42,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 - `skill_action` follows the `language::domain::specific` convention — see [SPEC.md](https://github.com/botzrDev/dreamd/blob/main/SPEC.md) (`AgentLearning` table) for full rules. Lowercase `[a-z0-9_]` segments joined by `::`. Examples: `rust::error_handling`, `python::api_design`, `typescript::types::branded`.
 - `source_harness` is `"aider"`. This lets dreamd attribute learnings across harnesses.
 - `id`, `schema_version` and `timestamp` are placeholders — the daemon mints its own and ignores what you send. They may be omitted.
-- `X-Client-Dedup-Key` is optional. If two appends share the same key in the same project, the second returns the original `id` with `"deduplicated": true`.
+- `X-Client-Dedup-Key` is optional, and only for retrying one append. If two appends in the same project share the key and the learning, the second returns the original `id` with `"deduplicated": true`; the same key with different content is stored as a new record. Keys are forgotten when the daemon restarts or evicts the project's coordinator.
 - The daemon must be running (`dreamd watch`) for the `curl` to succeed. Without it there is no socket and `curl` fails to connect (exit code 7). An MCP session from another harness does not open the socket on its own.
 - `PROJECT` is the absolute path of the project root (the directory that contains `.agent/`), as registered by `dreamd init`.
 

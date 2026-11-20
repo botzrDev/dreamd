@@ -103,6 +103,34 @@ pub enum DreamCycleError {
 pub struct DreamCycleResult {
     pub decay: DecayResult,
     pub autobiography: Option<AutobiographyOutcome>,
+    /// `Some` when the cycle kept `LESSONS.md` as it was (DRM-115).
+    pub lesson_held: Option<LessonHold>,
+}
+
+/// Why this cycle kept `LESSONS.md` as it was (DRM-115).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LessonHold {
+    /// `"user_dirty_tree"` or `"no_baseline"`, as `SkipReason::as_str`.
+    pub reason: &'static str,
+    /// The repo-relative path, as `StartCheck.lessons` names it.
+    pub file: String,
+}
+
+impl LessonHold {
+    /// The hold the cycle-start check asks for: `Some` when `LESSONS.md` held
+    /// bytes no dream cycle wrote. The reason follows the baseline, as the
+    /// commit's skip reason does.
+    #[must_use]
+    pub fn from_start(start: &StartCheck) -> Option<Self> {
+        start.lessons.as_ref().map(|file| LessonHold {
+            reason: if start.had_baseline {
+                "user_dirty_tree"
+            } else {
+                "no_baseline"
+            },
+            file: file.display().to_string(),
+        })
+    }
 }
 
 /// How post-filesystem index updates reach the Tantivy indexer task.
@@ -136,9 +164,68 @@ pub fn copy_notice(exemplar_id: &str) -> String {
     )
 }
 
-/// How to turn the model path on. Printed only when the caller did not pass
-/// `--no-llm` and dreamd has no key it will use.
-pub const NO_API_KEY_NOTICE: &str = "no API key, so this cycle did not call a model. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add anthropic_api_key or openai_api_key to ~/.config/dreamd/secrets.toml, to compose a summary. `dreamd dream --no-llm` chooses this copy on purpose.";
+/// Who looked for the key: this command, or the daemon that ran the cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyHolder {
+    Command,
+    Daemon,
+}
+
+/// The line for a deterministic lesson written because no key was used
+/// (DRM-113). It names the variable and the `secrets.toml` field that were
+/// looked for, at `secrets` (`secrets.toml` when the platform has no config
+/// dir). The daemon's line says that a key in the caller's shell is not used,
+/// because the daemon reads its own environment.
+#[must_use]
+pub fn no_key_notice(no_key: &llm::NoKey, holder: KeyHolder, secrets: Option<&Path>) -> String {
+    let s = secrets.map_or_else(|| "secrets.toml".to_string(), |p| p.display().to_string());
+    match no_key {
+        llm::NoKey::Missing(v) => {
+            let (var, key, vendor) = (v.env_var(), v.secrets_key(), v.vendor());
+            match holder {
+                KeyHolder::Command => format!(
+                    "no {var} in the environment and no {key} in {s}, so this cycle did not call a model. \
+                     The configured model goes to {vendor}, and dreamd sends each vendor only its own key. \
+                     Set {var}, or add {key} to {s}, to compose a summary. \
+                     `dreamd dream --no-llm` chooses this copy on purpose."
+                ),
+                KeyHolder::Daemon => format!(
+                    "the daemon has no {var} in its environment and no {key} in {s}, so this cycle did not call a model. \
+                     The configured model goes to {vendor}, and dreamd sends each vendor only its own key. \
+                     A key set in your shell is not used: the daemon reads its own environment. \
+                     Add {key} to {s} (mode 0600), or set {var} where the daemon is started and restart it, to compose a summary. \
+                     `dreamd dream --no-llm` chooses this copy on purpose."
+                ),
+            }
+        }
+        llm::NoKey::NoKeyRule(a) => format!(
+            "this cycle did not call a model: the configured model goes to genai's {a} adapter, \
+             and dreamd sends an API key only to Anthropic or OpenAI. \
+             Set `provider` to \"anthropic\" or \"openai\", or choose a claude-* or gpt-* model, to compose a summary. \
+             `dreamd dream --no-llm` chooses this copy on purpose."
+        ),
+    }
+}
+
+/// The first line of a cycle that kept `LESSONS.md` as it was (DRM-115).
+#[must_use]
+pub fn lesson_held_notice(held: &LessonHold) -> String {
+    let file = &held.file;
+    if held.reason == "no_baseline" {
+        format!(
+            "lesson kept: {file} differs from HEAD, and dreamd has no record yet of what its last \
+             cycle wrote, so this cycle did not rewrite it. Commit it with git, or delete it, and \
+             the next cycle writes the lesson again."
+        )
+    } else {
+        format!(
+            "lesson kept: {file} changed outside a dream cycle, so this cycle did not rewrite it. \
+             dreamd rebuilds LESSONS.md from the log, so commit your edit with git to keep it in \
+             history, or delete the file to drop it, and the next cycle writes the lesson again. \
+             To keep a correction for good, record it with append_node."
+        )
+    }
+}
 
 /// The line that names every event this cycle pinned.
 #[must_use]
@@ -152,21 +239,37 @@ pub fn pin_notice(citations: &[String]) -> String {
 /// Lines for `dreamd dream` and `POST /api/v1/dream`'s `notices` array.
 ///
 /// A deterministic lesson says it is a copy of its exemplar. The no-key line
-/// is added only when the caller allowed a model and none is configured.
+/// ([`no_key_notice`]) is added only when the caller allowed a model and
+/// `no_key` says why none was called; `holder` is who looked for the key.
 /// Any lesson that cites events says those events were pinned. An absent or
 /// unreadable `LESSONS.md` yields nothing.
+///
+/// `held` is the cycle's [`LessonHold`] (DRM-115). Then the first line is
+/// [`lesson_held_notice`], with no copy line and no no-key line: the file is
+/// the user's, and no model was asked. The pin line follows when the held
+/// file cites events.
 #[must_use]
-pub fn cycle_notices(agent_root: &AgentRoot, no_llm: bool, has_credentials: bool) -> Vec<String> {
+pub fn cycle_notices(
+    agent_root: &AgentRoot,
+    no_llm: bool,
+    no_key: Option<&llm::NoKey>,
+    holder: KeyHolder,
+    held: Option<&LessonHold>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = held.map(lesson_held_notice).into_iter().collect();
     let Ok(file) = crate::lessons::read_lessons_file(&agent_root.lessons_md()) else {
-        return Vec::new();
+        return lines;
     };
-    let mut lines = Vec::new();
-    if file.prompt_version == consolidation::DETERMINISTIC_PROMPT_ID {
+    if held.is_none() && file.prompt_version == consolidation::DETERMINISTIC_PROMPT_ID {
         if let Some(id) = file.lessons.first().map(|lesson| lesson.id.as_str()) {
             lines.push(copy_notice(id));
         }
-        if !no_llm && !has_credentials {
-            lines.push(NO_API_KEY_NOTICE.to_string());
+        if let Some(k) = no_key.filter(|_| !no_llm) {
+            lines.push(no_key_notice(
+                k,
+                holder,
+                llm::secrets_toml_path().as_deref(),
+            ));
         }
     }
     if !file.citations.is_empty() {
@@ -218,6 +321,10 @@ pub fn ensure_not_in_progress(agent_root: &AgentRoot) -> Result<(), DreamCycleEr
 ///
 /// `ledger` is the project writer lock's appender (`WriterLock::ledger`); the
 /// plan's provenance edges go through it at commit.
+///
+/// `held` (DRM-115) means the cycle-start check found that `LESSONS.md` holds
+/// bytes no cycle wrote. The cycle then keeps the file: it makes no model
+/// call, and the plan writes no lesson ([`plan::plan_cycle_with`]).
 pub async fn run_filesystem_phases(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -225,15 +332,21 @@ pub async fn run_filesystem_phases(
     cycle_date: &str,
     no_llm: bool,
     share_personal: bool,
+    held: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     let prepared = prepare(agent_root, now_sec)?;
-    let body = compose(
-        agent_root,
-        prepared.selected.as_ref(),
-        no_llm,
-        share_personal,
-    )
-    .await;
+    let body = if held {
+        // The file is kept, so a body would be thrown away; make no call.
+        LessonBodySource::Deterministic
+    } else {
+        compose(
+            agent_root,
+            prepared.selected.as_ref(),
+            no_llm,
+            share_personal,
+        )
+        .await
+    };
     let composed_for = prepared.selected.as_ref().map(|s| s.cluster_key.as_str());
     commit(
         agent_root,
@@ -243,15 +356,18 @@ pub async fn run_filesystem_phases(
         &prepared.raw,
         composed_for,
         body,
+        held,
     )
 }
 
 /// [`run_filesystem_phases`] with an explicit backend — the seam tests use to
 /// drive the LLM path with a fake and no network.
 ///
-/// `share_personal` means what it does for [`run_filesystem_phases`]. It is a
-/// parameter here so a test can drive the consent path against the same fake
-/// backend the rest of the LLM assertions use.
+/// `share_personal` and `held` mean what they do for
+/// [`run_filesystem_phases`]. `share_personal` is a parameter here so a test
+/// can drive the consent path against the same fake backend the rest of the
+/// LLM assertions use.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -260,9 +376,12 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
     backend: &B,
     model: &str,
     share_personal: bool,
+    held: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     let prepared = prepare(agent_root, now_sec)?;
     let body = match prepared.selected.as_ref() {
+        // DRM-115: the file is kept; make no model call.
+        Some(_) if held => LessonBodySource::Deterministic,
         Some(selected) => {
             // The spend cap (AILAB-196) is read here rather than threaded
             // through this function, because its signature is the FakeLlm seam
@@ -296,6 +415,7 @@ pub async fn run_filesystem_phases_with_backend<B: LlmBackend>(
         &prepared.raw,
         composed_for,
         body,
+        held,
     )
 }
 
@@ -383,7 +503,10 @@ pub async fn compose(
 /// ([`retention::collect_objects`]). Reads no log.
 ///
 /// `composed_for` is the cluster key `body` was composed for (see
-/// `gate_at_commit`).
+/// `gate_at_commit`). `held` (DRM-115) keeps `LESSONS.md` as it is: the plan
+/// writes and unlinks no lesson, and pins what the held file cites
+/// ([`plan::plan_cycle_with`]).
+#[allow(clippy::too_many_arguments)]
 pub fn commit(
     agent_root: &AgentRoot,
     ledger: &Ledger,
@@ -392,6 +515,7 @@ pub fn commit(
     raw: &[episodic::RawLine],
     composed_for: Option<&str>,
     body: LessonBodySource,
+    held: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     // One plan holds both filesystem phases' outputs, in one stage
     // (ARCHITECTURE.md §3).
@@ -425,7 +549,7 @@ pub fn commit(
                 Err(e) => retention::warn_skipped(&e, "autosnap retention skipped; no ref pruned"),
             }
             let prior = stage.read(&agent_root.lessons_md()).map_err(WalError::Io)?;
-            let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, |selected| {
+            let plan = plan::plan_cycle_with(raw, prior.as_deref(), now_sec, held, |selected| {
                 gate_at_commit(body, composed_for, selected)
             })
             .map_err(LessonPhaseError::from)?;
@@ -707,7 +831,7 @@ pub async fn run_guarded_cycle<F, Fut>(
     dispatch: F,
 ) -> Result<DreamCycleResult, DreamCycleError>
 where
-    F: FnOnce(i64, String) -> Fut,
+    F: FnOnce(i64, String, bool) -> Fut,
     Fut: std::future::Future<Output = Result<DecayResult, DreamCycleError>>,
 {
     ensure_not_in_progress(opts.agent_root)?;
@@ -728,7 +852,10 @@ where
         }
     };
 
-    let decay = dispatch(opts.now_sec, cycle_date.clone()).await?;
+    // DRM-115: a LESSONS.md that holds bytes no cycle wrote is kept. A failed
+    // check holds nothing, as it holds no commit.
+    let lesson_held = start.as_ref().and_then(LessonHold::from_start);
+    let decay = dispatch(opts.now_sec, cycle_date.clone(), lesson_held.is_some()).await?;
 
     if let Some(start) = &start {
         if let Err(e) = autobiography::record_baseline(opts.agent_root, baseline.as_ref(), start) {
@@ -751,6 +878,7 @@ where
     Ok(DreamCycleResult {
         decay,
         autobiography,
+        lesson_held,
     })
 }
 
@@ -796,8 +924,17 @@ pub fn run_in_process(
             commit_autobiography: !no_commit,
             index: IndexBackend::FreshHandle(lock.clone()),
         },
-        |now_sec, cycle_date| async move {
-            run_filesystem_phases(root, ledger, now_sec, &cycle_date, no_llm, share_personal).await
+        |now_sec, cycle_date, held| async move {
+            run_filesystem_phases(
+                root,
+                ledger,
+                now_sec,
+                &cycle_date,
+                no_llm,
+                share_personal,
+                held,
+            )
+            .await
         },
     ));
     // The indexer task holds a clone of the token; dropping the runtime ends
@@ -1054,6 +1191,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             true,
             false,
+            false,
         )
         .await
         .expect("filesystem phases")
@@ -1298,27 +1436,70 @@ mod tests {
         };
         crate::lessons::write_lessons_file(&root.lessons_md(), &file).unwrap();
 
-        let with_key = cycle_notices(&root, false, true);
+        let with_key = cycle_notices(&root, false, None, KeyHolder::Command, None);
         assert_eq!(
             with_key,
             vec![copy_notice("evt_b"), pin_notice(&file.citations)]
         );
-        assert!(!with_key.iter().any(|l| l.contains("no API key")));
+        assert!(!with_key.iter().any(|l| l.contains("did not call a model")));
 
-        let no_key = cycle_notices(&root, false, false);
+        let missing = llm::NoKey::Missing(llm::KeyProvider::Anthropic);
+        let no_key = cycle_notices(&root, false, Some(&missing), KeyHolder::Command, None);
         assert_eq!(
             no_key,
             vec![
                 copy_notice("evt_b"),
-                NO_API_KEY_NOTICE.to_string(),
+                no_key_notice(
+                    &missing,
+                    KeyHolder::Command,
+                    llm::secrets_toml_path().as_deref()
+                ),
                 pin_notice(&file.citations),
             ]
         );
 
-        let asked = cycle_notices(&root, true, false);
+        let asked = cycle_notices(&root, true, Some(&missing), KeyHolder::Command, None);
         assert_eq!(
             asked,
             vec![copy_notice("evt_b"), pin_notice(&file.citations)]
+        );
+    }
+
+    /// DRM-113 test 4: each no-key line names the variable, the
+    /// `secrets.toml` key, and who looked.
+    #[test]
+    fn no_key_notices_name_the_variable_and_who_looked() {
+        let secrets = Path::new("/x/secrets.toml");
+        assert_eq!(
+            no_key_notice(
+                &llm::NoKey::Missing(llm::KeyProvider::Anthropic),
+                KeyHolder::Command,
+                Some(secrets)
+            ),
+            "no ANTHROPIC_API_KEY in the environment and no anthropic_api_key in /x/secrets.toml, \
+             so this cycle did not call a model. The configured model goes to Anthropic, and dreamd \
+             sends each vendor only its own key. Set ANTHROPIC_API_KEY, or add anthropic_api_key to \
+             /x/secrets.toml, to compose a summary. `dreamd dream --no-llm` chooses this copy on purpose."
+        );
+        assert_eq!(
+            no_key_notice(
+                &llm::NoKey::Missing(llm::KeyProvider::OpenAi),
+                KeyHolder::Daemon,
+                Some(secrets)
+            ),
+            "the daemon has no OPENAI_API_KEY in its environment and no openai_api_key in \
+             /x/secrets.toml, so this cycle did not call a model. The configured model goes to \
+             OpenAI, and dreamd sends each vendor only its own key. A key set in your shell is not \
+             used: the daemon reads its own environment. Add openai_api_key to /x/secrets.toml \
+             (mode 0600), or set OPENAI_API_KEY where the daemon is started and restart it, to \
+             compose a summary. `dreamd dream --no-llm` chooses this copy on purpose."
+        );
+        assert_eq!(
+            no_key_notice(&llm::NoKey::NoKeyRule("Gemini"), KeyHolder::Command, None),
+            "this cycle did not call a model: the configured model goes to genai's Gemini adapter, \
+             and dreamd sends an API key only to Anthropic or OpenAI. Set `provider` to \
+             \"anthropic\" or \"openai\", or choose a claude-* or gpt-* model, to compose a summary. \
+             `dreamd dream --no-llm` chooses this copy on purpose."
         );
     }
 
@@ -1339,7 +1520,7 @@ mod tests {
                 commit_autobiography: false,
                 index: IndexBackend::Skip,
             },
-            |now_sec, cycle_date| {
+            |now_sec, cycle_date, _held| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(now_sec, NOW_SEC);
                 assert_eq!(cycle_date, "2025-05-13");
@@ -1371,7 +1552,7 @@ mod tests {
                     commit_autobiography: false,
                     index: IndexBackend::Skip,
                 },
-                |_, _| async { panic!("dispatch must not run while a cycle is in progress") },
+                |_, _, _| async { panic!("dispatch must not run while a cycle is in progress") },
             ))
             .unwrap_err();
         assert!(matches!(err, DreamCycleError::InProgress));
@@ -1450,7 +1631,7 @@ mod tests {
                 commit_autobiography,
                 index: IndexBackend::Skip,
             },
-            |_, _| {
+            |_, _, _| {
                 write();
                 async { Ok(DecayResult::default()) }
             },
@@ -1503,7 +1684,7 @@ mod tests {
                 commit_autobiography: true,
                 index: IndexBackend::Skip,
             },
-            |_, _| async { Err(DreamCycleError::Coordinator("dispatch failed".to_string())) },
+            |_, _, _| async { Err(DreamCycleError::Coordinator("dispatch failed".to_string())) },
         )
         .await
         .unwrap_err();
@@ -1753,6 +1934,37 @@ mod tests {
             .collect()
     }
 
+    /// DRM-115 test 4: a held cycle makes no model call and keeps
+    /// `LESSONS.md`'s bytes.
+    #[tokio::test]
+    async fn a_held_cycle_makes_no_model_call() {
+        let (_dir, root) = scaffold_fixture();
+        assert!(
+            deterministic_exemplar(&root).events.len() > 1,
+            "precondition: the fixture promotes"
+        );
+        fs::create_dir_all(root.lessons_md().parent().unwrap()).unwrap();
+        fs::write(root.lessons_md(), b"my hand edit\n").unwrap();
+        let fake = crate::llm::fake::FakeLlm::ok(COMPOSED);
+
+        run_filesystem_phases_with_backend(
+            &root,
+            writer_lock(&root).ledger(),
+            NOW_SEC,
+            &cycle_date_from_now_sec(NOW_SEC),
+            &fake,
+            "claude-haiku-4-5",
+            false,
+            true,
+        )
+        .await
+        .expect("held cycle");
+
+        assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(fake.last_prompt(), None);
+        assert_eq!(fs::read(root.lessons_md()).unwrap(), b"my hand edit\n");
+    }
+
     #[tokio::test]
     async fn llm_success_writes_model_text_but_keeps_the_exemplar_id() {
         let (_dir, root) = scaffold_fixture();
@@ -1782,6 +1994,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
+            false,
             false,
         )
         .await
@@ -1915,6 +2128,7 @@ mod tests {
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
             false,
+            false,
         )
         .await
         .expect("a hallucinated citation must never fail the cycle");
@@ -1960,6 +2174,7 @@ mod tests {
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
             false,
+            false,
         )
         .await
         .expect("cycle must still commit");
@@ -1988,6 +2203,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
+            false,
             false,
         )
         .await
@@ -2021,6 +2237,7 @@ mod tests {
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
             false,
+            false,
         )
         .await
         .expect("cycle must still commit");
@@ -2048,6 +2265,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
+            false,
             false,
         )
         .await
@@ -2081,6 +2299,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             // No consent to read `.agent/personal/` (AILAB-199).
+            false,
             false,
         )
         .await
@@ -2152,6 +2371,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             false,
+            false,
         )
         .await
         .expect("llm cycle");
@@ -2196,6 +2416,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             true,
+            false,
         )
         .await
         .expect("llm cycle");
@@ -2260,6 +2481,7 @@ mod tests {
             &cycle_date_from_now_sec(NOW_SEC),
             true,
             true,
+            false,
         )
         .await
         .expect("deterministic cycle");
@@ -2291,6 +2513,7 @@ mod tests {
             &fake,
             "claude-haiku-4-5",
             true,
+            false,
         )
         .await
         .expect("llm cycle");

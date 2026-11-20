@@ -151,7 +151,7 @@ Orphans are expected, and permanent, after anything that removes an event from t
 
 ### `dreamd forget <EVENT_ID>`
 
-Removes one event from the live episodic log, pinned or not, and updates the lesson state that names it.
+Removes one event from the live episodic log, pinned or not, and the lesson state built from it or naming it.
 
 ```text
 $ dreamd forget --dry-run evt_01M3YEGYSZVX7594HBPM64XHR6
@@ -164,9 +164,11 @@ The result line goes to stdout. `removed` is `false` when the id is not in the l
 
 | `lesson=` | What happened to `semantic/LESSONS.md` |
 |---|---|
-| `untouched` | There is no lesson file, or it does not name the id. |
-| `citation_dropped` | The id was in `citations` but was not the lesson's exemplar. It was removed from `citations` and the file was rewritten. |
-| `unlinked` | The id was the lesson's exemplar, so the lesson body was that event's content. The file was deleted. No replacement lesson is selected until the next dream cycle. |
+| `untouched` | There is no lesson file, or it does not name the id and is not a model-written lesson over the id's cluster. |
+| `citation_dropped` | The lesson is deterministic (`prompt_version` `deterministic-only`), and the id was in `citations` but was not its exemplar. Only a hand-edited file has that shape. The id was removed from `citations`, and the file was rewritten. |
+| `unlinked` | The id was the lesson's exemplar. Or the lesson was written by a model, and the event was in its cluster (its `skill_action` is the lesson's `cluster_key` or under it) or among its citations: the model saw every event of the cluster, so its prose can hold any of them. The file was deleted, and no replacement lesson is selected until the next dream cycle. |
+
+Pins on the lesson's other citations stay; `dreamd archive --force-unpin <id>` removes one. Older copies of `LESSONS.md` stay in the autosnap objects under `.agent/.dreamd/branches/objects/` until retention prunes them; the newest 20 `snap-*` refs are kept.
 
 After a removal the command also recounts `semantic/recurrence_counts.json` and, when `.agent/.dreamd/index/` exists, deletes the event's document from the recall index and re-indexes the lesson layer. It does not run a dream cycle and does not decay other events.
 
@@ -193,6 +195,7 @@ After a removal the command also recounts `semantic/recurrence_counts.json` and,
 **What `dreamd forget` does not remove.** It rewrites the live files only. The event can still be present in:
 
 - the ledger, as the event id in old edge lines (ids only, never content);
+- the Tantivy index's segment files under `.agent/.dreamd/index/`. The deleted document's stored copy stays there, marked deleted and never returned by recall, until a segment merge rewrites that segment. `dreamd doctor --repair` deletes the index and rebuilds it from the log, which no longer holds the event;
 - every memory snapshot object taken while the event was in the log (`.agent/.dreamd/branches/objects/`, one per dream cycle and per `dreamd memory branch`; see [`branching.md`](./branching.md)), and checking out such a snapshot brings the event back;
 - your git history, if a dream cycle committed the episodic log or `LESSONS.md` (the autobiography commit that `dreamd dream --no-commit` skips).
 

@@ -14,6 +14,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 
 use dreamd_core::collector::RecallExclusion;
 use dreamd_core::config::{load_config, Config, DreamCycleMode, AUTO_MODE_UNSUPPORTED};
+use dreamd_core::ingress::{k_too_large_message, MAX_RECALL_K};
 
 use crate::commands;
 use crate::commands::version::VERSION_SHORT;
@@ -114,9 +115,15 @@ pub struct DoctorArgs {
     /// Wipes the whole derived index directory, including any .tantivy-*.lock
     /// inside it, and never targets lock files on their own. Does not modify
     /// AGENT_LEARNINGS.jsonl. Refuses while another dreamd process holds the
-    /// project.
+    /// project, and while the episodic log is missing or holds no record and
+    /// the index holds events, since the rebuild would delete them.
     #[arg(long)]
     pub repair: bool,
+    /// With --repair: rebuild even when the episodic log is missing or holds
+    /// no record while the index holds events. The rebuild deletes those
+    /// events from the index.
+    #[arg(long, requires = "repair")]
+    pub allow_empty_log: bool,
     /// Print skill_action prefix counts vs semantic/recurrence_counts.json; flag drift.
     #[arg(long)]
     pub cluster_health: bool,
@@ -139,7 +146,7 @@ pub enum Command {
     /// Run a dream cycle: write LESSONS.md and prune decayed episodic events.
     /// Uses a configured LLM, or the deterministic exemplar when there is no key.
     Dream(DreamArgs),
-    /// Remove one episodic event and the lesson state that names it.
+    /// Remove one episodic event and the lesson state built from it.
     ///
     /// Stop a live `dreamd watch` first; the command refuses while the daemon
     /// is running.
@@ -188,7 +195,7 @@ pub enum Command {
     ///
     /// The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
     Uninstall(UninstallArgs),
-    /// Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release.
+    /// Stop local dreamd servers, keep this version's cached binary and remove the others.
     Update(UpdateArgs),
     /// Run the daemon in the foreground until it gets SIGINT or SIGTERM.
     Watch(WatchArgs),
@@ -226,10 +233,10 @@ pub struct ArchiveArgs {
 /// (5, vs recall's 10). `--json` prints one compact JSON array instead.
 #[derive(Args)]
 pub struct BlameArgs {
-    /// Free-text query, matched with BM25 against stored events and lessons.
+    /// Free-text query (any text; nothing is query syntax), matched with BM25 against stored events and lessons.
     pub query: String,
-    /// Max results.
-    #[arg(short = 'k', long, default_value_t = 5)]
+    /// Maximum results, 0 to 100.
+    #[arg(short = 'k', long, default_value_t = 5, value_parser = parse_recall_k)]
     pub k: usize,
     /// Print each hit's salience factor breakdown.
     #[arg(long)]
@@ -257,10 +264,12 @@ pub struct McpArgs {
     /// Hard-lock dream cycle to manual-only mode (overrides config.toml).
     #[arg(long)]
     pub manual_only: bool,
-    /// Override the project root used for agent-root discovery.
-    /// Required when the IDE launches the MCP server from a non-project CWD
-    /// (e.g. Cursor's global ~/.cursor/mcp.json). Must be an absolute path to
-    /// the directory that contains `.agent/`.
+    /// Use the `.agent/` store in this folder instead of discovering one from
+    /// the working directory. Needed when the IDE launches the MCP server
+    /// from a non-project CWD (e.g. Cursor's global ~/.cursor/mcp.json). The
+    /// folder must hold `.agent/` itself. A relative path is resolved against
+    /// the working directory, and a leading `~` is not expanded. If the folder
+    /// holds no store, or its `.agent/` is the daemon home, `dreamd mcp` exits 2.
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
     /// Serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio: an IP
@@ -296,10 +305,10 @@ pub struct MigrateArgs {
 /// Arguments for the `dreamd recall` subcommand (WEG-51).
 #[derive(Args)]
 pub struct RecallArgs {
-    /// Free-text query, matched with BM25 against stored events and lessons.
+    /// Free-text query (any text; nothing is query syntax), matched with BM25 against stored events and lessons.
     pub query: String,
-    /// Max results. HTTP and MCP recall default to 5.
-    #[arg(short = 'k', long, default_value_t = 10)]
+    /// Maximum results, 0 to 100.
+    #[arg(short = 'k', long, default_value_t = 10, value_parser = parse_recall_k)]
     pub k: usize,
     /// Print each hit's salience factor breakdown.
     #[arg(long)]
@@ -310,6 +319,21 @@ pub struct RecallArgs {
     /// Drop hits whose skill_action equals this prefix or extends it with `::`.
     #[arg(long = "without-cluster", action = ArgAction::Append)]
     pub without_cluster: Vec<String>,
+}
+
+/// The `-k` parser of `dreamd recall` and `dreamd blame` (DRM-109): a whole
+/// number from 0 to [`MAX_RECALL_K`], the limit HTTP and MCP recall apply.
+/// Above it the error is [`k_too_large_message`]; clap prints the error and
+/// exits 2. The field stays `usize`, so callers do not change.
+pub(crate) fn parse_recall_k(value: &str) -> Result<usize, String> {
+    let k: u64 = value
+        .parse()
+        .map_err(|_| format!("k must be a whole number from 0 to {MAX_RECALL_K}"))?;
+    if k > u64::from(MAX_RECALL_K) {
+        return Err(k_too_large_message());
+    }
+    // At most 100, so it fits every `usize`.
+    Ok(k as usize)
 }
 
 /// Arguments for the `dreamd score` subcommand (WEG-52).
@@ -685,14 +709,16 @@ fn no_home_message() -> &'static str {
     }
 }
 
-/// Which subcommands own the shared daemon log at `~/.agent/dreamd.log`.
+/// Which subcommands get the daemon log (`~/.agent/dreamd.log`, or
+/// `<socket>.log` for a daemon on another `DREAMD_SOCK`).
 ///
-/// Only the daemon does. `init_tracing` opens the path with `truncate(true)`,
-/// so any short-lived invocation that got a path would wipe a running daemon's
-/// accumulated log. `mcp` is long-running but is deliberately
-/// excluded: IDEs spawn several concurrently, so a file layer there would have
-/// two MCP servers truncating each other's log; its stderr already lands in the
-/// IDE's own MCP log. Everything else runs console-only on stderr. AILAB-184.
+/// Only the daemon does: `watch` installs `init_daemon_tracing`, whose file
+/// opens only after the socket is bound (DRM-119), so a `watch` that stops
+/// earlier never touches a running daemon's log. `mcp` is long-running but is
+/// deliberately excluded: IDEs spawn several concurrently, and their lines
+/// would interleave in one file; its stderr already lands in the IDE's own MCP
+/// log. Everything else calls `init_tracing(None)` and runs console-only on
+/// stderr. AILAB-184.
 fn wants_daemon_log(command: Option<&Command>) -> bool {
     matches!(command, Some(Command::Watch(_)))
 }
@@ -804,16 +830,26 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let config = match load_config(&cwd) {
+    let agent_root = match discover_store_or_exit(&cwd) {
+        Ok(r) => r,
+        Err(code) => {
+            // DRM-101: the store this folder used to reach may be the one in
+            // the daemon home, which discovery now skips.
+            if let Some(line) =
+                home_dir().and_then(|h| commands::daemon_home_store::report_line(&h.join(".agent")))
+            {
+                eprintln!("{line}");
+            }
+            return code;
+        }
+    };
+    // DRM-103: the store's own config, not the working directory's.
+    let config = match load_config(agent_root.project_root()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dreamd: error — {e}");
             return ExitCode::from(1);
         }
-    };
-    let agent_root = match discover_store_or_exit(&cwd) {
-        Ok(r) => r,
-        Err(code) => return code,
     };
     let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
     // Socket via the shared resolver ($DREAMD_SOCK else the daemon-home
@@ -839,6 +875,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
     let mut err = std::io::stderr();
     let flags = commands::doctor::DoctorFlags {
         repair: args.repair,
+        allow_empty_log: args.allow_empty_log,
         cluster_health: args.cluster_health,
         provenance: args.provenance,
     };
@@ -929,7 +966,12 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let config = match load_config(&cwd) {
+    let agent_root = match discover_store_or_exit(&cwd) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    // DRM-103: the store's own config, not the working directory's.
+    let config = match load_config(agent_root.project_root()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dreamd: {e}");
@@ -940,10 +982,6 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         eprintln!("dreamd: {msg}");
         return ExitCode::from(2);
     }
-    let agent_root = match discover_store_or_exit(&cwd) {
-        Ok(r) => r,
-        Err(code) => return code,
-    };
     // AILAB-341: `--dry` writes nothing, so it forks off here — after config and
     // store resolution (a preview still needs to know which store it is
     // previewing), before the write path. It deliberately does not proxy to the
@@ -1021,7 +1059,8 @@ fn run_init(args: InitArgs) -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(commands::init::InitError::NoProjectRoot) => ExitCode::from(2),
+        Err(commands::init::InitError::NoProjectRoot)
+        | Err(commands::init::InitError::DaemonHome) => ExitCode::from(2),
         Err(commands::init::InitError::Io(e)) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)
@@ -1035,12 +1074,35 @@ fn run_mcp(args: McpArgs) -> ExitCode {
         Err(code) => return code,
     };
     // --project-root overrides CWD-based agent-root discovery. Required when
-    // an IDE launches the MCP server from a non-project CWD.
-    let effective_root = match args.project_root.clone() {
-        Some(p) => p,
+    // an IDE launches the MCP server from a non-project CWD. It is resolved
+    // once, here, before any transport, socket probe or disclosure, so daemon
+    // and in-process mode refuse it the same way (DRM-102).
+    let effective_root = match args.project_root.as_deref() {
+        Some(raw) => {
+            let daemon_home = home_dir().map(|h| h.join(".agent"));
+            match commands::mcp::resolve_project_root(
+                raw,
+                &cwd,
+                daemon_home.as_deref(),
+                dreamd_core::launcher::Launcher::from_env(),
+            ) {
+                Ok(root) => root,
+                Err(msg) => {
+                    eprintln!("dreamd mcp: {msg}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
         None => cwd,
     };
-    let mut config = match load_config(&effective_root) {
+    // DRM-103: the config of the store this server will use, found from
+    // `effective_root` the way the server finds it. With no store it is the
+    // user-level config, as before.
+    let config_root = match dreamd_core::layout::AgentRoot::discover(&effective_root) {
+        Ok(root) => root.project_root().to_path_buf(),
+        Err(_) => effective_root.clone(),
+    };
+    let mut config = match load_config(&config_root) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dreamd: error — {e}");
@@ -1379,6 +1441,7 @@ fn run_setup(args: SetupArgs, interactive: commands::setup::Interactive) -> Exit
         // Usage — no project root to set up, or nowhere to ask the questions
         // (both messages are already on stderr).
         Err(commands::setup::SetupError::NoProjectRoot)
+        | Err(commands::setup::SetupError::DaemonHome)
         | Err(commands::setup::SetupError::NotATty) => ExitCode::from(2),
         // Conflict / malformed / unwritable MCP config (message already on
         // stderr, with the --force remedy where one exists).
@@ -1396,9 +1459,11 @@ fn run_status() -> ExitCode {
         Err(code) => return code,
     };
     // Socket path via the shared resolver ($DREAMD_SOCK else ~/.agent/dreamd.sock);
-    // registry and the daemon log both resolve off $HOME via the one `home_dir()`
-    // helper. `status` installs no file layer (AILAB-184), so nothing in this
-    // process truncates the log, and the tail is read here, in-command.
+    // the registry resolves off $HOME via the one `home_dir()` helper, and the
+    // daemon log is the one the daemon on that socket writes (DRM-119):
+    // `~/.agent/dreamd.log` for the default socket, else `<socket>.log`.
+    // `status` installs no file layer (AILAB-184), and the tail is read here,
+    // in-command.
     #[cfg(unix)]
     let socket = dreamd_core::client::resolve_daemon_socket();
     // Off Unix there is no socket to resolve: the daemon publishes a loopback
@@ -1411,7 +1476,14 @@ fn run_status() -> ExitCode {
     let registry_path =
         home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).registry_toml());
     let log_tail = home_dir()
-        .map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
+        .map(|h| {
+            let daemon_home = dreamd_core::layout::DaemonHome::new(h.join(".agent"));
+            #[cfg(unix)]
+            if let Some(socket) = socket.as_deref() {
+                return daemon_home.log_file_for(socket);
+            }
+            daemon_home.log_file()
+        })
         .map(|p| commands::status::read_log_tail(&p))
         .unwrap_or_default();
     // lock-ok (AILAB-583): status never opens a Tantivy index — it probes the
@@ -1435,8 +1507,9 @@ fn run_status() -> ExitCode {
     }
 }
 
-/// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`
-/// (parent of the per-version dirs; clearing it drops all versions).
+/// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`, the
+/// parent of the per-version dirs. `update` keeps the running version's dir
+/// and removes the others (DRM-152); `uninstall` clears all of them.
 /// Resolved off [`home_dir`] the same way `resolve_daemon_home` is. `None` — no
 /// home directory; the commands print a skip note instead.
 fn resolve_shim_cache_dir() -> Option<PathBuf> {
@@ -1562,7 +1635,7 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
     // lock-ok (AILAB-583): update never opens a Tantivy index — it signals this
-    // user's local servers and clears the native-binary cache.
+    // user's local servers and removes the other versions' cached binaries.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -1695,7 +1768,8 @@ fn run_service_uninstall(purge: bool, yes: bool) -> ExitCode {
 /// refusals — no supported backend on this host, no project root under cwd,
 /// an existing LaunchAgent plist or scheduled-task XML without `--force`, and
 /// the two `service uninstall --purge` confirmation refusals (non-tty stdin
-/// without `--yes`, and a declined prompt) — exit 2 exactly like `dreamd
+/// without `--yes`, and a declined prompt), and `--purge` while the daemon
+/// home holds a project store (DRM-101) — exit 2 exactly like `dreamd
 /// watch` without a project root; every other failure (service file write,
 /// `systemctl` / `launchctl` / `schtasks` / `icacls` / `id -u` /
 /// `whoami /user` spawn or non-zero exit) is a runtime error and exits 1. The
@@ -1710,7 +1784,8 @@ fn service_exit(result: Result<(), commands::service::ServiceError>) -> ExitCode
             | ServiceError::PlistExists(_)
             | ServiceError::TaskExists(_)
             | ServiceError::NotATty
-            | ServiceError::Declined),
+            | ServiceError::Declined
+            | ServiceError::DaemonHomeHoldsStore { .. }),
         ) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(2)
@@ -1767,20 +1842,18 @@ pub fn run() -> ExitCode {
 
     // Install the tracing subscriber once (WEG-32), before dispatch,
     // so every subcommand's `tracing` callsites land on stderr. AILAB-184: only
-    // the daemon (`dreamd watch`) additionally gets the file layer at
-    // ~/.agent/dreamd.log; see `wants_daemon_log` for why every other
-    // invocation passes None and stays console-only. The log path is resolved
-    // via the one `home_dir()` helper (empty HOME counts as none).
+    // the daemon (`dreamd watch`) additionally gets the file layer, through
+    // `init_daemon_tracing`, whose file `watch` opens after it binds its
+    // socket (DRM-119); see `wants_daemon_log` for why every other invocation
+    // calls `init_tracing(None)` and stays console-only.
     // `_log_guard` must live until run() returns — `let _ =` would drop it
     // immediately and discard buffered file logs — and it is still
     // load-bearing whenever a file layer is installed.
-    let log_file = if wants_daemon_log(cli.command.as_ref()) {
-        home_dir().map(|h| dreamd_core::layout::DaemonHome::new(h.join(".agent")).log_file())
+    let _log_guard = if wants_daemon_log(cli.command.as_ref()) {
+        Some(dreamd_core::observability::init_daemon_tracing())
     } else {
-        None
+        dreamd_core::observability::init_tracing(None)
     };
-
-    let _log_guard = dreamd_core::observability::init_tracing(log_file);
 
     if cli.version {
         println!("{VERSION_SHORT}");
@@ -2627,7 +2700,7 @@ mod tests {
 
     /// AILAB-184 — only the daemon owns `~/.agent/dreamd.log`. Everything else,
     /// including the long-running `mcp` server (several run concurrently under
-    /// an IDE), stays console-only so nothing truncates the daemon's file.
+    /// an IDE), stays console-only so nothing else writes the daemon's file.
     #[test]
     fn wants_daemon_log_true_for_watch_only() {
         let watch = Cli::try_parse_from(["dreamd", "watch"]).unwrap();
@@ -2668,6 +2741,24 @@ mod tests {
         let bare = Cli::try_parse_from(["dreamd", "--version"]).unwrap();
         assert!(bare.command.is_none());
         assert!(!wants_daemon_log(bare.command.as_ref()));
+    }
+
+    /// DRM-100 test 21: `--allow-empty-log` only makes sense with `--repair`.
+    #[test]
+    fn allow_empty_log_needs_repair() {
+        assert!(
+            Cli::try_parse_from(["dreamd", "doctor", "--allow-empty-log"]).is_err(),
+            "--allow-empty-log without --repair must not parse"
+        );
+        let both = Cli::try_parse_from(["dreamd", "doctor", "--repair", "--allow-empty-log"])
+            .expect("--repair --allow-empty-log parses");
+        match both.command {
+            Some(Command::Doctor(args)) => {
+                assert!(args.repair);
+                assert!(args.allow_empty_log);
+            }
+            _ => panic!("expected Doctor"),
+        }
     }
 
     #[test]
@@ -2967,6 +3058,78 @@ mod tests {
                 "man page must document subcommand {sub}; page length={}",
                 page.len()
             );
+        }
+    }
+
+    /// DRM-124 property 7: `PROPTEST_CASES`, else `default`. A fixed
+    /// `with_cases(n)` would ignore the variable.
+    fn cases(default: u32) -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// What `parse_recall_k` should give: `Some(n)` for a decimal whole
+    /// number from 0 to `MAX_RECALL_K`, with any leading zeros, else `None`.
+    /// An optional leading `+` is a whole number too, because `u64`'s parser
+    /// takes it and DRM-109 kept that parser.
+    fn whole_number_to_100(text: &str) -> Option<usize> {
+        let digits = text.strip_prefix('+').unwrap_or(text);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let significant = digits.trim_start_matches('0');
+        if significant.len() > 3 {
+            return None;
+        }
+        let n = significant
+            .bytes()
+            .fold(0usize, |n, b| n * 10 + usize::from(b - b'0'));
+        (n <= MAX_RECALL_K as usize).then_some(n)
+    }
+
+    /// Text for the `-k` parser: the spec's three arms, plus a small range and
+    /// both sides of the limit, which the wide arms almost never draw (drift
+    /// entry `proptest-any-f64-excludes-nan`).
+    fn k_text() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            "[0-9]{1,25}",
+            any::<usize>().prop_map(|n| n.to_string()),
+            "\\PC{0,8}",
+            (0u64..=110).prop_map(|n| n.to_string()),
+            Just(MAX_RECALL_K.to_string()),
+            Just((MAX_RECALL_K + 1).to_string()),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(cases(256)))]
+
+        /// DRM-124 property 7 (DRM-109): the `-k` parser gives `Ok(n)` exactly
+        /// for a whole number from 0 to 100, and otherwise one of its two
+        /// messages.
+        #[test]
+        fn k_parser_accepts_exactly_0_to_100_drm109(text in k_text()) {
+            let whole = format!("k must be a whole number from 0 to {MAX_RECALL_K}");
+            let large = k_too_large_message();
+            match (parse_recall_k(&text), whole_number_to_100(&text)) {
+                (Ok(n), Some(want)) => proptest::prop_assert_eq!(n, want, "{:?}", text),
+                (Err(e), None) => proptest::prop_assert!(
+                    e == whole || e == large,
+                    "{:?}: unexpected message {:?}",
+                    text,
+                    e
+                ),
+                (got, want) => proptest::prop_assert!(
+                    false,
+                    "{:?}: the parser gave {:?}, expected {:?}",
+                    text,
+                    got,
+                    want
+                ),
+            }
         }
     }
 }

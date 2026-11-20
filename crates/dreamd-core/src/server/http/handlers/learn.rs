@@ -5,8 +5,10 @@ use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use tokio::sync::oneshot;
 
+use crate::config::load_config;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg};
-use crate::ingress::LearnIngress;
+use crate::daemon_client::CONFIG_LOAD_FAILED;
+use crate::ingress::{LearnIngress, LearnRequest};
 use crate::registry::ProjectEntry;
 use crate::server::lifecycle::CoordinatorSendError;
 
@@ -14,84 +16,81 @@ use super::super::router::{error_400, error_500};
 use super::super::state::AppState;
 use super::super::types::LearnResponse;
 
-/// Wire body for `POST /api/v1/learn`.
-///
-/// Deliberately not the domain [`AgentLearning`]: `id`, `schema_version`, and
-/// `timestamp` are daemon-owned (minted and stamped in `coordinator.rs` on every
-/// durable write), but `AgentLearning` is also the *disk* record, where `id` is
-/// authoritative and must keep parsing strictly (`episodic.rs`). One
-/// `Deserialize` impl cannot serve both surfaces, so the wire gets its own type
-/// rather than the protocol struct gaining a `skip_deserializing` that would
-/// weaken the disk read. AILAB-175.
-///
-/// No `deny_unknown_fields`: a client that still sends `id` (older doc
-/// examples did) has it **ignored, not rejected**, and serde's default
-/// ignore-unknown gives that for free.
-///
-/// [`AgentLearning`]: dreamd_protocol::AgentLearning
-#[derive(serde::Deserialize)]
-pub(crate) struct AppendLearningRequest {
-    /// 0.0..=10.0 subjective friction. Required — unlike MCP, HTTP has never
-    /// defaulted it, and `Some(..)` below keeps that contract.
-    pub pain: f32,
-    /// 0.0..=10.0 long-term relevance. Required, same reasoning as `pain`.
-    pub importance: f32,
-    /// Sticky flag; the only field with a serde default, matching
-    /// `AgentLearning::pinned`. Client-settable and preserved (see below).
-    #[serde(default)]
-    pub pinned: bool,
-    /// Clustering key; validated and normalized at ingress.
-    pub skill_action: String,
-    /// Provenance tag, e.g. `"cursor"`, `"claude-code"`.
-    pub source_harness: String,
-    /// Free-text body; redacted at ingress, 4 KiB cap enforced downstream.
-    pub content: String,
-}
-
 /// `POST /api/v1/learn` — append one episodic learning durably.
 ///
 /// # Headers
 /// * `X-Agent-Root` (required)
 /// * `Content-Type: application/json` (required)
-/// * `X-Client-Dedup-Key` (optional) — idempotency key scoped per project
+/// * `X-Client-Dedup-Key` (optional) — retry key scoped per project, read
+///   when the body has no `client_dedup_key`
 ///
 /// # Body
-/// [`AppendLearningRequest`] JSON. `id`, `schema_version`, and `timestamp` are
+/// [`LearnRequest`] JSON. `id`, `schema_version`, and `timestamp` are
 /// **not accepted from the client** — they are daemon-owned and server-stamped
 /// on durable write. A body that still carries them is accepted and those
 /// values ignored, never rejected.
 ///
 /// # Responses
 /// * `201` — `{"id","timestamp","deduplicated"}`
-/// * `400` — invalid `skill_action` or score out of `0.0..=10.0`
+/// * `400` — invalid `skill_action` or score out of `0.0..=10.0`; an
+///   `X-Client-Dedup-Key` that is not UTF-8; a body key and a header key that
+///   differ
 /// * `413` — serialized line exceeds cap
+/// * `500` — the project's config does not load (`config load failed: …`);
+///   nothing is written
 /// * `503` — coordinator busy (`Retry-After: 1`)
+///
+/// Redaction follows the project's own `redaction`, read from its config on
+/// every request, so an edit applies to the next append (DRM-103).
 pub(crate) async fn post_learn(
     State(state): State<AppState>,
     Extension(project): Extension<ProjectEntry>,
     headers: HeaderMap,
-    Json(req): Json<AppendLearningRequest>,
+    Json(req): Json<LearnRequest>,
 ) -> axum::response::Response {
     tracing::debug!(project_root = %project.root, "POST /api/v1/learn");
 
-    let client_dedup_key = headers
-        .get("x-client-dedup-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned());
+    // DRM-106: the key is the body's `client_dedup_key`, else the header,
+    // decoded as UTF-8 from its bytes so a non-ASCII key is still a key. A
+    // body key and a header key that differ are refused, so no caller is
+    // half-deduped. Nothing is written on either refusal.
+    let header_key = match headers.get("x-client-dedup-key") {
+        None => None,
+        Some(value) => match std::str::from_utf8(value.as_bytes()) {
+            Ok(key) => Some(key.to_owned()),
+            Err(_) => return error_400("X-Client-Dedup-Key is not UTF-8"),
+        },
+    };
+    let client_dedup_key = match (req.client_dedup_key.clone(), header_key) {
+        (Some(body), Some(header)) if body != header => {
+            return error_400("client_dedup_key in the body and X-Client-Dedup-Key differ");
+        }
+        (Some(body), _) => Some(body),
+        (None, header) => header,
+    };
 
-    // Map the wire body onto the domain type through the same shared seam the
-    // MCP path uses: validate, normalize, redact, and stamp the placeholder id.
-    // Sole skill_action gate (ARCHITECTURE.md §9); coordinator does not re-check.
-    // `Some(..)` (never `None`) preserves the HTTP contract — the optional
-    // validators apply the same 0.0..=10.0 check, and MCP's `unwrap_or(5.0)`
-    // default is unreachable from here.
+    // DRM-103: each project's own config, read on every append like the
+    // in-process store does, so an edit applies to the next append.
+    let config_root = std::path::PathBuf::from(&project.root);
+    let config = match tokio::task::spawn_blocking(move || load_config(&config_root)).await {
+        Ok(Ok(config)) => config,
+        Ok(Err(e)) => return error_500(&format!("{CONFIG_LOAD_FAILED}: {e}")),
+        Err(_) => return error_500(&format!("{CONFIG_LOAD_FAILED}: the read task failed")),
+    };
+
+    // ARCHITECTURE.md §9: the one ingress call for this path, for HTTP and
+    // daemon-mode MCP alike; the coordinator does not re-check. It validates,
+    // normalizes, redacts, and stamps the placeholder id. The scores arrive as
+    // `f64` and are checked as sent (DRM-104). `Some(..)` (never `None`) keeps
+    // the HTTP contract: both scores are required here, so `DEFAULT_SCORE`
+    // never applies.
     let mut learning = match LearnIngress::build_agent_learning(
         &req.content,
         &req.source_harness,
         &req.skill_action,
-        Some(req.pain as f64),
-        Some(req.importance as f64),
-        state.config.redaction,
+        Some(req.pain),
+        Some(req.importance),
+        config.redaction,
     ) {
         Ok(l) => l,
         Err(e) => return error_400(&e.to_string()),

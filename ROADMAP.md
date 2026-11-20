@@ -41,7 +41,8 @@ BM25 × salience.
 - **Memory branches** — `dreamd memory branch | checkout | branches | delete |
   diff | bisect` over snapshots stored under `.agent/.dreamd/branches/`; every
   dream cycle also leaves a `snap-*` snapshot
-  ([`docs/branching-guide.md`](docs/branching-guide.md)).
+  ([`docs/branching-guide.md`](docs/branching-guide.md)). Deprecated in 1.2.0
+  and removed in 2.0. Branch `.agent/` with git.
 - **Provenance ledger** — derivation edges recorded under
   `.agent/.dreamd/provenance/`, checked read-only by `dreamd doctor --provenance`.
   Unsigned; no stored root; records derivation, not trust
@@ -110,6 +111,16 @@ BM25 × salience.
   process writes into a store that replaced its own, an empty dedup key no
   longer drops learnings, and `watch` no longer deletes a file that is not a
   socket.
+
+## Shipped — v1.4.0
+
+- **Hardening**, listed in [`CHANGELOG.md`](CHANGELOG.md). Recall takes any
+  text in one order, with `k` at most 100. Each project is redacted and
+  configured by its own config, and an API key goes only to its own vendor. A
+  dream cycle keeps a hand-edited `LESSONS.md` and commits only on a branch.
+  Every client call to the daemon has a deadline and checks the daemon's
+  version first, and `dreamd setup` keeps a repo's `AGENTS.md` loaded in
+  Claude Code.
 
 ## Next
 

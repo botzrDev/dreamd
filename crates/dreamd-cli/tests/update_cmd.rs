@@ -6,8 +6,9 @@
 //! `~/.agent` / `~/.cache` / npx cache. No network anywhere.
 //!
 //! `tests/uninstall_cmd.rs` keeps the AILAB-226 baseline coverage (dry-run
-//! mutates nothing, real path clears socket + cache, cargo-install hint); this
-//! file covers the restart contract text and `--restart`.
+//! mutates nothing, real path clears the socket and the other cached versions,
+//! cargo-install hint); this file covers the restart contract text, `--restart`
+//! and which cached versions `update` keeps (DRM-152).
 
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -321,22 +322,162 @@ fn quiet_keeps_versions_and_a_compressed_next_line() {
     );
 }
 
-/// A second update in a row is benign — nothing left to clear, contract still
+/// A second update in a row is benign — nothing left to remove, contract still
 /// printed.
 #[test]
 fn second_update_is_benign_and_still_prints_the_contract() {
     let f = Fixture::new();
     let (_, first) = run_update(&f, false, false, false, ATTEMPTED_NO_MATCH);
-    assert!(first.contains("native cache cleared"), "got: {first:?}");
+    assert!(
+        first.contains("removed 1 other cached version(s): 0.1.0-test"),
+        "got: {first:?}"
+    );
 
     let (calls, stdout) = run_update(&f, false, false, false, ATTEMPTED_NO_MATCH);
     assert_eq!(calls, 1, "the stop pass is idempotent, not skipped");
     assert!(
-        stdout.contains("no daemon socket") && stdout.contains("native cache already clean"),
+        stdout.contains("no daemon socket") && stdout.contains("no other cached versions in"),
         "second run must be benign; got: {stdout:?}"
     );
     assert!(
         stdout.contains("restart contract"),
         "guidance must not vanish on the second run; got: {stdout:?}"
     );
+}
+
+/// The cache directory the running binary's own version uses.
+const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// DRM-152's cache: this version's binary (bytes `x`), an older version's,
+/// and an empty older directory.
+fn versioned_cache(f: &Fixture) {
+    let cache = f.cache_tree();
+    std::fs::remove_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(cache.join(THIS_VERSION)).unwrap();
+    std::fs::write(cache.join(THIS_VERSION).join("dreamd"), b"x").unwrap();
+    std::fs::create_dir_all(cache.join("1.0.0")).unwrap();
+    std::fs::write(cache.join("1.0.0").join("dreamd"), b"old binary").unwrap();
+    std::fs::create_dir_all(cache.join("0.9.0")).unwrap();
+}
+
+/// Every file under `dir` with its bytes, by relative path, and every
+/// directory, so an empty one counts.
+fn snapshot(dir: &std::path::Path) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path.strip_prefix(dir).unwrap().display().to_string();
+            if path.is_dir() {
+                out.push((rel, None));
+                stack.push(path);
+            } else {
+                out.push((rel, Some(std::fs::read(&path).unwrap())));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn has_line(stdout: &str, want: &str) -> bool {
+    stdout.lines().any(|line| line == want)
+}
+
+/// DRM-152 test 1: the running version's binary stays; every other version
+/// goes.
+#[test]
+fn update_keeps_the_running_versions_cache() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let cache = f.cache_tree();
+
+    let (_, stdout) = run_update(&f, false, false, false, ATTEMPTED_NO_MATCH);
+
+    assert_eq!(
+        std::fs::read(cache.join(THIS_VERSION).join("dreamd")).unwrap(),
+        b"x",
+        "the running version's binary must stay byte for byte"
+    );
+    assert!(!cache.join("1.0.0").exists(), "an older version must go");
+    assert!(!cache.join("0.9.0").exists(), "an empty older dir must go");
+    let kept = format!(
+        "kept the cached dreamd {THIS_VERSION} in {}",
+        cache.join(THIS_VERSION).display()
+    );
+    assert!(has_line(&stdout, &kept), "want {kept:?}; got: {stdout:?}");
+    assert!(
+        has_line(&stdout, "removed 2 other cached version(s): 0.9.0, 1.0.0"),
+        "got: {stdout:?}"
+    );
+}
+
+/// DRM-152 test 2: the text promises no new binary, and names the floating
+/// spawn and the pin.
+#[test]
+fn update_promises_no_new_binary() {
+    let f = Fixture::new();
+    let (_, stdout) = run_update(&f, false, false, false, ATTEMPTED_NO_MATCH);
+
+    assert!(
+        !stdout.contains("fetches the new binary"),
+        "got: {stdout:?}"
+    );
+    assert!(!stdout.contains("until reinstall"), "got: {stdout:?}");
+    for want in [
+        "  3. re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp, \
+         and the shim downloads a binary only for a version it has not cached",
+        "  4. an MCP config that pins `dreamd-mcp@<version>` stays on that version. Use \
+         `npx -y dreamd-mcp` to follow new releases",
+    ] {
+        assert!(has_line(&stdout, want), "want {want:?}; got: {stdout:?}");
+    }
+    let after = format!(
+        "after: {VERSION_SHORT} (this process keeps its version; the next spawn runs the \
+         version npx resolves)"
+    );
+    assert!(has_line(&stdout, &after), "want {after:?}; got: {stdout:?}");
+}
+
+/// DRM-152 test 3: the dry run names what it would remove and changes
+/// nothing.
+#[test]
+fn dry_run_names_what_it_would_remove() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let before = snapshot(&f.cache_tree());
+
+    let (_, stdout) = run_update(&f, true, false, false, ATTEMPTED_NO_MATCH);
+
+    let want = format!(
+        "dry-run: would stop dreamd mcp/watch processes, remove the daemon socket, and remove \
+         cached versions other than {THIS_VERSION} from {}",
+        f.cache_tree().display()
+    );
+    assert!(has_line(&stdout, &want), "want {want:?}; got: {stdout:?}");
+    assert_eq!(
+        snapshot(&f.cache_tree()),
+        before,
+        "a dry run must leave the cache byte for byte"
+    );
+}
+
+/// DRM-152 test 4: a cache that holds only this version is left alone.
+#[test]
+fn a_cache_with_only_this_version_is_left_alone() {
+    let f = Fixture::new();
+    let cache = f.cache_tree();
+    std::fs::remove_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(cache.join(THIS_VERSION)).unwrap();
+    std::fs::write(cache.join(THIS_VERSION).join("dreamd"), b"x").unwrap();
+
+    let (_, stdout) = run_update(&f, false, false, false, ATTEMPTED_NO_MATCH);
+
+    assert_eq!(
+        std::fs::read(cache.join(THIS_VERSION).join("dreamd")).unwrap(),
+        b"x"
+    );
+    let want = format!("no other cached versions in {}", cache.display());
+    assert!(has_line(&stdout, &want), "want {want:?}; got: {stdout:?}");
 }

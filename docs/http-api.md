@@ -104,6 +104,8 @@ The version check (BZR-1519). It runs after the authentication layer and before 
 | Header equal to the daemon's version | Pass through | |
 | Any other value, empty included | `426 Upgrade Required` | `` {"error":"version mismatch: client <client>, daemon <daemon>. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version."} `` |
 
+dreamd's own clients (`dreamd mcp` in daemon mode and the `dreamd dream` proxy) also ask first: once per process, before their first call, they send `GET /api/v1/health` with no `X-Agent-Root`, which the daemon answers `400` without opening a project. A missing or different `x-dreamd-version` on that answer stops the call before anything is sent. Only a pass is remembered, so a client probes again after a failure. When the client is the older side, its sentence says so and tells the user to update the client, not to restart the daemon.
+
 Every response from this layer and the layers inside it, the `426` included, carries `x-dreamd-version` with the daemon's version. A `403` / `401` from the authentication layer does not. A dreamd client treats a `426`, a different version, or a missing header on any status but `401` and `403` as a version mismatch. It builds its own sentence from the daemon's `x-dreamd-version` and does not show the `426` body. Under the npm shim (`DREAMD_LAUNCHER=npx`) that sentence names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`.
 
 ### `agent_root_middleware`
@@ -112,14 +114,18 @@ Validates `X-Agent-Root` and resolves the project via `~/.agent/registry.toml`.
 
 | Condition | Status | Body |
 |---|---|---|
-| Header missing or non-UTF-8 | `400 Bad Request` | `{"error":"missing or non-UTF-8 X-Agent-Root header"}` |
-| Path not in registry | `404 Not Found` | `{"error":"agent root not registered"}` |
+| Header missing | `400 Bad Request` | `{"error":"X-Agent-Root header missing: send the absolute path of the folder that holds .agent/"}` |
+| Header bytes not UTF-8 | `400 Bad Request` | `{"error":"X-Agent-Root is not UTF-8: send the absolute path of the folder that holds .agent/"}` |
+| Header empty or a relative path. Nothing is resolved against the daemon's working directory | `400 Bad Request` | `{"error":"X-Agent-Root must be the absolute path of the folder that holds .agent/; got \".\""}`, ending in the value sent |
+| Path not in registry | `404 Not Found` | `{"error":"agent root not registered"}`. A clone or a worktree is a new path: run `dreamd init` in that folder once, and the next request goes through with no restart |
 | Registry read/parse failure | `500 Internal Server Error` | `{"error":"registry read failed"}` |
 | Registered project found | Pass through | Injects `ProjectEntry` into request extensions |
 
 **Header:** `X-Agent-Root: /absolute/path/to/project`
 
 Value is the **project root** (parent of `.agent/`), not the `.agent/` directory itself.
+
+The value is the path's UTF-8 text sent as raw bytes, with no percent-encoding, so `-H "X-Agent-Root: $PWD"` works for any UTF-8 path, accented letters included. A path that is not valid UTF-8 is not supported.
 
 ---
 
@@ -135,34 +141,40 @@ Append one episodic learning. The coordinator mints the event ID, stamps `schema
 |---|---|---|
 | `X-Agent-Root` | Yes | Absolute project root path (see middleware) |
 | `Content-Type` | Yes | `application/json` |
-| `X-Client-Dedup-Key` | No | Idempotency key (see below) |
+| `X-Client-Dedup-Key` | No | Retry key, read when the body has no `client_dedup_key` (see [Idempotency](#idempotency-x-client-dedup-key)) |
 
-#### Request body (`AppendLearningRequest`)
+#### Request body (`LearnRequest`)
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `pain` | number | Yes | `0.0`–`10.0` inclusive |
-| `importance` | number | Yes | `0.0`–`10.0` inclusive |
+| `pain` | number | Yes | A JSON number, checked against `0.0`–`10.0` inclusive as sent, then stored as the nearest 32-bit float. `10.0000001` is refused, not rounded to `10.0` first |
+| `importance` | number | Yes | Same as `pain` |
 | `pinned` | boolean | No | Default `false`. Dream-cycle pin union keeps pinned events through decay; `dreamd archive --force-unpin` clears pins. |
 | `skill_action` | string | Yes | Clustering key; normalized and validated (see below) |
 | `source_harness` | string | Yes | Provenance tag, e.g. `"cursor"`, `"claude-code"` |
 | `content` | string | Yes | Free-text body; max ~4 KiB serialized line (413 if exceeded) |
+| `client_dedup_key` | string | No | Retry key (see [Idempotency](#idempotency-x-client-dedup-key)). Any characters, non-ASCII and newlines included. When the `X-Client-Dedup-Key` header is also sent, the two must be equal |
 
 **Daemon-owned fields:** `id`, `schema_version`, and `timestamp` are **not part of the request body**. The daemon mints the `evt_<ULID>` id and stamps the schema version and the UTC persistence timestamp on every durable write, so there is nothing useful a client can send. A body that still includes them — earlier versions of this document told you to — is **accepted and those values ignored**, never rejected. All three come back in the response.
 
 **`skill_action` rules:** Trimmed, lowercased, whitespace collapsed to `_`, segments joined by `::`. Each segment must match `[a-z0-9_]+`. Max 256 bytes. Examples: `rust::error_handling`, `rust::cargo::test`. Rejects `.`, `/`, `-`, and empty segments.
+
+**Check order:** `skill_action`, then `pain`, then `importance`, then redaction of `content`, then the size cap (`413`). The first failure is the answer, so a body with a bad `skill_action` and a bad `pain` gets the `skill_action` message. Before these the daemon reads the project's config (`500` if it does not load). In-process `dreamd mcp` runs the same function in the same order, so `append_node` answers alike in both modes.
 
 #### Response
 
 | Status | Body | When |
 |---|---|---|
 | `201 Created` | `{"id":"evt_…","timestamp":"…","deduplicated":false}` | New durable write |
-| `201 Created` | `{"id":"evt_…","timestamp":"…","deduplicated":true}` | Duplicate `X-Client-Dedup-Key` within this project |
-| `400 Bad Request` | `{"error":"…"}` | Invalid `skill_action`, score out of range, missing `X-Agent-Root` |
+| `201 Created` | `{"id":"evt_…","timestamp":"…","deduplicated":true}` | Same key and same learning within this project's coordinator |
+| `400 Bad Request` | `{"error":"…"}` | Invalid `skill_action`, score out of range, an `X-Agent-Root` the middleware refuses |
+| `400 Bad Request` | `{"error":"X-Client-Dedup-Key is not UTF-8"}` | The header's bytes are not UTF-8. Nothing is written |
+| `400 Bad Request` | `{"error":"client_dedup_key in the body and X-Client-Dedup-Key differ"}` | The body and the header both carry a key, and they differ. Nothing is written |
 | `400` / `415` / `422` | plain text, not JSON | Body rejected before the handler runs: malformed JSON (`400`), `Content-Type` not `application/json` (`415`), a required field missing or of the wrong type (`422`). See [Error body shape](#error-body-shape) |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |
 | `413 Payload Too Large` | `{"error":"payload too large"}` | Serialized line exceeds cap |
+| `500 Internal Server Error` | `{"error":"config load failed: …"}` | The project's `.agent/.dreamd/config.toml` (or the user-level config) does not parse. Nothing is written. The daemon reads the project's config on every learn, so fixing the file fixes the next request |
 | `503 Service Unavailable` | `{"error":"coordinator busy, retry"}` | Coordinator channel full; includes `Retry-After: 1` |
 | `500 Internal Server Error` | `{"error":"…"}` | Coordinator or routing failure |
 
@@ -192,7 +204,9 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 #### Idempotency (`X-Client-Dedup-Key`)
 
-Optional opaque string. When present, a second `POST /learn` with the **same key and same project** returns the original `id` with `"deduplicated": true` instead of appending a duplicate line. Keys are scoped per coordinator (per project) — the same key on two different projects creates two distinct records. An empty or all-whitespace key counts as no key.
+Optional string, for retrying one write. The key is the body's `client_dedup_key`, or, when the body has none, the `X-Client-Dedup-Key` header, read as UTF-8 from its bytes; daemon-mode MCP sends it in the body. A second `POST /learn` with the **same key and the same learning** (`content` after redaction, `skill_action`, `source_harness`, `pain`, `importance` and `pinned`) in the same project returns the original `id` with `"deduplicated": true` and writes nothing. The same key with a different learning is stored as a new record with its own id, and a retry of either learning then returns that learning's id. Derive the key from the content, or use one per write attempt.
+
+Keys are scoped per coordinator (per project) — the same key on two different projects creates two distinct records. They live in memory only: a daemon restart, or the daemon evicting an idle project's coordinator, forgets every key. An empty or all-whitespace key counts as no key.
 
 ---
 
@@ -210,8 +224,8 @@ BM25 lexical search with query-time salience scoring. Returns ranked matches fro
 
 | Param | Required | Default | Description |
 |---|---|---|---|
-| `q` | Yes | — | Search query string. Parsed by Tantivy's query parser, so `"`, `(`, `:` and `AND`/`OR` are query syntax; a query it cannot parse — `rust::error` is one, because of the `:` — is a `400` (see below). Send plain words. At most 16384 bytes once decoded; a longer `q` is a `414` |
-| `k` | No | `5` (`DEFAULT_RECALL_K`) | Maximum results to return. Unsigned integer |
+| `q` | Yes | — | Any text. dreamd splits it on whitespace and into words with the content field's tokenizer. A piece that splits into several words, such as `parse_config()` or `README.md`, matches as a phrase. Quotes, colons, `AND`/`OR`/`NOT`, `+`, `-`, `*` and parentheses are not operators. Text with no words matches nothing. At most 16384 bytes once decoded; a longer `q` is a `414` |
+| `k` | No | `5` (`DEFAULT_RECALL_K`) | Maximum results: a whole number from 0 to 100 (`MAX_RECALL_K`). Default `5`. A larger `k` is a `400` `{"error":"k must be at most 100"}`; `0` returns no results |
 | `explain` | No | omitted | Exact value `1` adds a `citations` array (see below). Any other value, including absent, omits it. HTTP-only — MCP `search_nodes` has no equivalent parameter. |
 | `exclude` | No | none | Repeatable (`exclude=evt_a&exclude=evt_b`). Drops the document with that exact `event_id` before the top-`k` cut, so up to `k` of the remaining hits come back. Nothing is deleted. There is no cluster parameter. HTTP-only. See [`docs/observability.md`](observability.md#counterfactual-recall---without--exclude-bzr-194). |
 
@@ -295,7 +309,8 @@ d(r) = 1.5 - 0.5 / r    for r >= 1
 
 | Status | When |
 |---|---|
-| `400 Bad Request` | Missing `q`, or a `k` that is not an unsigned integer; missing `X-Agent-Root`; or a `q` the query parser rejects (for example an unbalanced `"` or `(`), which answers `{"error":"recall failed: …"}` |
+| `400 Bad Request` | Missing `q`, or a `k` that is not an unsigned integer; or an `X-Agent-Root` the middleware refuses |
+| `400 Bad Request` | `k` over 100: `{"error":"k must be at most 100"}` |
 | `403 Forbidden` | UID mismatch |
 | `404 Not Found` | Unregistered project |
 | `414 URI Too Long` | `q` is over 16384 bytes once decoded: `{"error":"query exceeds 16384 bytes; pass a shorter query"}`. A request target over 65,534 bytes is refused by hyper before routing, with an empty body |
@@ -398,7 +413,7 @@ No request body.
 |---|---|---|
 | `200 OK` | `{"status":"ok","autobiography":{…},"notices":[…]}` | Cycle completed. `autobiography` and `notices` are described below |
 | `409 Conflict` | `{"error":"dream cycle in progress"}` | A cycle is open in the project's coordinator, or `.agent/.dreamd/state.json` records the last cycle as `in_progress` |
-| `400 Bad Request` | `{"error":"…"}` | Missing `X-Agent-Root` |
+| `400 Bad Request` | `{"error":"…"}` | An `X-Agent-Root` the middleware refuses |
 | `403 Forbidden` | `{"error":"…"}` | UID mismatch |
 | `404 Not Found` | `{"error":"…"}` | Unregistered project |
 | `503 Service Unavailable` | `{"error":"coordinator busy, retry"}` | `Retry-After: 1` |
@@ -411,7 +426,7 @@ The 200 body's `autobiography` object reports the git autobiography commit (BZR-
 | `committed` | `commit` (the new commit's id) | The cycle committed the episodic log, and `LESSONS.md` when that file exists |
 | `unchanged` | — | Both files already match HEAD, so no commit was made |
 | `no_repo` | — | No git repo at or above the project root |
-| `skipped` | `reason`, `files` | The commit was held. `user_dirty_tree`: the listed files hold changes no dream cycle wrote; commit them with git and the next cycle commits again. `no_baseline`: dreamd has no record yet of what its last cycle wrote, and the next cycle commits |
+| `skipped` | `reason`, `files` | The commit was held. `user_dirty_tree`: the listed files hold changes no dream cycle wrote; commit them with git and the next cycle commits again. `no_baseline`: dreamd has no record yet of what its last cycle wrote, and the next cycle commits; when `files` lists `LESSONS.md`, the commit waits until you commit those files with git. Git's state can also hold the commit, and then `files` is empty: `detached_head` (HEAD is a checked-out tag or commit; check out a branch), `merge_in_progress`, `rebase_in_progress`, `apply_in_progress` (a `git am` or `git rebase --apply`), `cherry_pick_in_progress` and `revert_in_progress` (finish or abort it), and `bisect_in_progress` (run `git bisect reset`). The cycle's changes stay in the working tree, and the next cycle on a branch commits them |
 
 ```json
 {"status":"ok","autobiography":{"outcome":"skipped","reason":"user_dirty_tree","files":[".agent/semantic/LESSONS.md"]}}
@@ -419,7 +434,9 @@ The 200 body's `autobiography` object reports the git autobiography commit (BZR-
 
 The key is absent when the autobiography phase did not run or failed (a failure is logged at ERROR, and the cycle still succeeds). A daemon before 1.3.0 answers `{"status":"ok"}`. Key order is not part of the contract.
 
-`notices` is an array of strings, present only when it is non-empty. A deterministic lesson says it is a copy of the representative event, not a summary. When the caller did not send `x-dreamd-no-llm: 1` and the daemon has no API key, one line says how to set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.config/dreamd/secrets.toml`. When the lesson cites events, one line names the ids that were pinned.
+`lesson_held` is present when the cycle kept `LESSONS.md` as it was, because the file held bytes no dream cycle wrote: `{"reason":"user_dirty_tree","file":".agent/semantic/LESSONS.md"}`, with `reason` `user_dirty_tree` or `no_baseline` as for `autobiography`. That cycle made no model call and did not rewrite or remove the file; pins and decay still ran on the log. The hold lasts until the file is committed with git or deleted. The first `notices` line then starts `lesson kept:`, and the body has no copy line and no no-key line. The key is absent when the lesson was not held, and a daemon before 1.4.0 never sends it.
+
+`notices` is an array of strings, present only when it is non-empty. A deterministic lesson says it is a copy of the representative event, not a summary. When the caller did not send `x-dreamd-no-llm: 1` and the daemon has no key for the vendor its model goes to, one line names the variable and the `secrets.toml` key it looked for, and says that a key in the caller's shell is not used. When the lesson cites events, one line names the ids that were pinned.
 
 #### curl example
 
@@ -434,7 +451,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ### `GET /api/v1/preferences`
 
-Returns the contents of `.agent/personal/PREFERENCES.md` for the resolved project.
+Returns the contents of `.agent/personal/PREFERENCES.md` for the resolved project. The file is served only when it resolves to a regular file inside `.agent/personal/`, the rule the dream cycle uses for `personal/`. A symlink within `personal/` is followed; one that leads outside it is refused. The daemon reads the file off its async workers, at most 16 KiB plus one byte, with a 5 s deadline.
 
 #### Request headers
 
@@ -453,19 +470,31 @@ Returns the contents of `.agent/personal/PREFERENCES.md` for the resolved projec
 
 | Field | Description |
 |---|---|
-| `body` | File contents (empty string if file absent) |
+| `body` | File contents as UTF-8, at most 16 KiB (empty string if file absent) |
 | `last_modified` | RFC 3339 UTC timestamp (file mtime, `Z` suffix), or `null` if file absent |
 
-A file that exists but cannot be read is `500` with `{"error":"preferences read failed: …"}`.
+A missing file, or a symlink whose target is missing, is `200` with an empty body.
+
+#### Errors
+
+Each is `500` with `{"error":"…"}`:
+
+| `error` | Cause |
+|---|---|
+| `preferences read failed: .agent/personal/PREFERENCES.md resolves outside .agent/personal/, so it is not served` | The path, through a symlink, leads outside `.agent/personal/` |
+| `preferences read failed: .agent/personal/PREFERENCES.md is not a regular file` | A FIFO, a device or a folder |
+| `preferences read timed out after 5 s` | The read did not finish in 5 s, for example on a stuck mount |
+| `preferences read failed: …` | The file exists but could not be opened or read |
 
 #### Truncation
 
-Files larger than **16 KiB** are truncated. Response includes:
+The body is valid UTF-8 of at most **16 KiB** (16,384 bytes), cut at a character boundary. Response headers:
 
 | Header | Value |
 |---|---|
-| `X-Dreamd-Truncated` | `true` |
-| `X-Dreamd-Original-Size` | Full byte count before truncation |
+| `X-Dreamd-Truncated` | `true` when the body was cut at the cap |
+| `X-Dreamd-Original-Size` | With `X-Dreamd-Truncated`: the file's size on disk, in bytes |
+| `X-Dreamd-Lossy` | `true` when bytes that are not UTF-8 were replaced with U+FFFD |
 
 #### curl example
 
@@ -519,7 +548,7 @@ Salience distribution over every episodic document in the project index: total, 
 
 | Status | When |
 |---|---|
-| `400 Bad Request` | Missing `X-Agent-Root` |
+| `400 Bad Request` | An `X-Agent-Root` the middleware refuses |
 | `403 Forbidden` | UID mismatch |
 | `404 Not Found` | Unregistered project |
 | `500 Internal Server Error` | Index open, scan, or snapshot write failure |
@@ -538,7 +567,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 ### `POST /api/v1/migrate`
 
-A stub. No schema migration is available over HTTP yet. The route sits behind the same middleware as every other `/api/v1` route: `peer_uid_middleware` on Unix (403 on missing or mismatched peer UID), `bearer_auth_middleware` on Windows (401), then `agent_root_middleware` (400 without `X-Agent-Root`, 404 for an unregistered root). Only a request that passes all of them reaches the stub. The request body is ignored, so no `Content-Type` is required.
+A stub. No schema migration is available over HTTP yet. The route sits behind the same middleware as every other `/api/v1` route: `peer_uid_middleware` on Unix (403 on missing or mismatched peer UID), `bearer_auth_middleware` on Windows (401), then `agent_root_middleware` (400 for a missing, non-UTF-8 or relative `X-Agent-Root`, 404 for an unregistered root). Only a request that passes all of them reaches the stub. The request body is ignored, so no `Content-Type` is required.
 
 The handler does not run a migration, call the CLI migrator, or write `.bak` files.
 
@@ -573,7 +602,7 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 `metadata.recurrence` in recall results is computed from the index, once per searcher: the number of live episodic events whose `skill_action` equals the hit's or extends it with `::`, all-time. An event counts itself, so it is at least 1. A lesson hit gets the count of its `cluster_key`. A new event raises the count of every event in its key's subtree at the next index commit. `citations[].recurrence` is `d` of this count.
 
-`.agent/semantic/recurrence_counts.json` is the dream cycle's promotion report: windowed counts at the deepest qualifying prefix. Recall does not read it; `dreamd doctor --cluster-health` and the provenance `recurrence` edges do.
+`.agent/semantic/recurrence_counts.json` is the dream cycle's promotion report: one count per promoted key, the events that key claimed. Recall does not read it; `dreamd doctor --cluster-health` and the provenance `recurrence` edges do.
 
 See `crates/dreamd-core/src/recurrence.rs` and [architecture/durability.md](./architecture/durability.md).
 
@@ -600,7 +629,7 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 
 ## MCP tool errors
 
-`dreamd mcp` returns a rejected `search_nodes` or `append_node` call as a JSON-RPC error with one of these `message` strings. *Daemon mode* is `dreamd mcp` while `dreamd watch` is running: the MCP server forwards each call to this API. *In-process* is `dreamd mcp` with no daemon. A row applies to both unless it says otherwise.
+`dreamd mcp` returns a rejected `search_nodes` or `append_node` call as a JSON-RPC error with one of these `message` strings. *Daemon mode* is `dreamd mcp` while `dreamd watch` is running: the MCP server forwards each call to this API. *In-process* is `dreamd mcp` with no daemon. A row applies to both unless it says otherwise, and its `message` is the same in both modes: an `append_node` argument is checked once, by the process that owns the store, in the [check order](#post-apiv1learn) of `POST /learn`.
 
 | Code | `message` | Cause |
 |---|---|---|
@@ -610,17 +639,33 @@ Four kinds of response come from the framework (axum or hyper) instead and do **
 | `-32602` | `importance must be in 0.0..=10.0` | `importance` is outside 0–10 |
 | `-32602` | `learning exceeds 4096 bytes as a JSONL line; shorten content` | The record, serialized as one JSONL line, is over 4096 bytes |
 | `-32602` | `query exceeds 16384 bytes; pass a shorter query` | `search_nodes`' `query` is over 16384 bytes |
-| `-32602` | `recall failed: …` | The query parser rejected `query` (an unbalanced `"` or `(`, or a `skill_action` pasted as the query). Both modes give the same text |
+| `-32602` | `k must be at most 100` | `search_nodes`' `k` is over 100. In daemon mode the MCP server refuses it before calling the daemon |
 | `-32602` | the daemon's `error` string, or `daemon rejected the request (HTTP 400)` | Daemon mode only: any other `400` from the daemon |
-| `-32600` | `project not registered with daemon; run dreamd init` | Daemon mode only: the project root is not in `~/.agent/registry.toml` |
-| `-32600` | `recall failed: …` | In-process only: the search failed for a reason other than the query |
+| `-32600` | `` this folder is not set up for dreamd: there is no .agent/ store in <folder> or a folder above it. Run `dreamd setup` in the project folder, then restart this MCP server. `` | Both tools, in both modes: no project store at or above the folder `dreamd mcp` started in (`--project-root` when given). `~/.agent/` is the daemon home and never counts as one. Nothing is written and no daemon is called. Under the npm shim the command is `npx -y dreamd-mcp setup`. The server keeps this answer until the harness restarts it |
+| `-32600` | `` the store in <folder> is not registered with the running daemon. Run `dreamd init` in <folder> once: it registers the existing store without changing its files (a clone or a worktree is not registered until then), and the next call works without a restart. `` | Daemon mode only: the daemon answered `404`, because the store folder is not in `~/.agent/registry.toml`. A fresh clone or worktree is a new path, so it is not registered until `init` runs there. Under the npm shim the command is `npx -y dreamd-mcp init`. See [GUIDE §9](../GUIDE.md#9-clones-and-worktrees) |
+| `-32600` | `config load failed: …` | `append_node`, both modes: the project's config does not parse. dreamd reads it on every append, so an edit made while the server runs applies to the next call. Nothing is written. Fix the file; the call's arguments are not the problem |
+| `-32600` | the daemon's `X-Agent-Root …` string | Daemon mode only: the daemon refused the project path the MCP server sent. This version's `dreamd mcp` always sends an absolute UTF-8 path, so this means a bug or a client from another version |
+| `-32600` | `recall failed: …` | In-process only: the index could not be searched |
 | `-32600` | `index open failed: …` | In-process only: the index could not be opened |
 | `-32600` | `` <root>/.agent/.dreamd was deleted or replaced while this dreamd process (mcp) was using it, for example by `git clean -fdX`. It stopped writing to the store. Reload your MCP harness so it starts dreamd again. `` | In-process only: `.agent/.dreamd/` was deleted or replaced while the session ran. Every later call gets the same answer. In daemon mode the daemon opens the project again and the call goes through; see [`POST /learn`](#post-apiv1learn) |
 | `-32603` | `daemon error 500 Internal Server Error: {"error":"…"}` | Daemon mode only: the daemon could not open or search the index |
 | `-32603` | `daemon error 503 Service Unavailable: {"error":"coordinator busy, retry"}` | Daemon mode only: the daemon's append queue is full. Retry |
 | `-32603` | `daemon connect failed: …` | Daemon mode only: the daemon stopped after the session started. The other stages are `handshake`, `request` and `response read` |
 | `-32603` | `` version mismatch: client …, daemon …. Stop the other daemon and start this one with `dreamd watch`, or point DREAMD_SOCK at a daemon of this version. `` | Daemon mode only: the daemon runs another dreamd version. `daemon unknown` in place of a version means it sent none. Under the npm shim the fix names `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, then a harness reload |
-| `-32603` | `coordinator unavailable: no agent root found` | In-process only: `append_node` with no `.agent/` store at or above the working directory. Run `dreamd init` |
+| `-32603` | `` the daemon at <socket> did not answer within 30 s. Run `dreamd status`; if it says `not responding`, stop that `dreamd watch` and start it again. `` | Daemon mode only: the daemon accepted the connection but did not finish answering within the [client deadline](#client-deadlines). For `append_node` the message goes on: `The append may have been written. Retry with the same client_dedup_key so it cannot be stored twice.` |
+
+### Client deadlines
+
+Every call a dreamd client makes to the daemon has one deadline, which covers the connect, the HTTP handshake, the request and the whole response. When it runs out, the client closes the connection and reports that the daemon did not answer, naming its socket. It never falls back to an in-process store, because the daemon still holds the store's writer lock.
+
+| Call | Deadline |
+|---|---|
+| `search_nodes`, `append_node` (daemon mode) | 30 s |
+| `dreamd dream`, proxied to the daemon | 120 s: the model's whole retry budget (3 attempts × 30 s), plus 30 s for the cycle |
+| The version check, `GET /api/v1/health`, before a process's first call: `dreamd mcp`'s first tool call and every proxied `dreamd dream` | 30 s. A daemon that never answers therefore fails a proxied `dreamd dream` after 30 s, before the cycle starts |
+| `dreamd status` | 2 s, for its one `GET /api/v1/health` with no `X-Agent-Root`. The daemon answers that `400` without opening a project. Any answer is `daemon: running`; none is `daemon: not responding`, and `status` exits 1 |
+
+`DREAMD_CLIENT_TIMEOUT`, a whole number of seconds (1 or more), replaces the 30 s and 120 s deadlines; `status` keeps its 2 s. A timed-out `append_node` is `-32603` and may have been written: the daemon may have stored it before the deadline ran out. Retry it with the same `client_dedup_key`, and the daemon will not store it twice.
 
 ---
 

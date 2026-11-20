@@ -16,6 +16,9 @@ context/
 /lab/
 # Local dev .agent/ stores (examples/ carry their own fixtures)
 /.agent/
+# Local harness wiring written by `dreamd setup` for this checkout's own store
+/.mcp.json
+/CLAUDE.md
 
 # Per-project daemon state (config.toml, state.json); local-only
 /.agent/.dreamd/

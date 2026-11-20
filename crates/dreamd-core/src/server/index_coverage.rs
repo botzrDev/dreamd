@@ -13,17 +13,23 @@
 //! lost watermark both heal.
 //!
 //! [`assess_index_coverage`] reports the same difference from the committed
-//! index with no writer and no lock, for `dreamd doctor`.
+//! index with no writer and no lock. [`assess_index`] adds the content check
+//! for `dreamd doctor` (DRM-118): a log record whose indexed fields differ from
+//! its one alive document. `cover` does not heal that; `dreamd doctor
+//! --repair` does.
 
 use std::collections::{BTreeSet, HashMap};
 
 use dreamd_protocol::AgentLearning;
-use tantivy::schema::{Field, IndexRecordOption};
+use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::{
     DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, TERMINATED,
 };
 
-use crate::index::{SchemaFields, EVENT_ID_FIELD};
+use crate::index::{
+    SchemaFields, CONTENT_FIELD, EVENT_ID_FIELD, IMPORTANCE_FIELD, PAIN_FIELD, SKILL_ACTION_FIELD,
+    TIMESTAMP_SEC_FIELD,
+};
 use crate::layout::AgentRoot;
 use crate::server::index_freshness::read_jsonl_events;
 use crate::server::index_map::{tantivy_to_index, IndexError};
@@ -239,15 +245,41 @@ pub struct IndexCoverage {
     pub duplicated: usize,
 }
 
-/// Compare the episodic log with the committed index for `agent_root`.
-///
-/// Opens the index read-only: no writer and no project lock, so it is safe
-/// beside a live daemon. It sees the last commit, not a writer's uncommitted
-/// batch.
-pub fn assess_index_coverage(agent_root: &AgentRoot) -> Result<IndexCoverage, IndexError> {
+/// Log records whose indexed fields differ from their one alive document (DRM-118).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentDrift {
+    /// How many such records.
+    pub changed: usize,
+    /// The first three of their ids, in log order.
+    pub first_ids: Vec<String>,
+}
+
+/// The committed index compared with the log: the id-set difference and the content check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexAssessment {
+    /// The id-set difference, as [`assess_index_coverage`] reports it.
+    pub coverage: IndexCoverage,
+    /// The content check.
+    pub content: ContentDrift,
+}
+
+/// How many ids [`ContentDrift::first_ids`] keeps.
+const FIRST_IDS: usize = 3;
+
+/// One read of the committed index and the log: what both assessments start
+/// from.
+struct Committed {
+    reader: IndexReader,
+    indexed: Indexed,
+    events: Vec<AgentLearning>,
+}
+
+/// Open the committed index read-only, scan its `evt_` terms and read the log.
+/// `None` when there is no committed index (`index/meta.json` absent).
+fn read_committed(agent_root: &AgentRoot) -> Result<Option<Committed>, IndexError> {
     let index_dir = agent_root.dreamd_dir().join(INDEX_DIR_NAME);
     if !index_dir.join("meta.json").exists() {
-        return Ok(IndexCoverage::default());
+        return Ok(None);
     }
     let index = Index::open_in_dir(&index_dir).map_err(tantivy_to_index)?;
     let event_id = index
@@ -262,12 +294,126 @@ pub fn assess_index_coverage(agent_root: &AgentRoot) -> Result<IndexCoverage, In
     reader.reload().map_err(tantivy_to_index)?;
     let indexed = scan_indexed(&reader, event_id).map_err(tantivy_to_index)?;
     let events = read_jsonl_events(&agent_root.episodic_jsonl())?;
-    let diff = diff(&events, &indexed);
-    Ok(IndexCoverage {
-        present: true,
-        missing: diff.missing.len(),
-        not_in_log: diff.not_in_log.len() + diff.malformed.len(),
-        duplicated: diff.duplicated.len(),
+    Ok(Some(Committed {
+        reader,
+        indexed,
+        events,
+    }))
+}
+
+impl Committed {
+    fn coverage(&self) -> IndexCoverage {
+        let diff = diff(&self.events, &self.indexed);
+        IndexCoverage {
+            present: true,
+            missing: diff.missing.len(),
+            not_in_log: diff.not_in_log.len() + diff.malformed.len(),
+            duplicated: diff.duplicated.len(),
+        }
+    }
+}
+
+/// Compare the episodic log with the committed index for `agent_root`.
+///
+/// Opens the index read-only: no writer and no project lock, so it is safe
+/// beside a live daemon. It sees the last commit, not a writer's uncommitted
+/// batch. It compares ids only; [`assess_index`] also compares content.
+pub fn assess_index_coverage(agent_root: &AgentRoot) -> Result<IndexCoverage, IndexError> {
+    Ok(read_committed(agent_root)?
+        .map(|committed| committed.coverage())
+        .unwrap_or_default())
+}
+
+/// [`assess_index_coverage`], plus the content check (DRM-118).
+///
+/// For each log id whose last copy (the copy the set difference uses) has
+/// exactly one alive document, it compares the five fields recall reads, as
+/// `add_document` writes them: `content` and `skill_action` as strings, the
+/// timestamp in whole seconds, and pain and importance as `f64` bits. A
+/// document with no value for a fast field counts as changed. Missing,
+/// duplicated and index-only ids are counted by the set difference only.
+///
+/// The same read-only open as [`assess_index_coverage`]: no writer and no
+/// lock. It reads every alive document's stored fields once.
+pub fn assess_index(agent_root: &AgentRoot) -> Result<IndexAssessment, IndexError> {
+    let Some(committed) = read_committed(agent_root)? else {
+        return Ok(IndexAssessment::default());
+    };
+    let content = content_drift(&committed.reader, &committed.events, &committed.indexed)
+        .map_err(tantivy_to_index)?;
+    Ok(IndexAssessment {
+        coverage: committed.coverage(),
+        content,
+    })
+}
+
+/// The content check: visit each segment's alive documents once, and compare
+/// each `evt_` document whose id has one alive document with the log's last
+/// copy of that id.
+fn content_drift(
+    reader: &IndexReader,
+    log: &[AgentLearning],
+    indexed: &Indexed,
+) -> tantivy::Result<ContentDrift> {
+    // The last copy of each id, by log position, for ids with one alive doc.
+    let mut last: HashMap<IdKey, usize> = HashMap::with_capacity(log.len());
+    for (i, event) in log.iter().enumerate() {
+        last.insert(key_of(event), i);
+    }
+    last.retain(|key, _| indexed.alive.get(key).copied() == Some(1));
+
+    let searcher = reader.searcher();
+    let schema = searcher.schema();
+    let event_id = schema.get_field(EVENT_ID_FIELD)?;
+    let content = schema.get_field(CONTENT_FIELD)?;
+    let skill_action = schema.get_field(SKILL_ACTION_FIELD)?;
+
+    let mut changed: Vec<usize> = Vec::new();
+    for segment in searcher.segment_readers() {
+        let ff = segment.fast_fields();
+        let timestamp_col = ff.u64(TIMESTAMP_SEC_FIELD)?;
+        let pain_col = ff.f64(PAIN_FIELD)?;
+        let importance_col = ff.f64(IMPORTANCE_FIELD)?;
+        // Alive ids are read in order, so one cached block suffices.
+        let store = segment.get_store_reader(1)?;
+        for doc in segment.doc_ids_alive() {
+            let stored: TantivyDocument = store.get(doc)?;
+            // A missing stored string reads as "", as recall hydrates it.
+            let text = |field| {
+                stored
+                    .get_first(field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            };
+            let Some(body) = text(event_id).strip_prefix("evt_") else {
+                continue;
+            };
+            let Ok(key) = <IdKey>::try_from(body.as_bytes()) else {
+                continue;
+            };
+            let Some(&i) = last.get(&key) else {
+                continue;
+            };
+            let event = &log[i];
+            let same = text(content) == event.content
+                && text(skill_action) == event.skill_action
+                && timestamp_col.first(doc) == Some(event.timestamp.timestamp() as u64)
+                && pain_col.first(doc).map(f64::to_bits) == Some(f64::from(event.pain).to_bits())
+                && importance_col.first(doc).map(f64::to_bits)
+                    == Some(f64::from(event.importance).to_bits());
+            if !same {
+                changed.push(i);
+            }
+        }
+    }
+    changed.sort_unstable();
+    Ok(ContentDrift {
+        changed: changed.len(),
+        first_ids: changed
+            .iter()
+            .take(FIRST_IDS)
+            .map(|&i| log[i].id.as_str().to_string())
+            .collect(),
     })
 }
 
@@ -501,6 +647,190 @@ mod tests {
             }
         );
         assert_eq!(f.total(), 100, "90 of 100 ids is a mass delete");
+    }
+
+    /// A project store whose log is `log` and whose committed index holds
+    /// `indexed` through `add_document`. The log is written first (drift entry
+    /// `index-fixtures-must-write-the-log-first`).
+    fn store(log: &[AgentLearning], indexed: &[AgentLearning]) -> (tempfile::TempDir, AgentRoot) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let jsonl = root.episodic_jsonl();
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        let lines: String = log
+            .iter()
+            .map(|e| format!("{}\n", serde_json::to_string(e).unwrap()))
+            .collect();
+        std::fs::write(&jsonl, lines).unwrap();
+
+        let index_dir = root.dreamd_dir().join(INDEX_DIR_NAME);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_dir(&index_dir, schema).unwrap();
+        let mut writer: IndexWriter<TantivyDocument> = index.writer(15_000_000).unwrap();
+        for event in indexed {
+            add_document(&mut writer, &fields, event).unwrap();
+        }
+        writer.commit().unwrap();
+        (dir, root)
+    }
+
+    fn content_of(log: &[AgentLearning], indexed: &[AgentLearning]) -> ContentDrift {
+        let (_dir, root) = store(log, indexed);
+        assess_index(&root).unwrap().content
+    }
+
+    /// DRM-118 test 1: one change per row, to each field recall reads.
+    #[test]
+    fn each_indexed_field_is_compared() {
+        type Edit = fn(&mut AgentLearning);
+        let rows: [(&str, Edit); 5] = [
+            ("content", |e| e.content = "use port 6543".to_string()),
+            ("skill_action", |e| {
+                e.skill_action = "rust::other".to_string()
+            }),
+            ("timestamp + 1 s", |e| {
+                e.timestamp += chrono::Duration::seconds(1);
+            }),
+            ("pain", |e| e.pain = 10.0),
+            ("importance", |e| e.importance = 1.5),
+        ];
+        for (name, edit) in rows {
+            let indexed = evs([0, 1]);
+            let mut log = indexed.clone();
+            edit(&mut log[1]);
+
+            let content = content_of(&log, &indexed);
+
+            assert_eq!(
+                content,
+                ContentDrift {
+                    changed: 1,
+                    first_ids: vec![id(1)],
+                },
+                "row {name}"
+            );
+        }
+    }
+
+    /// DRM-118 test 2: what the index does not hold, or holds rounded, is
+    /// not a change.
+    #[test]
+    fn what_the_index_does_not_hold_is_not_compared() {
+        type Edit = fn(&mut AgentLearning);
+        let rows: [(&str, Edit); 3] = [
+            ("timestamp under one second", |e| {
+                e.timestamp += chrono::Duration::milliseconds(900);
+            }),
+            ("source_harness", |e| {
+                e.source_harness = "cursor".to_string()
+            }),
+            ("pinned", |e| e.pinned = true),
+        ];
+        for (name, edit) in rows {
+            let indexed = evs([0, 1]);
+            let mut log = indexed.clone();
+            edit(&mut log[1]);
+
+            let (_dir, root) = store(&log, &indexed);
+            let assessment = assess_index(&root).unwrap();
+
+            assert_eq!(assessment.content, ContentDrift::default(), "row {name}");
+            assert_eq!(
+                assessment.coverage,
+                IndexCoverage {
+                    present: true,
+                    ..Default::default()
+                },
+                "row {name}"
+            );
+        }
+    }
+
+    /// DRM-118 test 3: missing and duplicated ids are counted by the set
+    /// difference only, and the log's last copy of an id is the one compared.
+    #[test]
+    fn missing_duplicated_and_last_copy() {
+        // Id 1 is missing from the index; id 2 has two alive documents. The
+        // index's copies of both differ from the log.
+        let log = evs([0, 1, 2]);
+        let mut stale = log.clone();
+        for event in &mut stale {
+            event.content = format!("{} (old)", event.content);
+        }
+        let (_dir, root) = store(&log, &[log[0].clone()]);
+        {
+            let index_dir = root.dreamd_dir().join(INDEX_DIR_NAME);
+            let index = Index::open_in_dir(&index_dir).unwrap();
+            let (_, fields) = build_schema();
+            let mut writer: IndexWriter<TantivyDocument> = index.writer(15_000_000).unwrap();
+            // Past the upsert: two alive documents for id 2.
+            for _ in 0..2 {
+                writer
+                    .add_document(doc!(
+                        fields.content => stale[2].content.clone(),
+                        fields.timestamp_sec => stale[2].timestamp.timestamp() as u64,
+                        fields.pain => f64::from(stale[2].pain),
+                        fields.importance => f64::from(stale[2].importance),
+                        fields.layer => Layer::Episodic.as_str(),
+                        fields.event_id => id(2),
+                        fields.skill_action => stale[2].skill_action.clone(),
+                    ))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+
+        let assessment = assess_index(&root).unwrap();
+
+        assert_eq!(
+            assessment,
+            IndexAssessment {
+                coverage: IndexCoverage {
+                    present: true,
+                    missing: 1,
+                    not_in_log: 0,
+                    duplicated: 1,
+                },
+                content: ContentDrift::default(),
+            }
+        );
+
+        // Two copies of id 0 in the log: the index holds the first, the last
+        // differs.
+        let first = ev(0);
+        let mut last = ev(0);
+        last.content = "the corrected copy".to_string();
+        let content = content_of(&[first.clone(), last], &[first]);
+        assert_eq!(
+            content,
+            ContentDrift {
+                changed: 1,
+                first_ids: vec![id(0)],
+            }
+        );
+    }
+
+    /// DRM-118 test 4: the count is every changed record, and the ids are the
+    /// first three in log order, not index order.
+    #[test]
+    fn first_ids_are_the_first_three_in_log_order() {
+        let indexed = evs(0..6);
+        // The log lists ids 5 down to 0, so log order is not id order.
+        let mut log: Vec<AgentLearning> = indexed.iter().rev().cloned().collect();
+        for event in log.iter_mut().take(5) {
+            event.pain = 9.0;
+        }
+
+        let content = content_of(&log, &indexed);
+
+        assert_eq!(
+            content,
+            ContentDrift {
+                changed: 5,
+                first_ids: vec![id(5), id(4), id(3)],
+            }
+        );
     }
 
     #[test]

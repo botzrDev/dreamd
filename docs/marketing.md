@@ -10,7 +10,7 @@ dreamd makes Claude Code, Cursor, and Cline remember the same things. Drop a `.a
 
 Every coding agent ships its own memory format. dreamd is what they could share.
 
-AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool.
+AGENTS.md is what you wrote down. dreamd is what your agent learned, across every tool. When a memory goes bad, `blame` finds it and `forget` removes it, with a receipt.
 
 ---
 

@@ -10,7 +10,7 @@
 //!
 //! Production path: HTTP/MCP recall → `TantivyIndexHandle::reader` → [`recall`].
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -19,10 +19,11 @@ use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
 use tantivy::query::{
-    AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery, TermSetQuery,
+    AllQuery, BooleanQuery, EmptyQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery,
+    TermSetQuery,
 };
 use tantivy::schema::{IndexRecordOption, TantivyDocument, Term, Value};
-use tantivy::{DocAddress, DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
+use tantivy::{DocAddress, DocId, Index, Score, SegmentOrdinal, SegmentReader, TantivyError};
 
 use crate::index::{Layer, SchemaFields, IMPORTANCE_FIELD, PAIN_FIELD, TIMESTAMP_SEC_FIELD};
 use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
@@ -86,14 +87,81 @@ pub struct ScoredDoc {
 impl Eq for ScoredDoc {}
 
 impl PartialOrd for ScoredDoc {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+/// Score order only: `score_key` under `f64::total_cmp` (DRM-110). The heaps
+/// cannot see `event_id`, so documents that tie here are kept at the top-`k`
+/// boundary and ordered by `recall_order` after hydration.
 impl Ord for ScoredDoc {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.score.cmp(&other.score)
+    fn cmp(&self, other: &Self) -> Ordering {
+        score_key(self.score.0).total_cmp(&score_key(other.score.0))
+    }
+}
+
+/// The score key every recall comparison uses (DRM-110): NaN is lowest, and
+/// `-0.0` equals `0.0`.
+fn score_key(score: f64) -> f64 {
+    if score.is_nan() {
+        f64::NEG_INFINITY
+    } else if score == 0.0 {
+        0.0
+    } else {
+        score
+    }
+}
+
+/// Recall's one total order (DRM-110): score descending ([`score_key`],
+/// `f64::total_cmp`), then `event_id` ascending. So an event comes before a
+/// lesson that ties with it (`evt_` < `lsn_`), and the order depends on
+/// neither the index's segments nor `k`.
+fn recall_order(a: &RecallResult, b: &RecallResult) -> Ordering {
+    score_key(b.score)
+        .total_cmp(&score_key(a.score))
+        .then_with(|| a.event_id.cmp(&b.event_id))
+}
+
+/// Offer `doc` to a top-`k` min-heap, keeping the ties at its boundary
+/// (DRM-110). `ties` holds documents whose score equals the heap's minimum:
+///
+/// * heap not full: push;
+/// * heap full, score above the minimum: pop the minimum into `ties`, push
+///   `doc`, and drop every tie below the new minimum;
+/// * heap full, score equal to the minimum: `doc` joins `ties`;
+/// * heap full, score below the minimum (or `k == 0`): drop it.
+///
+/// The heap plus `ties` is then every document scoring at least the `k`-th
+/// best score, so the caller can decide the boundary by `event_id`.
+fn offer(
+    heap: &mut BinaryHeap<Reverse<ScoredDoc>>,
+    ties: &mut Vec<ScoredDoc>,
+    k: usize,
+    doc: ScoredDoc,
+) {
+    if heap.len() < k {
+        heap.push(Reverse(doc));
+        return;
+    }
+    let Some(Reverse(min)) = heap.peek() else {
+        return;
+    };
+    match doc.cmp(min) {
+        Ordering::Less => {}
+        Ordering::Equal => ties.push(doc),
+        Ordering::Greater => {
+            let Some(Reverse(old)) = heap.pop() else {
+                return;
+            };
+            heap.push(Reverse(doc));
+            // Every tie equals `old`. They stay only while the new minimum
+            // still equals it.
+            match heap.peek() {
+                Some(Reverse(new_min)) if new_min.cmp(&old) == Ordering::Equal => ties.push(old),
+                _ => ties.clear(),
+            }
+        }
     }
 }
 
@@ -146,9 +214,11 @@ pub fn cluster_prefix_matches(skill_action: &str, prefix: &str) -> bool {
 }
 
 /// Per-segment collector. Tantivy invokes `collect()` once per matching
-/// doc; the min-heap (`BinaryHeap<Reverse<…>>`) caps at `k` entries.
+/// doc; the min-heap (`BinaryHeap<Reverse<…>>`) caps at `k` entries, and
+/// `ties` keeps the documents that tie its minimum (`offer`, DRM-110).
 pub struct SalienceSegmentCollector {
     heap: BinaryHeap<Reverse<ScoredDoc>>,
+    ties: Vec<ScoredDoc>,
     k: usize,
     segment_ord: SegmentOrdinal,
     timestamp_col: Column<u64>,
@@ -173,7 +243,7 @@ impl SegmentCollector for SalienceSegmentCollector {
         let sal = salience_with_context(self.now_sec, ts, p, imp, RecurrenceContext::recall(rec));
         let final_score = bm25 * sal;
 
-        let entry = Reverse(ScoredDoc {
+        let entry = ScoredDoc {
             score: OrderedFloat(final_score),
             doc_address: DocAddress::new(self.segment_ord, doc),
             timestamp_sec: ts as u64,
@@ -182,26 +252,29 @@ impl SegmentCollector for SalienceSegmentCollector {
             recurrence: rec,
             bm25,
             salience: sal,
-        });
-
-        if self.heap.len() < self.k {
-            self.heap.push(entry);
-        } else if let Some(Reverse(min)) = self.heap.peek() {
-            if entry.0.score > min.score {
-                self.heap.pop();
-                self.heap.push(entry);
-            }
-        }
+        };
+        offer(&mut self.heap, &mut self.ties, self.k, entry);
     }
 
+    /// The segment's top `k`, plus the documents that tie the `k`-th.
     fn harvest(self) -> Vec<ScoredDoc> {
-        self.heap.into_iter().map(|Reverse(d)| d).collect()
+        self.heap
+            .into_iter()
+            .map(|Reverse(d)| d)
+            .chain(self.ties)
+            .collect()
     }
 }
 
 /// Top-level collector handed to `Searcher::search`. Stateless apart from
 /// `k`, `now_sec` and the searcher's recurrence table; per-segment work
 /// happens in [`SalienceSegmentCollector`].
+///
+/// Its fruit is the top `k` documents by score plus every document that ties
+/// the `k`-th, in no particular order (DRM-110): the `event_id` that breaks
+/// those ties is a stored field, which a collector cannot read cheaply.
+/// [`recall`] and [`score_by_salience`] hydrate the fruit, order it by score
+/// descending then `event_id` ascending, and keep the first `k`.
 pub struct SalienceCollector {
     k: usize,
     now_sec: i64,
@@ -241,8 +314,12 @@ impl Collector for SalienceCollector {
                     segment.segment_id().uuid_string()
                 ))
             })?;
+        // DRM-109: a segment never holds more than `max_doc` hits, so a huge
+        // `k` sizes nothing beyond the segment.
+        let capacity = self.k.min(segment.max_doc() as usize).saturating_add(1);
         Ok(SalienceSegmentCollector {
-            heap: BinaryHeap::with_capacity(self.k + 1),
+            heap: BinaryHeap::with_capacity(capacity),
+            ties: Vec::new(),
             k: self.k,
             segment_ord: segment_local_id,
             // The pinned Tantivy's `FastFieldReaders::{u64,f64}` take `&str`, not Field IDs.
@@ -259,24 +336,24 @@ impl Collector for SalienceCollector {
     }
 
     fn merge_fruits(&self, segment_fruits: Vec<Vec<ScoredDoc>>) -> tantivy::Result<Vec<ScoredDoc>> {
-        // Each segment already kept its own top-k; re-apply a global min-heap of
-        // size `k` so cross-segment recall cannot return more than `k` hits.
-        let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(self.k + 1);
+        // Each segment already kept its own top-k and its ties; re-apply the
+        // same rule globally ([`offer`]), so the fruit is the global top `k`
+        // plus the documents that tie the `k`-th (DRM-110). Hydration orders
+        // them by `event_id` and cuts to `k`. Sized by the hits there are,
+        // not by `k` alone (DRM-109).
+        let total: usize = segment_fruits.iter().map(Vec::len).sum();
+        let capacity = self.k.min(total).saturating_add(1);
+        let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(capacity);
+        let mut ties = Vec::new();
         for doc in segment_fruits.into_iter().flatten() {
-            if merged.len() < self.k {
-                merged.push(Reverse(doc));
-            } else if let Some(Reverse(min)) = merged.peek() {
-                if doc.score > min.score {
-                    merged.pop();
-                    merged.push(Reverse(doc));
-                }
-            }
+            offer(&mut merged, &mut ties, self.k, doc);
         }
-        Ok(merged.into_iter().map(|Reverse(d)| d).collect())
+        Ok(merged.into_iter().map(|Reverse(d)| d).chain(ties).collect())
     }
 }
 
-/// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s and sort descending by score.
+/// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s, sort them by
+/// [`recall_order`] and keep the first `limit` (DRM-110).
 ///
 /// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is private to
 /// this module on [`ScoredDoc`], so hydration must stay inside it.
@@ -284,8 +361,9 @@ fn hydrate_scored(
     searcher: &tantivy::Searcher,
     fields: &SchemaFields,
     top_docs: Vec<ScoredDoc>,
+    limit: usize,
 ) -> tantivy::Result<Vec<RecallResult>> {
-    Ok(hydrate_addressed(searcher, fields, top_docs)?
+    Ok(hydrate_addressed(searcher, fields, top_docs, limit)?
         .into_iter()
         .map(|(_, result)| result)
         .collect())
@@ -293,10 +371,15 @@ fn hydrate_scored(
 
 /// [`hydrate_scored`], keeping each result's [`DocAddress`] so
 /// [`rank_missing_tokens`] can tell documents apart across searches.
+///
+/// `top_docs` is a [`SalienceCollector`] fruit: the top `limit` plus the
+/// documents that tie the `limit`-th. The `event_id` that decides those ties
+/// is a stored field, so the boundary is cut here, after hydration.
 fn hydrate_addressed(
     searcher: &tantivy::Searcher,
     fields: &SchemaFields,
     top_docs: Vec<ScoredDoc>,
+    limit: usize,
 ) -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
     let mut results = Vec::with_capacity(top_docs.len());
     for scored in top_docs {
@@ -347,15 +430,19 @@ fn hydrate_addressed(
         ));
     }
 
-    results.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| recall_order(&a.1, &b.1));
+    results.truncate(limit);
     Ok(results)
 }
 
 /// Execute a salience-scored BM25 recall query.
+///
+/// `query_text` is any text. `words_query` turns it into words, and no
+/// character in it is an operator, so no text is an error (DRM-108).
+///
+/// Results are ordered by score descending, then `event_id` ascending, on
+/// every path (DRM-110), so the order depends on neither the index's
+/// segments nor `k`.
 ///
 /// `now_sec` is caller-provided so tests stay deterministic: this function
 /// reads no clock.
@@ -377,6 +464,9 @@ pub fn recall(
 }
 
 /// [`recall`] with counterfactual exclusion (BZR-194).
+///
+/// `query_text` is any text: the query is its `words_query`, and there is
+/// no grammar (DRM-108). The only errors are the index's own.
 ///
 /// A non-empty `exclusion` wraps the query in a [`BooleanQuery`]: the query as
 /// one `Must` clause, then `MustNot` clauses for the excluded ids (one
@@ -400,19 +490,73 @@ pub fn recall_excluding(
 ) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
     let recurrence = reader.recurrence(&searcher)?;
-    let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
 
-    // One parsed query, the exclusion's `MustNot` clauses, and the salience
+    // One word query, the exclusion's `MustNot` clauses, and the salience
     // collector. The bag and every token search go through it.
     let search = |text: &str, limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
-        let final_query = exclude(query_parser.parse_query(text)?, fields, exclusion);
+        let final_query = exclude(
+            words_query(searcher.index(), fields, text)?,
+            fields,
+            exclusion,
+        );
         let collector = SalienceCollector::new(limit, now_sec, Arc::clone(&recurrence));
         let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
-        hydrate_addressed(&searcher, fields, top_docs)
+        hydrate_addressed(&searcher, fields, top_docs, limit)
     };
 
     let bag = search(query_text, k)?;
     rank_missing_tokens(bag, query_text, k, search)
+}
+
+/// The query for any recall text (DRM-108), built as Tantivy's parser builds
+/// text that has no grammar, so a query that parsed before scores bit for bit
+/// as it did.
+///
+/// Split on whitespace. A piece that repeats an earlier piece byte for byte
+/// is dropped, as the parser did. Run each other piece through the content
+/// field's tokenizer: a piece with one token is a [`TermQuery`], a piece with
+/// several is a [`PhraseQuery`] with each term at its token's position (a
+/// token `RemoveLongFilter` drops keeps its gap), and a piece with none adds
+/// nothing. Every clause is `Should`, in input order; one clause is returned
+/// bare, and no clause at all is an [`EmptyQuery`].
+///
+/// No text is an error. The only error is the content field's tokenizer
+/// missing from the index, which no input causes.
+fn words_query(
+    index: &Index,
+    fields: &SchemaFields,
+    text: &str,
+) -> tantivy::Result<Box<dyn Query>> {
+    let mut analyzer = index.tokenizer_for_field(fields.content)?;
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for piece in text.split_whitespace() {
+        if pieces.contains(&piece) {
+            continue;
+        }
+        pieces.push(piece);
+        let mut terms: Vec<(usize, Term)> = Vec::new();
+        analyzer.token_stream(piece).process(&mut |token| {
+            terms.push((
+                token.position,
+                Term::from_field_text(fields.content, &token.text),
+            ));
+        });
+        let query: Box<dyn Query> = match terms.len() {
+            0 => continue,
+            1 => {
+                let (_, term) = terms.remove(0);
+                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+            }
+            _ => Box::new(PhraseQuery::new_with_offset(terms)),
+        };
+        clauses.push((Occur::Should, query));
+    }
+    Ok(match clauses.len() {
+        0 => Box::new(EmptyQuery),
+        1 => clauses.remove(0).1,
+        _ => Box::new(BooleanQuery::new(clauses)),
+    })
 }
 
 /// The query's tokens when it is plain: two or more whitespace-separated
@@ -517,7 +661,7 @@ fn rank_missing_tokens(
 
     // A hit found only by a token search may still sit inside a wider bag.
     let wide = if union.len() > bag_len {
-        search(query_text, k + token_hits.len())?
+        search(query_text, k.saturating_add(token_hits.len()))?
     } else {
         union[..bag_len].to_vec()
     };
@@ -540,12 +684,7 @@ fn rank_missing_tokens(
             hit
         })
         .collect();
-    ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.event_id.cmp(&b.event_id))
-    });
+    ranked.sort_by(recall_order);
     ranked.truncate(k);
     Ok(ranked)
 }
@@ -604,7 +743,7 @@ pub fn score_by_salience(
     let recurrence = reader.recurrence(&searcher)?;
     let collector = SalienceCollector::new(n, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&AllQuery, &collector)?;
-    hydrate_scored(&searcher, fields, top_docs)
+    hydrate_scored(&searcher, fields, top_docs, n)
 }
 
 #[cfg(test)]
@@ -612,6 +751,7 @@ mod tests {
     use super::*;
     use crate::index::build_schema;
     use tantivy::doc;
+    use tantivy::query::QueryParser;
     use tantivy::{Index, ReloadPolicy};
 
     const DAY_SECS: i64 = 86_400;
@@ -1019,12 +1159,299 @@ mod tests {
 
         assert_eq!(merged.len(), 3, "merge must cap at k");
         let mut kept: Vec<f64> = merged.iter().map(|d| d.score.into_inner()).collect();
-        kept.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        kept.sort_by(|a, b| b.total_cmp(a));
         assert_eq!(
             kept,
             vec![0.9, 0.8, 0.7],
             "merge must keep the highest scores"
         );
+    }
+
+    /// DRM-109 test 1: a `k` far past the index sizes no heap by `k`. Over
+    /// three documents, `k = usize::MAX` returns the three; on the base the
+    /// segment heap's `k + 1` overflows or the allocation aborts.
+    #[test]
+    fn a_huge_k_allocates_for_the_documents_only() {
+        let docs: Vec<_> = ["evt_a", "evt_b", "evt_c"]
+            .into_iter()
+            .map(|id| ("tokio", id, "rust::a", NOW_SEC, 5.0, Layer::Episodic))
+            .collect();
+        let (_idx, fields, reader) = build_exclusion_index(&docs);
+        let results = recall(&reader, &fields, "tokio", usize::MAX, NOW_SEC).expect("recall");
+        assert_eq!(results.len(), 3, "every match comes back");
+    }
+
+    /// DRM-110 fixtures: `(content, event_id, skill_action, timestamp_sec,
+    /// pain, importance, layer)`.
+    type TieDoc = (&'static str, String, &'static str, i64, f64, f64, Layer);
+
+    /// An in-RAM index with one commit per group of `commits`, in order, and
+    /// no merges, so each group stays its own segment.
+    fn build_committed_index(commits: &[Vec<TieDoc>]) -> (Index, SchemaFields, RecallReader) {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+        for group in commits {
+            for (content, event_id, skill_action, ts, pain, importance, layer) in group {
+                writer
+                    .add_document(doc!(
+                        fields.content => *content,
+                        fields.timestamp_sec => *ts as u64,
+                        fields.pain => *pain,
+                        fields.importance => *importance,
+                        fields.layer => layer.as_str(),
+                        fields.last_updated_sec => *ts as u64,
+                        fields.cited_event_count => 0_u64,
+                        fields.event_id => event_id.as_str(),
+                        fields.skill_action => *skill_action,
+                        fields.source_harness => "claude-code",
+                    ))
+                    .expect("add doc");
+            }
+            writer.commit().expect("commit");
+        }
+        let reader = RecallReader::open(&index, ReloadPolicy::Manual).expect("reader");
+        (index, fields, reader)
+    }
+
+    fn owned_ids(results: &[RecallResult]) -> Vec<String> {
+        results.iter().map(|r| r.event_id.clone()).collect()
+    }
+
+    /// DRM-110 test 1 (LP-READ-10): an event and the lesson built from it
+    /// score exactly the same. In every segment layout, `k = 1` returns the
+    /// event, `k = 4` lists the event then the lesson, and the three layouts
+    /// give the same lists.
+    #[test]
+    fn ties_follow_event_id_across_segment_layouts() {
+        const TEXT: &str = "tokio runtime panics under load";
+        let event: TieDoc = (
+            TEXT,
+            "evt_01TIE".into(),
+            "rust::tokio",
+            NOW_SEC,
+            9.0,
+            9.0,
+            Layer::Episodic,
+        );
+        let lesson: TieDoc = (
+            TEXT,
+            "lsn_evt_01TIE".into(),
+            "rust::tokio",
+            NOW_SEC,
+            9.0,
+            9.0,
+            Layer::Semantic,
+        );
+        let others: Vec<TieDoc> = (1..=6)
+            .map(|n| {
+                (
+                    "tokio runtime notes",
+                    format!("evt_01OTHER{n}"),
+                    "rust::other",
+                    NOW_SEC - n * DAY_SECS,
+                    f64::from(n as u8),
+                    5.0,
+                    Layer::Episodic,
+                )
+            })
+            .collect();
+
+        // One commit with the lesson first; one commit per document; the
+        // lesson's commit before the event's.
+        let mut one: Vec<TieDoc> = vec![lesson.clone()];
+        one.extend(others.iter().cloned());
+        one.push(event.clone());
+        let mut each: Vec<Vec<TieDoc>> = vec![vec![event.clone()]];
+        each.extend(others.iter().cloned().map(|d| vec![d]));
+        each.push(vec![lesson.clone()]);
+        let mut split: Vec<Vec<TieDoc>> = vec![vec![lesson.clone()], others[..3].to_vec()];
+        let mut last = vec![event.clone()];
+        last.extend(others[3..].iter().cloned());
+        split.push(last);
+
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        for (name, layout) in [
+            ("one commit", vec![one]),
+            ("per doc", each),
+            ("lesson first", split),
+        ] {
+            let (_idx, fields, reader) = build_committed_index(&layout);
+            let top = owned_ids(&recall(&reader, &fields, "tokio", 1, NOW_SEC).expect("k=1"));
+            let four = owned_ids(&recall(&reader, &fields, "tokio", 4, NOW_SEC).expect("k=4"));
+            assert_eq!(top, ["evt_01TIE"], "{name}: k=1");
+            assert_eq!(
+                &four[..2],
+                ["evt_01TIE", "lsn_evt_01TIE"],
+                "{name}: k=4 {four:?}"
+            );
+            assert!(
+                four.starts_with(&top),
+                "{name}: {top:?} is not a prefix of {four:?}"
+            );
+            lists.push(four);
+        }
+        assert!(
+            lists.windows(2).all(|w| w[0] == w[1]),
+            "layouts disagree: {lists:?}"
+        );
+    }
+
+    /// A hand-made hit for the re-rank tests.
+    fn hit(
+        doc: u32,
+        id: &str,
+        content: &str,
+        bm25: f64,
+        salience: f64,
+    ) -> (DocAddress, RecallResult) {
+        (
+            DocAddress::new(0, doc),
+            RecallResult {
+                score: bm25 * salience,
+                bm25,
+                salience,
+                content: content.to_owned(),
+                timestamp_sec: 0,
+                pain: 5.0,
+                importance: 5.0,
+                recurrence: 0,
+                layer: Layer::Episodic,
+                skill_action: "rust::x".to_owned(),
+                source_harness: "claude-code".to_owned(),
+                event_id: id.to_owned(),
+            },
+        )
+    }
+
+    /// DRM-110 test 2: the BZR-1522 re-rank orders two hits that tie after
+    /// it by `event_id`, though its token search found the higher id first,
+    /// and its whole output is in score-then-id order.
+    #[test]
+    fn rank_missing_tokens_orders_ties_like_the_plain_path() {
+        let top = hit(0, "evt_t", "alpha alpha", 5.0, 1.0);
+        let other = hit(1, "evt_o", "alpha", 2.0, 1.0);
+        // Both hold the missing token and score the same.
+        let high = hit(2, "evt_q", "alpha beta", 1.0, 0.5);
+        let low = hit(3, "evt_p", "alpha beta", 1.0, 0.5);
+        let search =
+            |text: &str, _limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
+                Ok(match text {
+                    "beta" => vec![high.clone(), low.clone()],
+                    _ => vec![top.clone(), other.clone(), high.clone(), low.clone()],
+                })
+            };
+        let ranked = rank_missing_tokens(vec![top.clone(), other.clone()], "alpha beta", 4, search)
+            .expect("re-rank");
+        assert_eq!(ids(&ranked), ["evt_t", "evt_p", "evt_q", "evt_o"]);
+        assert_eq!(
+            ranked[1].score, ranked[2].score,
+            "the two promoted hits tie"
+        );
+        assert!(
+            ranked.windows(2).all(|w| {
+                w[0].score > w[1].score
+                    || (w[0].score == w[1].score && w[0].event_id < w[1].event_id)
+            }),
+            "score descending, then event_id ascending: {:?}",
+            ids(&ranked)
+        );
+    }
+
+    /// DRM-110 test 3: NaN orders last, and `-0.0` ties `0.0`, so the id
+    /// decides between them.
+    #[test]
+    fn score_key_orders_nan_last_and_zeroes_equal() {
+        let results = |scores: &[(f64, &str)]| -> Vec<RecallResult> {
+            scores
+                .iter()
+                .map(|&(score, id)| hit(0, id, "", score, 1.0).1)
+                .collect()
+        };
+        let mut mixed = results(&[
+            (f64::NAN, "e1"),
+            (1.0, "e2"),
+            (0.0, "e3"),
+            (-0.0, "e4"),
+            (f64::INFINITY, "e5"),
+        ]);
+        mixed.sort_by(recall_order);
+        assert_eq!(ids(&mixed), ["e5", "e2", "e3", "e4", "e1"]);
+
+        let mut zeros = results(&[(0.0, "b"), (-0.0, "a")]);
+        zeros.sort_by(recall_order);
+        assert_eq!(
+            ids(&zeros),
+            ["a", "b"],
+            "-0.0 equals 0.0, so the id decides"
+        );
+    }
+
+    mod prefix {
+        use super::*;
+        use proptest::prelude::*;
+
+        const CONTENTS: [&str; 4] = [
+            "tokio runtime",
+            "tokio axum handler",
+            "axum runtime error",
+            "tokio",
+        ];
+        const WORDS: [&str; 5] = ["tokio", "runtime", "axum", "handler", "error"];
+        const KEYS: [&str; 2] = ["rust::tokio", "rust::axum"];
+
+        /// One document: content, pain, importance, age, key and commit slot,
+        /// each from a small set so that whole documents repeat and tie.
+        fn doc() -> impl Strategy<Value = (usize, usize, usize, usize, usize, usize)> {
+            (
+                0..CONTENTS.len(),
+                0..3usize,
+                0..3usize,
+                0..2usize,
+                0..KEYS.len(),
+                0..3usize,
+            )
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// DRM-110 test 4: on a store full of ties, `recall(k)` is a
+            /// prefix of `recall(k + 1)`, for any segment layout. The event
+            /// ids are a random permutation of the documents' order, so a
+            /// segment does not meet its ties in id order.
+            #[test]
+            fn prefix_property(
+                (docs, ids) in prop::collection::vec(doc(), 1..=40).prop_flat_map(|docs| {
+                    let order: Vec<usize> = (0..docs.len()).collect();
+                    (Just(docs), Just(order).prop_shuffle())
+                }),
+                commits in 1..=3usize,
+                word in 0..WORDS.len(),
+                k in 0..=20usize,
+            ) {
+                let mut groups: Vec<Vec<TieDoc>> = vec![Vec::new(); commits];
+                for (n, &(content, pain, importance, age, key, slot)) in docs.iter().enumerate() {
+                    groups[slot % commits].push((
+                        CONTENTS[content],
+                        format!("evt_{:04}", ids[n]),
+                        KEYS[key],
+                        NOW_SEC - age as i64 * DAY_SECS,
+                        [3.0, 6.0, 9.0][pain],
+                        [3.0, 6.0, 9.0][importance],
+                        Layer::Episodic,
+                    ));
+                }
+                let (_idx, fields, reader) = build_committed_index(&groups);
+                let at = |k: usize| owned_ids(&recall(&reader, &fields, WORDS[word], k, NOW_SEC).expect("recall"));
+                let (shorter, longer) = (at(k), at(k + 1));
+                prop_assert!(
+                    longer.starts_with(&shorter),
+                    "k={}: {:?} is not a prefix of k+1: {:?}", k, shorter, longer
+                );
+            }
+        }
     }
 
     /// BZR-194 fixtures: `(content, event_id, skill_action, timestamp_sec, pain, layer)`.
@@ -1398,5 +1825,401 @@ mod tests {
                 "one-off pain {one_off_pain}"
             );
         }
+    }
+
+    // ── DRM-108: recall takes plain words, not Tantivy's grammar ─────────────
+
+    /// Event A of [`WordsStore`]: `tokio runtime panics`.
+    const WORDS_A: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    /// Event B of [`WordsStore`]: `axum handler`.
+    const WORDS_B: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FB1";
+
+    /// One fixed store for the DRM-108 tests: 20 events written to the
+    /// episodic log first, then indexed by the first open's coverage pass, as
+    /// every store is (AGENTS.md: the index is a function of the log). Fields
+    /// drop in order: the handle goes before its lock and the folder.
+    struct WordsStore {
+        handle: crate::server::tantivy_handle::TantivyIndexHandle,
+        _lock: crate::writer_lock::WriterLock,
+        fields: SchemaFields,
+        _dir: tempfile::TempDir,
+    }
+
+    impl WordsStore {
+        /// The 41-letter run between `foo_` and `_bar` that `RemoveLongFilter`
+        /// drops, leaving a position gap (Amendment 2).
+        fn long_word() -> String {
+            "a".repeat(41)
+        }
+
+        /// Write the log, then open the store. Call inside a tokio runtime:
+        /// the open starts the indexer task.
+        fn open() -> Self {
+            use crate::layout::AgentRoot;
+            use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+            use crate::writer_lock::{WriterKind, WriterLock};
+            use dreamd_protocol::{AgentLearning, EventId};
+
+            let gap = format!("foo_{}_bar appears in a generated name", Self::long_word());
+            // (id suffix, content, skill_action, days old, pain, importance)
+            let events: Vec<(&str, &str, &str, i64, f32, f32)> = vec![
+                ("B0", "tokio runtime panics", "rust::tokio", 1, 8.0, 8.0),
+                ("B1", "axum handler", "rust::axum", 1, 6.0, 6.0),
+                (
+                    "B2",
+                    "tokio scheduler starves the runtime under load",
+                    "rust::tokio",
+                    3,
+                    5.0,
+                    6.0,
+                ),
+                (
+                    "B3",
+                    "axum handler error returns a rejection",
+                    "rust::axum::error",
+                    2,
+                    7.0,
+                    7.0,
+                ),
+                (
+                    "B4",
+                    "error handling in rust with thiserror",
+                    "rust::error_handling",
+                    5,
+                    6.0,
+                    5.0,
+                ),
+                (
+                    "B5",
+                    "an axum extractor error",
+                    "rust::axum::extract",
+                    4,
+                    5.0,
+                    8.0,
+                ),
+                (
+                    "B6",
+                    "rust error handling: rust error handling notes",
+                    "rust::error_handling",
+                    1,
+                    6.0,
+                    6.0,
+                ),
+                ("B7", "foo_bar baz config", "rust::config", 2, 6.0, 6.0),
+                ("B8", "bar then foo and baz", "rust::config", 2, 6.0, 6.0),
+                (
+                    "B9",
+                    "dead-lock in a tokio mutex",
+                    "rust::tokio::sync",
+                    3,
+                    7.0,
+                    6.0,
+                ),
+                (
+                    "BA",
+                    "the lock is dead after a panic",
+                    "rust::sync",
+                    2,
+                    6.0,
+                    6.0,
+                ),
+                ("BB", gap.as_str(), "rust::codegen", 2, 6.0, 6.0),
+                (
+                    "BC",
+                    "We don't deploy on Fridays.",
+                    "ops::deploy",
+                    6,
+                    6.0,
+                    9.0,
+                ),
+                (
+                    "BD",
+                    "parse_config() panics on an empty file",
+                    "rust::config",
+                    2,
+                    7.0,
+                    6.0,
+                ),
+                (
+                    "BE",
+                    "update README.md with an install section",
+                    "docs::readme",
+                    8,
+                    4.0,
+                    5.0,
+                ),
+                (
+                    "BF",
+                    "std::sync::Mutex poisoning after a panic",
+                    "rust::sync",
+                    3,
+                    8.0,
+                    7.0,
+                ),
+                (
+                    "BG",
+                    "what's the runtime cost of tokio::spawn",
+                    "rust::tokio",
+                    2,
+                    5.0,
+                    5.0,
+                ),
+                (
+                    "BH",
+                    "retry on 4xx responses is a bug",
+                    "http::retry",
+                    4,
+                    6.0,
+                    7.0,
+                ),
+                (
+                    "BJ",
+                    "run the tests with --verbose",
+                    "rust::testing",
+                    7,
+                    3.0,
+                    4.0,
+                ),
+                (
+                    "BK",
+                    "cargo test fails to pass on CI",
+                    "rust::testing",
+                    2,
+                    6.0,
+                    6.0,
+                ),
+            ];
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = AgentRoot::new(dir.path());
+            std::fs::create_dir_all(root.episodic_dir()).expect("episodic dir");
+            let mut log = String::new();
+            for (suffix, content, skill_action, days, pain, importance) in &events {
+                let learning = AgentLearning {
+                    schema_version: "1.0.0".to_string(),
+                    id: EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5F{suffix}"))
+                        .expect("event id"),
+                    timestamp: chrono::DateTime::from_timestamp(NOW_SEC - days * DAY_SECS, 0)
+                        .expect("timestamp"),
+                    pain: *pain,
+                    importance: *importance,
+                    pinned: false,
+                    skill_action: skill_action.to_string(),
+                    source_harness: "drm-108".to_string(),
+                    content: content.to_string(),
+                };
+                log.push_str(&serde_json::to_string(&learning).expect("serialize"));
+                log.push('\n');
+            }
+            std::fs::write(root.episodic_jsonl(), log).expect("write the log");
+
+            let lock = WriterLock::acquire(&root, WriterKind::Watch).expect("writer lock");
+            let handle =
+                TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
+            let (_, fields) = build_schema();
+            let store = Self {
+                handle,
+                _lock: lock,
+                fields,
+                _dir: dir,
+            };
+            assert_eq!(
+                store.recall("", 0).len(),
+                0,
+                "sanity: an empty query matches nothing"
+            );
+            store
+        }
+
+        fn reader(&self) -> &RecallReader {
+            self.handle.reader()
+        }
+
+        fn try_recall(&self, query: &str, k: usize) -> tantivy::Result<Vec<RecallResult>> {
+            recall(self.reader(), &self.fields, query, k, NOW_SEC)
+        }
+
+        fn recall(&self, query: &str, k: usize) -> Vec<RecallResult> {
+            self.try_recall(query, k)
+                .unwrap_or_else(|e| panic!("{query:?}: {e}"))
+        }
+
+        /// What recall returned before DRM-108: the same search, with the
+        /// query built by Tantivy's `QueryParser`, through the same collector
+        /// and the same BZR-1522 re-rank. With `rerank` false, the bag alone.
+        fn parser_recall(&self, query: &str, k: usize) -> Vec<RecallResult> {
+            self.parser_search(query, k, true)
+        }
+
+        fn parser_search(&self, query: &str, k: usize, rerank: bool) -> Vec<RecallResult> {
+            let searcher = self.reader().searcher();
+            let recurrence = self.reader().recurrence(&searcher).expect("recurrence");
+            let parser = QueryParser::for_index(searcher.index(), vec![self.fields.content]);
+            let search =
+                |text: &str, limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
+                    let parsed = parser.parse_query(text)?;
+                    let collector = SalienceCollector::new(limit, NOW_SEC, Arc::clone(&recurrence));
+                    let top: Vec<ScoredDoc> = searcher.search(&*parsed, &collector)?;
+                    hydrate_addressed(&searcher, &self.fields, top, limit)
+                };
+            let bag = search(query, k).unwrap_or_else(|e| panic!("parser {query:?}: {e}"));
+            if !rerank {
+                return bag.into_iter().map(|(_, result)| result).collect();
+            }
+            rank_missing_tokens(bag, query, k, search).expect("parser re-rank")
+        }
+    }
+
+    /// Each hit's id, BM25 bits, salience bits and score bits, in order.
+    fn bits(results: &[RecallResult]) -> Vec<(String, u64, u64, u64)> {
+        results
+            .iter()
+            .map(|r| {
+                (
+                    r.event_id.clone(),
+                    r.bm25.to_bits(),
+                    r.salience.to_bits(),
+                    r.score.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    /// DRM-108 test 1: no text is an error, whatever its punctuation.
+    #[tokio::test]
+    async fn any_text_is_a_query() {
+        let store = WordsStore::open();
+        for query in [
+            "What's the best way to handle errors here?",
+            "Don't retry on 4xx",
+            "I can't get `cargo test` to pass",
+            "run with --verbose",
+            "why does parse_config() panic",
+            "Update README.md: add an install section",
+            "see https://docs.rs/tokio/latest",
+            "add [dev-dependencies]",
+            "Handle the case where x > 10 && y < 5",
+            "We don't deploy on Fridays.",
+            "std::sync::Mutex",
+            "fn main() {",
+            "axum AND",
+            "*",
+            "timestamp_sec:[0 TO 9999999999]",
+            "+axum +tokio",
+            "NOT tokio",
+            "\"unbalanced",
+            "(open",
+            "rust::error",
+        ] {
+            let result = store.try_recall(query, 5);
+            assert!(result.is_ok(), "{query:?}: {result:?}");
+        }
+    }
+
+    /// DRM-108 test 2 (D1, Amendment 2): every query the parser took scores
+    /// bit for bit as it did: the same ids in the same order, with the same
+    /// BM25, salience and score. `rust error handling axum` takes the
+    /// BZR-1522 re-rank, so the reference runs it too.
+    #[tokio::test]
+    async fn plain_queries_score_as_the_parser_did() {
+        let store = WordsStore::open();
+        let gap = format!("foo_{}_bar", WordsStore::long_word());
+        for query in [
+            "tokio",
+            "tokio runtime",
+            "tokio tokio runtime",
+            "Tokio tokio runtime",
+            "foo_bar baz",
+            "dead-lock tokio",
+            "axum handler error",
+            "zzznotindexed",
+            "rust error handling axum",
+            // DRM-109 (from DRM-108's verify): a tab and a newline split words
+            // as a space does.
+            "axum\thandler\nerror tokio",
+            gap.as_str(),
+        ] {
+            let want = store.parser_recall(query, 20);
+            assert_eq!(
+                want.is_empty(),
+                query == "zzznotindexed",
+                "{query:?}: the fixture matches every query but zzznotindexed"
+            );
+            assert_eq!(bits(&store.recall(query, 20)), bits(&want), "{query:?}");
+        }
+        // The BZR-1522 path changed the top hit: the bag's lacks `axum`.
+        const RERANKED: &str = "rust error handling axum";
+        let bag_top = store.parser_search(RERANKED, 20, false)[0].content.clone();
+        let top = store.recall(RERANKED, 20)[0].content.clone();
+        assert!(
+            !bag_top.contains("axum") && top.contains("axum"),
+            "the re-rank ran: bag top {bag_top:?}, top {top:?}"
+        );
+    }
+
+    /// DRM-108 test 3: text with no words matches nothing.
+    #[tokio::test]
+    async fn text_with_no_words_matches_nothing() {
+        let store = WordsStore::open();
+        let long = WordsStore::long_word();
+        for query in ["", "   ", "*", "!!! ???", long.as_str()] {
+            assert_eq!(bits(&store.recall(query, 20)), vec![], "{query:?}");
+        }
+    }
+
+    /// DRM-108 test 4 (D3): operators and quote marks are words.
+    #[tokio::test]
+    async fn operators_are_words() {
+        let store = WordsStore::open();
+        let ids_of = |query: &str| -> Vec<String> {
+            store
+                .recall(query, 20)
+                .into_iter()
+                .map(|r| r.event_id)
+                .collect()
+        };
+        let both = ids_of("+axum +tokio");
+        assert!(
+            both.iter().any(|id| id == WORDS_A) && both.iter().any(|id| id == WORDS_B),
+            "+axum +tokio returns A and B: {both:?}"
+        );
+        assert_eq!(
+            ids_of("\"tokio runtime\"").first().map(String::as_str),
+            Some(WORDS_A),
+            "\"tokio runtime\" is two words, and A ranks first"
+        );
+        assert!(
+            ids_of("NOT tokio").iter().any(|id| id == WORDS_A),
+            "NOT tokio returns A"
+        );
+    }
+
+    /// DRM-108 test 5: the exclusion wraps the word query. A is gone, and
+    /// every other hit scores as in [`recall`].
+    #[tokio::test]
+    async fn exclusion_wraps_the_word_query() {
+        let store = WordsStore::open();
+        const QUERY: &str = "What's tokio";
+        let all = store.recall(QUERY, 20);
+        assert!(
+            all.iter().any(|r| r.event_id == WORDS_A),
+            "A matches {QUERY:?} without the exclusion"
+        );
+        let exclusion = RecallExclusion {
+            ids: vec![WORDS_A.to_string()],
+            cluster_prefixes: Vec::new(),
+        };
+        let kept = recall_excluding(
+            store.reader(),
+            &store.fields,
+            QUERY,
+            20,
+            &exclusion,
+            NOW_SEC,
+        )
+        .expect("recall_excluding");
+        let without_a: Vec<RecallResult> =
+            all.into_iter().filter(|r| r.event_id != WORDS_A).collect();
+        assert_eq!(bits(&kept), bits(&without_a));
     }
 }

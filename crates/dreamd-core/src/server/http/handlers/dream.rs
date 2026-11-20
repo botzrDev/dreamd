@@ -100,10 +100,18 @@ pub(crate) async fn post_dream(
             body["autobiography"] = report;
         }
     }
+    // DRM-115: the cycle kept LESSONS.md.
+    if let Some(held) = &cycle.lesson_held {
+        if let Ok(value) = serde_json::to_value(held) {
+            body["lesson_held"] = value;
+        }
+    }
     let notices = dream_cycle::cycle_notices(
         &AgentRoot::new(&entry.root),
         no_llm,
-        crate::llm::resolve_llm_credentials().is_some(),
+        crate::llm::no_key_for(std::path::Path::new(&entry.root)).as_ref(),
+        dream_cycle::KeyHolder::Daemon,
+        cycle.lesson_held.as_ref(),
     );
     if !notices.is_empty() {
         body["notices"] = serde_json::json!(notices);
@@ -168,7 +176,7 @@ async fn run_cycle(
                     commit_autobiography: true,
                     index: IndexBackend::Sender(index_sender),
                 },
-                |now_sec, cycle_date| {
+                |now_sec, cycle_date, held| {
                     dispatch_cycle(
                         supervisor,
                         agent_root.clone(),
@@ -176,6 +184,7 @@ async fn run_cycle(
                         cycle_date,
                         no_llm,
                         share_personal,
+                        held,
                     )
                 },
             )
@@ -198,6 +207,9 @@ async fn run_cycle(
 /// [`DreamCycleError::CoordinatorBusy`] (503), as for any request. Commit waits
 /// for inbox space instead: by then the model call is spent, and the commit is
 /// a bounded file operation.
+///
+/// `held` (DRM-115): the cycle keeps `LESSONS.md`, so it skips the model call
+/// and tells the commit to keep the file.
 async fn dispatch_cycle(
     supervisor: Arc<Supervisor>,
     agent_root: AgentRoot,
@@ -205,6 +217,7 @@ async fn dispatch_cycle(
     cycle_date: String,
     no_llm: bool,
     share_personal: bool,
+    held: bool,
 ) -> Result<DecayResult, DreamCycleError> {
     let (tx, rx) = oneshot::channel();
     match supervisor
@@ -235,18 +248,24 @@ async fn dispatch_cycle(
             ))
         }
     };
-    let body = dream_cycle::compose(
-        &agent_root,
-        prepared.selected.as_ref(),
-        no_llm,
-        share_personal,
-    )
-    .await;
+    let body = if held {
+        // The file is kept, so a body would be thrown away; make no call.
+        crate::consolidation::LessonBodySource::Deterministic
+    } else {
+        dream_cycle::compose(
+            &agent_root,
+            prepared.selected.as_ref(),
+            no_llm,
+            share_personal,
+        )
+        .await
+    };
     let (tx, rx) = oneshot::channel();
     let commit = MemoryCoordinatorMsg::CommitCycle {
         ticket: prepared.ticket,
         cycle_date,
         body,
+        held,
         response_tx: tx,
     };
     // The model call is spent; wait for inbox space.

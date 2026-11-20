@@ -29,7 +29,7 @@ dreamd\-dream(1)
 Run a dream cycle: write LESSONS.md and prune decayed episodic events. Uses a configured LLM, or the deterministic exemplar when there is no key
 .TP
 dreamd\-forget(1)
-Remove one episodic event and the lesson state that names it
+Remove one episodic event and the lesson state built from it
 .TP
 dreamd\-init(1)
 Scaffold a new per\-project .agent/ store and register it
@@ -68,7 +68,7 @@ dreamd\-uninstall(1)
 Stop local dreamd servers, unregister this project, and clear caches
 .TP
 dreamd\-update(1)
-Stop local dreamd servers and clear the native binary cache so `npx \-y dreamd\-mcp` fetches the latest release
+Stop local dreamd servers, keep this version\*(Aqs cached binary and remove the others
 .TP
 dreamd\-watch(1)
 Run the daemon in the foreground until it gets SIGINT or SIGTERM

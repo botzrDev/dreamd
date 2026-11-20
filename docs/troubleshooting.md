@@ -67,7 +67,7 @@ DREAMD_LOG_FORMAT=json dreamd watch  # console lines as JSON
 4. A `DREAMD_SOCK` the daemon was not started with. `dreamd watch` and every client resolve it the same way, so the daemon and the MCP client need the same value, or neither sets it (then both use `~/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1, and `dreamd watch` exits 1 the same way
 5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
 6. Native Windows — the npx shim has no Windows binary and exits 1. Build `dreamd` and start `dreamd watch` first (see [windows.md](./windows.md))
-7. A daemon of another dreamd version, such as a 1.2.x `dreamd watch` that `setup` started before an upgrade. The tool call fails with `version mismatch: client …, daemon …`, or `daemon unknown` for a daemon from a release without this check. Under `npx -y dreamd-mcp`, run `npx -y dreamd-mcp update` to stop it, then `npx -y dreamd-mcp watch`, then reload the harness. With a `dreamd` binary, stop it and run `dreamd watch`. If a `dreamd service` unit runs the daemon, follow `update` with `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`, because the unit names the old version's binary. Or point `DREAMD_SOCK` at a daemon of this version
+7. A daemon of another dreamd version, such as a 1.2.x `dreamd watch` that `setup` started before an upgrade. The tool call fails before anything is sent to the daemon, so nothing is written: the client asks the daemon its version first. The message is `version mismatch: client …, daemon …`, or `daemon unknown` for a daemon from a release without this check. When the message says `This client is older than the daemon`, update the client instead of restarting the daemon: install the daemon's version, or under npx, if your MCP config pins a version with an `@` after `dreamd-mcp`, change it to the floating `npx -y dreamd-mcp` and reload the harness. Otherwise the daemon is the older side. Under `npx -y dreamd-mcp`, run `npx -y dreamd-mcp update` to stop it, then `npx -y dreamd-mcp watch`, then reload the harness. With a `dreamd` binary, stop it and run `dreamd watch`. If a `dreamd service` unit runs the daemon, follow `update` with `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`, because the unit names the old version's binary. Or point `DREAMD_SOCK` at a daemon of this version
 8. A resumed Claude Code session from another folder. Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
 
 **Fix:**
@@ -81,7 +81,31 @@ npx -y dreamd-mcp doctor       # verify store health
 
 Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)`. If no daemon is running there is no default-stderr fallback line; `DREAMD_LOG=debug` logs `daemon not found … running in-process`.
 
+Running `dreamd mcp` or `npx -y dreamd-mcp` by hand starts the stdio server, which waits for a harness. On a terminal it prints `dreamd mcp: MCP server on stdio, waiting for a harness. …` to stderr and serves until Ctrl-C. To connect a harness, run `dreamd setup` (or `npx -y dreamd-mcp setup`).
+
 **Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per user login.
+
+---
+
+## A tool call or `dreamd dream` times out, or `status` says `not responding`
+
+**Symptom:** `search_nodes` or `append_node` fails with `the daemon at <socket> did not answer within 30 s`, `dreamd dream` exits 1 with the same sentence (`within 120 s`), or `dreamd status` prints `daemon: not responding (it accepted a connection but did not answer within 2 s)` and exits 1.
+
+**Cause:** a process accepts connections on the daemon socket but does not answer. Usually that is a `dreamd watch` stopped with Ctrl-Z or `kill -STOP`, or one that is wedged. A stopped process's socket still accepts connections, so the clients wait for the deadline and then give up. They do not fall back to running in-process, because that daemon still holds the store's writer lock.
+
+**Fix:**
+
+```bash
+pgrep -a dreamd                 # find the watch's pid
+kill -CONT <pid>                # a stopped watch runs again
+dreamd status                   # daemon: running
+```
+
+If it is not stopped but wedged, stop it with `kill -KILL <pid>` and start `dreamd watch` again. Use SIGKILL for a stopped process too if you do not want it to run on: a stopped process does not act on SIGTERM until it runs again.
+
+An `append_node` that timed out may have been written. Retry it with the same `client_dedup_key`, and the daemon will not store it twice.
+
+On a slow machine, where a healthy first call for a large project takes longer than 30 s, set `DREAMD_CLIENT_TIMEOUT` (whole seconds) for the harness and for `dreamd dream`. See [Client deadlines](./http-api.md#client-deadlines).
 
 ---
 
@@ -177,6 +201,30 @@ The episodic log (`.agent/episodic/`) and `LESSONS.md` are not ignored, so they 
 
 ---
 
+## `git clean -fd` deleted the episodic log
+
+**Symptom:** `dreamd doctor` prints `episodic_log: missing  [WARNING: …]` or `episodic_log: no records  [WARNING: …]`, and its `index_freshness` line says the index holds events the episodic log does not.
+
+**Why:** `git clean -fd` deletes untracked files, and `.agent/` stays untracked until you commit it. `git reset --hard` deletes a log that is only staged. Only `.agent/.dreamd/` is gitignored; the episodic log and `LESSONS.md` are meant to be committed. `dreamd setup` prints the commit command, and `dreamd doctor` and `dreamd status` print `memory_in_git: not committed` until git has a commit of the log.
+
+**What to do:**
+
+1. Stop `dreamd watch` and your agents. The next dreamd writer starts a new, empty log, and after one new event dreamd's next index check deletes the old events from the index when there are fewer than 64 of them.
+2. Restore `.agent/episodic/AGENT_LEARNINGS.jsonl` from a backup or your editor's local history. If an earlier commit holds it, `git log --all -- .agent/episodic/AGENT_LEARNINGS.jsonl` finds that commit.
+3. Run `dreamd doctor` again. The warning goes once the log holds the events.
+
+If no copy is left, the events are lost: the index holds their text, but dreamd cannot write them back to the log. `dreamd doctor --repair` refuses while it would delete them from the index, and `dreamd doctor --repair --allow-empty-log` rebuilds an empty index.
+
+**Next time:** commit the store after setup:
+
+```bash
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+```
+
+Or add `.agent/` to `.gitignore` to keep memory out of git; doctor then prints `memory_in_git: ignored`. `git clean -fdx` (lowercase `x`) deletes ignored files too, so keep a backup in that case.
+
+---
+
 ## How do I reset or clear memory?
 
 | Goal | Command |
@@ -184,10 +232,10 @@ The episodic log (`.agent/episodic/`) and `LESSONS.md` are not ignored, so they 
 | Clear session scratchpad | `dreamd reset workspace` (asks first; `--yes` skips the prompt and is required when stdin is not a tty) |
 | Remove one memory | `dreamd forget <event id>` — stop the daemon first; `--dry-run` previews. Find the id with `dreamd recall <query>` |
 | Uninstall dreamd (stop servers, unregister project, clear caches; keeps `.agent/` stores) | `dreamd uninstall` — flags and details: [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
-| Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
+| Update to the latest release | `dreamd update`, then reload your MCP harness and re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp |
 | Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project`. The store stays. Run `dreamd init` again to put the registry entry back. |
 | Remove the login service (systemd unit / LaunchAgent / scheduled task) | `dreamd service uninstall` — see [install.md](./install.md#removing-the-service) |
-| Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair` (or use *Full fresh store* below for a clean slate) |
+| Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair --allow-empty-log`; `--repair` alone refuses while the index holds events the log does not (or use *Full fresh store* below for a clean slate) |
 | Full fresh store | Delete `.agent/` and re-run `dreamd init` |
 
 **Warning:** Deleting `.agent/` is destructive. Commit or back up first if the store has value. There is no `dreamd reset --all`.
@@ -238,9 +286,9 @@ dreamd init
 
 ## No `.agent/` directory found
 
-**Symptom:** `dreamd: no .agent/ store found in … or any parent directory — run \`dreamd init\` first.` (`doctor`, `dream`), `dreamd: error — no .agent/ directory found. Run \`dreamd init\` first.` (`recall`, `migrate`, `service install`, …), `dreamd watch: no project root found from …`, or MCP `coordinator unavailable: no agent root found`. All but the MCP one exit 2.
+**Symptom:** `dreamd: no .agent/ store found in … or any parent directory — run \`dreamd init\` first.` (`doctor`, `dream`), `dreamd: error — no .agent/ directory found. Run \`dreamd init\` first.` (`recall`, `migrate`, `service install`, …), `dreamd watch: no project root found from …`, or, from both MCP tools, `this folder is not set up for dreamd: there is no .agent/ store in … or a folder above it. Run \`dreamd setup\` in the project folder, then restart this MCP server.` (`npx -y dreamd-mcp setup` under the npm shim). All but the MCP one exit 2.
 
-**Cause:** Project never initialized, or CWD is not inside a project with `.agent/`.
+**Cause:** Project never initialized, or CWD is not inside a project with `.agent/`. A store in `~/.agent/` does not count: that is the daemon home, and the walk up skips it, so a folder under your home with no store of its own finds none. If doctor or status also prints a `daemon_home_store:` line, see [A project store in the daemon home](#a-project-store-in-the-daemon-home).
 
 **Fix:**
 
@@ -251,7 +299,48 @@ dreamd init
 
 For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (see [adapters/cursor/README.md](../adapters/cursor/README.md)).
 
-**Prevention:** Run `dreamd init` once per repo; commit `.agent/` (except `.agent/.dreamd/` which is gitignored).
+That folder must hold `.agent/` itself; a subfolder does not count. A relative path is taken from the working directory the harness starts `dreamd mcp` in, and `~` is not expanded in an MCP config, so write the full path. Otherwise `dreamd mcp` exits 2 and says why.
+
+**Prevention:** Run `dreamd init` once per repo; commit `.agent/` (except `.agent/.dreamd/` which is gitignored). After `dreamd setup` (or `init`) in a folder your harness already had open, restart its MCP server: one that started with no store keeps answering "not set up" until it starts again.
+
+---
+
+## A project store in the daemon home
+
+**Symptom:** `dreamd doctor` (which then exits 1) and `dreamd status` print:
+
+```text
+daemon_home_store: /home/you/.agent holds a project store (events: N)  [WARNING: …]
+```
+
+and `dreamd service uninstall --purge` exits 2 with `refusing to purge /home/you/.agent: it holds a project store (…)` or `… it holds the store of the registered project /home/you …`.
+
+**Cause:** `~/.agent/` is the daemon home: it holds `registry.toml`, the socket, `dreamd.log` and, on Windows, `auth.json`. It is never a project store. A dreamd before 1.4.0 could still use it as one: a folder under your home with no store of its own bound to your home directory, so an MCP append landed in `~/.agent/episodic/`, and `dreamd init` in a git repo at your home directory registered it. dreamd now skips that store. Nothing reads it, nothing moves it, and `--purge` will not delete it for you.
+
+**Fix with events (`events: N`, N > 0):** move the store into the project it belongs to, one that has no `.agent/` yet. Stop the daemon first: `systemctl --user stop dreamd.service`, or end `dreamd watch`. There is no `dreamd service stop`.
+
+```bash
+mkdir ~/your-project/.agent
+# Move the ones that exist:
+mv ~/.agent/episodic ~/.agent/semantic ~/.agent/personal ~/.agent/working ~/your-project/.agent/
+rm -rf ~/.agent/.dreamd          # derived state; the index rebuilds from the log
+cd ~/your-project
+dreamd init                      # registers the store it finds (npx -y dreamd-mcp init)
+grep -qxF '/.agent/.dreamd/' .gitignore || echo '/.agent/.dreamd/' >> .gitignore
+git add .agent .gitignore && git commit -m "Move dreamd memory into the project"
+```
+
+**Fix with `events: 0`:** nothing to keep. Remove it:
+
+```bash
+rm -rf ~/.agent/episodic ~/.agent/semantic ~/.agent/personal ~/.agent/working ~/.agent/.dreamd
+```
+
+**If your home directory is registered** (the purge refusal names `the registered project /home/you`), drop that entry from your home directory: `cd ~ && dreamd init --uninstall-project`.
+
+None of these touches `registry.toml`, the socket, `dreamd.log` or `auth.json`. Run `dreamd doctor` again: the `daemon_home_store:` line is gone.
+
+**Prevention:** Run `dreamd setup` or `dreamd init` in a project folder, never in your home directory; both now refuse there.
 
 ---
 
@@ -286,7 +375,13 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 `AGENT_LEARNINGS.jsonl` and `~/.agent/registry.toml` are plain files you may edit. The write paths (`append_node`, `POST /api/v1/learn`, `dreamd init`) refuse what these warnings describe; a line written by hand skips those checks. The readers keep working, and `dreamd doctor` tells you what they are doing with the line. Each of these warnings makes `dreamd doctor` exit 1. Line numbers are lines of the file, blank and malformed lines included; doctor lists the first five.
 
-The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNINGS.jsonl` rebuild it: stop `dreamd watch`, run `dreamd doctor --repair`, start `dreamd watch` again.
+To fix a line by hand, stop dreamd's writer for the project first (`dreamd watch`, or the harness session running `dreamd mcp`), edit the line, then run `dreamd doctor --repair`. Until the repair, the index keeps the old text and scores, and `dreamd doctor` reports `index_freshness: stale content`. Add new records through `append_node` or `POST /api/v1/learn`, not by writing the file.
+
+### `index_freshness: stale content`
+
+**What the reader does:** Recall scores and returns the indexed copy of the record: its `content`, `skill_action`, timestamp, `pain` and `importance` as they were when it was indexed, not the line as it reads now. A writer's open does not re-index a changed line. Doctor names the first three changed ids.
+
+**Fix:** Stop dreamd's writer for the project (`dreamd watch`, or the harness session running `dreamd mcp`), then run `dreamd doctor --repair`, which rebuilds the index from the log.
 
 ### `score_range: N line(s) …`
 
@@ -306,6 +401,14 @@ The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNING
 
 **Fix:** Set `timestamp` to when the learning happened, in RFC 3339 UTC (for example `2026-10-31T09:30:00Z`), then rebuild the index as above. Doctor flags a timestamp more than 24 hours ahead of this machine's clock; if it flags every recent line, check the clock first.
 
+### `stored_secrets: N record(s) …`
+
+The lines after it name one record each, as `line N: evt_…`. Doctor lists every record that matches, not the first five, and prints none of their content. The check runs only while `redaction` is on.
+
+**What the reader does:** Nothing different. The content is stored, indexed and recalled as written. A record is listed when a redaction pattern matches its content: it was stored before dreamd caught that shape, or while `redaction` was off. Doctor lists both kinds.
+
+**Fix:** Check each line doctor names, for example with `sed -n '12p' .agent/episodic/AGENT_LEARNINGS.jsonl`. If it holds a secret, `dreamd forget <id>` removes the record from the log, the index, and any lesson it is the exemplar of. `forget` refuses while a daemon is live, so stop `dreamd watch` first. A log you committed keeps the secret in git history, so rotate the secret as well. If the match is not a secret, set `redaction = false` in the project's config ([configuration.md](./configuration.md#redaction)), which also turns this check off.
+
 ### `registry: parse error at line N`
 
 **Symptom:** Besides the doctor line, `dreamd status` prints `(not registered)` for a project you registered, and the daemon answers every request with `500 {"error":"registry read failed"}`. `dreamd mcp` in daemon mode reports that as `daemon error 500 Internal Server Error: {"error":"registry read failed"}`. `registry: error  [WARNING: could not read …]` is the same failure for a file that is not UTF-8 or cannot be read.
@@ -315,6 +418,28 @@ The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNING
 **Fix:** Edit the line doctor names. Each entry is a `[[projects]]` line followed by `root = "/absolute/path/to/project"`. Or delete `~/.agent/registry.toml` and run `dreamd init` in each project; `init` registers an existing `.agent/` without changing it. The daemon reads the fixed file on its next request; no restart is needed.
 
 **Prevention:** Write learnings through `append_node` or `POST /api/v1/learn`, and change the registry with `dreamd init` and `dreamd init --uninstall-project`.
+
+---
+
+## A clone or a worktree
+
+A clone or a `git worktree` of a project has the committed memory, but not what git leaves out. [GUIDE §9](../GUIDE.md#9-clones-and-worktrees) says what is shared and what each checkout keeps.
+
+### `the store in … is not registered with the running daemon`
+
+**Symptom:** With `dreamd watch` running, both MCP tools answer `-32600` `` the store in <folder> is not registered with the running daemon. Run `dreamd init` in <folder> once: it registers the existing store without changing its files (a clone or a worktree is not registered until then), and the next call works without a restart. `` Under the npm shim the command it names is `npx -y dreamd-mcp init`. Over HTTP the same request is `404 {"error":"agent root not registered"}`.
+
+**Cause:** The daemon serves only the stores in `~/.agent/registry.toml`. A fresh clone or worktree is a new path, so it is not registered until `init` runs there.
+
+**Fix:** Run the command the message names, in the folder it names. `init` registers the existing store, re-creates the folders git does not keep, and changes no file. The daemon reads the registry again when it changes, so the next call works without restarting the daemon or the MCP server.
+
+### ``missing_subdir: …  [WARNING: run `dreamd init` to re-scaffold]``
+
+**Symptom:** `dreamd doctor` prints `missing_subdir: personal/` (or `semantic/`, `working/`, `episodic/`, `.dreamd/`) and exits 1, typically in a fresh clone or worktree.
+
+**Cause:** Git keeps no empty folder and ignores `.agent/.dreamd/`, so a clone has no `personal/`, no `.dreamd/`, and no `semantic/` until a dream cycle has written `LESSONS.md`.
+
+**Fix:** Run `dreamd init` in the project. On an existing store it re-creates each missing folder and prints `dreamd: re-created missing .agent/ folders: …`. It creates no file: a missing `episodic/AGENT_LEARNINGS.jsonl` stays missing (see [`git clean -fd` deleted the episodic log](#git-clean--fd-deleted-the-episodic-log)), and the project's `config.toml` stays missing, so the user config and the defaults apply. If a scaffold path is a file rather than a folder, `init` prints `dreamd: error — .agent/<name> is not a directory`, exits 1 and writes nothing; move that file away and run `init` again.
 
 ---
 

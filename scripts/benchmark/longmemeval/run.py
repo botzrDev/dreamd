@@ -273,7 +273,10 @@ def dreamd_backend(entry: dict, corpus: list[str], corpus_ids: list[str],
 
     q = sanitize_query(query)
     t0 = time.monotonic()
-    r = subprocess.run([str(cfg.binary), "blame", q, "-k", str(len(lines)), "--json"],
+    # `blame -k` is at most 100 (DRM-109), so this asks for at most 100 hits.
+    # Session-level @30 and @50 may be truncated until Benchmark v0 (DRM-78-85)
+    # replaces this runner.
+    r = subprocess.run([str(cfg.binary), "blame", q, "-k", str(min(len(lines), 100)), "--json"],
                        cwd=proj, env=env, capture_output=True, text=True)
     t_query = time.monotonic() - t0
     if r.returncode != 0:

@@ -50,3 +50,8 @@ jobs:
         env:
           PROPTEST_CASES: "1024"
         run: cargo test -p dreamd-protocol --test roundtrip_proptest
+
+      - name: Run edge proptest (256 cases)
+        env:
+          PROPTEST_CASES: "256"
+        run: cargo test -p dreamd-core --test edge_proptest

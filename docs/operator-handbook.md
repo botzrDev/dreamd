@@ -9,9 +9,9 @@ the pages for the other maintenance commands.
 | Command | What it does | Daemon must be stopped? | Reference |
 |---|---|---|---|
 | `dreamd archive --force-unpin` | Clear `pinned` so decay can remove an entry | yes | below |
-| `dreamd forget <id>` | Remove one episodic event and the lesson state that names it (`--dry-run`, `--proof <PATH>`) | yes (`--dry-run` does not check) | [provenance.md](./provenance.md) |
-| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Snapshot, name, compare and restore the memory files | `checkout` and `bisect` only | [branching-guide.md](./branching-guide.md) |
-| `dreamd doctor [--repair\|--cluster-health\|--provenance]` | Health checks; `--repair` rebuilds the Tantivy index and unlinks an orphaned socket | `--repair` only | [troubleshooting.md](./troubleshooting.md) |
+| `dreamd forget <id>` | Remove one episodic event and the lesson state built from it (`--dry-run`, `--proof <PATH>`) | yes (`--dry-run` does not check) | [provenance.md](./provenance.md) |
+| `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.2.0, removed in 2.0. Snapshot, name, compare and restore the memory files. New work uses git | `checkout` and `bisect` only | [branching-guide.md](./branching-guide.md) |
+| `dreamd doctor [--repair [--allow-empty-log]\|--cluster-health\|--provenance]` | Health checks; `--repair` rebuilds the Tantivy index and unlinks an orphaned socket. It refuses while the episodic log is missing or holds no record and the index holds events; `--allow-empty-log` rebuilds anyway | `--repair` only | [troubleshooting.md](./troubleshooting.md) |
 | `dreamd migrate --from 1.0.0 --to 1.0.0` | Schema migration stub (takes `.bak` copies) | no | [migrate.md](./migrate.md) |
 | `dreamd salience-drift`, `dreamd blame <query>` | Reports on salience and recall ranking (`salience-drift` also writes today's snapshot under `.agent/.dreamd/observability/`) | no | [observability.md](./observability.md) |
 | `dreamd service …` | Login service for `dreamd watch` | n/a | [install.md](./install.md) |
@@ -95,6 +95,6 @@ deliberate, destructive-adjacent action is at least announced:
 one-shot, and since AILAB-184 only the daemon (`dreamd watch`) writes to
 `~/.agent/dreamd.log`; a one-shot is console-only. Nor was it durable before:
 the file layer opened that log with `truncate(true)`, so the next `dreamd`
-invocation of any kind erased the line. If you need to keep it, redirect stderr
-yourself (`dreamd archive … 2>> unpin-audit.log`). A real append-mode/rotating
-daemon log is tracked as AILAB-285.
+invocation of any kind erased the line. The daemon log is appended to since
+1.4.0, but a one-shot's stderr never reaches it; to keep the line, redirect
+stderr yourself (`dreamd archive … 2>> unpin-audit.log`).

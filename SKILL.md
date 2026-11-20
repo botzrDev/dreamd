@@ -24,12 +24,12 @@ A search finds every node whose `append_node` returned before it. If the index n
 }
 ```
 
-| Field   | Type   | Required | Default |
-| ------- | ------ | -------- | ------- |
-| `query` | string | yes      | —       |
-| `k`     | number | no       | 5       |
+| Field   | Type            | Required | Default |
+| ------- | --------------- | -------- | ------- |
+| `query` | string          | yes      | —       |
+| `k`     | integer (0–100) | no       | 5       |
 
-Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Use plain words. A colon is query syntax, and a `skill_action` pasted as the query (for example `rust::error`) fails the search.
+Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Any text works as `query`: the user's request, code, paths and a `skill_action` are split into words, and quotes, colons, `AND`/`OR`, `+` and `-` are not operators.
 
 Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a lesson. It also carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can quote the hit and see which tool taught it.
 
@@ -38,7 +38,7 @@ Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a l
 - Starting a task in a project you've worked in before
 - The user references a past decision, error, or pattern
 - You're about to make a choice that may have a documented prior
-- Session start — `search_nodes` with the current task description as the query
+- Session start — `search_nodes` with the user's request as the query
 
 ---
 
@@ -62,7 +62,7 @@ Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a l
 | `skill_action`     | string | **yes**  | Clustering key. See naming rules below.                                                                           |
 | `pain`             | number | no       | 0–10. How disruptive is it to not know this? Default 5.0.                                                         |
 | `importance`       | number | no       | 0–10. How broadly applicable is this? Default 5.0.                                                                |
-| `client_dedup_key` | string | no       | Idempotency key (any string; convention: first 60 chars of content, lowercased, spaces → underscores). Prevents duplicate writes on retry. |
+| `client_dedup_key` | string | no       | Optional retry key, derived from the content. Resend the same key with the same arguments to retry one write: you get the first id back, with no second record. The same key with different content is stored as a new record. Keys are forgotten when the server restarts. |
 
 Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d the JSONL line (fdatasync-equivalent on Unix). The result text is `{"id":"evt_…","timestamp":"…","deduplicated":false}` — the server mints the id and timestamp. The HTTP learn path returns 201; the MCP tool does not.
 
@@ -107,7 +107,7 @@ python::deps::virtualenv_activation
 general::git::rebase_conflict_resolution
 ```
 
-Keep it lowercase, `::` -separated, language-first. The domain segment groups related learnings for the dream cycle. Be consistent — `rust::deps::cargo_workspace` clusters with other `rust::deps::*` entries.
+Keep it lowercase, `::` -separated, language-first. The domain segment groups related learnings for the dream cycle. Be consistent — `rust::deps::cargo_workspace` clusters with other `rust::deps::*` entries. Three events under one key, or under sibling keys with a shared parent, make a lesson; a bare language root like `rust` only counts events filed as exactly `rust`.
 
 ---
 
@@ -116,7 +116,7 @@ Keep it lowercase, `::` -separated, language-first. The domain segment groups re
 **On session start** (before doing any work on a known project):
 
 ```json
-search_nodes({ "query": "<current task description>", "k": 10 })
+search_nodes({ "query": "<the user's request>", "k": 10 })
 ```
 
 Read the results. If relevant learnings exist, apply them before proceeding.
@@ -137,9 +137,9 @@ append_node({
 
 ## The dream cycle
 
-dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. Clusters with ≥ 3 events in a 7- or 30-day window are promotion candidates; each cycle writes **one** lesson — the highest-salience exemplar from the top cluster. Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install).
+dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. A key promotes when at least 3 of its events that no deeper key has claimed fall in the last 30 days, deepest key first, and a one-segment key such as `rust` counts only events filed as exactly `rust`. Each cycle writes **one** lesson — the highest-salience exemplar from the top cluster (summed salience, then more events, then the newest event, then the key ascending). Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install). Nothing runs it for you. There is no MCP tool for it, and `dream_cycle_mode = "auto"` makes `watch` fail.
 
-You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Hand-edits are visible until the next dream cycle, which replaces the file wholesale. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
+You can read `LESSONS.md` directly — it is plain UTF-8 markdown. A hand edit of `LESSONS.md` is kept: each cycle leaves the file as it is and says so, until you commit the edit with git or delete the file. After that, the next cycle rebuilds the lesson from the log, so record a correction you want kept with `append_node`. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
 
 ---
 
@@ -174,9 +174,10 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 | Treating an empty `search_nodes` just after `append_node` as a timing miss | The search commits pending appends and waits at most one second. Empty after that usually means the query did not match. Under heavy disk load the commit can take longer, so search once more before concluding |
 | Using slashes in `skill_action` (`rust/borrow-checker`) | Use `::` (`rust::borrow_checker`) — slashes are rejected                            |
 | Omitting `source_harness`                               | Required field; omitting causes a deserialization error                             |
-| No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |
+| No `.agent/` in the project                             | Both tools answer `this folder is not set up for dreamd` (-32600) and name the setup command; run `setup`, then restart the MCP server. `~/.agent/` is the daemon home, never a project store |
 | Writing vague content                                   | One concrete fact per node; vague content scores low on recall                      |
 | Not calling `search_nodes` at session start             | You will re-discover things already known; call it first                            |
+| Waiting for a lesson after `append_node`               | Lessons are written by `npx -y dreamd-mcp dream`, which does not run on its own     |
 
 ---
 

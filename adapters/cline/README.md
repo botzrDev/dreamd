@@ -11,7 +11,7 @@ cd ~/your-project
 npx -y dreamd-mcp init
 ```
 
-Cline must open a project that already has `.agent/`. Without it, `append_node` errors with `coordinator unavailable: no agent root found`.
+Cline must open a project that already has `.agent/`. Without it, `search_nodes` and `append_node` both answer `this folder is not set up for dreamd` and name the setup command. `~/.agent/` is the daemon home and does not count as a project store. Restart the MCP server in Cline after setup.
 
 ## 2. MCP config
 
@@ -27,6 +27,8 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
 
 > **npm note:** `dreamd-mcp` is live on npm — `npx -y dreamd-mcp` resolves the latest published version directly. The local-binary config below is for local development (and native Windows).
 
+Cline's MCP settings are global, so the server starts outside your project: `--project-root` tells dreamd which project's `.agent/` folder to use. Replace `/absolute/path/to/your-project` with the absolute path of the folder you ran `setup` in.
+
 **Published npm path:**
 
 ```json
@@ -34,7 +36,7 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp"],
+      "args": ["-y", "dreamd-mcp", "--project-root", "/absolute/path/to/your-project"],
       "disabled": false,
       "autoApprove": []
     }
@@ -49,7 +51,7 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
   "mcpServers": {
     "dreamd": {
       "command": "/absolute/path/to/target/release/dreamd",
-      "args": ["mcp"],
+      "args": ["mcp", "--project-root", "/absolute/path/to/your-project"],
       "disabled": false,
       "autoApprove": []
     }

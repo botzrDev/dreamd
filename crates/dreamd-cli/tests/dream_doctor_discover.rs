@@ -32,12 +32,15 @@ fn dream_from_subdir_operates_on_parent_store() {
 
     let sub = tmp.path().join("sub");
     std::fs::create_dir(&sub).unwrap();
+    // HOME apart from the project: a store at `$HOME/.agent` is the daemon
+    // home, which discovery skips (DRM-101).
+    let home = tempfile::tempdir().unwrap();
 
     // --no-commit keeps the cycle fully in-process (no daemon proxy, no git).
     let out = Command::new(dreamd_bin())
         .args(["dream", "--no-commit"])
         .current_dir(&sub)
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd dream from subdir");
 
@@ -137,11 +140,14 @@ fn doctor_from_subdir_uses_parent_store() {
 
     let sub = tmp.path().join("sub");
     std::fs::create_dir(&sub).unwrap();
+    // HOME apart from the project: a store at `$HOME/.agent` is the daemon
+    // home, which discovery skips (DRM-101).
+    let home = tempfile::tempdir().unwrap();
 
     let out = Command::new(dreamd_bin())
         .arg("doctor")
         .current_dir(&sub)
-        .env("HOME", tmp.path())
+        .env("HOME", home.path())
         .output()
         .expect("run dreamd doctor from subdir");
 

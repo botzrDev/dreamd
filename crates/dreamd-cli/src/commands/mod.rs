@@ -7,6 +7,7 @@
 pub mod archive;
 pub mod blame;
 pub mod confirm;
+pub mod daemon_home_store;
 pub mod deprecation;
 pub mod doctor;
 pub mod dream;

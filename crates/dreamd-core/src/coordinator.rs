@@ -10,7 +10,10 @@
 //!   - daemon-minted `EventId` (ULID, `evt_` + 26 Crockford chars),
 //!   - a hard reject for serialized lines over [`MAX_LEARNING_LINE_BYTES`],
 //!     with no sidecar,
-//!   - idempotency LRU keyed by (canonical AgentRoot path, client_dedup_key),
+//!   - idempotency LRU keyed by (canonical AgentRoot path, client_dedup_key,
+//!     learning fingerprint), so a key dedups only a retry of the same
+//!     learning (DRM-106); it is in memory, so a restart or an idle
+//!     eviction of the coordinator forgets every key,
 //!   - open-time recovery ([`episodic::recover`]), so a torn final line does
 //!     not poison later appends.
 //!
@@ -154,6 +157,9 @@ pub enum MemoryCoordinatorMsg {
         ticket: CycleTicket,
         cycle_date: String,
         body: LessonBodySource,
+        /// The cycle keeps `LESSONS.md` as it is (DRM-115): the start check
+        /// found bytes no cycle wrote. Passed to the plan, not re-checked here.
+        held: bool,
         response_tx: oneshot::Sender<Result<DecayResult, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
@@ -211,11 +217,14 @@ pub struct MemoryCoordinator {
     /// holds no lock; such a coordinator refuses to run a dream cycle.
     ledger: Option<Ledger>,
     rx: mpsc::Receiver<MemoryCoordinatorMsg>,
-    /// Canonicalized AgentRoot path — half of the idempotency LRU key.
-    /// Falls back to the un-canonicalized path if canonicalization fails
+    /// Canonicalized AgentRoot path — the first part of the idempotency LRU
+    /// key. Falls back to the un-canonicalized path if canonicalization fails
     /// (e.g., in tests against not-yet-created scratch dirs).
     agent_root_key: PathBuf,
-    idempotency: LruCache<(PathBuf, String), IdempotencyEntry>,
+    /// `(agent_root_key, client_dedup_key, learning_fingerprint)` → the first
+    /// write's id and timestamp. The same key with a different learning is a
+    /// different entry, so it is written (DRM-106). In memory only.
+    idempotency: LruCache<(PathBuf, String, u64), IdempotencyEntry>,
     /// Optional hand-off to the per-project Tantivy indexer task (WEG-42).
     /// `None` means "no indexer wired, append only" (existing tests). The
     /// hand-off awaits `send`, so a full channel backpressures this actor
@@ -350,9 +359,10 @@ impl MemoryCoordinator {
                     ticket,
                     cycle_date,
                     body,
+                    held,
                     response_tx,
                 } => {
-                    let result = self.handle_commit_cycle(ticket, &cycle_date, body);
+                    let result = self.handle_commit_cycle(ticket, &cycle_date, body, held);
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -372,12 +382,17 @@ impl MemoryCoordinator {
     ) -> Result<AppendOutcome, CoordinatorError> {
         // DRM-98: an empty or all-whitespace key is no key. As a key, `""` made
         // every later learning that sent it a dedup hit, so none was written.
-        let client_dedup_key = client_dedup_key.filter(|k| !k.trim().is_empty());
+        // DRM-106: the key names one learning, so the fingerprint of what
+        // ingress built is part of it. Taken once, before the placeholders
+        // below are overwritten.
+        let dedup = client_dedup_key
+            .filter(|k| !k.trim().is_empty())
+            .map(|key| (key, learning_fingerprint(&learning)));
 
         // Idempotency lookup before any write. A hit short-circuits to the
         // cached EventId — no second line on disk.
-        if let Some(key) = client_dedup_key.as_deref() {
-            let full_key = (self.agent_root_key.clone(), key.to_owned());
+        if let Some((key, fingerprint)) = &dedup {
+            let full_key = (self.agent_root_key.clone(), key.clone(), *fingerprint);
             if let Some(cached) = self.idempotency.get(&full_key) {
                 return Ok(AppendOutcome {
                     id: cached.id.clone(),
@@ -438,8 +453,8 @@ impl MemoryCoordinator {
 
         // Cache insert only after the durable write succeeds. Inserting
         // before would poison the cache on write failure.
-        if let Some(key) = client_dedup_key {
-            let full_key = (self.agent_root_key.clone(), key);
+        if let Some((key, fingerprint)) = dedup {
+            let full_key = (self.agent_root_key.clone(), key, fingerprint);
             self.idempotency.put(
                 full_key,
                 IdempotencyEntry {
@@ -538,6 +553,7 @@ impl MemoryCoordinator {
         ticket: CycleTicket,
         cycle_date: &str,
         body: LessonBodySource,
+        held: bool,
     ) -> Result<DecayResult, CoordinatorError> {
         let Some(ledger) = self.ledger.clone() else {
             return Err(CoordinatorError::DreamCycle(
@@ -549,7 +565,7 @@ impl MemoryCoordinator {
                 "no prepared dream cycle for this ticket".to_string(),
             ));
         };
-        let result = self.commit_open_cycle(open, &ledger, cycle_date, body);
+        let result = self.commit_open_cycle(open, &ledger, cycle_date, body, held);
         // Every exit path reopens: the commit can fail after its rename has
         // already replaced the log.
         let reopened = self.reopen();
@@ -576,6 +592,7 @@ impl MemoryCoordinator {
         ledger: &Ledger,
         cycle_date: &str,
         body: LessonBodySource,
+        held: bool,
     ) -> Result<DecayResult, CoordinatorError> {
         ledger.check_store()?;
         let (raw, body) = match self.log_since(&mut open)? {
@@ -602,6 +619,7 @@ impl MemoryCoordinator {
             &raw,
             open.composed_for.as_deref(),
             body,
+            held,
         )
         .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
         // The log the commit wrote is `raw` without the decayed records: the
@@ -896,6 +914,21 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()
     }
 }
 
+/// What makes two appends the same learning for a dedup key (DRM-106): the
+/// fields ingress built, never the placeholders the coordinator overwrites.
+fn learning_fingerprint(learning: &AgentLearning) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    learning.content.hash(&mut hasher);
+    learning.skill_action.hash(&mut hasher);
+    learning.source_harness.hash(&mut hasher);
+    learning.pain.to_bits().hash(&mut hasher);
+    learning.importance.to_bits().hash(&mut hasher);
+    learning.pinned.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,6 +1068,102 @@ mod tests {
         assert_eq!(lines.len(), 1, "second call must not produce a second line");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Append `learning` with `key`; returns `(deduplicated, id)`.
+    async fn append_with_key(
+        tx: &mpsc::Sender<MemoryCoordinatorMsg>,
+        learning: AgentLearning,
+        key: &str,
+    ) -> (bool, EventId) {
+        let (r_tx, r_rx) = oneshot::channel();
+        tx.send(MemoryCoordinatorMsg::AppendLearning {
+            learning,
+            client_dedup_key: Some(key.to_string()),
+            response_tx: r_tx,
+        })
+        .await
+        .unwrap();
+        let outcome = r_rx.await.unwrap().unwrap();
+        (outcome.deduplicated, outcome.id)
+    }
+
+    fn log_lines(path: &Path) -> usize {
+        std::fs::read_to_string(path)
+            .expect("read jsonl")
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count()
+    }
+
+    /// DRM-106 test 1 (LP-MCP-04): a key names one learning. The same key
+    /// with other content is written with its own id, and a retry of either
+    /// learning dedups to that learning's id.
+    #[tokio::test]
+    async fn same_key_new_content_is_stored() {
+        let dir = unique_tmp_dir("same-key-new-content");
+        let path = dir.join("AGENT_LEARNINGS.jsonl");
+        let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+        let a = sample_learning();
+        let mut b = sample_learning();
+        b.content = "a correction of the first learning".to_string();
+
+        let (dedup, id1) = append_with_key(&tx, a.clone(), "k").await;
+        assert!(!dedup, "A is written");
+        let (dedup, id2) = append_with_key(&tx, b.clone(), "k").await;
+        assert!(!dedup, "B, the same key with other content, is written");
+        assert_ne!(id1, id2, "B has its own id");
+        assert_eq!(
+            append_with_key(&tx, a, "k").await,
+            (true, id1),
+            "a retry of A dedups to A's id"
+        );
+        assert_eq!(
+            append_with_key(&tx, b, "k").await,
+            (true, id2),
+            "a retry of B dedups to B's id"
+        );
+
+        shutdown(tx, handle).await;
+        assert_eq!(log_lines(&path), 2, "A and B, once each");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DRM-106 test 2: every field ingress built is part of the learning, so
+    /// changing any one of them alone makes the second append a write.
+    #[tokio::test]
+    async fn same_key_any_field_changed_is_stored() {
+        /// Changes one field of a learning.
+        type Change = fn(&mut AgentLearning);
+        let changes: [(&str, Change); 5] = [
+            ("skill_action", |l| {
+                l.skill_action = "rust::other".to_string()
+            }),
+            ("source_harness", |l| {
+                l.source_harness = "other-harness".to_string()
+            }),
+            ("pain", |l| l.pain = 6.5),
+            ("importance", |l| l.importance = 7.5),
+            ("pinned", |l| l.pinned = true),
+        ];
+        for (field, change) in changes {
+            let dir = unique_tmp_dir(&format!("same-key-{field}"));
+            let path = dir.join("AGENT_LEARNINGS.jsonl");
+            let (tx, handle) = spawn_coordinator(&dir, &path).await;
+
+            let first = sample_learning();
+            let mut second = sample_learning();
+            change(&mut second);
+            let (_, id1) = append_with_key(&tx, first, "k").await;
+            let (dedup, id2) = append_with_key(&tx, second, "k").await;
+            assert!(!dedup, "{field} changed: the second append is written");
+            assert_ne!(id1, id2, "{field} changed: its own id");
+
+            shutdown(tx, handle).await;
+            assert_eq!(log_lines(&path), 2, "{field} changed: two lines");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// DRM-98: an empty or all-whitespace key is no key. Four different
@@ -1406,6 +1535,7 @@ mod tests {
             prepared.ticket,
             "2026-05-28",
             LessonBodySource::Deterministic,
+            false,
         );
         assert!(
             result.is_err(),
@@ -1492,7 +1622,12 @@ mod tests {
             "precondition: nothing promotes"
         );
         let decay = coord
-            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .handle_commit_cycle(
+                prepared.ticket,
+                CYCLE_DATE,
+                LessonBodySource::Deterministic,
+                false,
+            )
             .expect("commit");
         assert_eq!(decay.kept_count, 1, "precondition: only B is left");
         assert_eq!(
@@ -1673,8 +1808,13 @@ mod tests {
             prepared.selected.is_some(),
             "precondition: the store promotes"
         );
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("commit");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("commit");
 
         let lock = WriterLock::acquire(&in_process_root, WriterKind::Dream).unwrap();
         crate::dream_cycle::run_filesystem_phases(
@@ -1683,6 +1823,7 @@ mod tests {
             CYCLE_NOW_SEC,
             CYCLE_DATE,
             true,
+            false,
             false,
         )
         .await
@@ -1729,6 +1870,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Return `?` instead of unwrapping.", &[&ids[0], &ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -1810,7 +1952,12 @@ mod tests {
 
         let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
         let err = c
-            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .handle_commit_cycle(
+                prepared.ticket,
+                CYCLE_DATE,
+                LessonBodySource::Deterministic,
+                false,
+            )
             .expect_err("a directory at LESSONS.md fails the commit");
         assert_eq!(
             crate::wal::read_last_cycle_status(&root).unwrap(),
@@ -1822,8 +1969,13 @@ mod tests {
         let prepared = c
             .handle_prepare_cycle(CYCLE_NOW_SEC + 1)
             .expect("the next prepare runs");
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("the next commit runs");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("the next commit runs");
         assert!(root.lessons_md().is_file(), "LESSONS.md is a file");
         assert_eq!(
             crate::wal::read_last_cycle_status(&root).unwrap(),
@@ -1881,6 +2033,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Composed before the checkout.", &[&ids[0], &ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -1964,6 +2117,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Composed before the rewrite.", &[&ids[1], &ids[2]]),
+            false,
         )
         .expect("commit");
 
@@ -1996,14 +2150,19 @@ mod tests {
             id: prepared.ticket.id + 1,
             _lease: Arc::new(()),
         };
-        let refused = c.handle_commit_cycle(other, CYCLE_DATE, LessonBodySource::Deterministic);
+        let refused =
+            c.handle_commit_cycle(other, CYCLE_DATE, LessonBodySource::Deterministic, false);
         assert!(
             refused.is_err(),
             "another ticket must not commit this cycle: {refused:?}"
         );
 
-        let committed =
-            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+        let committed = c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        );
         assert!(
             committed.is_ok(),
             "the real ticket still commits: {committed:?}"
@@ -2025,8 +2184,13 @@ mod tests {
             .await
             .expect("append")
             .id;
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("commit");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("commit");
 
         let objects: Vec<PathBuf> = std::fs::read_dir(root.branches_objects_dir())
             .unwrap()
@@ -2074,6 +2238,7 @@ mod tests {
                 ticket: prepared.ticket,
                 cycle_date: CYCLE_DATE.to_string(),
                 body: LessonBodySource::Deterministic,
+                held: false,
                 response_tx: commit_tx,
             })
             .await;
@@ -2149,6 +2314,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("A lesson about rust::eh.", &[&a_ids[0], &a_ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -2392,8 +2558,12 @@ mod tests {
 
         let _new = replace_store(&root);
         let before = agent_tree(&root);
-        let result =
-            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+        let result = c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        );
 
         match &result {
             Err(err) => assert!(is_store_replaced(err, &root), "got {err:?}"),

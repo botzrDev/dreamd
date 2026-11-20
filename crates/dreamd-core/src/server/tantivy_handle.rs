@@ -1320,11 +1320,11 @@ mod tests {
             .unwrap();
         let id1 = r1_rx.await.unwrap().unwrap().id;
 
-        // Second append with same key — idempotency hit, no new write.
+        // Second append with the same key and the same learning — idempotency hit, no new write.
         let (r2_tx, r2_rx) = oneshot::channel();
         coord_tx
             .send(MemoryCoordinatorMsg::AppendLearning {
-                learning: sample_learning(make_event_id('1'), "rust.test", "second"),
+                learning: sample_learning(make_event_id('1'), "rust.test", "first"),
                 client_dedup_key: dedup,
                 response_tx: r2_tx,
             })

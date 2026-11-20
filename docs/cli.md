@@ -10,13 +10,13 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 
 | Command | What it does | Detail |
 |---|---|---|
-| `init` | Scaffold `.agent/` and register the project. An existing `.agent/` is left as-is; if it is missing from the registry, init registers it. `init --uninstall-project` removes the registry entry and leaves the store; `dreamd init` puts the entry back | [GUIDE.md](../GUIDE.md) §1 |
+| `init` | Scaffold `.agent/` and register the project. An existing `.agent/` is left as-is; if it is missing from the registry, init registers it. Refuses, exit 2, writing nothing, when the project root's `.agent/` would be the daemon home `~/.agent/` (a git repo at your home directory). `init --uninstall-project` removes the registry entry and leaves the store; `dreamd init` puts the entry back | [GUIDE.md](../GUIDE.md) §1 |
 | `setup` | `init`, plus harness MCP config and next steps | [below](#setup) |
 | `watch` | Foreground daemon until SIGINT/SIGTERM | [http-api.md](./http-api.md), [install.md](./install.md) |
 | `mcp` | MCP server, stdio by default | [mcp-transports.md](./mcp-transports.md) |
 | `dream` | Dream cycle | [GUIDE.md](../GUIDE.md) §4, [architecture.md](./architecture.md) |
-| `doctor` | Health checks; `--repair` rebuilds the index and moves aside a dream-cycle WAL that cannot be parsed; `--provenance` checks the ledger | [provenance.md](./provenance.md), [troubleshooting.md](./troubleshooting.md) |
-| `status` | Daemon liveness, project, last cycle, log tail | [below](#status) |
+| `doctor` | Health checks; `--repair` rebuilds the index and moves aside a dream-cycle WAL that cannot be parsed, and refuses while the episodic log is missing or holds no record and the index holds events (`--allow-empty-log` rebuilds anyway); `--provenance` checks the ledger | [provenance.md](./provenance.md), [troubleshooting.md](./troubleshooting.md) |
+| `status` | Daemon liveness, project, last cycle, whether git has a commit of the episodic log, log tail | [below](#status) |
 | `service` | OS supervisor for `watch` | [install.md](./install.md) |
 | `recall` | Ranked search | [observability.md](./observability.md) |
 | `blame` | Same ranking, smaller table, default `-k` 5 | [observability.md](./observability.md) |
@@ -29,24 +29,27 @@ On the npm path the shim does not put `dreamd` on `PATH`. Use `npx -y dreamd-mcp
 | `reset workspace` | Restore `working/WORKSPACE.md` | [below](#reset-workspace) |
 | `vectors enable` | Download the optional model; exit 2 on the default binary. Deprecated, with the `vectors` feature; removed in 2.0 | [vectors.md](./vectors.md) |
 | `uninstall` | Stop processes, unregister, clear caches. Asks for `y` on a tty; `--yes` in a script; exit 2 otherwise | [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) |
-| `update` | Stop processes, clear the native binary cache | same README |
+| `update` | Stop processes, keep this version's cached binary, remove the others | same README |
 | `version` | Version, commit, build date, target, schema, vectors | [below](#version) |
 
 `dream --dry` prints the `LESSONS.md` it would write and writes nothing. `dream --no-llm` forces the deterministic lesson and still goes through a live daemon. `dream --no-commit` skips the git commit and also skips the daemon, so do not run it while `dreamd watch` is serving that project ([troubleshooting.md](./troubleshooting.md)). `dream --auto` prints a deprecation notice (it is removed in 2.0) and still exits 2.
 
 ## status
 
-Prints five lines. Exit 0 when the daemon answers, exit 1 when it does not (the lines are still printed).
+Prints six lines, or seven while the daemon home holds a project store. Exit 0 when the daemon answers, exit 1 when it does not (the lines are still printed).
 
 ```text
-daemon: running | not running
+daemon: running | not running | not responding (it accepted a connection but did not answer within 2 s)
 socket: <path>
 project: <root> (registered | not registered)
 last_dream_cycle: <time> (<status>) | never run (<status>)
+memory_in_git: no git repo | committed | ignored | not committed  (…) | error (…)
 recent log: (none) | recent log (last 5 lines):
 ```
 
-With no `.agent/` in the working directory, the project line is `project: no .agent/ store in CWD` and the cycle line is `last_dream_cycle: (no store)`. Off Unix the address label is `server_json`, not `socket`. This is not `dreamd service status`.
+With no `.agent/` in the working directory, the project line is `project: no .agent/ store in CWD`, the cycle line is `last_dream_cycle: (no store)`, and the git line is `memory_in_git: (no store)`. `not committed` names the command that commits the store, which `git clean -fd` can otherwise delete. Off Unix the address label is `server_json`, not `socket`. This is not `dreamd service status`.
+
+While `~/.agent/` holds a project store (an `episodic/` directory a dreamd before 1.4.0 could leave there), a seventh line comes before the log tail: `daemon_home_store: <home> holds a project store (events: N)  [WARNING: …]`. It says how to move the store, or, with `events: 0`, which directories to remove. `dreamd doctor` prints the same line and fails its run. See [troubleshooting.md](./troubleshooting.md#a-project-store-in-the-daemon-home).
 
 ## score
 
@@ -55,6 +58,8 @@ With no `.agent/` in the working directory, the project line is `project: no .ag
 ## setup
 
 `dreamd setup` scaffolds `.agent/` and writes harness MCP config.
+
+Like `init`, it refuses with exit 2 when the project root's `.agent/` would be the daemon home `~/.agent/`, before any prompt, plan line or write, `--dry-run` included. Run it in a project folder below your home directory.
 
 | Flag | Effect |
 |---|---|

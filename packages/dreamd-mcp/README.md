@@ -1,8 +1,8 @@
 # dreamd-mcp
 
-**Agent memory you can trace and undo.** Every lesson cites the events it came from. `blame` shows which memories drove an answer. `forget` removes a bad memory and the lesson state built on it, with a receipt. `git revert` rolls back a whole learning cycle.
+**Shared memory across coding agents, in files you can trace and undo.** Every lesson cites the events it came from. `blame` shows which memories drove an answer. `forget` removes a bad memory and the lesson state built on it, with a receipt. `git revert` rolls back a whole learning cycle.
 
-dreamd is local-first, long-term memory for AI agents, served over MCP to Claude Code, Cursor, Cline and other MCP-aware harnesses. Memory lives in `.agent/` in your repo as JSONL and Markdown and is committed with your code, so you review what agents learned the way you review code.
+dreamd is local-first, long-term memory for AI agents, served over MCP to Claude Code, Cursor, Cline and other MCP-aware harnesses. Memory lives in `.agent/` in your repo as JSONL and Markdown and is committed with your code (`setup` prints the commit command), so you review what agents learned the way you review code.
 
 Source, docs and issues: **[github.com/botzrDev/dreamd](https://github.com/botzrDev/dreamd)**
 
@@ -46,7 +46,7 @@ After a `forget`, `doctor --provenance` reports the removed event's old ledger e
 
 ## How agents learn
 
-Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries an `id` (`evt_` for an event, `lsn_` for a lesson) and its source harness. A learning cycle (`dreamd dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo as `dreamd: cycle YYYY-MM-DD`. That commit is skipped when a file holds a change no dream cycle wrote (a hand edit, `forget`, or `archive --force-unpin`). Appends and a cycle's own rewrites do not hold it. Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
+Agents write episodes (what happened, how painful it was, how important) through the MCP tool `append_node` and recall them with `search_nodes`; each hit carries an `id` (`evt_` for an event, `lsn_` for a lesson) and its source harness. A learning cycle (`npx -y dreamd-mcp dream`) clusters episodes by `skill_action`, promotes a recurring pattern into a lesson in `LESSONS.md` that cites its events, and commits the result to your project's git repo as `dreamd: cycle YYYY-MM-DD`. Nothing runs that cycle on a timer, and there is no MCP tool for it. That commit is skipped when a file holds a change no dream cycle wrote (a hand edit, `forget`, or `archive --force-unpin`). Appends and a cycle's own rewrites do not hold it. Recall ranks episodes and lessons with BM25 × salience (age decay, pain, importance, recurrence). Preview the next cycle with `npx -y dreamd-mcp dream --dry`.
 
 ## Install
 
@@ -58,6 +58,12 @@ npx -y dreamd-mcp watch   # 2. shared daemon, recommended when several agents wr
                           # 3. reload the harness: it now spawns `npx -y dreamd-mcp` itself
 ```
 
+While git has no commit of `.agent/`, `setup` prints the command that commits it, because `git clean -fd` deletes untracked memory:
+
+```sh
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+```
+
 `setup` prompts when it has a TTY; in scripts pass `--yes` with `--harness claude|cursor|both|none`. It rewrites each MCP config as 2-space pretty-printed JSON, so an existing `.mcp.json` or `.cursor/mcp.json` can come back reformatted; other MCP servers in the file are kept. `npx -y dreamd-mcp init` scaffolds the store only, same as `setup --no-write-mcp`. Adapter quickstarts: [Claude Code](https://github.com/botzrDev/dreamd/tree/main/adapters/claude-code) · [Cursor](https://github.com/botzrDev/dreamd/tree/main/adapters/cursor) · [Cline](https://github.com/botzrDev/dreamd/tree/main/adapters/cline)
 
 **Several agents at once.** `npx -y dreamd-mcp` connects to a shared daemon if one is running, and otherwise runs a standalone in-process server. Sequential use across tools is safe. To point several agents at the same project simultaneously, start one daemon per machine with `npx -y dreamd-mcp watch` so every write goes through a single serialized writer.
@@ -65,6 +71,8 @@ npx -y dreamd-mcp watch   # 2. shared daemon, recommended when several agents wr
 **Platforms.** Prebuilt binaries cover Linux x86_64 and macOS x86_64/aarch64 (see `manifest.json`). Linux x86_64 is one static binary with no glibc requirement, checked on Ubuntu 20.04, Ubuntu 22.04, Debian 12 and Alpine 3.20; Linux arm64 has no prebuilt binary. The binary is downloaded once from the matching GitHub release into `~/.cache/dreamd-mcp/<version>/`, and its SHA-256 is checked against `manifest.json` before every run. On any other platform the shim exits 1. The prebuilt binaries serve MCP over stdio only; the opt-in Streamable HTTP transport needs a source build ([docs/mcp-transports.md](https://github.com/botzrDev/dreamd/blob/main/docs/mcp-transports.md)).
 
 **Windows.** This shim ships no Windows binary: on native Windows `npx -y dreamd-mcp` exits 1 and points you at WSL2. A `dreamd.exe` built from source runs learn, the learning cycle and the Tantivy index; start `dreamd watch` before `dreamd mcp` ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
+
+**Signals and exit status.** The shim passes SIGINT, SIGTERM and SIGHUP to `dreamd` and waits for it to exit. It exits with `dreamd`'s exit code, and if `dreamd` dies of a signal, the shim dies of the same signal. A binary that cannot start makes the shim exit 1 and print the binary's path. On Windows the shim passes nothing on: the console already sends Ctrl-C to `dreamd`, and the shim waits for it. Under `npx`, npm runs the shim through `sh -c`. Where `/bin/sh` is dash, as on Debian and Ubuntu, a SIGTERM sent to the `npm exec` process stops only that shell, and npm ignores SIGINT; send the signal to the process group, or press Ctrl-C in the terminal.
 
 > **Leave `npx dreamd-mcp` floating; don't pin.** On a fresh spawn, npx re-resolves the `latest` dist-tag, so a floating config always starts the current version. A running MCP server or `dreamd watch` daemon keeps the version it started with until you restart it, and an offline run falls back to the last-cached binary.
 
@@ -86,7 +94,7 @@ Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --proj
 npx -y dreamd-mcp update   # or: dreamd update
 ```
 
-`update` stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` processes, removes the socket and clears `~/.cache/dreamd-mcp`. Then reload your MCP harness so it drops the old process, and re-run `npx -y dreamd-mcp` to fetch the new binary. It never relaunches anything for you. `--dry-run` prints the plan and changes nothing; `--restart` makes the stop step explicit; `--quiet` / `-q` trims output. It does not touch `~/.npm/_npx`, and it does not replace a binary you built with `cargo install`.
+`update` stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` processes and removes the socket. In `~/.cache/dreamd-mcp` it keeps this version's binary and removes every older and newer one; the shim downloads a version again if a spawn needs it. It never contacts the network, so it cannot tell whether a newer release exists. Then reload your MCP harness so it drops the old process, and re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp, and the shim downloads a binary only for a version it has not cached. A dreamd-mcp installed globally or in the project's `node_modules` runs instead, and an MCP config that pins a dreamd-mcp version stays on it; use the floating form to follow new releases. `update` never relaunches anything for you. `--dry-run` prints the plan and changes nothing; `--restart` makes the stop step explicit; `--quiet` / `-q` trims output. It does not touch `~/.npm/_npx`, and it does not replace a binary you built with `cargo install`.
 
 ## Uninstall / reset
 

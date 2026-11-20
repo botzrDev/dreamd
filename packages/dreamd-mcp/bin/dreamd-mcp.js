@@ -3,16 +3,17 @@
 
 // dreamd-mcp — npx download/verify/exec shim for the native `dreamd` binary.
 // Flow: resolve platform → cache hit or GitHub release download → sha256 verify
-// → exec. Env overrides: DREAMD_BIN (+ DREAMD_BIN_ALLOW_UNVERIFIED). The shim
-// sets DREAMD_LAUNCHER=npx for the binary it runs. Exports below are for unit
-// tests only; IDEs spawn this file as the MCP entrypoint.
+// → run as a child that gets the shim's signals and whose exit status the shim
+// keeps (DRM-123). Env overrides: DREAMD_BIN (+ DREAMD_BIN_ALLOW_UNVERIFIED).
+// The shim sets DREAMD_LAUNCHER=npx for the binary it runs. Exports below are
+// for unit tests only; IDEs spawn this file as the MCP entrypoint.
 
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync, spawn, spawnSync } = require('child_process');
 const zlib = require('zlib');
 
 // Derived from package.json — the single source of truth for the version. This
@@ -263,6 +264,93 @@ async function ensureBinary(target, binaryPath, expectedSha256) {
   }
 }
 
+// Which signals the shim passes to the child, and which it only holds so it
+// outlives the child (DRM-123). On Windows the console already delivers
+// Ctrl-C and Ctrl-Break to the child, and child.kill() is TerminateProcess,
+// which would skip dreamd's shutdown.
+function signalPlan(platform) {
+  return platform === 'win32'
+    ? { forward: [], hold: ['SIGINT', 'SIGBREAK'] }
+    : { forward: ['SIGINT', 'SIGTERM', 'SIGHUP'], hold: [] };
+}
+
+// The status a shim that cannot die of `signal` exits with: the child's own
+// code, else 128 + the signal's number, else 1.
+function exitCodeFor(code, signal) {
+  if (typeof code === 'number') return code;
+  const n = signal ? os.constants.signals[signal] : undefined;
+  return typeof n === 'number' ? 128 + n : 1;
+}
+
+// Run the native binary and settle when it is gone. Never rejects. The child
+// shares the shim's stdio, so the JSON-RPC bytes of `dreamd mcp` pass straight
+// through; the shim itself writes nothing to stdout.
+function runChild(bin, args, env) {
+  return new Promise((resolve) => {
+    const plan = signalPlan(process.platform);
+    const listeners = [];
+    let done = false;
+    let child;
+    const removeListeners = () => {
+      for (const [sig, fn] of listeners) process.removeListener(sig, fn);
+      listeners.length = 0;
+    };
+    const settle = () => {
+      if (done) return false;
+      done = true;
+      removeListeners();
+      return true;
+    };
+    try {
+      child = spawn(bin, args, { stdio: 'inherit', env });
+    } catch (err) {
+      // A synchronous throw (an invalid argument) is a spawn failure too.
+      settle();
+      process.stderr.write(`[dreamd-mcp] could not start ${bin}: ${err.code}: ${err.message}\n`);
+      process.exitCode = 1;
+      resolve();
+      return;
+    }
+    for (const sig of plan.forward) {
+      const fn = () => {
+        try {
+          child.kill(sig);
+        } catch {
+          // The child is already gone; its 'exit' settles.
+        }
+      };
+      process.on(sig, fn);
+      listeners.push([sig, fn]);
+    }
+    for (const sig of plan.hold) {
+      const fn = () => {};
+      process.on(sig, fn);
+      listeners.push([sig, fn]);
+    }
+    child.on('error', (err) => {
+      if (!settle()) return;
+      process.stderr.write(`[dreamd-mcp] could not start ${bin}: ${err.code}: ${err.message}\n`);
+      process.exitCode = 1;
+      resolve();
+    });
+    child.on('exit', (code, signal) => {
+      if (!settle()) return;
+      if (signal && process.platform !== 'win32') {
+        // Die of the same signal, so a shell or supervisor sees what the
+        // child gave the shim. The listeners are gone, so the default action
+        // runs.
+        try {
+          process.kill(process.pid, signal);
+        } catch {
+          // Fall through to the exit status below.
+        }
+      }
+      process.exitCode = exitCodeFor(code, signal);
+      resolve();
+    });
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -291,7 +379,7 @@ async function main() {
       '[dreamd-mcp] WARNING: DREAMD_BIN set — skipping sha256 verification. ' +
       'Use only for local development builds.\n',
     );
-    execFileSync(process.env.DREAMD_BIN, dreamdArgs, { stdio: 'inherit', env: childEnv(process.env) });
+    await runChild(process.env.DREAMD_BIN, dreamdArgs, childEnv(process.env));
     return;
   }
 
@@ -300,8 +388,8 @@ async function main() {
     if (process.platform === 'win32') {
       process.stderr.write(
         `This npm package has no Windows binary.\n` +
-          `A dreamd.exe built from source, or taken from a GitHub release windows-x86_64.tar.gz when that release has one, can watch and learn over loopback.\n` +
-          `The dream cycle and the Tantivy index stay Unix-only. For the full product, use WSL2 or a Linux/macOS host.\n` +
+          `A dreamd.exe built from source, or taken from a GitHub release windows-x86_64.tar.gz when that release has one, runs learn, the dream cycle, and the Tantivy index over loopback. Start dreamd watch before dreamd mcp.\n` +
+          `For npx -y dreamd-mcp, use WSL2 or a Linux/macOS host.\n` +
           `Prebuilt shim binaries ship for linux-x64, darwin-x64, and darwin-arm64 only.\n`
       );
     } else {
@@ -339,18 +427,15 @@ async function main() {
   // Verify sha256 before every exec (not just on download)
   verifyBinary(binaryPath, binaryEntry.sha256);
 
-  execFileSync(binaryPath, dreamdArgs, { stdio: 'inherit', env: childEnv(process.env) });
+  await runChild(binaryPath, dreamdArgs, childEnv(process.env));
 }
 
 if (require.main === module) {
+  // No child run throws (runChild never rejects), so a throw here is a
+  // download or verify step's, and it is fatal.
   main().catch((err) => {
-    if (err.status !== undefined) {
-      process.exitCode = err.status;
-      process.stderr.write(`[dreamd-mcp] command exited with code ${err.status}\n`);
-    } else {
-      process.stderr.write(`[dreamd-mcp] Fatal error: ${err.message}\n`);
-      process.exit(1);
-    }
+    process.stderr.write(`[dreamd-mcp] Fatal error: ${err.message}\n`);
+    process.exit(1);
   });
 }
 
@@ -362,4 +447,7 @@ module.exports = {
   isAllowedRedirectHost,
   validateRedirect,
   isSafeTarEntry,
+  signalPlan,
+  exitCodeFor,
+  runChild,
 };

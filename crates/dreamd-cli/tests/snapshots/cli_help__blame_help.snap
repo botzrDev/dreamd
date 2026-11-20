@@ -8,11 +8,11 @@ Usage: blame [OPTIONS] <QUERY>
 
 Arguments:
   <QUERY>
-          Free-text query, matched with BM25 against stored events and lessons
+          Free-text query (any text; nothing is query syntax), matched with BM25 against stored events and lessons
 
 Options:
   -k, --k <K>
-          Max results
+          Maximum results, 0 to 100
           
           [default: 5]
 

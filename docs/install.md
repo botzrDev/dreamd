@@ -292,10 +292,11 @@ Windows binary to forward to — see above). The `ExecStart` /
 `ProgramArguments` path written into the unit is that binary's own resolved
 path (`current_exe`, canonicalized) — under `npx` that is the cached native
 `dreamd` the shim downloaded (`~/.cache/dreamd-mcp/<version>/dreamd`), not
-`npx` or `node`. That directory is per version, and `dreamd update` /
-`dreamd uninstall` clear it, so after either of those — or after a new
-`dreamd-mcp` release — reinstall the service so the unit points at the new
-binary (`--force` on macOS).
+`npx` or `node`. That directory is per version. `dreamd uninstall` clears it,
+and `dreamd update` removes every version's directory but its own. So after an
+uninstall, an update run by another version, or a new `dreamd-mcp` release,
+reinstall the service so the unit points at the binary you run now (`--force`
+on macOS).
 
 ## Fallback: foreground `dreamd watch`
 
@@ -354,6 +355,14 @@ clear one of those, see the *Full fresh store* row in
 Because it is destructive it asks first, like `dreamd reset workspace`: pass
 `--yes`, or answer `y` at the prompt. Without `--yes` on a non-interactive
 stdin it refuses and changes nothing.
+
+`--purge` also refuses, before the prompt and with `--yes` too, while the
+daemon home holds a project store: an `episodic/` directory in `~/.agent/`, or
+a registry entry for your home directory itself. A dreamd before 1.4.0 could
+leave one there. It exits 2, changes nothing, and points at
+[A project store in the daemon home](./troubleshooting.md#a-project-store-in-the-daemon-home),
+which says how to move that store or remove it. `dreamd doctor` and
+`dreamd status` print a `daemon_home_store:` line while it is there.
 
 Note this is not `dreamd uninstall`, which is a different verb: that one stops
 running `dreamd` processes, drops the socket, unregisters the current project,

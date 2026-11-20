@@ -306,12 +306,23 @@ fn the_probe_closes_before_the_server_serves() {
         resp.to_string().contains(FAKE_ERROR),
         "search_nodes returns the daemon's answer: {resp}"
     );
+    // DRM-122: the first tool call asks the daemon its version first, on
+    // its own connection, then sends the recall on the next one.
     let (n, seen) = fake.next();
     assert_eq!(n, 1, "the tool call opens the second connection");
     match seen {
         Seen::Request(line) => assert!(
+            line.starts_with("GET /api/v1/health"),
+            "the second connection carries the version probe: {line}"
+        ),
+        other => panic!("the probe's connection must carry a request: {other:?}"),
+    }
+    let (n, seen) = fake.next();
+    assert_eq!(n, 2, "the recall opens the third connection");
+    match seen {
+        Seen::Request(line) => assert!(
             line.starts_with("GET /api/v1/recall"),
-            "the second connection carries the recall request: {line}"
+            "the third connection carries the recall request: {line}"
         ),
         other => panic!("the tool call's connection must carry a request: {other:?}"),
     }

@@ -1,8 +1,8 @@
 {
   "name": "dreamd-mcp",
   "mcpName": "io.github.botzrDev/dreamd",
-  "version": "1.3.2",
-  "description": "Agent memory you can audit. Every lesson cites its source; trace a bad memory and remove it with a receipt. Local-first MCP server for Claude Code, Cursor and Cline.",
+  "version": "1.4.0",
+  "description": "Shared memory for Claude Code, Cursor, and Cline, in files you can audit. Trace a bad memory and remove it with a receipt. Local-first MCP server.",
   "keywords": [
     "mcp",
     "mcp-server",

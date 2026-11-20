@@ -16,7 +16,7 @@ you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 |----------|-------|
 | [`solo-rust-dev/`](solo-rust-dev/) | One Rust developer, Claude Code only. The agent keeps tripping the same family of clippy lints; dreamd consolidates them into one durable lesson. |
 | [`multi-harness/`](multi-harness/) | The same project worked across Claude Code **and** Cursor. A lesson first captured in Cursor surfaces in Claude Code — the payoff of "across every tool." |
-| [`crash-recovery/`](crash-recovery/) | Mid-cycle crash fixture: a legacy (`intents`) WAL that 1.1.0 still recovers the old way, a torn JSONL, and the recovery path on restart. |
+| [`crash-recovery/`](crash-recovery/) | Contributor fixture, not a setup walkthrough. Mid-cycle crash: a legacy (`intents`) WAL, a torn JSONL, and the recovery path on restart. |
 | [`pinned-events/`](pinned-events/) | Mix of `pinned: true/false` events showing what survives dream-cycle decay. |
 | [`cross-project/`](cross-project/) | Two projects with separate `.agent/` stores — memory does not cross boundaries. |
 
@@ -32,8 +32,10 @@ you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 ```
 
 `episodic/` is what the agent logged as it worked. The **dream cycle** clusters
-those learnings by `skill_action` prefix, and when a cluster recurs (≥3 times in
-a trailing 7- or 30-day window) it promotes the highest-salience example into
+those learnings by `skill_action` prefix, and when a cluster recurs (≥3 events
+in the last 30 days that no deeper cluster has claimed; a bare root like `rust`
+counts only events filed as exactly `rust`) it promotes the highest-salience
+example into
 `semantic/LESSONS.md`. The lesson text in `LESSONS.md` is verbatim agent output,
 not hand-written copy.
 

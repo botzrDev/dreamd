@@ -58,6 +58,14 @@ pub async fn serve_uds(
         let (stream, _addr) = listener.accept().await?;
         let uid = match stream.peer_cred() {
             Ok(cred) => cred.uid(),
+            // A peer that closed before its credentials were read is gone,
+            // not a fault: on macOS the bind probe of a refused second
+            // `watch` connects and leaves at once, and getpeereid answers
+            // ENOTCONN. Linux reads the credentials of a closed peer.
+            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+                tracing::debug!("peer left before peer_cred() on accept: {e}");
+                continue;
+            }
             Err(e) => {
                 tracing::warn!("peer_cred() failed on accept: {e}");
                 continue;

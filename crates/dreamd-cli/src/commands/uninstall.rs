@@ -166,8 +166,9 @@ pub fn run(
         let daemon_home = dreamd_core::DaemonHome::new(req.daemon_home);
         match init::uninstall_project(req.cwd, &daemon_home, req.quiet, out, err) {
             Ok(()) => {}
-            // Unreachable — the root was just checked — but treat as the skip.
-            Err(init::InitError::NoProjectRoot) => {}
+            // Unreachable — the root was just checked, and `uninstall_project`
+            // never refuses the daemon home (DRM-101) — but treat as the skip.
+            Err(init::InitError::NoProjectRoot | init::InitError::DaemonHome) => {}
             Err(init::InitError::Io(e)) => return Err(UninstallError::Io(e)),
         }
     } else if !req.quiet {

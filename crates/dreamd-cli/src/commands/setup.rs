@@ -12,7 +12,7 @@
 //! `dreamd reset`.
 //!
 //! A real run closes with the fixed-copy success card. Everything it claims is
-//! observed, not assumed: `wired` lists the labels `wire_mcp` actually wrote,
+//! observed, not assumed: `wired` lists the labels `apply_mcp` actually wrote,
 //! and `daemon` reports a liveness probe of the daemon's own listener (the
 //! socket on Unix, the loopback address in `server.json` elsewhere). A
 //! `--dry-run` prints the plan and the next-steps list instead — a plan is not
@@ -22,6 +22,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use const_format::concatcp;
 use dreamd_core::{AgentRoot, DaemonHome, GITIGNORE_SNIPPET};
 
 use super::init::{self, find_project_root, InitError, InitOutcome};
@@ -31,6 +32,26 @@ use super::setup_mcp::{self, Action, McpError, TargetPlan};
 /// re-resolves the `latest` dist-tag on each spawn — never hard-pin here
 /// (AGENTS.md `npm-dreamd-mcp-unscoped`).
 const MCP_BLOCK: &str = r#"{"mcpServers":{"dreamd":{"command":"npx","args":["-y","dreamd-mcp"]}}}"#;
+
+/// The line before the MCP block when setup has no project-level config for
+/// the harness (`--harness none`, LP-INSTALL-09).
+const GLOBAL_CONFIG_LINE: &str = "That config is global, so the block names this project's root:";
+
+/// The copy-paste MCP block for `harness`. A harness with a project-level
+/// config (`.mcp.json`, `.cursor/mcp.json`) gets [`MCP_BLOCK`]. Every other
+/// harness (`--harness none`: Cline and the rest) reads a global config, so the
+/// server would start outside the project and answer "not set up": that block
+/// names the root with `--project-root`, JSON-escaped.
+fn mcp_block(harness: Harness, project_root: &Path) -> String {
+    if !harness.config_targets().is_empty() {
+        return MCP_BLOCK.to_string();
+    }
+    let root = serde_json::to_string(&*project_root.to_string_lossy())
+        .expect("a string always serializes");
+    format!(
+        r#"{{"mcpServers":{{"dreamd":{{"command":"npx","args":["-y","dreamd-mcp","--project-root",{root}]}}}}}}"#
+    )
+}
 
 /// Left margin of every success-card row.
 const CARD_GUTTER: &str = "  ";
@@ -108,6 +129,9 @@ pub enum SetupError {
     /// No project root above `cwd` (no `.git/`, `Cargo.toml`, `package.json`
     /// or `pyproject.toml`); `cli.rs` maps this to exit code 2.
     NoProjectRoot,
+    /// The project root's `.agent/` would be the daemon home (DRM-101); the
+    /// message is already on stderr and nothing was written. Exit code 2.
+    DaemonHome,
     /// No TTY to prompt on and no `--yes`. Refusing beats silently accepting
     /// defaults that write files; `cli.rs` maps this to `2`.
     NotATty,
@@ -130,6 +154,7 @@ impl From<InitError> for SetupError {
     fn from(e: InitError) -> Self {
         match e {
             InitError::NoProjectRoot => Self::NoProjectRoot,
+            InitError::DaemonHome => Self::DaemonHome,
             InitError::Io(e) => Self::Io(e),
         }
     }
@@ -139,6 +164,7 @@ impl std::fmt::Display for SetupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoProjectRoot => write!(f, "no project root"),
+            Self::DaemonHome => write!(f, "the project's store would be the daemon home"),
             // Byte-identical to `ResetError::NotATty` on purpose — one refusal
             // vocabulary across commands. A test pins the pair.
             Self::NotATty => std::fmt::Display::fmt(&super::confirm::ConfirmError::NotATty, f),
@@ -212,6 +238,16 @@ pub fn run(
         }
     };
 
+    // DRM-101: before the prompt, the plan and any write.
+    if dreamd_core::layout::same_dir(&project_root.join(".agent"), req.daemon_home) {
+        writeln!(
+            err,
+            "dreamd: error \u{2014} {}",
+            init::daemon_home_refusal(&project_root, req.daemon_home)
+        )?;
+        return Err(SetupError::DaemonHome);
+    }
+
     writeln!(
         out,
         "dreamd setup \u{2014} project root: {}",
@@ -283,17 +319,21 @@ pub fn run(
                 DaemonHome::new(req.daemon_home).registry_toml().display()
             )?;
         }
-        wire_mcp(req, &project_root, out, err)?;
-        write_habit_plan(req, out)?;
+        plan_mcp(req, &project_root, out, err)?;
+        write_habit_plan(req, &project_root, out)?;
         writeln!(out, "dry-run: no changes made")?;
         // A dry run is a plan, not a completed setup — the success card would
         // be a lie here, so the plan keeps the next-steps list.
-        write_next_steps(req, out)?;
+        write_next_steps(req, &project_root, out)?;
     } else {
+        // DRM-158: read and classify every MCP target before the scaffold, so
+        // a refusal writes nothing. `init::run` touches neither MCP file, so
+        // the plan is still exact when it is applied below.
+        let wiring = plan_mcp(req, &project_root, out, err)?;
         // Reuse init verbatim (non-quiet): the scaffold lines and the first-run
         // privacy disclosure are exactly what a first-run user needs to see.
         let init_outcome = init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
-        let wired = wire_mcp(req, &project_root, out, err)?;
+        let wired = apply_mcp(&wiring, out, err)?;
         let habits = install_habit(&project_root, req.harness)?;
         // After the config is on disk, and before `watch` takes the log: a
         // sentence typed here is appended through the coordinator, then the
@@ -306,7 +346,12 @@ pub fn run(
             let mut input = stdin.lock();
             match prompt_first_lesson(&mut input, err)? {
                 Some(sentence) => {
-                    match record_first_lesson(&project_root, req.daemon_home, &sentence) {
+                    match record_first_lesson(
+                        &project_root,
+                        req.daemon_home,
+                        &sentence,
+                        req.launcher,
+                    ) {
                         Ok(recorded) => Some(recorded),
                         Err(e) => {
                             writeln!(
@@ -326,15 +371,24 @@ pub fn run(
         // Once per daemon home. A second project, and a rerun of this one,
         // keep the source line and do not ask again.
         let ask_star = !star_already_asked(&home);
+        // DRM-100: name the commit while git has no commit of the log. A git
+        // error prints no line; doctor's `memory_in_git:` reports it.
+        let commit = matches!(
+            dreamd_core::autobiography::log_git_state(&project_root),
+            Ok(dreamd_core::autobiography::LogGitState::NotCommitted)
+        )
+        .then(|| dreamd_core::autobiography::commit_store_command(&project_root));
         let card = Card {
             init: init_outcome,
             wired: &wired,
             habits: &habits,
             harness: req.harness,
+            project_root: &project_root,
             daemon_live,
             lesson: lesson.as_ref(),
             launcher: req.launcher,
             ask_star,
+            commit: commit.as_deref(),
         };
         write_card_and_mark(&card, out, &home)?;
     }
@@ -445,31 +499,41 @@ pub(crate) fn prompt_start_watch(
     Ok(parse_yes_no(&read_answer(input)).unwrap_or(false))
 }
 
-/// Merge `mcpServers.dreamd` into every harness config target (or report the
-/// dry-run plan). Runs after the scaffold so a refusal here never leaves a
-/// half-made `.agent/`.
+/// What the MCP step will do, decided before anything is written (DRM-158).
+enum McpWiring {
+    /// `--no-write-mcp` or `--harness none`: the status line to print.
+    Skipped(&'static str),
+    /// Every target, read and classified. Empty only under `--dry-run`.
+    Planned(Vec<TargetPlan>),
+}
+
+/// Read and classify every harness config target. Refuses (`Malformed`, or
+/// `Conflict` without `--force`) before anything is written: setup calls this
+/// before the scaffold, so a refusal writes nothing (DRM-158). Under
+/// `--dry-run`, reports the plan, or prints the skip line. Writes nothing.
 ///
-/// `--harness both` is all-or-nothing: every target is read and
-/// classified before any of them is written.
-///
-/// Returns the labels that end up carrying the dreamd block — what the success
-/// card reports as `wired`, and what its `Undo:` line names. Empty when wiring
-/// was skipped (`--no-write-mcp` / `--harness none`) or under `--dry-run`, where
-/// nothing was written and there is nothing to undo.
-fn wire_mcp(
+/// `--harness both` is all-or-nothing: every target is read and classified
+/// before any of them is written.
+fn plan_mcp(
     req: &SetupRequest<'_>,
     project_root: &Path,
     out: &mut dyn Write,
     err: &mut dyn Write,
-) -> Result<Vec<&'static str>, SetupError> {
+) -> Result<McpWiring, SetupError> {
     let targets = req.harness.config_targets();
-    if !req.write_mcp {
-        writeln!(out, "mcp config: skipped (--no-write-mcp)")?;
-        return Ok(Vec::new());
-    }
-    if targets.is_empty() {
-        writeln!(out, "mcp config: skipped (--harness none)")?;
-        return Ok(Vec::new());
+    let skipped = if !req.write_mcp {
+        Some("mcp config: skipped (--no-write-mcp)")
+    } else if targets.is_empty() {
+        Some("mcp config: skipped (--harness none)")
+    } else {
+        None
+    };
+    if let Some(line) = skipped {
+        // The real run prints it from `apply_mcp`, after init's lines.
+        if req.dry_run {
+            writeln!(out, "{line}")?;
+        }
+        return Ok(McpWiring::Skipped(line));
     }
 
     let mut plans = Vec::with_capacity(targets.len());
@@ -486,7 +550,7 @@ fn wire_mcp(
         for planned in &plans {
             report_dry_run(req, planned, out)?;
         }
-        return Ok(Vec::new());
+        return Ok(McpWiring::Planned(Vec::new()));
     }
 
     if !req.force {
@@ -501,12 +565,34 @@ fn wire_mcp(
             return Err(report_mcp_error(e, err)?);
         }
     }
+    Ok(McpWiring::Planned(plans))
+}
 
-    // Everything still standing here gets written: Create, Merge, AlreadyWired
-    // (a no-op that leaves the block in place), and — past the guard above —
-    // a `--force`-resolved Conflict. All four leave the file wired.
+/// Print the skip line, or write each plan `plan_mcp` made and print its
+/// status line. Any refusal already happened in `plan_mcp`, before the
+/// scaffold, so it wrote nothing (DRM-158).
+///
+/// Returns the labels that end up carrying the dreamd block — what the success
+/// card reports as `wired`, and what its `Undo:` line names. Empty when wiring
+/// was skipped (`--no-write-mcp` / `--harness none`).
+fn apply_mcp(
+    wiring: &McpWiring,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Vec<&'static str>, SetupError> {
+    let plans = match wiring {
+        McpWiring::Skipped(line) => {
+            writeln!(out, "{line}")?;
+            return Ok(Vec::new());
+        }
+        McpWiring::Planned(plans) => plans,
+    };
+
+    // Everything `plan_mcp` let through gets written: Create, Merge,
+    // AlreadyWired (a no-op that leaves the block in place), and — under
+    // `--force` — a resolved Conflict. All four leave the file wired.
     let mut wired = Vec::with_capacity(plans.len());
-    for planned in &plans {
+    for planned in plans {
         if let Err(e) = setup_mcp::apply(planned) {
             return Err(report_mcp_error(e, err)?);
         }
@@ -729,6 +815,7 @@ fn report_doctor(cwd: &Path, launcher: Launcher, out: &mut dyn Write) -> std::io
             repair: false,
             cluster_health: false,
             provenance: false,
+            allow_empty_log: false,
         },
         now_sec,
         &mut report,
@@ -756,9 +843,63 @@ fn write_card_row(out: &mut dyn Write, label: &str, value: &str) -> std::io::Res
 /// whatever the resolved daemon home is.
 const REGISTRY_TILDE: &str = "~/.agent/registry.toml";
 
-/// The habit labels [`install_habit`] returns, in the order it writes them.
-const HABIT_CLAUDE: &str = "CLAUDE.md";
-const HABIT_CURSOR: &str = ".cursor/rules/dreamd-recall.mdc";
+/// The habit files, relative to the project root.
+const CLAUDE_MD: &str = "CLAUDE.md";
+const AGENTS_MD: &str = "AGENTS.md";
+const CURSOR_RULE: &str = ".cursor/rules/dreamd-recall.mdc";
+
+/// One habit file the success card reports (DRM-153). [`install_habit`]
+/// returns them in row order: `AGENTS.md`, then `CLAUDE.md`, then the Cursor
+/// rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Habit {
+    /// The dreamd block in `AGENTS.md`.
+    AgentsBlock,
+    /// The dreamd block in `CLAUDE.md`, with no `AGENTS.md` at the root.
+    ClaudeBlock,
+    /// The dreamd block in a `CLAUDE.md` that does not import the root's
+    /// `AGENTS.md`. Claude Code then does not load `AGENTS.md`, and the card
+    /// says so ([`NO_IMPORT_NOTE`]).
+    ClaudeBlockWithoutImport,
+    /// `CLAUDE.md` is setup's one line `@AGENTS.md`.
+    ClaudeImport,
+    /// This run removed the dreamd block from a `CLAUDE.md` that imports
+    /// `AGENTS.md`. The rest of that file is the user's, so it has no Undo.
+    ClaudeBlockRemoved,
+    /// The always-on Cursor rule.
+    CursorRule,
+}
+
+/// The card's `habit` value for `habit`.
+fn habit_row(habit: Habit) -> &'static str {
+    match habit {
+        Habit::AgentsBlock => concatcp!(AGENTS_MD, "  (dreamd block)"),
+        Habit::ClaudeBlock | Habit::ClaudeBlockWithoutImport => {
+            concatcp!(CLAUDE_MD, "  (dreamd block)")
+        }
+        Habit::ClaudeImport => concatcp!(CLAUDE_MD, "  (imports ", AGENTS_MD, ")"),
+        Habit::ClaudeBlockRemoved => concatcp!(CLAUDE_MD, "  (dreamd block removed)"),
+        Habit::CursorRule => CURSOR_RULE,
+    }
+}
+
+/// The card's `Undo:` line for `habit`, if it has one.
+fn habit_undo(habit: Habit) -> Option<String> {
+    let remove_block = |file: &str| {
+        format!("Remove the dreamd block ({CLAUDE_BLOCK_START} to {CLAUDE_BLOCK_END}) from {file}.")
+    };
+    match habit {
+        Habit::AgentsBlock => Some(remove_block(AGENTS_MD)),
+        Habit::ClaudeBlock | Habit::ClaudeBlockWithoutImport => Some(remove_block(CLAUDE_MD)),
+        Habit::ClaudeImport => Some(format!("Delete {CLAUDE_MD}.")),
+        Habit::ClaudeBlockRemoved => None,
+        Habit::CursorRule => Some(format!("Delete {CURSOR_RULE}.")),
+    }
+}
+
+/// Austin's D5 ruling (2026-11-20): the note for a `CLAUDE.md` that keeps its
+/// block because it does not import the root's `AGENTS.md`.
+const NO_IMPORT_NOTE: &str = "CLAUDE.md does not import AGENTS.md, so Claude Code does not load AGENTS.md here. Add a line `@AGENTS.md` to CLAUDE.md to load it.";
 
 /// Left margin of every `Undo:` line, aligned under the `Next:` copy.
 const UNDO_INDENT: &str = "        ";
@@ -768,14 +909,19 @@ const UNDO_INDENT: &str = "        ";
 struct Card<'a> {
     init: InitOutcome,
     wired: &'a [&'static str],
-    habits: &'a [&'static str],
+    habits: &'a [Habit],
     harness: Harness,
+    /// The root a `--harness none` MCP block names (LP-INSTALL-09).
+    project_root: &'a Path,
     daemon_live: bool,
     lesson: Option<&'a RecordedLesson>,
     launcher: Launcher,
     /// Print the one star line under the source line. The caller sets this
     /// from the daemon home; the card itself does not look at the filesystem.
     ask_star: bool,
+    /// The command that commits the store, while git has no commit of the
+    /// episodic log (DRM-100). The caller reads git; the card does not.
+    commit: Option<&'a str>,
 }
 
 fn write_undo_line(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
@@ -798,8 +944,6 @@ fn write_undo_line(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
 fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<()> {
     let scaffolded = card.init == InitOutcome::Scaffolded;
     let gitignore_entry = GITIGNORE_SNIPPET.trim_end();
-    let has_claude_habit = card.habits.contains(&HABIT_CLAUDE);
-    let has_cursor_habit = card.habits.contains(&HABIT_CURSOR);
 
     // Blank line first: the card must not run into init's scaffold output.
     writeln!(out)?;
@@ -834,11 +978,8 @@ fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<(
             &format!("{label}  (dreamd \u{2192} npx -y dreamd-mcp)"),
         )?;
     }
-    if has_claude_habit {
-        write_card_row(out, "habit", &format!("{HABIT_CLAUDE}  (dreamd block)"))?;
-    }
-    if has_cursor_habit {
-        write_card_row(out, "habit", HABIT_CURSOR)?;
+    for habit in card.habits {
+        write_card_row(out, "habit", habit_row(*habit))?;
     }
     let daemon = if card.daemon_live {
         "running".to_string()
@@ -851,17 +992,43 @@ fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<(
     write_card_row(out, "daemon", &daemon)?;
     writeln!(out)?;
 
+    if card.habits.contains(&Habit::ClaudeBlockWithoutImport) {
+        writeln!(out, "  Note: {NO_IMPORT_NOTE}")?;
+        writeln!(out)?;
+    }
+
+    if let Some(command) = card.commit {
+        writeln!(
+            out,
+            "  Commit: git has no commit of .agent/ yet, and `git clean -fd` deletes it."
+        )?;
+        writeln!(out, "          From the project root, run:")?;
+        writeln!(out, "          {command}")?;
+        writeln!(out)?;
+    }
+
     if card.wired.is_empty() {
         // Same rule as `write_next_steps`: name the files the chosen harness
         // reads, or fall back to a generic phrase when there are none.
         let targets = card.harness.config_targets();
-        let where_to = if targets.is_empty() {
-            "your harness MCP config".to_string()
+        if targets.is_empty() {
+            writeln!(
+                out,
+                "  Next: add the dreamd MCP server to your harness MCP config."
+            )?;
+            writeln!(out, "        {GLOBAL_CONFIG_LINE}")?;
         } else {
-            targets.join(" and ")
-        };
-        writeln!(out, "  Next: add the dreamd MCP server to {where_to}:")?;
-        writeln!(out, "          {MCP_BLOCK}")?;
+            writeln!(
+                out,
+                "  Next: add the dreamd MCP server to {}:",
+                targets.join(" and ")
+            )?;
+        }
+        writeln!(
+            out,
+            "          {}",
+            mcp_block(card.harness, card.project_root)
+        )?;
         writeln!(out, "        then reload your harness and ask your agent:")?;
     } else {
         writeln!(
@@ -906,16 +1073,8 @@ fn write_success_card(card: &Card<'_>, out: &mut dyn Write) -> std::io::Result<(
             ),
         )?;
     }
-    if has_claude_habit {
-        write_undo_line(
-            out,
-            &format!(
-                "Remove the dreamd block ({CLAUDE_BLOCK_START} to {CLAUDE_BLOCK_END}) from {HABIT_CLAUDE}."
-            ),
-        )?;
-    }
-    if has_cursor_habit {
-        write_undo_line(out, &format!("Delete {HABIT_CURSOR}."))?;
+    for line in card.habits.iter().filter_map(|habit| habit_undo(*habit)) {
+        write_undo_line(out, &line)?;
     }
     if scaffolded {
         write_undo_line(
@@ -1008,7 +1167,11 @@ fn write_card_and_mark(
     Ok(())
 }
 
-fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
+fn write_next_steps(
+    req: &SetupRequest<'_>,
+    project_root: &Path,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
     let targets = req.harness.config_targets();
     // Only hand out the copy-paste block when setup did not write the config
     // itself (`--no-write-mcp` / `--harness none`).
@@ -1030,13 +1193,20 @@ fn write_next_steps(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Res
         )?;
     }
     let verify_step = if show_mcp_step {
-        let where_to = if targets.is_empty() {
-            "your harness MCP config".to_string()
+        if targets.is_empty() {
+            writeln!(
+                out,
+                "  2. add the dreamd MCP server to your harness MCP config."
+            )?;
+            writeln!(out, "     {GLOBAL_CONFIG_LINE}")?;
         } else {
-            targets.join(" and ")
-        };
-        writeln!(out, "  2. add the dreamd MCP server to {where_to}:")?;
-        writeln!(out, "       {MCP_BLOCK}")?;
+            writeln!(
+                out,
+                "  2. add the dreamd MCP server to {}:",
+                targets.join(" and ")
+            )?;
+        }
+        writeln!(out, "       {}", mcp_block(req.harness, project_root))?;
         3
     } else {
         2
@@ -1060,15 +1230,30 @@ const CURSOR_RECALL_RULE: &str = include_str!("../../assets/dreamd-recall.mdc");
 const CLAUDE_BLOCK_START: &str = "<!-- dreamd:start -->";
 const CLAUDE_BLOCK_END: &str = "<!-- dreamd:end -->";
 
-/// Body of the marked `CLAUDE.md` block. `source_harness` is Claude Code's
-/// reserved value; the Cursor rule names `"cursor"` instead.
-const CLAUDE_BLOCK_BODY: &str = "\
+/// The habit text both marked blocks share, split at the one phrase that
+/// differs (DRM-153 D2), so the other sentences cannot drift apart.
+const HABIT_BODY_HEAD: &str = "\
 At the start of a task, call `search_nodes` with the user's request as the query.
 
 If a hit overlaps the task, quote one line of its content and its id in the reply. If the search is empty, say nothing about memory.
 
-When the user corrects you or states a decision, call `append_node` with those same words in `content`, `source_harness` set to \"claude-code\", and a `skill_action` of lowercase segments joined by `::`.
-";
+When the user corrects you or states a decision, call `append_node` with those same words in `content`, `source_harness` set to ";
+const HABIT_BODY_TAIL: &str = ", and a `skill_action` of lowercase segments joined by `::`.\n";
+/// `CLAUDE.md` is read by Claude Code alone: its reserved value.
+const CLAUDE_SOURCE_HARNESS: &str = "\"claude-code\"";
+/// `AGENTS.md` is read by every agent that reads the repo.
+const AGENTS_SOURCE_HARNESS: &str =
+    "the name of the tool you run in, such as \"claude-code\", \"codex\" or \"cursor\"";
+
+/// Body of the marked `CLAUDE.md` block. `source_harness` is Claude Code's
+/// reserved value; the Cursor rule names `"cursor"` instead.
+const CLAUDE_BLOCK_BODY: &str = concatcp!(HABIT_BODY_HEAD, CLAUDE_SOURCE_HARNESS, HABIT_BODY_TAIL);
+/// Body of the marked `AGENTS.md` block (DRM-153): [`CLAUDE_BLOCK_BODY`] with
+/// the `source_harness` phrase that fits any agent.
+const AGENTS_BLOCK_BODY: &str = concatcp!(HABIT_BODY_HEAD, AGENTS_SOURCE_HARNESS, HABIT_BODY_TAIL);
+
+/// The whole `CLAUDE.md` setup writes beside an `AGENTS.md` (DRM-153).
+const IMPORT_LINE: &str = concatcp!("@", AGENTS_MD, "\n");
 
 /// A sentence `setup` stored, and the id the coordinator minted for it.
 struct RecordedLesson {
@@ -1087,13 +1272,26 @@ fn habit_targets(harness: Harness) -> (bool, bool) {
 }
 
 fn claude_block() -> String {
-    format!("{CLAUDE_BLOCK_START}\n{CLAUDE_BLOCK_BODY}{CLAUDE_BLOCK_END}\n")
+    marked_block(CLAUDE_BLOCK_BODY)
 }
 
-/// Insert or replace the marked block, leaving every other byte of `existing`
-/// in place. A missing file is the empty string.
+fn agents_block() -> String {
+    marked_block(AGENTS_BLOCK_BODY)
+}
+
+fn marked_block(body: &str) -> String {
+    format!("{CLAUDE_BLOCK_START}\n{body}{CLAUDE_BLOCK_END}\n")
+}
+
+/// Insert or replace the marked `CLAUDE.md` block, leaving every other byte of
+/// `existing` in place. A missing file is the empty string.
 fn merge_claude_md(existing: &str) -> String {
-    let block = claude_block();
+    merge_block(existing, &claude_block())
+}
+
+/// [`merge_claude_md`]'s rule for any marked `block`: replace a marked block
+/// in place, or append after one blank line.
+fn merge_block(existing: &str, block: &str) -> String {
     if let (Some(start), Some(end)) = (
         existing.find(CLAUDE_BLOCK_START),
         existing.find(CLAUDE_BLOCK_END),
@@ -1105,7 +1303,7 @@ fn merge_claude_md(existing: &str) -> String {
             }
             let mut out = String::new();
             out.push_str(&existing[..start]);
-            out.push_str(&block);
+            out.push_str(block);
             out.push_str(&existing[after..]);
             if !out.ends_with('\n') {
                 out.push('\n');
@@ -1114,53 +1312,245 @@ fn merge_claude_md(existing: &str) -> String {
         }
     }
     if existing.is_empty() {
-        return block;
+        return block.to_string();
     }
     let mut out = existing.to_string();
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out.push('\n');
-    out.push_str(&block);
+    out.push_str(block);
     out
 }
 
-fn write_habit_plan(req: &SetupRequest<'_>, out: &mut dyn Write) -> std::io::Result<()> {
+/// `text` without its marked dreamd block: the bytes from the start marker
+/// through the end marker, the one `\n` after the end marker, and the one
+/// blank line [`merge_block`] puts before a block it appends, when that line
+/// is there. Every other byte stays. A text with no block is returned as it
+/// is.
+fn remove_dreamd_block(text: &str) -> String {
+    let (Some(start), Some(end)) = (text.find(CLAUDE_BLOCK_START), text.find(CLAUDE_BLOCK_END))
+    else {
+        return text.to_string();
+    };
+    if end < start {
+        return text.to_string();
+    }
+    let mut after = end + CLAUDE_BLOCK_END.len();
+    if text[after..].starts_with('\n') {
+        after += 1;
+    }
+    let mut before = start;
+    if text[..before].ends_with("\n\n") {
+        before -= 1;
+    }
+    format!("{}{}", &text[..before], &text[after..])
+}
+
+/// Whether `claude_md` imports the root's `AGENTS.md`: some line, trimmed, is
+/// exactly `@AGENTS.md` or `@./AGENTS.md` (DRM-153 D3). A mention inside a
+/// sentence or a code span is not an import.
+fn imports_agents_md(claude_md: &str) -> bool {
+    claude_md
+        .lines()
+        .map(str::trim)
+        .any(|line| line == concatcp!("@", AGENTS_MD) || line == concatcp!("@./", AGENTS_MD))
+}
+
+/// What setup does to `AGENTS.md` and `CLAUDE.md` for Claude Code (DRM-153
+/// §3.1, and Austin's D5 ruling of 2026-11-20). Pure: [`install_habit`] reads
+/// the files and writes the result, and [`write_habit_plan`] prints it.
+#[derive(Debug, PartialEq, Eq)]
+struct ClaudeHabitPlan {
+    /// New `AGENTS.md` bytes, or `None` to leave the file as it is.
+    agents_md: Option<String>,
+    /// New `CLAUDE.md` bytes, or `None` to leave the file as it is.
+    claude_md: Option<String>,
+    /// The card's habit rows, in order.
+    habits: Vec<Habit>,
+    /// The `--dry-run` lines, in order.
+    dry_run: Vec<&'static str>,
+}
+
+const PLAN_MERGE_AGENTS: &str = concatcp!("dry-run: would merge a dreamd block into ", AGENTS_MD);
+const PLAN_MERGE_CLAUDE: &str = concatcp!("dry-run: would merge a dreamd block into ", CLAUDE_MD);
+const PLAN_CREATE_IMPORT: &str = concatcp!(
+    "dry-run: would create ",
+    CLAUDE_MD,
+    " with the line @",
+    AGENTS_MD
+);
+const PLAN_REPLACE_WITH_IMPORT: &str = concatcp!(
+    "dry-run: would replace ",
+    CLAUDE_MD,
+    " with the line @",
+    AGENTS_MD
+);
+const PLAN_REMOVE_BLOCK: &str =
+    concatcp!("dry-run: would remove the dreamd block from ", CLAUDE_MD);
+const PLAN_NO_IMPORT_NOTE: &str = concatcp!("note: ", NO_IMPORT_NOTE);
+
+/// Plan the Claude Code habit from the root's `AGENTS.md` and `CLAUDE.md`
+/// (`None`: the file is absent).
+///
+/// | `AGENTS.md` | `CLAUDE.md` | result |
+/// |---|---|---|
+/// | absent | any | the block merged into `CLAUDE.md`, as before DRM-153 |
+/// | present | absent | the block merged into `AGENTS.md`; `CLAUDE.md` is `@AGENTS.md` |
+/// | present | imports it | the block merged into `AGENTS.md`; a block in `CLAUDE.md` is removed |
+/// | present | nothing but a block, or only whitespace | as if `CLAUDE.md` were absent (setup's own file) |
+/// | present | anything else | the block stays in `CLAUDE.md`, plus the note |
+///
+/// A file whose bytes would not change gets `None`.
+fn plan_claude_habit(agents_md: Option<&str>, claude_md: Option<&str>) -> ClaudeHabitPlan {
+    let changed =
+        |before: Option<&str>, after: String| (before != Some(after.as_str())).then_some(after);
+    let Some(agents) = agents_md else {
+        return ClaudeHabitPlan {
+            claude_md: changed(claude_md, merge_claude_md(claude_md.unwrap_or(""))),
+            agents_md: None,
+            habits: vec![Habit::ClaudeBlock],
+            dry_run: vec![PLAN_MERGE_CLAUDE],
+        };
+    };
+    let agents_after = changed(Some(agents), merge_block(agents, &agents_block()));
+    match claude_md {
+        None => ClaudeHabitPlan {
+            agents_md: agents_after,
+            claude_md: Some(IMPORT_LINE.to_string()),
+            habits: vec![Habit::AgentsBlock, Habit::ClaudeImport],
+            dry_run: vec![PLAN_MERGE_AGENTS, PLAN_CREATE_IMPORT],
+        },
+        Some(claude) if imports_agents_md(claude) => {
+            let stripped = remove_dreamd_block(claude);
+            if stripped != claude {
+                ClaudeHabitPlan {
+                    agents_md: agents_after,
+                    claude_md: Some(stripped),
+                    habits: vec![Habit::AgentsBlock, Habit::ClaudeBlockRemoved],
+                    dry_run: vec![PLAN_MERGE_AGENTS, PLAN_REMOVE_BLOCK],
+                }
+            } else {
+                // Left alone. Setup's own one-line file keeps its row, so a
+                // re-run's card matches the run that created it.
+                let mut habits = vec![Habit::AgentsBlock];
+                if claude == IMPORT_LINE {
+                    habits.push(Habit::ClaudeImport);
+                }
+                ClaudeHabitPlan {
+                    agents_md: agents_after,
+                    claude_md: None,
+                    habits,
+                    dry_run: vec![PLAN_MERGE_AGENTS],
+                }
+            }
+        }
+        Some(claude) => {
+            let stripped = remove_dreamd_block(claude);
+            if stripped.trim().is_empty() {
+                // Setup's own file from before DRM-153: nothing but the block.
+                // An empty file goes the same way: merged into, it would be
+                // exactly that file, and the next run would rewrite it.
+                ClaudeHabitPlan {
+                    agents_md: agents_after,
+                    claude_md: Some(IMPORT_LINE.to_string()),
+                    habits: vec![Habit::AgentsBlock, Habit::ClaudeImport],
+                    dry_run: vec![PLAN_MERGE_AGENTS, PLAN_REPLACE_WITH_IMPORT],
+                }
+            } else {
+                // The user's own file: it keeps the block, and `AGENTS.md` is
+                // not touched (D5, option a).
+                ClaudeHabitPlan {
+                    agents_md: None,
+                    claude_md: changed(Some(claude), merge_claude_md(claude)),
+                    habits: vec![Habit::ClaudeBlockWithoutImport],
+                    dry_run: vec![PLAN_MERGE_CLAUDE, PLAN_NO_IMPORT_NOTE],
+                }
+            }
+        }
+    }
+}
+
+/// A habit file's text, or `None` when it is absent.
+fn read_habit_file(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`plan_claude_habit`] for the files at `project_root`.
+///
+/// A `CLAUDE.md` that is the same file as `AGENTS.md` (one is a link to the
+/// other) is planned as if there were no `AGENTS.md`: Claude Code already
+/// reads that text, and one merged block serves both names. Planning the two
+/// names apart would write `@AGENTS.md` over the shared file.
+fn plan_claude_habit_at(project_root: &Path) -> std::io::Result<ClaudeHabitPlan> {
+    let agents_path = project_root.join(AGENTS_MD);
+    let claude_path = project_root.join(CLAUDE_MD);
+    let claude = read_habit_file(&claude_path)?;
+    let agents = if claude.is_some() && same_file(&agents_path, &claude_path) {
+        None
+    } else {
+        read_habit_file(&agents_path)?
+    };
+    Ok(plan_claude_habit(agents.as_deref(), claude.as_deref()))
+}
+
+/// Whether `a` and `b` name one file. A path that cannot be resolved names
+/// no file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn write_habit_plan(
+    req: &SetupRequest<'_>,
+    project_root: &Path,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
     let (claude, cursor) = habit_targets(req.harness);
     if claude {
-        writeln!(out, "dry-run: would merge a dreamd block into CLAUDE.md")?;
+        for line in plan_claude_habit_at(project_root)?.dry_run {
+            writeln!(out, "{line}")?;
+        }
     }
     if cursor {
-        writeln!(out, "dry-run: would write .cursor/rules/dreamd-recall.mdc")?;
+        writeln!(out, "dry-run: would write {CURSOR_RULE}")?;
     }
     Ok(())
 }
 
-/// Write the habit files for `harness`. Claude gets a marked `CLAUDE.md` block;
-/// Cursor gets the always-on rule. `--harness none` writes neither.
+/// Write the habit files for `harness`. Claude Code gets the marked block in
+/// `AGENTS.md` or `CLAUDE.md` ([`plan_claude_habit`]); Cursor gets the
+/// always-on rule. `--harness none` writes neither, and setup never creates
+/// `AGENTS.md`.
 ///
-/// Returns the labels it wrote, in this order: [`HABIT_CLAUDE`], then
-/// [`HABIT_CURSOR`]. The success card lists them and names their undo.
-fn install_habit(project_root: &Path, harness: Harness) -> std::io::Result<Vec<&'static str>> {
+/// Returns the card's habit rows, in order: `AGENTS.md`, `CLAUDE.md`, then the
+/// Cursor rule.
+fn install_habit(project_root: &Path, harness: Harness) -> std::io::Result<Vec<Habit>> {
     let (claude, cursor) = habit_targets(harness);
-    let mut written = Vec::with_capacity(2);
+    let mut habits = Vec::with_capacity(3);
     if claude {
-        let path = project_root.join(HABIT_CLAUDE);
-        let existing = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e),
-        };
-        std::fs::write(&path, merge_claude_md(&existing))?;
-        written.push(HABIT_CLAUDE);
+        let plan = plan_claude_habit_at(project_root)?;
+        if let Some(text) = &plan.agents_md {
+            std::fs::write(project_root.join(AGENTS_MD), text)?;
+        }
+        if let Some(text) = &plan.claude_md {
+            std::fs::write(project_root.join(CLAUDE_MD), text)?;
+        }
+        habits.extend(plan.habits);
     }
     if cursor {
         let dir = project_root.join(".cursor").join("rules");
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("dreamd-recall.mdc"), CURSOR_RECALL_RULE)?;
-        written.push(HABIT_CURSOR);
+        std::fs::write(project_root.join(CURSOR_RULE), CURSOR_RECALL_RULE)?;
+        habits.push(Habit::CursorRule);
     }
-    Ok(written)
+    Ok(habits)
 }
 
 fn write_first_lesson_prompt(err: &mut dyn Write) -> std::io::Result<()> {
@@ -1198,6 +1588,7 @@ fn record_first_lesson(
     project_root: &Path,
     daemon_home: &Path,
     sentence: &str,
+    launcher: Launcher,
 ) -> Result<RecordedLesson, String> {
     let redaction = dreamd_core::config::load_config(project_root)
         .map(|config| config.redaction)
@@ -1206,8 +1597,8 @@ fn record_first_lesson(
     if stored.trim().is_empty() {
         return Err("the sentence was empty after redaction".to_string());
     }
-    let event_id = if open_daemon_store(daemon_home, project_root).is_some() {
-        append_via_daemon(daemon_home, project_root, &stored)?
+    let event_id = if open_daemon_store(daemon_home, project_root, launcher).is_some() {
+        append_via_daemon(daemon_home, project_root, &stored, launcher)?
     } else {
         append_in_process(project_root, &stored)?
     };
@@ -1224,8 +1615,7 @@ fn learning_for(stored: &str) -> Result<dreamd_protocol::AgentLearning, String> 
         FIRST_LESSON_SKILL,
         None,
         None,
-        // `stored` is already redacted. A second pass would be a no-op on
-        // ordinary text and a second mask on a value redaction already replaced.
+        // `stored` is already redacted, and `redact` is idempotent, so a second pass would change nothing.
         false,
     )
     .map_err(|e| e.to_string())
@@ -1278,8 +1668,9 @@ fn append_via_daemon(
     daemon_home: &Path,
     project_root: &Path,
     stored: &str,
+    launcher: Launcher,
 ) -> Result<String, String> {
-    let store = open_daemon_store(daemon_home, project_root)
+    let store = open_daemon_store(daemon_home, project_root, launcher)
         .ok_or_else(|| "daemon is not reachable".to_string())?;
     let req = dreamd_core::memory_store::AppendRequest {
         content: stored.to_string(),
@@ -1309,6 +1700,7 @@ fn append_via_daemon(
 fn open_daemon_store(
     daemon_home: &Path,
     project_root: &Path,
+    launcher: Launcher,
 ) -> Option<dreamd_core::memory_store::DaemonStore> {
     let header = std::fs::canonicalize(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf())
@@ -1321,7 +1713,9 @@ fn open_daemon_store(
         if !socket_is_live(&path) {
             return None;
         }
-        Some(dreamd_core::memory_store::DaemonStore::uds(path, header))
+        Some(dreamd_core::memory_store::DaemonStore::uds(
+            path, header, launcher,
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -1333,7 +1727,7 @@ fn open_daemon_store(
         let endpoint = dreamd_core::daemon_client::read_server_json(&server_json).ok()?;
         let token = dreamd_core::daemon_client::read_auth_token(&home.auth_json()).ok()?;
         Some(dreamd_core::memory_store::DaemonStore::tcp(
-            endpoint, token, header,
+            endpoint, token, header, launcher,
         ))
     }
 }
@@ -1342,6 +1736,13 @@ fn open_daemon_store(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// The two habits every card before DRM-153 knew.
+    const HABIT_CLAUDE: Habit = Habit::ClaudeBlock;
+    const HABIT_CURSOR: Habit = Habit::CursorRule;
+
+    /// The root a test card's `--harness none` MCP block names.
+    const CARD_ROOT: &str = "/work/project";
 
     /// Drive a prompt with canned bytes on stdin, returning the answer + the
     /// prompt copy. The sink is the *err* sink: prompts are written to stderr
@@ -1379,6 +1780,7 @@ mod tests {
     fn habit_text_asks_for_the_hit_id() {
         for (name, text) in [
             ("CLAUDE_BLOCK_BODY", CLAUDE_BLOCK_BODY),
+            ("AGENTS_BLOCK_BODY", AGENTS_BLOCK_BODY),
             ("CURSOR_RECALL_RULE", CURSOR_RECALL_RULE),
         ] {
             assert!(
@@ -1568,7 +1970,7 @@ mod tests {
         launcher: Launcher,
         harness: Harness,
         wired: &[&'static str],
-        habits: &[&'static str],
+        habits: &[Habit],
         daemon_live: bool,
         ask_star: bool,
     ) -> String {
@@ -1577,15 +1979,17 @@ mod tests {
             wired,
             habits,
             harness,
+            project_root: Path::new(CARD_ROOT),
             daemon_live,
             lesson: None,
             launcher,
             ask_star,
+            commit: None,
         })
     }
 
-    /// The habit labels `install_habit` returns for `harness`.
-    fn habits_for(harness: Harness) -> &'static [&'static str] {
+    /// The habits `install_habit` returns for `harness` with no `AGENTS.md`.
+    fn habits_for(harness: Harness) -> &'static [Habit] {
         match harness {
             Harness::Claude => &[HABIT_CLAUDE],
             Harness::Cursor => &[HABIT_CURSOR],
@@ -1869,7 +2273,7 @@ mod tests {
             launcher,
         };
         let mut out = Vec::new();
-        write_next_steps(&req, &mut out).expect("next steps on an in-memory io");
+        write_next_steps(&req, dir, &mut out).expect("next steps on an in-memory io");
         String::from_utf8(out).expect("next steps are utf-8")
     }
 
@@ -2024,6 +2428,39 @@ mod tests {
         assert_eq!(eof, None, "EOF skips the sentence");
     }
 
+    /// DRM-100 test 23: while git has no commit of the log, the card names the
+    /// commit between the daemon row and `Next:`.
+    #[test]
+    fn card_names_the_commit_while_git_has_no_commit_of_the_log() {
+        let command =
+            "git add .agent .gitignore && git commit -m \"Add dreamd memory\" -- .agent .gitignore";
+        let rendered = render(&Card {
+            init: InitOutcome::Scaffolded,
+            wired: &[".mcp.json"],
+            habits: &[HABIT_CLAUDE],
+            harness: Harness::Claude,
+            project_root: Path::new(CARD_ROOT),
+            daemon_live: false,
+            lesson: None,
+            launcher: Launcher::Binary,
+            ask_star: false,
+            commit: Some(command),
+        });
+        let command_line = format!("          {command}");
+        let block = [
+            "  daemon       not running \u{2014} start it with: dreamd watch",
+            "",
+            "  Commit: git has no commit of .agent/ yet, and `git clean -fd` deletes it.",
+            "          From the project root, run:",
+            command_line.as_str(),
+            "",
+            "  Next: reload Claude Code, then ask your agent:",
+            "",
+        ]
+        .join("\n");
+        assert!(rendered.contains(&block), "{rendered}");
+    }
+
     #[test]
     fn card_with_a_lesson_names_the_sentence_and_the_id() {
         let lesson = RecordedLesson {
@@ -2035,10 +2472,12 @@ mod tests {
             wired: &[".mcp.json"],
             habits: &[HABIT_CLAUDE],
             harness: Harness::Claude,
+            project_root: Path::new(CARD_ROOT),
             daemon_live: false,
             lesson: Some(&lesson),
             launcher: Launcher::Binary,
             ask_star: false,
+            commit: None,
         });
         assert!(
             rendered.contains("axum handlers need IntoResponse"),
@@ -2075,6 +2514,178 @@ mod tests {
         let fresh = merge_claude_md("");
         assert!(fresh.starts_with("<!-- dreamd:start -->\n"));
         assert!(fresh.ends_with("<!-- dreamd:end -->\n"));
+    }
+
+    /// DRM-153 test 1: the `AGENTS.md` body is the `CLAUDE.md` body with only
+    /// the `source_harness` phrase changed.
+    #[test]
+    fn agents_block_differs_from_claude_block_only_in_source_harness() {
+        let claude = "`source_harness` set to \"claude-code\",";
+        let agents = "`source_harness` set to the name of the tool you run in, such as \
+                      \"claude-code\", \"codex\" or \"cursor\",";
+        assert_eq!(
+            CLAUDE_BLOCK_BODY.matches(claude).count(),
+            1,
+            "{CLAUDE_BLOCK_BODY}"
+        );
+        assert_eq!(
+            AGENTS_BLOCK_BODY.matches(agents).count(),
+            1,
+            "{AGENTS_BLOCK_BODY}"
+        );
+        assert_eq!(CLAUDE_BLOCK_BODY.replace(claude, agents), AGENTS_BLOCK_BODY);
+        assert_eq!(
+            agents_block(),
+            format!("<!-- dreamd:start -->\n{AGENTS_BLOCK_BODY}<!-- dreamd:end -->\n")
+        );
+    }
+
+    /// DRM-153 test 2: an import is a whole line, trimmed.
+    #[test]
+    fn imports_agents_md_takes_a_whole_line_only() {
+        for text in [
+            "@AGENTS.md\n",
+            "@./AGENTS.md",
+            "# Notes\n\n  @AGENTS.md  \nmore\n",
+            "\t@./AGENTS.md\r\n",
+        ] {
+            assert!(imports_agents_md(text), "{text:?}");
+        }
+        for text in [
+            "see @AGENTS.md here\n",
+            "`@AGENTS.md`\n",
+            "",
+            "AGENTS.md\n",
+            "@AGENTS.md.bak\n",
+            "@../AGENTS.md\n",
+            "@agents.md\n",
+        ] {
+            assert!(!imports_agents_md(text), "{text:?}");
+        }
+    }
+
+    /// DRM-153 test 3: removing the block takes the blank line merge put
+    /// before it, keeps every other byte, and is the identity with no block.
+    #[test]
+    fn remove_dreamd_block_takes_the_block_and_its_blank_line() {
+        let block = claude_block();
+        for user in ["# Mine\n", "@AGENTS.md\n\n# Claude only\n"] {
+            assert_eq!(
+                remove_dreamd_block(&merge_claude_md(user)),
+                user,
+                "{user:?}"
+            );
+        }
+        assert_eq!(remove_dreamd_block(&merge_claude_md("# Mine")), "# Mine\n");
+        assert_eq!(
+            remove_dreamd_block(&format!("intro\n\n{block}\noutro\n")),
+            "intro\n\noutro\n"
+        );
+        assert_eq!(
+            remove_dreamd_block(&format!("intro\n{block}outro")),
+            "intro\noutro"
+        );
+        assert_eq!(remove_dreamd_block(&block), "");
+        for text in [
+            "",
+            "@AGENTS.md\n",
+            "a\n\nb\n",
+            "<!-- dreamd:end -->\n<!-- dreamd:start -->\n",
+            "<!-- dreamd:start -->\nno end\n",
+        ] {
+            assert_eq!(remove_dreamd_block(text), text, "{text:?}");
+        }
+    }
+
+    /// DRM-153 test 4: the card's habit rows, the D5 note, and the Undo lines,
+    /// as exact text, for each case of §3.1.
+    #[test]
+    fn habit_rows_note_and_undo_per_case() {
+        let undo_agents = "        Remove the dreamd block (<!-- dreamd:start --> to <!-- dreamd:end -->) from AGENTS.md.";
+        let undo_claude = "        Remove the dreamd block (<!-- dreamd:start --> to <!-- dreamd:end -->) from CLAUDE.md.";
+        let delete_claude = "        Delete CLAUDE.md.";
+        let agents_row = "  habit        AGENTS.md  (dreamd block)";
+        let claude_row = "  habit        CLAUDE.md  (dreamd block)";
+        let note = "  Note: CLAUDE.md does not import AGENTS.md, so Claude Code does not load AGENTS.md here. Add a line `@AGENTS.md` to CLAUDE.md to load it.";
+        // A case: its name, the habits, the card rows, the Undo lines, and
+        // whether the card prints the note.
+        type Case<'a> = (&'a str, &'a [Habit], &'a [&'a str], &'a [&'a str], bool);
+        let cases: [Case<'_>; 5] = [
+            (
+                "no AGENTS.md",
+                &[Habit::ClaudeBlock],
+                &[claude_row],
+                &[undo_claude],
+                false,
+            ),
+            (
+                "AGENTS.md, no CLAUDE.md",
+                &[Habit::AgentsBlock, Habit::ClaudeImport],
+                &[agents_row, "  habit        CLAUDE.md  (imports AGENTS.md)"],
+                &[undo_agents, delete_claude],
+                false,
+            ),
+            (
+                "CLAUDE.md imports it and had a block",
+                &[Habit::AgentsBlock, Habit::ClaudeBlockRemoved],
+                &[
+                    agents_row,
+                    "  habit        CLAUDE.md  (dreamd block removed)",
+                ],
+                &[undo_agents],
+                false,
+            ),
+            (
+                "CLAUDE.md imports it, left unchanged",
+                &[Habit::AgentsBlock],
+                &[agents_row],
+                &[undo_agents],
+                false,
+            ),
+            (
+                "CLAUDE.md does not import it",
+                &[Habit::ClaudeBlockWithoutImport],
+                &[claude_row],
+                &[undo_claude],
+                true,
+            ),
+        ];
+        for (case, habits, rows, habit_undo, has_note) in cases {
+            let rendered = card_with(
+                InitOutcome::Scaffolded,
+                Launcher::Binary,
+                Harness::Claude,
+                &[".mcp.json"],
+                habits,
+                false,
+                false,
+            );
+            let got_rows: Vec<&str> = rendered
+                .lines()
+                .filter(|l| l.starts_with("  habit"))
+                .collect();
+            assert_eq!(got_rows, rows, "{case}: {rendered}");
+            let undo: Vec<&str> = rendered
+                .lines()
+                .skip_while(|l| *l != "  Undo:")
+                .skip(1)
+                .take_while(|l| !l.is_empty())
+                .collect();
+            let mut want = vec!["        Remove the \"dreamd\" block from .mcp.json."];
+            want.extend_from_slice(habit_undo);
+            want.extend([
+                "        Remove the /.agent/.dreamd/ line from .gitignore.",
+                "        Run `dreamd init --uninstall-project` to remove the registry entry.",
+                "        Delete .agent/ last: it holds this project's memory.",
+                "        Re-run with --no-write-mcp to skip config writes entirely.",
+            ]);
+            assert_eq!(undo, want, "{case}: {rendered}");
+            let noted = format!(
+                "  daemon       not running \u{2014} start it with: dreamd watch\n\n{note}\n\n  Next:"
+            );
+            assert_eq!(rendered.contains(&noted), has_note, "{case}: {rendered}");
+            assert_eq!(rendered.contains("Note:"), has_note, "{case}: {rendered}");
+        }
     }
 
     /// `setup` scaffolds through `init::run`, so an existing store with no
@@ -2119,6 +2730,8 @@ mod tests {
 
     #[test]
     fn install_habit_writes_the_files_the_harness_owns() {
+        // A temp dir under a root with no `AGENTS.md`, so this is §3.1's first
+        // row.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             install_habit(dir.path(), Harness::Both).unwrap(),
@@ -2223,10 +2836,12 @@ mod tests {
             wired: &[],
             habits: &[],
             harness: Harness::None,
+            project_root: Path::new(CARD_ROOT),
             daemon_live: false,
             lesson: None,
             launcher: Launcher::Binary,
             ask_star,
+            commit: None,
         }
     }
 

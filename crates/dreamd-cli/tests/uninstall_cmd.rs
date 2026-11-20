@@ -363,8 +363,9 @@ fn update_dry_run_mutates_nothing_and_prints_version() {
     );
 }
 
-/// (d) Real update path: cache tree + socket cleared, npx cache untouched,
-/// actionable `npx -y dreamd-mcp` next step printed.
+/// (d) Real update path: other cached versions + socket cleared, npx cache
+/// untouched, actionable `npx -y dreamd-mcp` next step printed. The fixture's
+/// `0.1.0-test` is not this binary's version, so it goes (DRM-152).
 #[test]
 fn update_real_path_clears_cache_and_socket() {
     let f = fixture();
@@ -396,8 +397,8 @@ fn update_real_path_clears_cache_and_socket() {
     assert!(stop_called, "real update must attempt a process stop");
     assert!(!socket.exists(), "real update must remove the socket");
     assert!(
-        !cache_tree.exists(),
-        "real update must clear the cache tree"
+        !cache_tree.join("0.1.0-test").exists(),
+        "real update must remove the other cached versions"
     );
     assert!(
         f.npx_ours().exists(),
@@ -413,8 +414,8 @@ fn update_real_path_clears_cache_and_socket() {
         "must print before/after version lines; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("native cache cleared"),
-        "after-line must report the cache was cleared; got: {stdout:?}"
+        stdout.contains("removed 1 other cached version(s): 0.1.0-test"),
+        "update must report the versions it removed; got: {stdout:?}"
     );
 }
 
@@ -443,8 +444,8 @@ fn update_cargo_install_hint_prints_rebuild_guidance() {
         "cargo-installed binaries need rebuild guidance; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("native cache already clean"),
-        "absent cache must report already clean; got: {stdout:?}"
+        stdout.contains("no other cached versions in"),
+        "absent cache must report nothing to remove; got: {stdout:?}"
     );
 
     // --dry-run must surface the same hint: a cargo-installed user planning
@@ -548,8 +549,8 @@ fn update_warns_and_continues_when_daemon_is_live() {
         "must warn with update-specific recovery guidance; got: {stderr:?}"
     );
     assert!(
-        !cache_tree.exists(),
-        "a refused socket must not abort the native cache clear"
+        !cache_tree.join("0.1.0-test").exists(),
+        "a refused socket must not abort removing the other cached versions"
     );
 }
 

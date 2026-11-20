@@ -60,7 +60,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 | `id` | string | MUST be lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
 | `source_harness` | string | Writers SHOULD send a lowercase ASCII identifier matching `[a-z0-9_-]+`. These names are reserved for their owners by convention: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. The reference implementation stores the string it is given. It does not check the pattern and it does not map a name to an owner. |
-| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation counts every `::` prefix and promotes the deepest prefix whose recurrence meets the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. Each event is claimed by one promoted cluster. |
+| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation visits every `::` prefix deepest first. A prefix promotes when at least the threshold of its events that no deeper promoted prefix has claimed fall in the window. A one-segment prefix counts only events whose key is exactly that segment. So `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`, but `rust` does not collect unrelated `rust::*` one-offs. Each event is claimed by one promoted cluster. |
 | `content` | string | Lesson body. Markdown allowed. Writers SHOULD keep `content` under 4 KiB; readers MUST accept up to 64 KiB. |
 | `pain` | number | 0.0–10.0. Severity of the moment that produced this entry. See rubric below. |
 | `importance` | number | 0.0–10.0. Strategic weight. See rubric below. |
@@ -70,7 +70,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop duplicate appends. The reference implementation accepts it per request (MCP `append_node`, or the `X-Client-Dedup-Key` header) and does not write it into the JSONL line. The drop lasts for the life of that writer process. |
+| `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop a repeat of the same learning. The reference implementation accepts it per request (MCP `append_node`, or `POST /api/v1/learn`'s `client_dedup_key` field or `X-Client-Dedup-Key` header) and does not write it into the JSONL line. It drops an append only when both the key and the learning match an earlier one; the same key with new content is a new record. The drop lasts as long as that project's writer keeps it in memory: a restart or an idle eviction forgets the key. |
 
 `recurrence` is **not** an event field. For recall it is derived from the store: the number of live events whose `skill_action` equals the candidate's or extends it with `::`. Promotion uses its own windowed count.
 
@@ -122,7 +122,7 @@ flowchart TD
     H --> J["stage outputs → commit (redo WAL) → apply"]
 ```
 
-**Promotion.** A cluster is promoted when its recurrence is at least an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
+**Promotion.** A cluster is promoted when its recurrence is at least an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 unclaimed events in a 30-day window, and ranks promoted clusters by summed salience, then event count, then newest event, then key ascending. (Earlier text also named a 7-day window. Every event in 7 days is also in 30, so it never changed a result; this is a v0.2 clarification.)
 
 **Output format.** The dream cycle writes to `semantic/LESSONS.md`. The file MUST begin with a YAML frontmatter block followed by one lesson block per promoted cluster:
 
@@ -145,7 +145,7 @@ The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the
 
 **Idempotency.** The lesson body, `cluster_key`, `prompt_version`, and lesson id are a function of the input, including `pinned` state set by previous runs. `last_updated` is the timestamp of the cycle run, so two runs are not byte-identical. At a fixed clock the deterministic body matches. Two consecutive no-promotion cycles over the same input MUST agree on absence: the first leaves the file absent (removing one if present) and the second is a no-op.
 
-**Pruning.** An implementation MAY archive unpinned episodic events. The reference implementation archives an event when it is unpinned and older than 90 days. It also evaluates a salience floor of 2.0, which does not currently spare any event the age gate would archive, because past 90 days the recency term alone sits below that floor. Archived events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted. Pinned events MUST NOT be pruned.
+**Pruning.** An implementation MAY archive unpinned episodic events. The reference implementation archives an event when it is unpinned and older than 90 days. It also evaluates a salience floor of 2.0, which does not currently spare any event the age gate would archive, because past 90 days the recency term alone sits below that floor. Archived events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted. Pinned events MUST NOT be pruned. An event whose `id` appears on more than one line is pinned when any of those lines is, and none of its lines is pruned.
 
 ## Concurrency and file operations
 

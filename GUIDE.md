@@ -12,7 +12,7 @@ For reference docs see [docs/README.md](./docs/README.md). For the on-disk contr
 
 Pick one path. Commands after this section use the npm form (`npx -y dreamd-mcp <cmd>`). The npm shim does **not** put `dreamd` on `PATH`. If you cargo-installed, run `dreamd <cmd>` instead.
 
-This guide describes dreamd 1.3.2. If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. The 1.2.0 npm shim did not forward `status`, `recall`, `score`, `archive` and `migrate`; from 1.2.1 every command here runs as `npx -y dreamd-mcp <cmd>`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
+This guide describes dreamd 1.4.0. If `npx -y dreamd-mcp --version` prints a version older than 1.0.0, section 8's commands are not in that package. The 1.2.0 npm shim did not forward `status`, `recall`, `score`, `archive` and `migrate`; from 1.2.1 every command here runs as `npx -y dreamd-mcp <cmd>`. The curl examples use a Unix socket, so they are for Linux and macOS (WSL2 on Windows).
 
 ```bash
 # npm (no Rust required)
@@ -30,9 +30,17 @@ cd ~/your-project    # must contain .git/, Cargo.toml, package.json, or pyprojec
 npx -y dreamd-mcp setup
 ```
 
-**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — an empty `episodic/AGENT_LEARNINGS.jsonl`, a `working/WORKSPACE.md` scratch file, a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor. It also merges a `<!-- dreamd:start -->` block into `CLAUDE.md` (Claude Code) or writes `.cursor/rules/dreamd-recall.mdc` (Cursor), and the card it prints at the end lists each of these, with an Undo line for each.
+**What just happened:** `setup` scaffolded `<project>/.agent/` (episodic, semantic, personal, working) by calling `init` — an empty `episodic/AGENT_LEARNINGS.jsonl`, a `working/WORKSPACE.md` scratch file, a commented config template at `.agent/.dreamd/config.toml`, the project registered in `~/.agent/registry.toml`, `/.agent/.dreamd/` appended to `.gitignore` — then wrote the dreamd MCP block (`npx -y dreamd-mcp`) into the config for the harness you picked: `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor. For Claude Code it also merges a `<!-- dreamd:start -->` block. With an `AGENTS.md` at the project root, the block goes there, and a missing `CLAUDE.md` becomes the one line `@AGENTS.md`, which Claude Code needs to keep loading `AGENTS.md`; a `CLAUDE.md` of your own that does not import `AGENTS.md` keeps the block instead. Without an `AGENTS.md`, the block goes into `CLAUDE.md`. For Cursor it writes `.cursor/rules/dreamd-recall.mdc`. The card it prints at the end lists each of these, with an Undo line for each.
 
 `setup` prompts when it has a TTY; pass `--yes` (with `--harness claude|cursor|both|none`) in scripts. `npx -y dreamd-mcp init` is the lower-level scaffold primitive — it creates the store and writes no harness config, which is also what `npx -y dreamd-mcp setup --no-write-mcp` gives you. A second `init` where `.agent/` already exists and the project is already registered prints `already initialized` and returns before the `.gitignore` append. If `.agent/` exists but the registry entry is missing — after `dreamd init --uninstall-project`, a lost `registry.toml`, or a moved `HOME` — `dreamd init` registers it and does not rewrite the store. `dreamd init --uninstall-project` removes only the registry entry; run `dreamd init` again to put it back.
+
+Then commit the store. `setup` prints this command while git has no commit of `.agent/`:
+
+```bash
+git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitignore
+```
+
+Only `.agent/.dreamd/` is gitignored. The episodic log and `LESSONS.md` are meant to be committed, and until they are, `git clean -fd` deletes them. The `--` paths keep anything else you had staged out of this commit. To keep memory out of git instead, add `.agent/` to `.gitignore`.
 
 Verify:
 
@@ -41,7 +49,7 @@ ls -la .agent/
 npx -y dreamd-mcp doctor
 ```
 
-`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Last cycle status is `npx -y dreamd-mcp status` (1.2.1 and later; the 1.2.0 shim did not forward `status`); it exits 1 while no daemon is running.
+`doctor` prints dream-cycle mode and index health, one `name: value` line per check, and exits 0 when they pass. Its `memory_in_git:` line says whether git has a commit of the episodic log, and warns while git has none and the log holds events. Last cycle status is `npx -y dreamd-mcp status` (1.2.1 and later; the 1.2.0 shim did not forward `status`); it exits 1 while no daemon is running.
 
 ---
 
@@ -130,13 +138,13 @@ npx -y dreamd-mcp dream
 
 With the daemon running the cycle is proxied to it and prints `dream cycle complete (via daemon)`. With no API key configured the cycle is deterministic and makes no network call.
 
-> **Git:** after a successful cycle dreamd commits `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl` to your project's git repo as `dreamd <noreply@dreamd.dev>` with the message `dreamd: cycle YYYY-MM-DD`. Pass `--no-commit` to skip that commit. The commit is also skipped when either file held a change no dream cycle wrote when the cycle started, such as a hand edit or `dreamd forget`; appends and a cycle's own rewrites never hold it. `dreamd dream` then prints why and which files, and once you commit those files with git the next cycle commits again. `--no-commit` also skips the daemon proxy and runs the cycle in this process. Do not use it while `dreamd watch` is serving the same project: it rewrites the log under the daemon and then fails on the index lock the daemon holds. Stop `watch` first, or run `dreamd dream` with no flag so the daemon stays the writer.
+> **Git:** after a successful cycle dreamd commits `.agent/semantic/LESSONS.md` and `.agent/episodic/AGENT_LEARNINGS.jsonl` to your project's git repo as `dreamd <noreply@dreamd.dev>` with the message `dreamd: cycle YYYY-MM-DD`. It does not commit while HEAD is detached or while a merge, rebase, `git am`, cherry-pick, revert or bisect is in progress. The cycle still runs, its changes stay in the working tree, and `dreamd dream` says what to finish; the next cycle commits them. Pass `--no-commit` to skip that commit. The commit is also skipped when either file held a change no dream cycle wrote when the cycle started, such as a hand edit or `dreamd forget`; appends and a cycle's own rewrites never hold it. `dreamd dream` then prints why and which files, and once you commit those files with git the next cycle commits again. A cycle also keeps a `LESSONS.md` that changed outside a dream cycle, instead of rewriting it, and says so. It writes the lesson again once you commit or delete the file. Only the lesson is held: pins and decay still change the log. `--no-commit` also skips the daemon proxy and runs the cycle in this process. Do not use it while `dreamd watch` is serving the same project: it rewrites the log under the daemon and then fails on the index lock the daemon holds. Stop `watch` first, or run `dreamd dream` with no flag so the daemon stays the writer.
 
 **What just happened:**
 
 1. Every output is staged under `.agent/.dreamd/stage/` first; nothing live changes until one redo WAL (`dream_in_progress.wal`) commits them all
 2. Episodic events clustered by `skill_action`
-3. Clusters with ≥3 events in a 7- or 30-day window are promotion candidates; the cycle writes **one** lesson to `.agent/semantic/LESSONS.md` — the highest-salience exemplar from the top cluster (salience, then pain, then importance, then EventId)
+3. A key promotes when at least 3 of its events that no deeper key has claimed fall in the last 30 days, deepest key first, and a one-segment key such as `rust` counts only events filed as exactly `rust`. The cycle writes **one** lesson to `.agent/semantic/LESSONS.md` — the highest-salience exemplar (salience, then pain, then importance, then EventId) from the top cluster (summed salience, then more events, then the newest event, then the key ascending)
 4. Promoted exemplar events get `pinned: true` in JSONL
 5. Decay pruner archives stale unpinned events to `.agent/.dreamd/snapshots/`
 6. `recurrence_counts.json` updated; the redo WAL committed, its renames applied, and the WAL deleted
@@ -239,7 +247,7 @@ ls .agent/.dreamd/dream_in_progress.wal   # should be absent after recovery
 
 ## 8. Inspect and undo
 
-These need dreamd 1.0.0 or later. `blame`, `salience-drift`, `memory`, and `forget` are forwarded by the npm shim (1.0.0 and later); `recall` and `score` are forwarded from 1.2.1.
+These need dreamd 1.0.0 or later. `blame`, `salience-drift`, and `forget` are forwarded by the npm shim (1.0.0 and later); `recall` and `score` are forwarded from 1.2.1.
 
 See why a query ranked the way it did:
 
@@ -250,15 +258,7 @@ dreamd blame "axum error"              # id, timestamp, skill_action, content, b
 
 After section 4 the lesson shows up as its own row with an `lsn_evt_…` id and layer `semantic`, next to the episodic events it was promoted from.
 
-Branch the memory files before an experiment, then compare. The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0; `.agent/` is plain files, so git can do the same job:
-
-```bash
-dreamd memory branch before-experiment   # snapshots the live files, prints the object id
-dreamd memory branches                   # `*` marks the current branch; snap-* are the automatic ones
-dreamd memory diff <older-ref> <newer-ref>
-```
-
-`memory checkout <name>` replaces the live memory files with that snapshot. It and `memory bisect` refuse while `dreamd watch` is running, so stop the daemon first. Checkout does not rebuild the recall index; `dreamd recall` can keep returning the store you left until `dreamd doctor --repair`. Full walkthrough: [docs/branching-guide.md](./docs/branching-guide.md). Bisect is in that guide too; there is no `memory bisect reset`.
+To keep a copy of memory before an experiment, commit `.agent/` and branch it with git. The `dreamd memory` commands were deprecated in 1.2.0 (there is no 1.1.0 tag) and will be removed in 2.0. They still run. [docs/branching-guide.md](./docs/branching-guide.md) describes them for an install that already uses them.
 
 Remove one event (stop the daemon first — `forget` refuses while it is running):
 
@@ -269,6 +269,23 @@ dreamd doctor --provenance
 ```
 
 `forget` removes the event from the JSONL and drops or unlinks the lesson that names it. `--proof` writes a `forget-receipt/1.0` JSON file — a record of what was removed, not a signed proof. The provenance ledger under `.agent/.dreamd/provenance/` is append-only, so `doctor --provenance` afterwards lists the forgotten event's old edges as orphans and exits 1; after a `forget` that is expected. Format: [docs/provenance.md](./docs/provenance.md).
+
+---
+
+## 9. Clones and worktrees
+
+A clone or a `git worktree` of a project whose `.agent/` is committed has that memory. Part of `.agent/` travels with git, and part belongs to each checkout.
+
+- **Shared through git:** the committed files under `.agent/`, such as the episodic log (`episodic/AGENT_LEARNINGS.jsonl`) and `semantic/LESSONS.md`.
+- **Each checkout's own:** `.agent/.dreamd/`, which git ignores. It holds the index, `writer.lock`, the provenance ledger and the project `config.toml`. A clone starts without it: the first open builds the index from the log, and the project's own `config.toml` is missing until you copy it, so the user config (`~/.config/dreamd/config.toml` on Linux; [configuration](docs/configuration.md#config-file-locations) gives the macOS and Windows paths) and the built-in defaults apply. Git keeps no empty folder, so a clone has no `personal/`, and no `semantic/` until a dream cycle has written `LESSONS.md`.
+- **With a daemon running:** run `dreamd init` (or `npx -y dreamd-mcp init`) once in each clone and worktree. Until then every call answers with the folder and the command:
+
+  ```
+  the store in /path/to/clone is not registered with the running daemon. Run `dreamd init` in /path/to/clone once: it registers the existing store without changing its files (a clone or a worktree is not registered until then), and the next call works without a restart.
+  ```
+
+  `init` registers the store, re-creates the missing folders and changes no file. In-process mode needs nothing for the tools to work; `init` still re-creates the folders `dreamd doctor` checks.
+- **Merging two checkouts:** each checkout appends to its own copy of the log, so a merge usually conflicts at the end of `AGENT_LEARNINGS.jsonl`. Keep both sides' new lines: each one is an event with its own id. A line that was in the log before the checkouts split is still one event when a side changed it (a dream cycle pins the events its lessons cite, and `dreamd archive --force-unpin` unpins one), so keep only the changed copy. A line one side removed (`dreamd forget`, or decay in a dream cycle) stays removed. If both sides ran a dream cycle, `semantic/LESSONS.md` conflicts as well; keep one side's file whole. Then run `dreamd doctor`: `duplicate_id` lists any id left on two lines.
 
 ---
 

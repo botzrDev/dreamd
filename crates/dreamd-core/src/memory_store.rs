@@ -14,6 +14,7 @@
 //! * [`DaemonStore`] — the daemon proxy. HTTP-over-UDS on Unix (WEG-259),
 //!   loopback TCP + `Authorization: Bearer` off Unix (AILAB-192). Same requests,
 //!   same `X-Agent-Root` contract, same per-call connect on both transports.
+//!   Each call has a deadline, `deadline_for(CallKind::Request)` (DRM-121).
 //!
 //! The HTTP handlers are not adapters. `GET /api/v1/recall` keeps its reader
 //! pinned to the primary handle through `AppState::with_index_handle` and
@@ -24,9 +25,15 @@
 //! Wire shapes stay single-sited in [`crate::ingress`]: the recall envelope is
 //! [`RecallIngress::to_json`], the learn body is [`LearnResponse`], and the
 //! default `k` is [`crate::ingress::DEFAULT_RECALL_K`].
+//!
+//! A third store answers in a folder with no project store: on Unix,
+//! `dreamd mcp` serves [`NotSetUpStore`] there in daemon and in-process mode
+//! alike, and both tools answer [`not_set_up_message`] (DRM-101). It reads
+//! nothing, writes nothing and calls no daemon.
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::Mutex;
@@ -37,8 +44,10 @@ use tokio::sync::mpsc;
 
 use crate::config::load_config;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg, MAX_LEARNING_LINE_BYTES};
+use crate::daemon_client::{deadline_for, CallKind, DaemonTransportError};
 use crate::ingress::{
-    query_too_long_message, LearnIngress, LearnResponse, RecallIngress, MAX_RECALL_QUERY_BYTES,
+    k_too_large_message, query_too_long_message, LearnIngress, LearnRequest, LearnResponse,
+    RecallIngress, DEFAULT_SCORE, MAX_RECALL_K, MAX_RECALL_QUERY_BYTES,
 };
 use crate::recurrence::RecallReader;
 use crate::AgentRoot;
@@ -67,12 +76,14 @@ const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryStoreError {
     /// The tool arguments are wrong: a bad `skill_action`, a score outside
-    /// `0.0..=10.0`, a learning or query over its size limit, a query the
-    /// parser rejects, or any other `400` the daemon explains. MCP `-32602`.
+    /// `0.0..=10.0`, a learning or query over its size limit, or any other
+    /// `400` the daemon explains. MCP `-32602`.
     #[error("{0}")]
     InvalidParams(String),
-    /// An unregistered project, a rejected content type, or an index that
-    /// cannot be opened or searched. MCP `-32600`.
+    /// An unregistered project, a project path the daemon refuses
+    /// (`X-Agent-Root`, DRM-102), a project config that does not load
+    /// (DRM-103), a rejected content type, or an index that cannot be opened
+    /// or searched. MCP `-32600`.
     #[error("{0}")]
     InvalidRequest(String),
     /// Coordinator, transport, or daemon failure. MCP `-32603`.
@@ -114,7 +125,8 @@ pub struct AppendRequest {
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Recall up to `k` hits for `query`, as the canonical
-    /// `{"results":[...]}` JSON string.
+    /// `{"results":[...]}` JSON string. A `k` over [`MAX_RECALL_K`] is
+    /// `InvalidParams` with [`k_too_large_message`] (DRM-109).
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError>;
 
     /// Durably append one learning.
@@ -242,24 +254,21 @@ impl InProcessStore {
             handle.reader().clone()
         };
         let now_sec = chrono::Utc::now().timestamp();
-        recall_to_json(&reader, query, k, now_sec).map_err(|e| match e {
-            // tantivy turns every query-parser error into `InvalidArgument`:
-            // the caller's to fix, as `get_recall`'s 400 says in daemon mode.
-            e @ tantivy::TantivyError::InvalidArgument(_) => {
-                MemoryStoreError::params(format!("recall failed: {e}"))
-            }
-            e => MemoryStoreError::invalid(format!("recall failed: {e}")),
-        })
+        recall_to_json(&reader, query, k, now_sec)
+            .map_err(|e| MemoryStoreError::invalid(format!("recall failed: {e}")))
     }
 }
 
 #[async_trait::async_trait]
 impl MemoryStore for InProcessStore {
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError> {
-        // The same limit the daemon and its client apply (BZR-1301), so one
-        // query gets one answer in both modes.
+        // The same limits the daemon and its client apply (BZR-1301,
+        // DRM-109), so one call gets one answer in both modes.
         if query.len() > MAX_RECALL_QUERY_BYTES {
             return Err(MemoryStoreError::params(query_too_long_message()));
+        }
+        if k > MAX_RECALL_K {
+            return Err(MemoryStoreError::params(k_too_large_message()));
         }
         let Some(root) = &self.agent_root else {
             return Ok(EMPTY_RESULTS.to_string());
@@ -299,9 +308,10 @@ impl MemoryStore for InProcessStore {
             ));
         };
 
-        let config = load_config(agent_root.project_root())
-            .map_err(|e| MemoryStoreError::internal(format!("config load failed: {e}")))?;
-        // Sole skill_action gate for the in-process path (ARCHITECTURE.md §9).
+        let config = load_config(agent_root.project_root()).map_err(|e| {
+            MemoryStoreError::invalid(format!("{}: {e}", crate::daemon_client::CONFIG_LOAD_FAILED))
+        })?;
+        // ARCHITECTURE.md §9: the one ingress call for this path.
         let mut learning = LearnIngress::build_agent_learning(
             &req.content,
             &req.source_harness,
@@ -341,6 +351,51 @@ impl MemoryStore for InProcessStore {
     }
 }
 
+// No project store (DRM-101)
+
+/// What both MCP tools answer in a folder with no project store (DRM-101).
+/// `start` is where discovery began; `launcher` picks the setup command.
+pub fn not_set_up_message(start: &std::path::Path, launcher: crate::launcher::Launcher) -> String {
+    format!(
+        "this folder is not set up for dreamd: there is no .agent/ store in {} or a folder \
+         above it. Run `{}` in the project folder, then restart this MCP server.",
+        start.display(),
+        launcher.command("setup")
+    )
+}
+
+/// The store a Unix `dreamd mcp` serves in a folder with no project store,
+/// in daemon and in-process mode alike (DRM-101). `search_nodes` and
+/// `append_node` both answer [`not_set_up_message`] as `InvalidRequest`
+/// (`-32600`): the arguments are fine, and the project needs setting up.
+/// Nothing is written and no daemon is called.
+#[cfg(unix)]
+pub struct NotSetUpStore {
+    message: String,
+}
+
+#[cfg(unix)]
+impl NotSetUpStore {
+    /// The store for a `dreamd mcp` whose discovery started at `start`.
+    pub fn new(start: &Path, launcher: crate::launcher::Launcher) -> Self {
+        Self {
+            message: not_set_up_message(start, launcher),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoryStore for NotSetUpStore {
+    async fn recall_json(&self, _query: &str, _k: u32) -> Result<String, MemoryStoreError> {
+        Err(MemoryStoreError::invalid(self.message.clone()))
+    }
+
+    async fn append(&self, _req: AppendRequest) -> Result<LearnResponse, MemoryStoreError> {
+        Err(MemoryStoreError::invalid(self.message.clone()))
+    }
+}
+
 // Daemon adapter
 
 /// Daemon-proxy store: every call is one HTTP request to the running daemon.
@@ -353,6 +408,8 @@ impl MemoryStore for InProcessStore {
 ///
 /// `agent_root_header` is the canonicalized project-root string sent as
 /// `X-Agent-Root` (matches `resolve_project`'s server-side lookup).
+/// `not_registered` is the daemon's `404` answer for that store, built once
+/// from the header and the launcher ([`not_registered_message`], DRM-107).
 pub struct DaemonStore {
     #[cfg(unix)]
     sock_path: PathBuf,
@@ -361,40 +418,86 @@ pub struct DaemonStore {
     #[cfg(not(unix))]
     token: AuthToken,
     agent_root_header: String,
+    not_registered: String,
+    /// Each call's deadline: `deadline_for(CallKind::Request)` (DRM-121).
+    deadline: std::time::Duration,
+    /// The daemon passed the version probe (DRM-122). Only a pass is kept, so
+    /// a daemon fixed mid-session is probed again on the next call.
+    version_ok: AtomicBool,
 }
 
+/// What a timed-out append adds to its error (DRM-121): the daemon may have
+/// stored it before the deadline ran out.
+pub const APPEND_MAY_HAVE_BEEN_WRITTEN: &str = "The append may have been written. Retry with the same client_dedup_key so it cannot be stored twice.";
+
 impl DaemonStore {
-    /// Unix: proxy over the daemon's UDS socket.
+    /// Unix: proxy over the daemon's UDS socket. `launcher` picks the
+    /// command the `404` message names.
     #[cfg(unix)]
-    pub fn uds(sock_path: PathBuf, agent_root_header: String) -> Self {
+    pub fn uds(
+        sock_path: PathBuf,
+        agent_root_header: String,
+        launcher: crate::launcher::Launcher,
+    ) -> Self {
         Self {
             sock_path,
+            not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
+            deadline: deadline_for(CallKind::Request),
+            version_ok: AtomicBool::new(false),
         }
     }
 
     /// Off Unix: proxy over loopback TCP with a bearer credential.
+    /// `launcher` picks the command the `404` message names.
     #[cfg(not(unix))]
-    pub fn tcp(endpoint: DaemonEndpoint, token: AuthToken, agent_root_header: String) -> Self {
+    pub fn tcp(
+        endpoint: DaemonEndpoint,
+        token: AuthToken,
+        agent_root_header: String,
+        launcher: crate::launcher::Launcher,
+    ) -> Self {
         Self {
             endpoint,
             token,
+            not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
+            deadline: deadline_for(CallKind::Request),
+            version_ok: AtomicBool::new(false),
         }
     }
 
+    /// The same store with another deadline, so a test need not wait 30 s.
+    #[cfg(test)]
+    fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// One request within [`Self::deadline`], after the version probe while
+    /// no probe has passed (DRM-122). A failed probe is mapped by
+    /// [`map_transport_error`] and the call is not sent. The call's own
+    /// transport error goes through `map_call`, so `append` can tell a
+    /// timeout apart.
     async fn send(
         &self,
         req: hyper::Request<Full<Bytes>>,
+        map_call: fn(DaemonTransportError) -> MemoryStoreError,
     ) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
+        if !self.version_ok.load(Ordering::Acquire) {
+            #[cfg(unix)]
+            let probe = crate::daemon_client::preflight_version(&self.sock_path).await;
+            #[cfg(not(unix))]
+            let probe =
+                crate::daemon_client::preflight_version_tcp(&self.endpoint, &self.token).await;
+            probe.map_err(map_transport_error)?;
+            self.version_ok.store(true, Ordering::Release);
+        }
         #[cfg(unix)]
-        {
-            send_remote(&self.sock_path, req).await
-        }
+        let sent = send_remote(&self.sock_path, req, self.deadline).await;
         #[cfg(not(unix))]
-        {
-            send_remote_tcp(&self.endpoint, &self.token, req).await
-        }
+        let sent = send_remote_tcp(&self.endpoint, &self.token, req, self.deadline).await;
+        sent.map_err(map_call)
     }
 }
 
@@ -402,19 +505,19 @@ impl DaemonStore {
 impl MemoryStore for DaemonStore {
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError> {
         let req = build_recall_request(query, k, &self.agent_root_header)?;
-        let (status, body) = self.send(req).await?;
+        let (status, body) = self.send(req, map_transport_error).await?;
         if status.is_success() {
             // The daemon already returns the canonical {"results":[...]} shape;
             // forward it verbatim.
             Ok(String::from_utf8_lossy(&body).into_owned())
         } else {
-            Err(map_remote_status_error(status, &body))
+            Err(map_remote_status_error(status, &body, &self.not_registered))
         }
     }
 
     async fn append(&self, req: AppendRequest) -> Result<LearnResponse, MemoryStoreError> {
         let http_req = build_learn_request(&req, &self.agent_root_header)?;
-        let (status, body) = self.send(http_req).await?;
+        let (status, body) = self.send(http_req, append_transport_error).await?;
         if status.is_success() {
             // The daemon serialized this with `LearnResponse` too, so the
             // round trip is lossless.
@@ -422,7 +525,7 @@ impl MemoryStore for DaemonStore {
                 MemoryStoreError::internal(format!("daemon learn response parse failed: {e}"))
             })
         } else {
-            Err(map_remote_status_error(status, &body))
+            Err(map_remote_status_error(status, &body, &self.not_registered))
         }
     }
 }
@@ -452,7 +555,9 @@ fn percent_encode_query(value: &str) -> String {
 ///
 /// A query over [`MAX_RECALL_QUERY_BYTES`] is refused before anything is
 /// built, with the daemon's `414` message (BZR-1301). Below that limit the
-/// encoded URI always fits the `http` crate's 65,534 bytes.
+/// encoded URI always fits the `http` crate's 65,534 bytes. A `k` over
+/// [`MAX_RECALL_K`] is refused the same way, with the daemon's `400` message
+/// (DRM-109), so nothing is sent that the daemon would refuse.
 pub(crate) fn build_recall_request(
     query: &str,
     k: u32,
@@ -460,6 +565,9 @@ pub(crate) fn build_recall_request(
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
     if query.len() > MAX_RECALL_QUERY_BYTES {
         return Err(MemoryStoreError::params(query_too_long_message()));
+    }
+    if k > MAX_RECALL_K {
+        return Err(MemoryStoreError::params(k_too_large_message()));
     }
     let uri = format!("/api/v1/recall?q={}&k={k}", percent_encode_query(query));
     hyper::Request::builder()
@@ -472,57 +580,78 @@ pub(crate) fn build_recall_request(
 }
 
 /// Build `POST /api/v1/learn` with `X-Agent-Root`, `Content-Type:
-/// application/json`, an optional `X-Client-Dedup-Key`, and a JSON body built
-/// by [`LearnIngress::placeholder_learning`] — the same placeholder
-/// constructor the in-process path uses, so `schema_version` is
-/// `RECORD_SCHEMA_VERSION` and the `EventId` is the shared placeholder.
+/// application/json`, and a [`LearnRequest`] body: the type the daemon
+/// deserializes. The dedup key travels in the body, never as
+/// `X-Client-Dedup-Key`, so a key with `\n` or non-ASCII characters works as
+/// it does in process (DRM-106).
 ///
-/// `pain` and `importance` are checked here first, with the shared
-/// `LearnIngress` validators, because the placeholder stores them as `f32`:
-/// the cast would turn `1e40` into infinity, which serializes as `null`, and
-/// round `10.0000001` to `10.0` (BZR-1301). The daemon mints the real `id`
-/// and `timestamp`, and re-runs every `LearnIngress` check (skill_action,
-/// score range, redaction) on arrival, so the raw skill_action and content
-/// are forwarded as given. Pure: unit-tested directly, and cfg-free — see
-/// [`build_recall_request`].
+/// The daemon runs the one ingress call on arrival
+/// ([`LearnIngress::build_agent_learning`]: `skill_action`, then `pain`, then
+/// `importance`, then redaction), so both modes answer a bad append the same
+/// way (DRM-104). The client converts nothing: the fields go as given, `f64`
+/// scores included, and an omitted score is [`DEFAULT_SCORE`], as in process.
+/// It refuses nothing: a score JSON cannot carry goes as [`wire_score`] makes
+/// it. The daemon mints `id` and `timestamp`. Pure: unit-tested directly, and
+/// cfg-free — see [`build_recall_request`].
 pub(crate) fn build_learn_request(
     req: &AppendRequest,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
-    LearnIngress::validate_optional_pain(req.pain)
-        .and_then(|()| LearnIngress::validate_optional_importance(req.importance))
-        .map_err(|e| MemoryStoreError::params(e.to_string()))?;
-    let mut learning = LearnIngress::placeholder_learning(
-        &req.content,
-        &req.source_harness,
-        &req.skill_action,
-        req.pain,
-        req.importance,
-    );
-    learning.pinned = req.pinned;
-    let body = serde_json::to_vec(&learning)
-        .map_err(|e| MemoryStoreError::internal(format!("serialize learning failed: {e}")))?;
+    let pain = wire_score(req.pain.unwrap_or(DEFAULT_SCORE));
+    let importance = wire_score(req.importance.unwrap_or(DEFAULT_SCORE));
+    let body = serde_json::to_vec(&LearnRequest {
+        pain,
+        importance,
+        pinned: req.pinned,
+        skill_action: req.skill_action.clone(),
+        source_harness: req.source_harness.clone(),
+        content: req.content.clone(),
+        client_dedup_key: req.client_dedup_key.clone(),
+    })
+    .map_err(|e| MemoryStoreError::internal(format!("serialize learning failed: {e}")))?;
 
-    let mut builder = hyper::Request::builder()
+    hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri("/api/v1/learn")
         .header(hyper::header::HOST, "localhost")
         .header("x-agent-root", agent_root_header)
-        .header(hyper::header::CONTENT_TYPE, "application/json");
-    if let Some(key) = req.client_dedup_key.as_deref() {
-        builder = builder.header("x-client-dedup-key", key);
-    }
-    builder
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
         .map_err(|e| MemoryStoreError::internal(format!("build learn request failed: {e}")))
+}
+
+/// A score as it goes over the wire: `v` when it is finite, else `f64::MAX`.
+///
+/// JSON has no infinity or NaN. Send the largest finite `f64` instead: the
+/// daemon's one ingress call refuses it in its own order, with the message
+/// in-process gives for the original value (DRM-104). `f64::MAX` survives the
+/// JSON round trip exactly, and it is out of range, as every non-finite score
+/// is in process.
+fn wire_score(v: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        f64::MAX
+    }
 }
 
 /// Label for a `400` whose body is not the daemon's `{"error": …}` envelope.
 const DAEMON_REJECTED_400: &str = "daemon rejected the request (HTTP 400)";
 
-/// The `404` message. The daemon's only `404` on these routes is a registry
-/// miss.
-const NOT_REGISTERED: &str = "project not registered with daemon; run dreamd init";
+/// The daemon-mode answer to a 404 (DRM-107): the daemon serves only
+/// registered stores, and a clone or worktree is a new path. The daemon's
+/// only `404` on these routes is a registry miss. `root` is the store folder
+/// the call was for (the `X-Agent-Root` header); `launcher` picks the `init`
+/// command.
+pub fn not_registered_message(root: &str, launcher: crate::launcher::Launcher) -> String {
+    format!(
+        "the store in {root} is not registered with the running daemon. Run `{init}` in \
+         {root} once: it registers the existing store without changing its files (a clone \
+         or a worktree is not registered until then), and the next call works without a \
+         restart.",
+        init = launcher.command("init"),
+    )
+}
 
 /// The one message for a learning over the JSONL line cap, in both modes
 /// (BZR-1301): the daemon client's `413` arm and the in-process store's
@@ -544,74 +673,108 @@ fn daemon_error_message(body: &[u8]) -> Option<String> {
 /// Map a non-success daemon HTTP status to a [`MemoryStoreError`]. Never
 /// panics. Cfg-free: one status table for both transports, so a Windows
 /// client and a Unix client explain the same 404 the same way (BZR-1301).
+/// `not_registered` is the store's [`not_registered_message`], which only the
+/// caller knows (DRM-107).
 ///
 /// | Status | `message` | Kind |
 /// |---|---|---|
-/// | 400 | the daemon's `error` string, or [`DAEMON_REJECTED_400`] for any other body | `InvalidParams` |
-/// | 404 | [`NOT_REGISTERED`] | `InvalidRequest` |
+/// | 400 | an `X-Agent-Root …` string, as is | `InvalidRequest` |
+/// | 400 | any other `error` string, or [`DAEMON_REJECTED_400`] for any other body | `InvalidParams` |
+/// | 404 | `not_registered`, the store's [`not_registered_message`] | `InvalidRequest` |
 /// | 413 | [`learning_too_large_message`] | `InvalidParams` |
 /// | 414 | [`query_too_long_message`] | `InvalidParams` |
 /// | 415 | `content-type rejected (defensive)` | `InvalidRequest` |
+/// | 500 | a `config load failed: …` string, as is | `InvalidRequest` |
 /// | other | `daemon error {status}: {body}` | `Internal` |
 ///
 /// 413 comes only from learn and 414 only from recall, and hyper's own `414`
 /// has an empty body, so both ignore the body.
-fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
+fn map_remote_status_error(
+    status: hyper::StatusCode,
+    body: &Bytes,
+    not_registered: &str,
+) -> MemoryStoreError {
     match status.as_u16() {
-        400 => MemoryStoreError::params(
-            daemon_error_message(body).unwrap_or_else(|| DAEMON_REJECTED_400.to_owned()),
-        ),
-        404 => MemoryStoreError::invalid(NOT_REGISTERED),
+        400 => match daemon_error_message(body) {
+            Some(msg) if msg.starts_with(crate::daemon_client::AGENT_ROOT_REJECTED_PREFIX) => {
+                MemoryStoreError::invalid(msg)
+            }
+            Some(msg) => MemoryStoreError::params(msg),
+            None => MemoryStoreError::params(DAEMON_REJECTED_400.to_owned()),
+        },
+        404 => MemoryStoreError::invalid(not_registered),
         413 => MemoryStoreError::params(learning_too_large_message()),
         414 => MemoryStoreError::params(query_too_long_message()),
         415 => MemoryStoreError::invalid("content-type rejected (defensive)"),
-        _ => MemoryStoreError::internal(format!(
-            "daemon error {status}: {}",
-            String::from_utf8_lossy(body)
-        )),
+        500 => match daemon_error_message(body) {
+            Some(msg) if msg.starts_with(crate::daemon_client::CONFIG_LOAD_FAILED) => {
+                MemoryStoreError::invalid(msg)
+            }
+            _ => remote_internal(status, body),
+        },
+        _ => remote_internal(status, body),
     }
+}
+
+/// The `Internal` text for a daemon status with no mapping of its own.
+fn remote_internal(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
+    MemoryStoreError::internal(format!(
+        "daemon error {status}: {}",
+        String::from_utf8_lossy(body)
+    ))
 }
 
 /// Map a transport failure to the stage that failed. Never includes a token.
 /// A version mismatch is the sentence alone (BZR-1519): it names its own fix.
-fn map_transport_error(e: crate::daemon_client::DaemonTransportError) -> MemoryStoreError {
-    use crate::daemon_client::DaemonTransportError;
+/// A timed-out call is its own sentence, which names the socket (DRM-121).
+fn map_transport_error(e: DaemonTransportError) -> MemoryStoreError {
     let stage = match e {
         DaemonTransportError::Unreachable | DaemonTransportError::Connect(_) => "connect",
         DaemonTransportError::Handshake(_) => "handshake",
         DaemonTransportError::Send(_) => "request",
         DaemonTransportError::ReadBody(_) => "response read",
         DaemonTransportError::VersionMismatch(msg) => return MemoryStoreError::internal(msg),
+        DaemonTransportError::TimedOut { .. } => return MemoryStoreError::internal(e.to_string()),
     };
     MemoryStoreError::internal(format!("daemon {stage} failed: {e:?}"))
 }
 
+/// [`map_transport_error`] for an append. A timed-out append may have reached
+/// the daemon, so its error adds [`APPEND_MAY_HAVE_BEEN_WRITTEN`] (DRM-121).
+fn append_transport_error(e: DaemonTransportError) -> MemoryStoreError {
+    let timed_out = matches!(e, DaemonTransportError::TimedOut { .. });
+    match map_transport_error(e) {
+        MemoryStoreError::Internal(msg) if timed_out => {
+            MemoryStoreError::Internal(format!("{msg} {APPEND_MAY_HAVE_BEEN_WRITTEN}"))
+        }
+        other => other,
+    }
+}
+
 /// Open a fresh HTTP-over-UDS connection to the daemon, send one request, and
-/// collect the response into `(status, body)`. Per-call connect (no pooling):
-/// MCP tool calls are infrequent, so a pool would hold idle connections for
-/// nothing (WEG-78-A).
+/// collect the response into `(status, body)` within `deadline`. Per-call
+/// connect (no pooling): MCP tool calls are infrequent, so a pool would hold
+/// idle connections for nothing (WEG-78-A).
 #[cfg(unix)]
 async fn send_remote(
     sock_path: &Path,
     req: hyper::Request<Full<Bytes>>,
-) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
-    crate::daemon_client::send_one(sock_path, req)
-        .await
-        .map_err(map_transport_error)
+    deadline: std::time::Duration,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    crate::daemon_client::send_one_within(sock_path, req, deadline).await
 }
 
 /// Loopback-TCP sibling of `send_remote` (AILAB-192). The credential is
-/// inserted by [`crate::daemon_client::send_one_tcp`], not here, so no
+/// inserted by [`crate::daemon_client::send_one_tcp_within`], not here, so no
 /// request-building site can forget it.
 #[cfg(not(unix))]
 async fn send_remote_tcp(
     endpoint: &DaemonEndpoint,
     token: &AuthToken,
     req: hyper::Request<Full<Bytes>>,
-) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
-    crate::daemon_client::send_one_tcp(endpoint, token, req)
-        .await
-        .map_err(map_transport_error)
+    deadline: std::time::Duration,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    crate::daemon_client::send_one_tcp_within(endpoint, token, req, deadline).await
 }
 
 /// A store behind an `Arc`, as the MCP server holds it.
@@ -685,14 +848,66 @@ mod tests {
         assert_eq!(*stub.seen_append.lock().unwrap(), Some(req));
     }
 
+    /// DRM-101 test 5: with no project store, both tools answer the exact
+    /// not-set-up message as `InvalidRequest`, and the command it names follows
+    /// the launcher.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn not_set_up_store_refuses_both_tools() {
+        use crate::launcher::Launcher;
+        let start = Path::new("/work/r02");
+        let expected = "this folder is not set up for dreamd: there is no .agent/ store in \
+                        /work/r02 or a folder above it. Run `dreamd setup` in the project \
+                        folder, then restart this MCP server.";
+        let store = NotSetUpStore::new(start, Launcher::Binary);
+        assert_eq!(
+            store.recall_json("rust tokio", 5).await.unwrap_err(),
+            MemoryStoreError::InvalidRequest(expected.to_string())
+        );
+        let req = AppendRequest {
+            content: "a learning".to_string(),
+            source_harness: "test-harness".to_string(),
+            skill_action: "rust::test".to_string(),
+            pain: None,
+            importance: None,
+            client_dedup_key: None,
+            pinned: false,
+        };
+        assert_eq!(
+            store.append(req.clone()).await.unwrap_err(),
+            MemoryStoreError::InvalidRequest(expected.to_string())
+        );
+
+        let npx = NotSetUpStore::new(start, Launcher::Npx);
+        for err in [
+            npx.recall_json("q", 1).await.unwrap_err(),
+            npx.append(req).await.unwrap_err(),
+        ] {
+            let MemoryStoreError::InvalidRequest(msg) = err else {
+                panic!("not InvalidRequest: {err:?}");
+            };
+            assert!(
+                msg.contains("Run `npx -y dreamd-mcp setup` in the project folder"),
+                "{msg}"
+            );
+        }
+    }
+
     // ── BZR-1301: daemon status map and the client's checks ─────────────────
 
     fn status(code: u16) -> hyper::StatusCode {
         hyper::StatusCode::from_u16(code).expect("valid status")
     }
 
+    /// The store folder the status-map tests' client is for.
+    const MAP_ROOT: &str = "/r/proj";
+
     fn map(code: u16, body: &[u8]) -> MemoryStoreError {
-        map_remote_status_error(status(code), &Bytes::copy_from_slice(body))
+        map_remote_status_error(
+            status(code),
+            &Bytes::copy_from_slice(body),
+            &not_registered_message(MAP_ROOT, crate::launcher::Launcher::Binary),
+        )
     }
 
     /// Test 1: a 400 carries the daemon's own `error` string, unchanged.
@@ -714,19 +929,52 @@ mod tests {
         );
     }
 
-    /// Test 2: the score and header 400s are forwarded the same way.
+    /// Test 2 (DRM-102 test 5): a score 400 is forwarded as `InvalidParams`.
     #[test]
-    fn status_400_forwards_score_and_header_strings() {
+    fn status_400_forwards_score_strings_as_params() {
+        let msg = "pain must be in 0.0..=10.0";
+        let body = serde_json::json!({ "error": msg }).to_string();
+        assert_eq!(
+            map(400, body.as_bytes()),
+            MemoryStoreError::InvalidParams(msg.to_string())
+        );
+    }
+
+    /// DRM-102 test 6: the middleware's `X-Agent-Root` 400s are
+    /// `InvalidRequest` (-32600) with the same text. The caller cannot fix
+    /// them by changing a tool's arguments.
+    #[test]
+    fn status_400_agent_root_strings_are_invalid_request() {
         for msg in [
-            "pain must be in 0.0..=10.0",
-            "missing or non-UTF-8 X-Agent-Root header",
+            "X-Agent-Root header missing: send the absolute path of the folder that holds .agent/",
+            "X-Agent-Root is not UTF-8: send the absolute path of the folder that holds .agent/",
+            "X-Agent-Root must be the absolute path of the folder that holds .agent/; got \".\"",
         ] {
             let body = serde_json::json!({ "error": msg }).to_string();
             assert_eq!(
                 map(400, body.as_bytes()),
-                MemoryStoreError::InvalidParams(msg.to_string())
+                MemoryStoreError::InvalidRequest(msg.to_string()),
+                "{msg}"
             );
         }
+    }
+
+    /// DRM-103 test 6: a 500 that says the project's config did not load is
+    /// `InvalidRequest` (-32600) with the daemon's text; any other 500 stays
+    /// `Internal`.
+    #[test]
+    fn status_500_config_load_failed_is_invalid_request() {
+        assert_eq!(
+            map(500, br#"{"error":"config load failed: x"}"#),
+            MemoryStoreError::InvalidRequest("config load failed: x".to_string())
+        );
+        assert!(
+            matches!(
+                map(500, br#"{"error":"index open failed"}"#),
+                MemoryStoreError::Internal(_)
+            ),
+            "any other 500 stays Internal"
+        );
     }
 
     /// Test 3: any other 400 body gets the generic label, which never names
@@ -757,15 +1005,53 @@ mod tests {
         }
     }
 
-    /// Test 4: a 404 keeps the `dreamd init` hint and drops the raw body.
+    /// Test 4: a 404 is the store's not-registered message, whatever the
+    /// body; the raw body is dropped (DRM-107 changed the message).
     #[test]
-    fn status_404_keeps_the_init_hint() {
+    fn status_404_is_the_not_registered_message() {
         for body in [br#"{"error":"agent root not registered"}"#.as_slice(), b""] {
             assert_eq!(
                 map(404, body),
                 MemoryStoreError::InvalidRequest(
-                    "project not registered with daemon; run dreamd init".to_string()
+                    "the store in /r/proj is not registered with the running daemon. Run \
+                     `dreamd init` in /r/proj once: it registers the existing store without \
+                     changing its files (a clone or a worktree is not registered until \
+                     then), and the next call works without a restart."
+                        .to_string()
                 )
+            );
+        }
+    }
+
+    /// DRM-107 test 1: a `DaemonStore` for `/r/proj` answers a 404 with its
+    /// own root and the `init` command its launcher runs.
+    #[cfg(unix)]
+    #[test]
+    fn status_404_names_the_root_and_the_init_command() {
+        use crate::launcher::Launcher;
+        for (launcher, init) in [
+            (Launcher::Binary, "dreamd init"),
+            (Launcher::Npx, "npx -y dreamd-mcp init"),
+        ] {
+            let store = DaemonStore::uds(
+                PathBuf::from("/nonexistent/dreamd.sock"),
+                "/r/proj".to_string(),
+                launcher,
+            );
+            let want = format!(
+                "the store in /r/proj is not registered with the running daemon. Run `{init}` \
+                 in /r/proj once: it registers the existing store without changing its files \
+                 (a clone or a worktree is not registered until then), and the next call \
+                 works without a restart."
+            );
+            assert_eq!(
+                map_remote_status_error(
+                    status(404),
+                    &Bytes::from_static(br#"{"error":"agent root not registered"}"#),
+                    &store.not_registered,
+                ),
+                MemoryStoreError::InvalidRequest(want),
+                "{launcher:?}"
             );
         }
     }
@@ -842,6 +1128,245 @@ mod tests {
         );
     }
 
+    /// DRM-121 test 6: a timed-out append says it may have been written and
+    /// how to retry it; a timed-out recall does not. The fake answers the
+    /// version probe (DRM-122) and nothing else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_append_says_it_may_have_been_written() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("silent.sock");
+        let fake = FakeDaemon::start(&sock, |line| {
+            line.starts_with("GET /api/v1/health ")
+                .then(|| fake_response("400 Bad Request", Some(THIS_VERSION), "{}"))
+        });
+        let store = DaemonStore::uds(sock.clone(), "/r/proj".to_string(), Launcher::Binary)
+            .with_deadline(std::time::Duration::from_millis(200));
+
+        // Bounded, so a call with no deadline fails here instead of hanging.
+        let bound = std::time::Duration::from_secs(5);
+        let appended = tokio::time::timeout(
+            bound,
+            store.append(learn("rust::deadline", Some(5.0), Some(5.0))),
+        )
+        .await
+        .expect("the append ran 5 s past its deadline");
+        match appended {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("may have been written"), "{msg}");
+                assert!(msg.contains("client_dedup_key"), "{msg}");
+                assert!(msg.contains(&sock.display().to_string()), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        let recalled = tokio::time::timeout(bound, store.recall_json("deadline", 5))
+            .await
+            .expect("the recall ran 5 s past its deadline");
+        match recalled {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("did not answer within 200 ms"), "{msg}");
+                assert!(!msg.contains("may have been written"), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(fake.count("GET /api/v1/health"), 1, "one probe passed");
+    }
+
+    /// This binary's version, as the fakes below answer it.
+    #[cfg(unix)]
+    const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    /// One raw HTTP/1.1 response.
+    #[cfg(unix)]
+    fn fake_response(status: &str, version: Option<&str>, body: &str) -> Vec<u8> {
+        let version = version
+            .map(|v| format!("x-dreamd-version: {v}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\n{version}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// A UDS fake daemon: each connection on its own thread. It records every
+    /// request line, then writes what `answer` gives for it, or holds the
+    /// connection open without answering when `answer` gives `None`.
+    #[cfg(unix)]
+    struct FakeDaemon {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[cfg(unix)]
+    impl FakeDaemon {
+        fn start(
+            sock: &Path,
+            answer: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+        ) -> Self {
+            use std::io::{BufRead, Write};
+
+            let listener = std::os::unix::net::UnixListener::bind(sock).expect("bind");
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let answer = Arc::new(answer);
+            let log = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let log = Arc::clone(&log);
+                    let answer = Arc::clone(&answer);
+                    std::thread::spawn(move || {
+                        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut length = 0usize;
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(v) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = v.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        let mut body = vec![0u8; length];
+                        let _ = std::io::Read::read_exact(&mut reader, &mut body);
+                        let request_line = request_line.trim_end().to_string();
+                        log.lock().unwrap().push(request_line.clone());
+                        match answer(&request_line) {
+                            Some(bytes) => {
+                                let _ = stream.write_all(&bytes);
+                            }
+                            // Hold the connection without answering.
+                            None => std::thread::sleep(std::time::Duration::from_secs(30)),
+                        }
+                    });
+                }
+            });
+            Self { seen }
+        }
+
+        /// How many requests began with `prefix` (method and path).
+        fn count(&self, prefix: &str) -> usize {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with(prefix))
+                .count()
+        }
+    }
+
+    /// A learn body the store parses.
+    #[cfg(unix)]
+    const LEARN_BODY: &str = r#"{"id":"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV","timestamp":"2026-11-20T00:00:00+00:00","deduplicated":false}"#;
+
+    /// DRM-122 test 2: a daemon that sends no version is refused at the
+    /// probe, before any learn reaches it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_store_checks_the_version_before_the_first_write() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("old.sock");
+        let fake = FakeDaemon::start(&sock, |_| {
+            Some(fake_response("201 Created", None, LEARN_BODY))
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        match store.append(learn("rust::preflight", None, None)).await {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("daemon unknown"), "{msg}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(fake.count("GET /api/v1/health"), 1);
+        assert_eq!(fake.count("POST /api/v1/learn"), 0, "nothing was written");
+    }
+
+    /// DRM-122 test 3: a probe that passes is kept: two appends and a recall
+    /// cost one probe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_passing_probe_runs_once() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("current.sock");
+        let fake = FakeDaemon::start(&sock, |line| {
+            Some(if line.starts_with("POST /api/v1/learn ") {
+                fake_response("201 Created", Some(THIS_VERSION), LEARN_BODY)
+            } else if line.starts_with("GET /api/v1/recall") {
+                fake_response("200 OK", Some(THIS_VERSION), r#"{"results":[]}"#)
+            } else {
+                fake_response("400 Bad Request", Some(THIS_VERSION), "{}")
+            })
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("first append");
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("second append");
+        store.recall_json("preflight", 5).await.expect("recall");
+        assert_eq!(fake.count("GET /api/v1/health"), 1, "one probe");
+        assert_eq!(fake.count("POST /api/v1/learn"), 2);
+        assert_eq!(fake.count("GET /api/v1/recall"), 1);
+    }
+
+    /// DRM-122 test 4: a failed probe is not kept. The first append fails and
+    /// sends nothing; the second probes again and goes through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_probe_is_tried_again() {
+        use crate::launcher::Launcher;
+        use std::sync::atomic::AtomicUsize;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("fixed.sock");
+        let probes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&probes);
+        let fake = FakeDaemon::start(&sock, move |line| {
+            Some(if line.starts_with("GET /api/v1/health ") {
+                let version = (counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+                    .then_some(THIS_VERSION);
+                fake_response("400 Bad Request", version, "{}")
+            } else {
+                fake_response("201 Created", Some(THIS_VERSION), LEARN_BODY)
+            })
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        match store.append(learn("rust::preflight", None, None)).await {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("daemon unknown"), "{msg}")
+            }
+            other => panic!("expected the first append to fail, got {other:?}"),
+        }
+        assert_eq!(
+            fake.count("POST /api/v1/learn"),
+            0,
+            "the first append sent nothing"
+        );
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("the second append, after a passing probe");
+        assert_eq!(fake.count("GET /api/v1/health"), 2, "probed again");
+        assert_eq!(fake.count("POST /api/v1/learn"), 1);
+    }
+
     /// Test 8: a query at the limit builds, and its URI fits the `http`
     /// crate's 65,534 bytes even when every byte is percent-encoded.
     #[test]
@@ -850,7 +1375,7 @@ mod tests {
         let encoded = "é".repeat(MAX_RECALL_QUERY_BYTES / 2);
         assert_eq!(encoded.len(), MAX_RECALL_QUERY_BYTES);
         for query in [ascii, encoded] {
-            let req = build_recall_request(&query, u32::MAX, "/home/u/project")
+            let req = build_recall_request(&query, MAX_RECALL_K, "/home/u/project")
                 .expect("a query at the limit builds");
             assert!(req.uri().to_string().len() <= 65_534);
         }
@@ -885,6 +1410,38 @@ mod tests {
         }
     }
 
+    /// DRM-109 test 4: in-process `search_nodes` refuses a `k` over the
+    /// limit with the daemon's message, though the store could search.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn in_process_search_refuses_k_over_100() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".agent")).expect(".agent");
+        let store = InProcessStore::new(
+            Some(AgentRoot::new(dir.path())),
+            None,
+            None,
+            new_index_map(),
+        );
+        assert_eq!(
+            store.recall_json("tokio", 101).await.unwrap_err(),
+            MemoryStoreError::InvalidParams("k must be at most 100".to_string())
+        );
+    }
+
+    /// DRM-109 test 5: the daemon client refuses a `k` over the limit before
+    /// it builds a request, with the daemon's message.
+    #[test]
+    fn build_recall_request_refuses_k_over_100() {
+        assert_eq!(
+            build_recall_request("tokio", 101, "/home/u/project").unwrap_err(),
+            MemoryStoreError::InvalidParams("k must be at most 100".to_string())
+        );
+        let req = build_recall_request("tokio", MAX_RECALL_K, "/home/u/project")
+            .expect("k at the limit builds");
+        assert_eq!(req.uri().to_string(), "/api/v1/recall?q=tokio&k=100");
+    }
+
     fn learn(skill_action: &str, pain: Option<f64>, importance: Option<f64>) -> AppendRequest {
         AppendRequest {
             content: "c".to_string(),
@@ -897,35 +1454,132 @@ mod tests {
         }
     }
 
-    /// Test 10: scores are checked before the `f32` cast; skill_action is
-    /// still forwarded raw for the daemon to check.
-    #[tokio::test]
-    async fn build_learn_request_checks_scores_before_the_cast() {
+    /// The JSON body of a built learn request.
+    async fn sent_body(req: hyper::Request<Full<Bytes>>) -> serde_json::Value {
         use http_body_util::BodyExt;
 
-        for pain in [1e9, 1e40, -0.5, 10.000_000_1] {
-            assert_eq!(
-                build_learn_request(&learn("rust::x", Some(pain), None), "/r")
-                    .expect_err("pain out of range"),
-                MemoryStoreError::InvalidParams("pain must be in 0.0..=10.0".to_string()),
-                "pain {pain}"
-            );
-        }
-        for importance in [11.0, f64::INFINITY] {
-            assert_eq!(
-                build_learn_request(&learn("rust::x", None, Some(importance)), "/r")
-                    .expect_err("importance out of range"),
-                MemoryStoreError::InvalidParams("importance must be in 0.0..=10.0".to_string()),
-                "importance {importance}"
-            );
-        }
-        build_learn_request(&learn("rust::x", Some(10.0), Some(0.0)), "/r").expect("in range");
-        build_learn_request(&learn("rust::x", None, Some(0.0)), "/r").expect("pain omitted");
-
-        let req = build_learn_request(&learn("BAD::UPPER.dots", None, None), "/r")
-            .expect("skill_action is the daemon's to check");
         let body = req.into_body().collect().await.expect("body").to_bytes();
-        let sent: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-        assert_eq!(sent["skill_action"], "BAD::UPPER.dots");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    /// DRM-106 test 6: the dedup key travels in the body, so a key a header
+    /// cannot carry (`a\nb`) builds, and no `x-client-dedup-key` is sent.
+    #[tokio::test]
+    async fn build_learn_request_sends_the_key_in_the_body() {
+        let mut append = learn("rust::x", None, None);
+        append.client_dedup_key = Some("a\nb".to_string());
+        let req = build_learn_request(&append, "/r")
+            .unwrap_or_else(|e| panic!("key a\\nb: the request builds; got {e:?}"));
+        assert!(
+            req.headers().get("x-client-dedup-key").is_none(),
+            "the key is not sent as a header"
+        );
+        let sent = sent_body(req).await;
+        assert_eq!(sent["client_dedup_key"], "a\nb", "{sent}");
+    }
+
+    /// DRM-104 test 2 (was test 10): the client checks nothing the daemon
+    /// checks. A bad score and a bad `skill_action` are sent as given, for
+    /// the daemon's one ingress call to answer; an omitted score is `5.0`.
+    #[tokio::test]
+    async fn build_learn_request_sends_the_raw_fields() {
+        for pain in [12.0, -0.5, 10.000_000_1] {
+            let req = build_learn_request(&learn("Rust.Tokio", Some(pain), Some(pain)), "/r")
+                .unwrap_or_else(|e| panic!("pain {pain}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(sent["pain"].as_f64(), Some(pain), "pain {pain}: {sent}");
+            assert_eq!(
+                sent["importance"].as_f64(),
+                Some(pain),
+                "importance {pain}: {sent}"
+            );
+            assert_eq!(sent["skill_action"], "Rust.Tokio", "{sent}");
+        }
+
+        let req = build_learn_request(&learn("rust::x", None, None), "/r").expect("builds");
+        let sent = sent_body(req).await;
+        assert_eq!(sent["pain"].as_f64(), Some(5.0), "{sent}");
+        assert_eq!(sent["importance"].as_f64(), Some(5.0), "{sent}");
+    }
+
+    /// DRM-104 test 3 (Amendment 4): a score JSON cannot carry is sent as
+    /// `f64::MAX`, which the daemon's ingress refuses in its own order. The
+    /// client refuses nothing.
+    #[tokio::test]
+    async fn build_learn_request_sends_a_score_json_cannot_carry_as_out_of_range() {
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let req = build_learn_request(&learn("rust::x", Some(bad), None), "/r")
+                .unwrap_or_else(|e| panic!("pain {bad}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(sent["pain"].as_f64(), Some(f64::MAX), "pain {bad}: {sent}");
+            assert_eq!(sent["importance"].as_f64(), Some(5.0), "omitted: {sent}");
+
+            let req = build_learn_request(&learn("rust::x", None, Some(bad)), "/r")
+                .unwrap_or_else(|e| panic!("importance {bad}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(
+                sent["importance"].as_f64(),
+                Some(f64::MAX),
+                "importance {bad}: {sent}"
+            );
+            assert_eq!(sent["pain"].as_f64(), Some(5.0), "omitted: {sent}");
+        }
+    }
+
+    /// DRM-104 test 3b (Amendment 4): a call with a non-finite score answers in
+    /// daemon mode as it does in process. The daemon-mode answer is the
+    /// client's refusal if it makes one, else the daemon's ingress over the
+    /// body the client sends.
+    #[tokio::test]
+    async fn non_finite_scores_answer_like_in_process() {
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        for (skill_action, pain, importance) in [
+            ("Rust.Tokio", Some(nan), Some(5.0)),
+            ("rust::x", Some(12.0), Some(nan)),
+            ("rust::x", Some(nan), None),
+            ("rust::x", None, Some(f64::NEG_INFINITY)),
+            ("Rust.Tokio", Some(inf), Some(inf)),
+        ] {
+            let row = format!("({skill_action:?}, {pain:?}, {importance:?})");
+            let req = learn(skill_action, pain, importance);
+            let in_process = LearnIngress::build_agent_learning(
+                &req.content,
+                &req.source_harness,
+                &req.skill_action,
+                req.pain,
+                req.importance,
+                false,
+            )
+            .expect_err("in process refuses the row")
+            .to_string();
+
+            let daemon_mode = match build_learn_request(&req, "/r") {
+                Err(
+                    MemoryStoreError::InvalidParams(m)
+                    | MemoryStoreError::InvalidRequest(m)
+                    | MemoryStoreError::Internal(m),
+                ) => m,
+                Ok(http) => {
+                    let sent = sent_body(http).await;
+                    match (sent["pain"].as_f64(), sent["importance"].as_f64()) {
+                        (Some(p), Some(i)) => LearnIngress::build_agent_learning(
+                            sent["content"].as_str().expect("content"),
+                            sent["source_harness"].as_str().expect("source_harness"),
+                            sent["skill_action"].as_str().expect("skill_action"),
+                            Some(p),
+                            Some(i),
+                            false,
+                        )
+                        .expect_err("the daemon refuses the row")
+                        .to_string(),
+                        // Not a JSON number: the daemon's extractor refuses the
+                        // body before ingress runs.
+                        _ => format!("the daemon cannot read the body: {sent}"),
+                    }
+                }
+            };
+            assert_eq!(daemon_mode, in_process, "{row}");
+        }
     }
 }

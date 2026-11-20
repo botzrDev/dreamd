@@ -9,7 +9,7 @@ cd ~/your-project
 npx -y dreamd-mcp setup --harness claude
 ```
 
-Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.mcp.json` at the project root. It also merges a `<!-- dreamd:start -->` block into `CLAUDE.md` so the next session searches memory and quotes a hit. Add `--yes` for non-interactive shells. `npx -y dreamd-mcp init` is the scaffold-only primitive if you'd rather wire MCP by hand.
+Scaffolds `.agent/` (via `init`) and writes the dreamd block into `.mcp.json` at the project root. It also merges a `<!-- dreamd:start -->` block that tells the next session to search memory and quote a hit. Without an `AGENTS.md` at the project root, the block goes into `CLAUDE.md`. With one, the block goes into `AGENTS.md`: once a `CLAUDE.md` exists, Claude Code loads `AGENTS.md` only through a line `@AGENTS.md` in it. A missing `CLAUDE.md`, an empty one, or one that holds only a dreamd block becomes that one line. A `CLAUDE.md` that already imports `AGENTS.md` loses only its dreamd block. Any other `CLAUDE.md` keeps its block, `AGENTS.md` is not touched, and the card says how to load `AGENTS.md`. Add `--yes` for non-interactive shells. `npx -y dreamd-mcp init` is the scaffold-only primitive if you'd rather wire MCP by hand.
 
 ## 2. MCP config
 

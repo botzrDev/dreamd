@@ -254,9 +254,8 @@ crates.io is a second install path (`cargo install dreamd`). It does not replace
 npm or the GitHub Release. Do this after step 6, from the commit that is on
 `main` for `X.Y.Z`, with a clean tree. An agent session does not publish.
 
-The `dreamd` name is already owned by `botzrDev`. `0.0.0` (2026-05-08) is a
-reservation, about 5 KB, and it is what `cargo install dreamd` fetches until a
-1.x version exists. `dreamd-core` and `dreamd-protocol` are unpublished.
+All three crates are on crates.io, owned by `botzrDev`, since 1.3.1
+(2026-11-16). The `0.0.0` reservation of `dreamd` was yanked that day.
 
 Publish in dependency order. `cargo publish` uploads the crate and yanks nothing.
 A version can be published once.
@@ -269,17 +268,13 @@ cargo package -p dreamd
 cargo publish -p dreamd-protocol
 cargo publish -p dreamd-core
 cargo publish -p dreamd
-cargo install dreamd --version ^1.3
+cargo install dreamd --version X.Y.Z
 dreamd version
 ```
 
 `cargo install dreamd` with no version requirement then selects `X.Y.Z`, because
-it is the highest version. After that install works, yank the reservation so a
-pinned `0.0.0` cannot be fetched again:
-
-```sh
-cargo yank --version 0.0.0 dreamd
-```
+it is the highest version. Publish all three crates for every release, in that
+order: each path dependency's `version` names the same release (step 1, row 7).
 
 docs.rs builds `dreamd` and `dreamd-core` without the `vectors` feature
 (`[package.metadata.docs.rs]`). Give it a few minutes, then open
