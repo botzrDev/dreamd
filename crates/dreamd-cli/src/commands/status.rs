@@ -7,11 +7,15 @@
 //! While the daemon home holds a project store, which discovery skips, a
 //! `daemon_home_store:` line before the log tail says so (DRM-101).
 //!
-//! Liveness is always a bounded *connect* probe, never file presence, so a stale
+//! Liveness is always a bounded probe, never file presence, so a stale
 //! address file left behind by a `SIGKILL`ed daemon reports `not running`
 //! without hanging on a wedged listener. On Unix that is a UDS connect to
 //! `~/.agent/dreamd.sock` (see
-//! [`dreamd_core::server::is_daemon_socket_live`]); off Unix it is a TCP connect
+//! [`dreamd_core::server::is_daemon_socket_live`]), then one
+//! `GET /api/v1/health` with no `X-Agent-Root` and a 2 s deadline
+//! ([`dreamd_core::daemon_client::STATUS_DEADLINE`], DRM-121). Any answer is
+//! `running`; a daemon that accepts and does not answer, such as one stopped
+//! with `kill -STOP`, is `not responding`. Off Unix it is a TCP connect
 //! to the loopback address published in `~/.agent/server.json` (see
 //! [`dreamd_core::daemon_client::tcp_daemon_is_live`], AILAB-192), and the
 //! report labels that line `server_json` rather than `socket`.
@@ -30,10 +34,10 @@ pub(crate) const LOG_TAIL_LINES: usize = 5;
 ///
 /// Returns an empty vec when the file is absent or unreadable (the caller then
 /// prints "recent log: (none)"). There is no ordering constraint against the
-/// tracing subscriber (AILAB-184): only `dreamd watch` passes a log path to
-/// `init_tracing`, so no one-shot ever opens that file with `truncate(true)`
-/// or has to race its own startup to read it; the read happens in-command and
-/// sees whatever a running daemon has written. `dreamd status` reads
+/// tracing subscriber (AILAB-184): only `dreamd watch` has a file layer, and
+/// it opens the file only after binding its socket, to append (DRM-119), so no
+/// one-shot ever writes that file or has to race its own startup to read it;
+/// the read happens in-command and sees whatever a running daemon has written. `dreamd status` reads
 /// [`LOG_TAIL_LINES`] through [`read_log_tail`]; `dreamd service status` reads
 /// its own, longer tail (`service::STATUS_LOG_TAIL_LINES`, AILAB-178).
 pub(crate) fn read_log_tail_n(log_file: &Path, n: usize) -> Vec<String> {
@@ -64,8 +68,9 @@ pub(crate) fn read_log_tail(log_file: &Path) -> Vec<String> {
 /// - `log_tail` holds the daemon log's last lines, pre-read by the caller
 ///   (see `read_log_tail`).
 ///
-/// Returns `Ok(true)` when a bounded connect probe on that address succeeds
-/// (the caller exits 0) and `Ok(false)` otherwise (exit 1). Reads that fail on
+/// Returns `Ok(true)` when the probe finds the daemon running (the caller
+/// exits 0) and `Ok(false)` when it is not running or not responding (exit 1).
+/// Reads that fail on
 /// malformed on-disk state print a fallback string instead of aborting, so
 /// `status` always prints a complete block.
 pub fn run(
@@ -75,12 +80,17 @@ pub fn run(
     log_tail: &[String],
     out: &mut impl Write,
 ) -> io::Result<bool> {
-    let live = socket.map(daemon_liveness).unwrap_or(false);
-    writeln!(
-        out,
-        "daemon: {}",
-        if live { "running" } else { "not running" }
-    )?;
+    let liveness = socket.map(daemon_liveness).unwrap_or(Liveness::NotRunning);
+    match liveness {
+        Liveness::Running => writeln!(out, "daemon: running")?,
+        Liveness::NotRunning => writeln!(out, "daemon: not running")?,
+        Liveness::NotResponding => writeln!(
+            out,
+            "daemon: not responding (it accepted a connection but did not answer within {} s)",
+            STATUS_DEADLINE_SECS
+        )?,
+    }
+    let live = liveness == Liveness::Running;
     // Label the address line for the transport that is actually in use. On Unix
     // the daemon's address *is* a filesystem socket. Off Unix it is
     // `~/.agent/server.json` — the file a loopback-TCP daemon publishes its
@@ -165,10 +175,57 @@ pub fn run(
     Ok(live)
 }
 
-/// Daemon liveness probe for the resolved socket path.
+/// What the liveness probe found (DRM-121).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// Nothing accepted the connection.
+    NotRunning,
+    /// The daemon answered.
+    Running,
+    /// Something accepted the connection but did not answer in time.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    NotResponding,
+}
+
+/// The status probe's deadline in whole seconds, as the report prints it.
 #[cfg(unix)]
-fn daemon_liveness(path: &Path) -> bool {
-    dreamd_core::server::is_daemon_socket_live(path)
+const STATUS_DEADLINE_SECS: u64 = dreamd_core::daemon_client::STATUS_DEADLINE.as_secs();
+/// Off Unix the probe is a connect, which never reports `NotResponding`.
+#[cfg(not(unix))]
+const STATUS_DEADLINE_SECS: u64 = 2;
+
+/// Daemon liveness probe for the resolved socket path: a bounded connect,
+/// then one `GET /api/v1/health` with no `X-Agent-Root`, which the daemon
+/// answers `400` without opening a project, within
+/// [`dreamd_core::daemon_client::STATUS_DEADLINE`] (DRM-121).
+///
+/// Any HTTP answer, or a version mismatch, is `Running`; a timeout is
+/// `NotResponding`; any other failure is `NotRunning`.
+#[cfg(unix)]
+fn daemon_liveness(path: &Path) -> Liveness {
+    use dreamd_core::daemon_client::{
+        health_probe_request, send_one_within, DaemonTransportError, STATUS_DEADLINE,
+    };
+
+    if !dreamd_core::server::is_daemon_socket_live(path) {
+        return Liveness::NotRunning;
+    }
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        // No runtime for the request: keep the connect's answer.
+        return Liveness::Running;
+    };
+    match rt.block_on(send_one_within(
+        path,
+        health_probe_request(),
+        STATUS_DEADLINE,
+    )) {
+        Ok(_) | Err(DaemonTransportError::VersionMismatch(_)) => Liveness::Running,
+        Err(DaemonTransportError::TimedOut { .. }) => Liveness::NotResponding,
+        Err(_) => Liveness::NotRunning,
+    }
 }
 
 /// Daemon liveness probe off Unix, where `path` is `~/.agent/server.json` and
@@ -179,8 +236,12 @@ fn daemon_liveness(path: &Path) -> bool {
 /// `SIGKILL`ed watch left behind still parses, so presence proves nothing and
 /// only the connect can tell "running" from "stale address file".
 #[cfg(not(unix))]
-fn daemon_liveness(path: &Path) -> bool {
-    dreamd_core::daemon_client::tcp_daemon_is_live(path)
+fn daemon_liveness(path: &Path) -> Liveness {
+    if dreamd_core::daemon_client::tcp_daemon_is_live(path) {
+        Liveness::Running
+    } else {
+        Liveness::NotRunning
+    }
 }
 
 #[cfg(test)]
@@ -191,9 +252,35 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_running_when_socket_present() {
+        use std::io::{BufRead, Write};
+
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("dreamd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind listener");
+        // DRM-121: the listener answers, as a daemon's middleware answers the
+        // probe with no `X-Agent-Root`. Each connection on its own thread; the
+        // connect probe's connection ends before it sends anything.
+        let server = listener.try_clone().expect("clone listener");
+        std::thread::spawn(move || {
+            for stream in server.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) if line == "\r\n" => break,
+                            Ok(_) => {}
+                        }
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
         let mut buf = Vec::new();
         let live = run(
             dir.path(),

@@ -335,9 +335,15 @@ fn skipped_wiring_card_omits_wired_rows_and_the_mcp_undo() {
         stdout.contains("to remove the registry entry."),
         "the registry entry was written, so Undo names it; got: {stdout}"
     );
+    // `--harness none` means a global config, so the block names the root
+    // (DRM-153, LP-INSTALL-09).
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    let block = format!(
+        r#"{{"mcpServers":{{"dreamd":{{"command":"npx","args":["-y","dreamd-mcp","--project-root",{}]}}}}}}"#,
+        serde_json::to_string(root.to_str().unwrap()).unwrap()
+    );
     assert!(
-        stdout
-            .contains(r#"{"mcpServers":{"dreamd":{"command":"npx","args":["-y","dreamd-mcp"]}}}"#),
+        stdout.contains(&block),
         "the skipped-wiring card must hand over the copy-paste block; got: {stdout}"
     );
     assert!(

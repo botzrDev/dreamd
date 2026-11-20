@@ -72,6 +72,8 @@ git add .agent .gitignore && git commit -m "Add dreamd memory" -- .agent .gitign
 
 **Windows.** This shim ships no Windows binary: on native Windows `npx -y dreamd-mcp` exits 1 and points you at WSL2. A `dreamd.exe` built from source runs learn, the learning cycle and the Tantivy index; start `dreamd watch` before `dreamd mcp` ([docs/windows.md](https://github.com/botzrDev/dreamd/blob/main/docs/windows.md)).
 
+**Signals and exit status.** The shim passes SIGINT, SIGTERM and SIGHUP to `dreamd` and waits for it to exit. It exits with `dreamd`'s exit code, and if `dreamd` dies of a signal, the shim dies of the same signal. A binary that cannot start makes the shim exit 1 and print the binary's path. On Windows the shim passes nothing on: the console already sends Ctrl-C to `dreamd`, and the shim waits for it. Under `npx`, npm runs the shim through `sh -c`. Where `/bin/sh` is dash, as on Debian and Ubuntu, a SIGTERM sent to the `npm exec` process stops only that shell, and npm ignores SIGINT; send the signal to the process group, or press Ctrl-C in the terminal.
+
 > **Leave `npx dreamd-mcp` floating; don't pin.** On a fresh spawn, npx re-resolves the `latest` dist-tag, so a floating config always starts the current version. A running MCP server or `dreamd watch` daemon keeps the version it started with until you restart it, and an offline run falls back to the last-cached binary.
 
 ## Commands
@@ -92,7 +94,7 @@ Any other first argument is passed to `dreamd mcp` (so `npx -y dreamd-mcp --proj
 npx -y dreamd-mcp update   # or: dreamd update
 ```
 
-`update` stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` processes, removes the socket and clears `~/.cache/dreamd-mcp`. Then reload your MCP harness so it drops the old process, and re-run `npx -y dreamd-mcp` to fetch the new binary. It never relaunches anything for you. `--dry-run` prints the plan and changes nothing; `--restart` makes the stop step explicit; `--quiet` / `-q` trims output. It does not touch `~/.npm/_npx`, and it does not replace a binary you built with `cargo install`.
+`update` stops this `$HOME`'s local `dreamd mcp` / `dreamd watch` processes and removes the socket. In `~/.cache/dreamd-mcp` it keeps this version's binary and removes every older and newer one; the shim downloads a version again if a spawn needs it. It never contacts the network, so it cannot tell whether a newer release exists. Then reload your MCP harness so it drops the old process, and re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp, and the shim downloads a binary only for a version it has not cached. A dreamd-mcp installed globally or in the project's `node_modules` runs instead, and an MCP config that pins a dreamd-mcp version stays on it; use the floating form to follow new releases. `update` never relaunches anything for you. `--dry-run` prints the plan and changes nothing; `--restart` makes the stop step explicit; `--quiet` / `-q` trims output. It does not touch `~/.npm/_npx`, and it does not replace a binary you built with `cargo install`.
 
 ## Uninstall / reset
 

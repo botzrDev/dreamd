@@ -1,7 +1,7 @@
 //! A project store in the daemon home (DRM-101).
 //!
 //! The daemon home (`~/.agent/`) holds dreamd's registry, socket and log. It
-//! is never a project store, and discovery skips it. A dreamd before 1.3.3
+//! is never a project store, and discovery skips it. A dreamd before 1.4.0
 //! could still leave one there: every folder under `$HOME` with no store of
 //! its own bound to `$HOME`, and an append wrote `~/.agent/episodic/`. Nothing
 //! reads that store now, and nothing moves it.

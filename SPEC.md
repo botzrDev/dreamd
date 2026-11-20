@@ -60,7 +60,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 | `id` | string | MUST be lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with explicit UTC offset (e.g., `2026-05-08T10:55:00Z`). |
 | `source_harness` | string | Writers SHOULD send a lowercase ASCII identifier matching `[a-z0-9_-]+`. These names are reserved for their owners by convention: `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue`. The reference implementation stores the string it is given. It does not check the pattern and it does not map a name to an owner. |
-| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation counts every `::` prefix and promotes the deepest prefix whose recurrence meets the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. Each event is claimed by one promoted cluster. |
+| `skill_action` | string | Hierarchical clustering key. Segments match `[a-z0-9_]+`, separated by `::`. Total length ≤ 256 bytes. Implementations SHOULD lowercase. The reference implementation visits every `::` prefix deepest first. A prefix promotes when at least the threshold of its events that no deeper promoted prefix has claimed fall in the window. A one-segment prefix counts only events whose key is exactly that segment. So `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`, but `rust` does not collect unrelated `rust::*` one-offs. Each event is claimed by one promoted cluster. |
 | `content` | string | Lesson body. Markdown allowed. Writers SHOULD keep `content` under 4 KiB; readers MUST accept up to 64 KiB. |
 | `pain` | number | 0.0–10.0. Severity of the moment that produced this entry. See rubric below. |
 | `importance` | number | 0.0–10.0. Strategic weight. See rubric below. |
@@ -122,7 +122,7 @@ flowchart TD
     H --> J["stage outputs → commit (redo WAL) → apply"]
 ```
 
-**Promotion.** A cluster is promoted when its recurrence is at least an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 events in either a 7-day or 30-day window.
+**Promotion.** A cluster is promoted when its recurrence is at least an implementation-defined threshold over a recent window. The reference implementation uses ≥ 3 unclaimed events in a 30-day window, and ranks promoted clusters by summed salience, then event count, then newest event, then key ascending. (Earlier text also named a 7-day window. Every event in 7 days is also in 30, so it never changed a result; this is a v0.2 clarification.)
 
 **Output format.** The dream cycle writes to `semantic/LESSONS.md`. The file MUST begin with a YAML frontmatter block followed by one lesson block per promoted cluster:
 

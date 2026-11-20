@@ -19,7 +19,7 @@ never pretty-printed, one whole record per `\n`-terminated line:
 | `id` | string | Lexically sortable by creation time. The reference reader stores `evt_` plus 26 Crockford base32 characters (a ULID) and skips any other spelling, including UUIDv7. Assigned by the writer. |
 | `timestamp` | string | ISO 8601 with an explicit UTC offset. |
 | `source_harness` | string | Lowercase `[a-z0-9_-]+` naming your harness. `claude-code`, `cursor`, `cline`, `opencode`, `aider`, `continue` are reserved for their owners. dreamd stores the value you send as-is; it does not check the pattern or the reserved names. |
-| `skill_action` | string | Cluster key: `[a-z0-9_]` segments joined by `::`, ≤ 256 bytes. dreamd lowercases it and turns spaces into `_`, then rejects dots, hyphens and slashes. The cycle counts every `::` prefix and promotes the deepest one that clears the threshold, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. |
+| `skill_action` | string | Cluster key: `[a-z0-9_]` segments joined by `::`, ≤ 256 bytes. dreamd lowercases it and turns spaces into `_`, then rejects dots, hyphens and slashes. The cycle counts every `::` prefix and promotes the deepest one that clears the threshold on events no deeper cluster has claimed, so `rust::errors::a` and `rust::errors::b` can promote together as `rust::errors`. A one-segment key such as `rust` counts only events filed as exactly that key. |
 | `content` | string | The lesson, in natural language. Keep it under 4 KiB; a reader accepts up to 64 KiB. dreamd rejects an append whose whole serialized line exceeds 4096 bytes (HTTP 413). |
 | `pain` / `importance` | number | 0.0–10.0 each. Roughly: routine success ≈ 2, recoverable failure ≈ 5, hard failure ≈ 7, security-relevant ≈ 8–10. |
 | `pinned` | boolean | `false` unless the event must survive pruning. Do not unset a `true` another writer set. |
@@ -53,10 +53,13 @@ Three rules that decide whether your reader is conformant:
 ## Semantic: `LESSONS.md`
 
 The dream cycle promotes a cluster once its recurrence passes an
-implementation-defined threshold; dreamd uses **≥ 3 events in either a 7-day or
-a 30-day window**. The output is YAML frontmatter followed by one
-HTML-comment-delimited block per promoted lesson. dreamd writes exactly one
-lesson per cycle, for the highest-scoring promoted cluster:
+implementation-defined threshold; dreamd uses **≥ 3 unclaimed events in a
+30-day window**: a key's events that no deeper promoted key has claimed, and,
+for a one-segment key such as `rust`, only events filed as exactly that key.
+The output is YAML frontmatter followed by one HTML-comment-delimited block per
+promoted lesson. dreamd writes exactly one lesson per cycle, for the
+highest-scoring promoted cluster (ties go to more events, then the newest
+event, then the key ascending):
 
 ```
 ---
@@ -119,9 +122,12 @@ distill it into `semantic/`. dreamd's surface for that consent is
 >   with both scores required; needs a running `dreamd watch`. See
 >   [`../http-api.md`](../http-api.md).
 >
-> Never `echo >>` the JSONL log or hand-edit it in an editor. A direct append
-> races the coordinator, skips redaction and dedup, and leaves the derived index
-> disagreeing with the file.
+> Never `echo >>` a record onto the JSONL log: a direct append races the
+> coordinator and skips redaction and dedup. To fix a line by hand, stop
+> dreamd's writer for the project first (`dreamd watch`, or the harness session
+> running `dreamd mcp`), edit the line, then run `dreamd doctor --repair`. Until
+> the repair, the index keeps the old text and scores, and `dreamd doctor`
+> reports `index_freshness: stale content`.
 
 ---
 

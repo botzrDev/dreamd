@@ -157,6 +157,9 @@ pub enum MemoryCoordinatorMsg {
         ticket: CycleTicket,
         cycle_date: String,
         body: LessonBodySource,
+        /// The cycle keeps `LESSONS.md` as it is (DRM-115): the start check
+        /// found bytes no cycle wrote. Passed to the plan, not re-checked here.
+        held: bool,
         response_tx: oneshot::Sender<Result<DecayResult, CoordinatorError>>,
     },
     /// Gracefully drain the channel and exit the run loop.
@@ -356,9 +359,10 @@ impl MemoryCoordinator {
                     ticket,
                     cycle_date,
                     body,
+                    held,
                     response_tx,
                 } => {
-                    let result = self.handle_commit_cycle(ticket, &cycle_date, body);
+                    let result = self.handle_commit_cycle(ticket, &cycle_date, body, held);
                     let _ = response_tx.send(result);
                 }
                 MemoryCoordinatorMsg::Shutdown { response_tx } => {
@@ -549,6 +553,7 @@ impl MemoryCoordinator {
         ticket: CycleTicket,
         cycle_date: &str,
         body: LessonBodySource,
+        held: bool,
     ) -> Result<DecayResult, CoordinatorError> {
         let Some(ledger) = self.ledger.clone() else {
             return Err(CoordinatorError::DreamCycle(
@@ -560,7 +565,7 @@ impl MemoryCoordinator {
                 "no prepared dream cycle for this ticket".to_string(),
             ));
         };
-        let result = self.commit_open_cycle(open, &ledger, cycle_date, body);
+        let result = self.commit_open_cycle(open, &ledger, cycle_date, body, held);
         // Every exit path reopens: the commit can fail after its rename has
         // already replaced the log.
         let reopened = self.reopen();
@@ -587,6 +592,7 @@ impl MemoryCoordinator {
         ledger: &Ledger,
         cycle_date: &str,
         body: LessonBodySource,
+        held: bool,
     ) -> Result<DecayResult, CoordinatorError> {
         ledger.check_store()?;
         let (raw, body) = match self.log_since(&mut open)? {
@@ -613,6 +619,7 @@ impl MemoryCoordinator {
             &raw,
             open.composed_for.as_deref(),
             body,
+            held,
         )
         .map_err(|e| CoordinatorError::DreamCycle(e.to_string()))?;
         // The log the commit wrote is `raw` without the decayed records: the
@@ -1528,6 +1535,7 @@ mod tests {
             prepared.ticket,
             "2026-05-28",
             LessonBodySource::Deterministic,
+            false,
         );
         assert!(
             result.is_err(),
@@ -1614,7 +1622,12 @@ mod tests {
             "precondition: nothing promotes"
         );
         let decay = coord
-            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .handle_commit_cycle(
+                prepared.ticket,
+                CYCLE_DATE,
+                LessonBodySource::Deterministic,
+                false,
+            )
             .expect("commit");
         assert_eq!(decay.kept_count, 1, "precondition: only B is left");
         assert_eq!(
@@ -1795,8 +1808,13 @@ mod tests {
             prepared.selected.is_some(),
             "precondition: the store promotes"
         );
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("commit");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("commit");
 
         let lock = WriterLock::acquire(&in_process_root, WriterKind::Dream).unwrap();
         crate::dream_cycle::run_filesystem_phases(
@@ -1805,6 +1823,7 @@ mod tests {
             CYCLE_NOW_SEC,
             CYCLE_DATE,
             true,
+            false,
             false,
         )
         .await
@@ -1851,6 +1870,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Return `?` instead of unwrapping.", &[&ids[0], &ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -1932,7 +1952,12 @@ mod tests {
 
         let prepared = c.handle_prepare_cycle(CYCLE_NOW_SEC).expect("prepare");
         let err = c
-            .handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
+            .handle_commit_cycle(
+                prepared.ticket,
+                CYCLE_DATE,
+                LessonBodySource::Deterministic,
+                false,
+            )
             .expect_err("a directory at LESSONS.md fails the commit");
         assert_eq!(
             crate::wal::read_last_cycle_status(&root).unwrap(),
@@ -1944,8 +1969,13 @@ mod tests {
         let prepared = c
             .handle_prepare_cycle(CYCLE_NOW_SEC + 1)
             .expect("the next prepare runs");
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("the next commit runs");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("the next commit runs");
         assert!(root.lessons_md().is_file(), "LESSONS.md is a file");
         assert_eq!(
             crate::wal::read_last_cycle_status(&root).unwrap(),
@@ -2003,6 +2033,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Composed before the checkout.", &[&ids[0], &ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -2086,6 +2117,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("Composed before the rewrite.", &[&ids[1], &ids[2]]),
+            false,
         )
         .expect("commit");
 
@@ -2118,14 +2150,19 @@ mod tests {
             id: prepared.ticket.id + 1,
             _lease: Arc::new(()),
         };
-        let refused = c.handle_commit_cycle(other, CYCLE_DATE, LessonBodySource::Deterministic);
+        let refused =
+            c.handle_commit_cycle(other, CYCLE_DATE, LessonBodySource::Deterministic, false);
         assert!(
             refused.is_err(),
             "another ticket must not commit this cycle: {refused:?}"
         );
 
-        let committed =
-            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+        let committed = c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        );
         assert!(
             committed.is_ok(),
             "the real ticket still commits: {committed:?}"
@@ -2147,8 +2184,13 @@ mod tests {
             .await
             .expect("append")
             .id;
-        c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic)
-            .expect("commit");
+        c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        )
+        .expect("commit");
 
         let objects: Vec<PathBuf> = std::fs::read_dir(root.branches_objects_dir())
             .unwrap()
@@ -2196,6 +2238,7 @@ mod tests {
                 ticket: prepared.ticket,
                 cycle_date: CYCLE_DATE.to_string(),
                 body: LessonBodySource::Deterministic,
+                held: false,
                 response_tx: commit_tx,
             })
             .await;
@@ -2271,6 +2314,7 @@ mod tests {
             prepared.ticket,
             CYCLE_DATE,
             llm_body("A lesson about rust::eh.", &[&a_ids[0], &a_ids[1]]),
+            false,
         )
         .expect("commit");
 
@@ -2514,8 +2558,12 @@ mod tests {
 
         let _new = replace_store(&root);
         let before = agent_tree(&root);
-        let result =
-            c.handle_commit_cycle(prepared.ticket, CYCLE_DATE, LessonBodySource::Deterministic);
+        let result = c.handle_commit_cycle(
+            prepared.ticket,
+            CYCLE_DATE,
+            LessonBodySource::Deterministic,
+            false,
+        );
 
         match &result {
             Err(err) => assert!(is_store_replaced(err, &root), "got {err:?}"),

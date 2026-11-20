@@ -32,8 +32,10 @@ you can `cat` and `grep`. Durable appends go through the daemon / MCP, not
 ```
 
 `episodic/` is what the agent logged as it worked. The **dream cycle** clusters
-those learnings by `skill_action` prefix, and when a cluster recurs (≥3 times in
-a trailing 7- or 30-day window) it promotes the highest-salience example into
+those learnings by `skill_action` prefix, and when a cluster recurs (≥3 events
+in the last 30 days that no deeper cluster has claimed; a bare root like `rust`
+counts only events filed as exactly `rust`) it promotes the highest-salience
+example into
 `semantic/LESSONS.md`. The lesson text in `LESSONS.md` is verbatim agent output,
 not hand-written copy.
 

@@ -128,14 +128,15 @@
 //!   the login session's, so the plist never carries `EnvironmentVariables`.
 //! - **The plist never sets `StandardOutPath` / `StandardErrorPath`** (AILAB-184):
 //!   the supervised `watch` already owns `~/.agent/dreamd.log` through the
-//!   tracing file layer, which truncates on open, so a second writer aimed at
-//!   the same file would clobber it. Likewise never `AbandonProcessGroup`:
-//!   launchd must keep tracking the PID it spawned.
-//! - **All five verbs are one-shots and stay console-only** (AILAB-184): the
-//!   tracing file layer truncates `~/.agent/dreamd.log`, so `wants_daemon_log`
-//!   in `cli.rs` never grants it to `service`. The supervised `watch` still
-//!   gets the file layer, and its stderr additionally lands in the user
-//!   journal on Linux (text; JSON with `DREAMD_LOG_FORMAT=json`).
+//!   tracing file layer, so a second writer aimed at the same file would
+//!   interleave the console's text with its JSON lines. Likewise never
+//!   `AbandonProcessGroup`: launchd must keep tracking the PID it spawned.
+//! - **All five verbs are one-shots and stay console-only** (AILAB-184): only
+//!   the daemon writes `~/.agent/dreamd.log`, so `wants_daemon_log` in
+//!   `cli.rs` never grants the file layer to `service`. The supervised `watch`
+//!   still gets it, opened after the bind (DRM-119), and its stderr
+//!   additionally lands in the user journal on Linux (text; JSON with
+//!   `DREAMD_LOG_FORMAT=json`).
 //!
 //! Hosts with no backend at all (Linux without a reachable systemd --user
 //! manager: containers, most CI runners) get [`ServiceError::NoSystemd`] and

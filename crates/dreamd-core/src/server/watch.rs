@@ -195,6 +195,18 @@ fn no_home_error() -> WatchError {
     ))
 }
 
+/// Open the daemon log at `path`, once the socket or listener is bound
+/// (DRM-119). A failure is one WARN, and the daemon serves on without a file
+/// log.
+fn open_daemon_log_or_warn(path: &Path) {
+    if let Err(e) = crate::observability::open_daemon_log(path) {
+        tracing::warn!(
+            "dreamd watch: daemon log not opened at {}: {e}",
+            path.display()
+        );
+    }
+}
+
 /// Boot a per-project daemon in the foreground, binding the socket
 /// `daemon_client::resolve_daemon_socket` names (`$DREAMD_SOCK` when it is
 /// absolute, else `~/.agent/dreamd.sock`), and block until SIGINT/SIGTERM. The
@@ -203,8 +215,9 @@ fn no_home_error() -> WatchError {
 /// The sequence is: discover AgentRoot → load config + WEG-66 guard → resolve
 /// the socket path (a relative `DREAMD_SOCK` stops here) → project writer lock
 /// (which runs WAL recovery) → open the index → boot Supervisor → compose
-/// AppState → bind socket → serve until a shutdown signal (SIGINT/SIGTERM),
-/// then unlink the socket, drain, and release the lock.
+/// AppState → bind socket → open the daemon log (DRM-119) → serve until a
+/// shutdown signal (SIGINT/SIGTERM), then unlink the socket, drain, and
+/// release the lock.
 #[cfg(unix)]
 async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // 1. Discover project root from cwd.
@@ -280,6 +293,12 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     //    and unlinked below.
     let listener = bind_api_socket(&sock_path)?;
 
+    // 5.1. Only now, with the socket bound, open the daemon log (DRM-119): a
+    //      `watch` that stopped at the lock, the config or the bind never
+    //      touched the file a running daemon writes. A `DREAMD_SOCK` daemon
+    //      logs beside its socket.
+    open_daemon_log_or_warn(&daemon_home.log_file_for(&sock_path));
+
     tracing::info!(
         "dreamd watch: serving on {} (project: {})",
         sock_path.display(),
@@ -341,7 +360,8 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
 /// writer lock (which runs WAL recovery) → resolve the daemon home → require
 /// `~/.agent/auth.json` → open the index → boot Supervisor wired to it →
 /// compose AppState → [`bind_listen`] (`127.0.0.1:0`
-/// unless `listen` says otherwise, AILAB-197) → publish `server.json` → serve
+/// unless `listen` says otherwise, AILAB-197) → open the daemon log (DRM-119)
+/// → publish `server.json` → serve
 /// until Ctrl-C → unlink `server.json` → drain.
 ///
 /// The index is the same hand-off as [`run_watch_uds`]. A mapped segment file
@@ -460,6 +480,8 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    the kernel's backlog instead of failing. `write_server_json` publishes a
     //    loopback host whatever the bind was (see `server_json_body`).
     let listener = bind_listen(listen).await?;
+    // Only now, with the listener bound, open the daemon log (DRM-119).
+    open_daemon_log_or_warn(&daemon_home.log_file());
     let addr = listener.local_addr()?;
     let server_json = daemon_home.server_json();
     write_server_json(&server_json, addr)?;

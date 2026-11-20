@@ -2,16 +2,11 @@ This project uses dreamd for cross-session memory -- what your agent learns here
 
 ## Session discipline
 
-At task start, call `search_nodes` on the domain you are working in. If you are fixing a Rust async bug,
-search "rust async"; if you are auditing an MCP server, search "echos mcp". You may have a relevant note
-that saves 10+ minutes.
+At task start, call `search_nodes` with the user's request as the query. Any text works: the user's own
+words, code, paths; nothing is query syntax. You may have a relevant note that saves 10+ minutes.
 
 At session end, call `append_node` for each discovery worth keeping: non-obvious constraints, surprises,
 patterns that would have changed your approach if known at the start.
-
-At session start, call `GET /api/v1/preferences` over the Unix socket, passing the `X-Agent-Root` header
-set to your project's absolute root path. Use the response body to calibrate your `pain` and `importance`
-scores for this user.
 
 ## skill_action format
 

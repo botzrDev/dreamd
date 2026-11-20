@@ -24,10 +24,10 @@ A search finds every node whose `append_node` returned before it. If the index n
 }
 ```
 
-| Field   | Type   | Required | Default |
-| ------- | ------ | -------- | ------- |
-| `query` | string | yes      | —       |
-| `k`     | number | no       | 5       |
+| Field   | Type            | Required | Default |
+| ------- | --------------- | -------- | ------- |
+| `query` | string          | yes      | —       |
+| `k`     | integer (0–100) | no       | 5       |
 
 Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Any text works as `query`: the user's request, code, paths and a `skill_action` are split into words, and quotes, colons, `AND`/`OR`, `+` and `-` are not operators.
 
@@ -38,7 +38,7 @@ Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a l
 - Starting a task in a project you've worked in before
 - The user references a past decision, error, or pattern
 - You're about to make a choice that may have a documented prior
-- Session start — `search_nodes` with the current task description as the query
+- Session start — `search_nodes` with the user's request as the query
 
 ---
 
@@ -107,7 +107,7 @@ python::deps::virtualenv_activation
 general::git::rebase_conflict_resolution
 ```
 
-Keep it lowercase, `::` -separated, language-first. The domain segment groups related learnings for the dream cycle. Be consistent — `rust::deps::cargo_workspace` clusters with other `rust::deps::*` entries.
+Keep it lowercase, `::` -separated, language-first. The domain segment groups related learnings for the dream cycle. Be consistent — `rust::deps::cargo_workspace` clusters with other `rust::deps::*` entries. Three events under one key, or under sibling keys with a shared parent, make a lesson; a bare language root like `rust` only counts events filed as exactly `rust`.
 
 ---
 
@@ -116,7 +116,7 @@ Keep it lowercase, `::` -separated, language-first. The domain segment groups re
 **On session start** (before doing any work on a known project):
 
 ```json
-search_nodes({ "query": "<current task description>", "k": 10 })
+search_nodes({ "query": "<the user's request>", "k": 10 })
 ```
 
 Read the results. If relevant learnings exist, apply them before proceeding.
@@ -137,9 +137,9 @@ append_node({
 
 ## The dream cycle
 
-dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. Clusters with ≥ 3 events in a 7- or 30-day window are promotion candidates; each cycle writes **one** lesson — the highest-salience exemplar from the top cluster. Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install). Nothing runs it for you. There is no MCP tool for it, and `dream_cycle_mode = "auto"` makes `watch` fail.
+dreamd consolidates `episodic/AGENT_LEARNINGS.jsonl` into `semantic/LESSONS.md`. A key promotes when at least 3 of its events that no deeper key has claimed fall in the last 30 days, deepest key first, and a one-segment key such as `rust` counts only events filed as exactly `rust`. Each cycle writes **one** lesson — the highest-salience exemplar from the top cluster (summed salience, then more events, then the newest event, then the key ascending). Trigger it with `npx -y dreamd-mcp dream` (or `dreamd dream` after a cargo install). Nothing runs it for you. There is no MCP tool for it, and `dream_cycle_mode = "auto"` makes `watch` fail.
 
-You can read `LESSONS.md` directly — it is plain UTF-8 markdown. Hand-edits are visible until the next dream cycle, which replaces the file wholesale. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
+You can read `LESSONS.md` directly — it is plain UTF-8 markdown. A hand edit of `LESSONS.md` is kept: each cycle leaves the file as it is and says so, until you commit the edit with git or delete the file. After that, the next cycle rebuilds the lesson from the log, so record a correction you want kept with `append_node`. Durable JSONL appends go through `append_node` / the daemon, not hand-edits.
 
 ---
 

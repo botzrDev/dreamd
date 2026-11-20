@@ -1,12 +1,13 @@
 //! Forget cascade: remove one episodic event and the derived state
-//! that names it.
+//! built from it.
 //!
 //! [`cascade`] plans, stages and commits like a dream cycle but is not one. Its
 //! plan ([`crate::plan::plan_forget`]) is the JSONL without the one id, the
-//! lesson that cites it dropped or unlinked, and the recurrence sidecar
-//! recounted; the commit renames them in and appends ledger edges for the
-//! lesson that remains. It never decays other rows, never re-selects a lesson,
-//! and never copies the forgotten row into `snapshots/`.
+//! lesson built from it unlinked (or a deterministic lesson's other citation
+//! dropped), and the recurrence sidecar recounted; the commit renames them in
+//! and appends ledger edges for the lesson that remains. It never decays other
+//! rows, never re-selects a lesson, and never copies the forgotten row into
+//! `snapshots/`.
 //!
 //! The JSONL has one writer. `dreamd forget` takes the project writer lock
 //! (`WriterLock::acquire`) before it runs [`cascade`] in-process, so no
@@ -39,13 +40,17 @@ use crate::wal::{self, CycleKind, WalError};
 /// What [`cascade`] did to `semantic/LESSONS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LessonEffect {
-    /// No lesson file, or the file does not name the id.
+    /// No lesson file, or the file does not name the id and was not built
+    /// from it.
     Untouched,
-    /// The id was a citation but not the exemplar; it was dropped from
+    /// The lesson is deterministic, and the id was a citation but not the
+    /// exemplar (a shape only a hand-edited file has); it was dropped from
     /// `citations` and the file was rewritten.
     CitationDropped,
-    /// The id was a `Lesson.id`. The lesson body is that event's content, so
-    /// the file was unlinked.
+    /// The id was a `Lesson.id`, so the lesson body is that event's content.
+    /// Or the lesson is model-written, and the id was one of its citations or
+    /// in its cluster, so the model's prose can hold its text (DRM-114). The
+    /// file was unlinked.
     Unlinked,
 }
 
@@ -178,8 +183,12 @@ pub fn preview(agent_root: &AgentRoot, id: &EventId) -> Result<ForgetReport, For
 
     dream_cycle::ensure_not_in_progress(agent_root)?;
 
+    let skill_action = events
+        .iter()
+        .find(|ev| ev.id == *id)
+        .map(|ev| ev.skill_action.as_str());
     let lesson = match lessons::read_lessons_file(&agent_root.lessons_md()) {
-        Ok(file) => plan::classify_lessons(&file, id.as_str()),
+        Ok(file) => plan::classify_lessons(&file, id.as_str(), skill_action),
         Err(e) if e.kind() == io::ErrorKind::NotFound => LessonEffect::Untouched,
         Err(e) => return Err(ForgetError::Lessons(e)),
     };
@@ -304,7 +313,7 @@ mod tests {
     fn seed_lessons(root: &AgentRoot, exemplar: char, content: &str, citations: &[char]) {
         let file = LessonsFile {
             last_updated: DateTime::from_timestamp(NOW_SEC - 60, 0).unwrap(),
-            prompt_version: "deterministic".to_string(),
+            prompt_version: crate::consolidation::DETERMINISTIC_PROMPT_ID.to_string(),
             cluster_key: CLUSTER.to_string(),
             citations: citations.iter().map(|c| eid(*c).to_string()).collect(),
             lessons: vec![Lesson {
@@ -428,6 +437,53 @@ mod tests {
 
         assert_eq!(report.lesson, LessonEffect::Unlinked);
         assert!(!root.lessons_md().exists());
+    }
+
+    /// DRM-114 test 3: `preview` and `cascade` agree that a model-written
+    /// lesson goes with any event of its cluster, cited or not.
+    #[test]
+    fn preview_and_cascade_agree_on_a_model_lesson() {
+        let (root, lock, _g) = setup(
+            "forget-model-lesson",
+            &[
+                learning('A', "alpha", false),
+                learning('B', "beta", false),
+                learning('C', "gamma, which the model saw", false),
+            ],
+        );
+        let file = LessonsFile {
+            last_updated: DateTime::from_timestamp(NOW_SEC - 60, 0).unwrap(),
+            prompt_version: "lesson-v1".to_string(),
+            cluster_key: CLUSTER.to_string(),
+            citations: vec![eid('B').to_string(), eid('A').to_string()],
+            lessons: vec![Lesson {
+                id: eid('B').to_string(),
+                content: "prose over alpha, beta and gamma".to_string(),
+                pinned: false,
+            }],
+        };
+        write_lessons_file(&root.lessons_md(), &file).unwrap();
+        let log_before = fs::read(root.episodic_jsonl()).unwrap();
+        let lessons_before = fs::read(root.lessons_md()).unwrap();
+
+        for id in ['A', 'C'] {
+            let report = preview(&root, &eid(id)).unwrap();
+            assert_eq!(
+                report,
+                ForgetReport {
+                    removed: true,
+                    lesson: LessonEffect::Unlinked
+                },
+                "preview of {id}"
+            );
+            assert_eq!(fs::read(root.lessons_md()).unwrap(), lessons_before);
+            assert_eq!(fs::read(root.episodic_jsonl()).unwrap(), log_before);
+            assert!(!root.wal_path().exists());
+        }
+
+        let report = cascade(&root, lock.ledger(), &eid('C'), NOW_SEC).unwrap();
+        assert_eq!(report.lesson, LessonEffect::Unlinked);
+        assert!(!root.lessons_md().exists(), "LESSONS.md is gone");
     }
 
     #[test]

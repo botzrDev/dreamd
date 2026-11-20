@@ -149,7 +149,9 @@ pub fn run(
     for line in dream_cycle::cycle_notices(
         &root,
         no_llm,
-        dreamd_core::llm::resolve_llm_credentials().is_some(),
+        dreamd_core::llm::no_key_for(project_root).as_ref(),
+        dream_cycle::KeyHolder::Command,
+        result.lesson_held.as_ref(),
     ) {
         writeln!(out, "{line}")?;
     }
@@ -469,24 +471,31 @@ mod tests {
         let sock = dir.path().join("dreamd.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = stream.read(&mut buf).unwrap();
-                assert!(n > 0, "client closed before the request ended");
-                request.extend_from_slice(&buf[..n]);
-            }
-            // The daemon states its version (BZR-1519); without it the proxy
-            // reports a daemon of unknown version.
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{}: {}\r\ncontent-length: {}\r\n\r\n{BODY}",
-                dreamd_core::daemon_client::VERSION_HEADER,
-                env!("CARGO_PKG_VERSION"),
-                BODY.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8(request).unwrap()
+            let serve = |status: &str, body: &str| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0, "client closed before the request ended");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                // The daemon states its version (BZR-1519); without it the
+                // proxy reports a daemon of unknown version.
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{}: {}\r\ncontent-length: {}\r\n\r\n{body}",
+                    dreamd_core::daemon_client::VERSION_HEADER,
+                    env!("CARGO_PKG_VERSION"),
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                String::from_utf8(request).unwrap()
+            };
+            // DRM-122: the proxy asks the daemon its version first, on its
+            // own connection.
+            let probe = serve("400 Bad Request", "{}");
+            assert!(probe.starts_with("GET /api/v1/health "), "got {probe}");
+            serve("200 OK", BODY)
         });
 
         let mut out = Vec::new();

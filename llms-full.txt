@@ -49,8 +49,8 @@ GitHub release's windows-x86_64.tar.gz when that release has one, does watch and
 learn over loopback TCP with a bearer token. The dream cycle and the Tantivy
 index run there too; see docs/windows.md. Node >= 18 required.
 
-Version note: this describes 1.3.2, published on GitHub as `v1.3.2` and on npm
-as `dreamd-mcp` 1.3.2. `blame`, `salience-drift`, `forget`,
+Version note: this describes 1.4.0, published on GitHub as `v1.4.0` and on npm
+as `dreamd-mcp` 1.4.0. `blame`, `salience-drift`, `forget`,
 `recall --without`, `doctor --provenance`, and `explain=1` are in that version.
 `dreamd memory` still runs and was deprecated in 1.2.0; it is removed in 2.0.
 
@@ -140,7 +140,8 @@ the next index commit (up to 5 s); an empty result right after an append is that
 
 All files are UTF-8 plaintext. `.agent/` is checked into git. You can cat, grep, and
 git diff any file. Durable appends to the JSONL go through `append_node` / the daemon
-(single writer), not hand-edits; the dream cycle rewrites LESSONS.md wholesale.
+(single writer). A line fixed by hand needs `dreamd doctor --repair`; the dream cycle
+rewrites LESSONS.md wholesale.
 
 ## Episodic record schema (schema_version: "1.0.0")
 
@@ -171,14 +172,14 @@ git diff any file. Durable appends to the JSONL go through `append_node` / the d
   dreamd score             # top memories by salience, no query
   dreamd salience-drift    # salience distribution and drift vs. 7 days ago; --json
   dreamd memory branch|checkout|branches|delete|diff|bisect   # deprecated in 1.2.0, removed in 2.0; branch .agent/ with git
-  dreamd forget <evt_id>   # remove one event + the lesson state naming it; --dry-run, --proof <path>
+  dreamd forget <evt_id>   # remove one event + the lesson state built from it; --dry-run, --proof <path>
   dreamd doctor            # health check; --repair, --cluster-health, --provenance
   dreamd archive <evt_id> --force-unpin   # clear a pin so decay can prune the entry
   dreamd migrate --from 1.0.0 --to 1.0.0  # episodic schema migration (identity no-op only)
   dreamd vectors enable    # model download on a `--features vectors` build; exits 2 on
                            # the default binary; recall is unchanged either way
   dreamd uninstall         # stop local servers, unregister project, clear caches
-  dreamd update            # clear the binary cache so npx fetches the latest
+  dreamd update            # stop local servers, keep this version's cached binary
   dreamd version           # structured version output
   dreamd reset workspace   # re-scaffold working/WORKSPACE.md
 
@@ -214,7 +215,7 @@ into an LLM-assisted dream cycle (API key in the environment or
 `.agent/personal/` is excluded from that request unless you pass
 `--share-personal` on that call.
 
-## Current scope (v1.3.2)
+## Current scope (v1.4.0)
 
 IN: BM25 lexical recall (including `LESSONS.md` as a Tantivy document layer —
 not embeddings), Linux + macOS full daemon, Windows learn, dream cycle, and Tantivy index (loopback TCP; no prebuilt npm binary), opt-in LLM

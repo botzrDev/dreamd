@@ -433,6 +433,14 @@ fn mcp_sends_the_canonical_absolute_root() {
     assert_eq!(body["results"], Value::Array(Vec::new()), "{body}");
     mcp.close();
 
+    // DRM-122: the version probe comes first and names no project.
+    assert_eq!(
+        requests
+            .recv_timeout(TIMEOUT)
+            .expect("the fake daemon got the version probe"),
+        None,
+        "the version probe carries no x-agent-root"
+    );
     let sent = requests
         .recv_timeout(TIMEOUT)
         .expect("the fake daemon got a request")

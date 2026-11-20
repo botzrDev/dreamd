@@ -4,7 +4,10 @@ use axum::extract::{Extension, RawQuery, State};
 use axum::response::IntoResponse;
 
 use crate::collector::RecallExclusion;
-use crate::ingress::{query_too_long_message, RecallIngress, MAX_RECALL_QUERY_BYTES};
+use crate::ingress::{
+    k_too_large_message, query_too_long_message, RecallIngress, MAX_RECALL_K,
+    MAX_RECALL_QUERY_BYTES,
+};
 use crate::recurrence::RecallReader;
 use crate::registry::ProjectEntry;
 
@@ -48,7 +51,8 @@ fn recall_to_json_excluding(
 ///
 /// # Query
 /// * `q` (required) — search string
-/// * `k` (optional, default [`crate::ingress::DEFAULT_RECALL_K`]) — max results
+/// * `k` (optional, default [`crate::ingress::DEFAULT_RECALL_K`]) — max
+///   results, at most [`MAX_RECALL_K`] (DRM-109)
 /// * `explain` (optional) — exact value `1` adds a `citations` array; any
 ///   other value, including absent, omits it
 /// * `exclude` (optional, repeatable) — drop this `event_id` before top-k
@@ -57,7 +61,8 @@ fn recall_to_json_excluding(
 /// # Responses
 /// * `200` — `{"results":[{"id","score","bm25","salience","source","content","metadata":{…}}]}`,
 ///   plus `"citations":[…]` when `explain=1`
-/// * `400` — `q` missing, or `k` not an unsigned integer
+/// * `400` — `q` missing, `k` not an unsigned integer, or `k` over
+///   [`MAX_RECALL_K`] (`{"error": k_too_large_message()}`)
 /// * `414` — `q` over [`MAX_RECALL_QUERY_BYTES`] once decoded (BZR-1301)
 /// * `500` — the index could not be opened or searched
 pub(crate) async fn get_recall(
@@ -78,7 +83,11 @@ pub(crate) async fn get_recall(
         )
             .into_response();
     }
+    // The shared `k` limit (DRM-109), with the message both MCP stores give.
     let k = params.k_or_default();
+    if k > MAX_RECALL_K {
+        return error_400(&k_too_large_message());
+    }
     let now_sec = chrono::Utc::now().timestamp();
 
     // Resolve the reader for this project: the pinned primary handle when this

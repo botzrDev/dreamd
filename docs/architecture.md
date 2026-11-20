@@ -367,32 +367,38 @@ prefix of its own key: `split("::")`, then `parts[..len].join("::")` for `len`
 in `1..=parts.len()` (`build_prefix_tree`). An event keyed
 `a::b::c` therefore counts toward `a`, `a::b`, and `a::b::c`.
 
-Assignment is **deepest-wins**: prefixes are sorted longest-first and each
-event is claimed by the deepest qualifying cluster through a `Vacant` entry
-guard (`compute_promoted_clusters`, which `dreamd doctor --cluster-health` and
-`dreamd dream --dry` share with the write path). Each event belongs to exactly
-**one** cluster. Counts fan out across the tree; membership does not.
+Assignment is **deepest-wins**: prefixes are visited longest-first, and a
+prefix that promotes claims all its candidates (below), so each event is
+claimed by the deepest promoted cluster that counts it
+(`compute_promoted_clusters`, which `dreamd doctor --cluster-health` and
+`dreamd dream --dry` share with the write path). Each event belongs to at most
+**one** cluster. Membership lists fan out across the tree; claims do not.
 
 The output is `ClusterOutput { promoted: Vec<PromotedCluster> }`, where
 `PromotedCluster { cluster_key, events, salience_sum }`.
 
 ### Recurrence and promotion
 
-A cluster qualifies for promotion when it holds at least
-`PROMOTION_THRESHOLD = 3` events in **either** the 7-day **or** the 30-day
-trailing window (`WINDOW_7_DAYS_SEC`, `WINDOW_30_DAYS_SEC`; the OR-logic is in
-`compute_promoted_clusters`). Either window alone is
-sufficient — this catches both a burst inside a week and a slow drip across a
-month. The counts are written to `semantic/recurrence_counts.json` as
+A prefix promotes when at least `PROMOTION_THRESHOLD = 3` of its
+**candidates** fall in the 30-day trailing window (`WINDOW_30_DAYS_SEC`, in
+`compute_promoted_clusters`). The candidates of a prefix with two or more
+segments are its events that no deeper promoted prefix has claimed, so a
+parent never promotes on its children's events. The candidates of a
+one-segment prefix are the events whose key is exactly that segment, so `rust`
+does not collect unrelated `rust::*` one-offs. A prefix that promotes claims
+every candidate, in the window or not. `WINDOW_7_DAYS_SEC` is deprecated and
+read by nothing: every event inside it is also inside the 30-day window, so it
+never changed a result. The counts are written to `semantic/recurrence_counts.json` as
 `RecurrenceSidecar { schema_version: "1.0", clusters }` (`plan::plan_cycle`,
 through `consolidation::sidecar_bytes`), and staged with the cycle's other
 outputs. Recall does not read that file. Its `recurrence` is all-time and per
 subtree: the number of alive episodic docs whose `skill_action` equals the
 candidate's or extends it with `::` (`recurrence.rs`), where promotion counts a
-window and keeps the deepest qualifying prefix.
+prefix's unclaimed candidates in a window.
 
-Of the qualifying clusters, only the **single top cluster by `salience_sum`**
-is promoted to `LESSONS.md`, and it contributes exactly **one** `Lesson`, filed
+Of the promoted clusters, only the **single top cluster** is written to
+`LESSONS.md`: the first by `salience_sum` descending, then more events, then
+the newest event, then `cluster_key` ascending (`top_cluster_order`), and it contributes exactly **one** `Lesson`, filed
 under the exemplar's id (`select_lesson`). `pick_exemplar` ranks
 salience → pain → importance → lowest `EventId`. A cycle is therefore a narrow
 instrument: at most one lesson per run, not a batch summarisation pass.
@@ -492,16 +498,35 @@ start advances; a file that was not keeps its old entry. So a hand edit, or a
 `dreamd forget`, `archive --force-unpin` or `memory checkout` that leaves
 bytes neither HEAD nor the baseline explains (they rewrite the store outside a
 cycle), holds the commit on every later cycle until the user commits that
-file, and only that file is named. A store with no baseline
+file, and only that file is named. A `memory checkout` that restores an older
+`LESSONS.md` is held the same way until it is committed. A store with no baseline
 yet whose files differ from HEAD skips once with reason `no_baseline`, and the
 next cycle compares against the baseline that cycle recorded. A fresh store's
 untracked files are dreamd's, so its first cycle commits. A failed check
 records no baseline, and the commit runs as if the start were clean.
 
-The cycle **still runs** when the commit is held: only the commit is skipped,
-with a WARN naming the files, and the skip is recorded in `state.json`
-(`last_autobiography_skip`). The check is not a guard on hand edits; it only
-decides whether to commit.
+The cycle **still runs** when the commit is held, with a WARN naming the
+files, and the skip is recorded in `state.json` (`last_autobiography_skip`).
+The check also guards `LESSONS.md` (DRM-115). When it finds that the file
+holds bytes no cycle wrote, on the `user_dirty_tree` and the `no_baseline`
+route alike, the cycle keeps the file: it makes no model call, and the plan
+neither writes nor unlinks `LESSONS.md`. It still pins, and lists ledger edges
+for, what the held file cites, if it parses, and the log's pins and decay run
+as usual. A held file never becomes the baseline: with no previous baseline,
+`lessons_sha256` is recorded as `None`, which matches no file. So the hold
+lasts until the user commits the file or deletes it. The log has no such
+hold; its rewrites keep the user's lines through `patch_lines`.
+
+**Where the commit may go (DRM-116).** The commit is made only when git's
+state is clean (`Repository::state`) and HEAD names a branch. A merge,
+rebase, `git am`, cherry-pick, revert or bisect in progress skips it first,
+each with its own reason (`merge_in_progress` …, so a bisect says bisect),
+then a detached HEAD (`detached_head`), and both are checked before the
+dirty-start hold. The cycle still runs and the baseline is still recorded, so
+after a cycle on a detached tag and a `git checkout` back to the branch, git
+carries the modified files over and the next cycle commits them there.
+Before 1.4.0 that commit landed on the detached HEAD, and the checkout dropped
+the cycle's learnings from the live store.
 
 **What the commit holds.** The tree is HEAD's tree plus the two tracked
 paths, built in an in-memory `git2::Index`: a present file is staged and
@@ -810,18 +835,22 @@ Two layers:
 - **File → `~/.agent/dreamd.log`, JSON always — daemon only.** Only `dreamd
   watch`, the long-running daemon, installs this layer; every other invocation
   (`init`, `status`, `doctor`, `dream`, `reset`, `mcp`, bare `--version`, …)
-  passes `None` and is console-only on stderr. The gate is
-  `cli::wants_daemon_log` (AILAB-184). The reason is the next sentence: the
-  daemon's file is **truncated at startup** — there is no log rotation — and it
-  is created as mode `0o666` before the process umask, so a typical umask of
-  `022` leaves it `0644`. The socket is `0600`. A short-lived one-shot that opened the same path would erase a
-  running daemon's accumulated log while writing nothing of its own into it.
-  `mcp` is long-running but excluded too: IDEs spawn several concurrently, and
-  they would truncate each other. Written through a non-blocking appender
-  (`tracing-appender`); the returned `WorkerGuard` is bound as `_log_guard` in
-  `run()` and held until the process exits, since dropping it early discards
-  buffered file logs. The path is resolved via `DaemonHome::log_file()`, never
-  hardcoded.
+  calls `init_tracing(None)` and is console-only on stderr. The gate is
+  `cli::wants_daemon_log` (AILAB-184). `watch` opens the file only after it
+  has bound its socket (DRM-119), so a `watch` that stops at the lock, the
+  config or the bind writes nothing there, and a running daemon's log is left
+  as it was. The lines `watch` logs before the bind are held in memory, up to
+  1 MiB, and written first when the file opens. The file is **appended to**,
+  never truncated. At a start, a file of 8 MiB or more is renamed to
+  `dreamd.log.1`, replacing an older `.1`; there is no rotation during a run.
+  It is mode `0600`, whether new or existing, like the socket. A daemon on a
+  `DREAMD_SOCK` other than the default logs to `<socket>.log`, so two daemons
+  never share one file. `mcp` is long-running but excluded too: IDEs spawn
+  several concurrently, and their lines would interleave in one file. Written
+  through a non-blocking appender (`tracing-appender`); the returned
+  `WorkerGuard` is bound as `_log_guard` in `run()` and held until the process
+  exits, since dropping it early discards buffered file logs. The path is
+  resolved via `DaemonHome::log_file_for(socket)`, never hardcoded.
 
 Each layer has its own filter, from the `DREAMD_LOG` env var
 (`error|warn|info|debug|trace`, standard `EnvFilter` syntax). When it is unset,

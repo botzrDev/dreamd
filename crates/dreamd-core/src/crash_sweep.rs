@@ -200,6 +200,7 @@ fn run(scenario: Scenario, root: &AgentRoot, lock: &WriterLock) -> Result<(), St
                     &date(),
                     true,
                     false,
+                    false,
                 ))
                 .map(drop)
                 .map_err(|e| e.to_string())

@@ -427,9 +427,21 @@ impl DaemonHome {
         self.home.join("server.json")
     }
 
-    /// `~/.agent/dreamd.log` — daemon log.
+    /// `~/.agent/dreamd.log` — the log of the daemon on the default socket.
     pub fn log_file(&self) -> PathBuf {
         self.home.join("dreamd.log")
+    }
+
+    /// The daemon log for a daemon bound at `socket` (DRM-119): `log_file()` for
+    /// the default socket, else the socket's path with `.log` appended
+    /// (`/x/dev.sock` → `/x/dev.sock.log`).
+    pub fn log_file_for(&self, socket: &Path) -> PathBuf {
+        if socket == self.socket_path() {
+            return self.log_file();
+        }
+        let mut name = socket.as_os_str().to_owned();
+        name.push(".log");
+        PathBuf::from(name)
     }
 
     /// `~/.agent/star-asked` — present after `dreamd setup` has printed its
@@ -439,7 +451,7 @@ impl DaemonHome {
         self.home.join("star-asked")
     }
 
-    /// `~/.agent/episodic/`: a store's log dir, here only if a dreamd before 1.3.3 used it (DRM-101).
+    /// `~/.agent/episodic/`: a store's log dir, here only if a dreamd before 1.4.0 used it (DRM-101).
     pub fn stray_episodic_dir(&self) -> PathBuf {
         self.home.join("episodic")
     }
@@ -571,6 +583,22 @@ mod tests {
         assert_eq!(h.server_json(), PathBuf::from("/home/u/.agent/server.json"));
         assert_eq!(h.log_file(), PathBuf::from("/home/u/.agent/dreamd.log"));
         assert_eq!(h.star_asked(), PathBuf::from("/home/u/.agent/star-asked"),);
+    }
+
+    /// DRM-119 test 3: the default socket keeps `dreamd.log`; any other
+    /// socket logs beside itself.
+    #[test]
+    fn the_log_follows_the_socket() {
+        let h = DaemonHome::new("/home/u/.agent");
+        assert_eq!(h.log_file_for(&h.socket_path()), h.log_file());
+        assert_eq!(
+            h.log_file_for(Path::new("/x/dev.sock")),
+            PathBuf::from("/x/dev.sock.log")
+        );
+        assert_eq!(
+            h.log_file_for(Path::new("/x/dreamd")),
+            PathBuf::from("/x/dreamd.log")
+        );
     }
 
     #[test]

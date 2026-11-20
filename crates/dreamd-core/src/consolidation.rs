@@ -1,8 +1,9 @@
 //! Cluster engine and the pin rule (WEG-58).
 //!
 //! `run_cluster_engine` reads the episodic JSONL, builds a prefix tree over
-//! `skill_action` (split on `::`), applies deepest-wins disambiguation, and
-//! writes `semantic/recurrence_counts.json`. A dream cycle computes the same
+//! `skill_action` (split on `::`), promotes each prefix on the events no
+//! deeper promoted prefix has claimed (a one-segment prefix on its exact key
+//! only, DRM-117), and writes `semantic/recurrence_counts.json`. A dream cycle computes the same
 //! counts inside [`crate::plan::plan_cycle`] ([`compute_promoted_clusters`],
 //! `sidecar_bytes`) and stages them with the cycle's other outputs.
 //!
@@ -78,21 +79,31 @@ pub struct ClusterOutput {
 /// One promoted cluster returned by [`run_cluster_engine`].
 #[derive(Debug, Clone)]
 pub struct PromotedCluster {
-    /// The deepest prefix at which ≥ `PROMOTION_THRESHOLD` events landed.
+    /// The prefix that promoted: at least `PROMOTION_THRESHOLD` of its
+    /// candidate events fall in the 30-day window
+    /// ([`compute_promoted_clusters`], DRM-117).
     pub cluster_key: String,
-    /// All member events (may have differing leaf `skill_action` keys).
+    /// The events this cluster claimed. Under a key of two or more segments
+    /// they can have differing leaf keys; under a one-segment key every one
+    /// is filed as exactly that key.
     pub events: Vec<AgentLearning>,
     /// Sum of per-event salience scores at `now_sec`.
     pub salience_sum: f64,
 }
 
-/// Minimum event count within a recurrence window for cluster promotion.
+/// Minimum count of candidate events in [`WINDOW_30_DAYS_SEC`] for a prefix
+/// to promote.
 pub const PROMOTION_THRESHOLD: usize = 3;
 
-/// Trailing window for short-burst recurrence detection (seconds).
+/// A 7-day trailing window (seconds). Promotion no longer reads it: every
+/// event in 7 days is also in 30, so it never changed a result (DRM-117).
+#[deprecated(
+    note = "unused since 1.4.0: every event in 7 days is also in 30, so it never changed promotion"
+)]
 pub const WINDOW_7_DAYS_SEC: i64 = 7 * 24 * 3600;
 
-/// Trailing window for slow-burn recurrence detection (seconds).
+/// The promotion window (seconds): a prefix promotes when at least
+/// [`PROMOTION_THRESHOLD`] of its candidate events are this recent.
 pub const WINDOW_30_DAYS_SEC: i64 = 30 * 24 * 3600;
 
 /// Build the `skill_action` prefix tree over `events`: each event contributes
@@ -118,9 +129,12 @@ fn build_prefix_tree(events: &[AgentLearning]) -> BTreeMap<String, Vec<usize>> {
 /// 1. Read + parse `AGENT_LEARNINGS.jsonl`.
 /// 2. Build the prefix tree: each event contributes to every prefix of its
 ///    `skill_action` (split on `::`).
-/// 3. Find the deepest prefix where the 7-day **or** 30-day trailing window
-///    holds ≥ `PROMOTION_THRESHOLD` events (deepest-wins — an event is
-///    assigned to exactly one promoted cluster).
+/// 3. Visit every prefix deepest first. A prefix promotes when at least
+///    `PROMOTION_THRESHOLD` of its candidates fall in the 30-day window, and
+///    it claims every candidate, so an event is in at most one promoted
+///    cluster. A prefix of two or more segments counts its events that no
+///    deeper promoted prefix has claimed; a one-segment prefix counts only
+///    events whose key is exactly that segment (DRM-117).
 /// 4. Compute per-cluster salience sum.
 /// 5. Write `recurrence_counts.json` sidecar.
 /// 6. Return [`ClusterOutput`].
@@ -173,8 +187,9 @@ pub(crate) fn sidecar_bytes(promoted: &[PromotedCluster]) -> Result<Vec<u8>, Con
 /// `now_sec` is caller-provided for determinism — do not call `Utc::now()`.
 ///
 /// Shared by [`run_cluster_engine`] and `dreamd doctor --cluster-health` so the
-/// promotion rules — threshold windows **and** deepest-wins claiming — cannot
-/// drift between what the dream cycle writes and what doctor audits. Deriving
+/// promotion rule — the threshold over unclaimed candidates in 30 days **and**
+/// deepest-wins claiming — cannot drift between what the dream cycle writes
+/// and what doctor audits. Deriving
 /// raw prefix-tree counts instead would report drift on every healthy store,
 /// since the sidecar only ever holds promoted, deepest-wins-claimed counts.
 pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<PromotedCluster> {
@@ -193,22 +208,29 @@ pub fn compute_promoted_clusters(events: &[AgentLearning], now_sec: i64) -> Vec<
             .then(a.cmp(b))
     });
 
-    let mut event_cluster: HashMap<usize, String> = HashMap::new();
+    let mut claimed: HashSet<usize> = HashSet::new();
     let mut cluster_indices: BTreeMap<String, Vec<usize>> = BTreeMap::new();
 
     for prefix in &prefixes {
-        let member_indices = &depth_map[prefix];
-        let in_7d = count_in_window(member_indices, events, now_sec, WINDOW_7_DAYS_SEC);
-        let in_30d = count_in_window(member_indices, events, now_sec, WINDOW_30_DAYS_SEC);
-        if in_7d < PROMOTION_THRESHOLD && in_30d < PROMOTION_THRESHOLD {
+        // The candidates (DRM-117). A prefix of two or more segments counts
+        // its members that no deeper promoted prefix has claimed, so a parent
+        // never promotes on its children's events. A one-segment prefix counts
+        // only events filed as exactly that key, so `rust` does not collect
+        // unrelated `rust::*` one-offs; no other prefix can claim those.
+        let members = depth_map[prefix].iter().copied();
+        let candidates: Vec<usize> = if prefix.contains("::") {
+            members.filter(|idx| !claimed.contains(idx)).collect()
+        } else {
+            members
+                .filter(|&idx| events[idx].skill_action == *prefix)
+                .collect()
+        };
+        if count_in_window(&candidates, events, now_sec, WINDOW_30_DAYS_SEC) < PROMOTION_THRESHOLD {
             continue;
         }
-        for &idx in member_indices {
-            if let std::collections::hash_map::Entry::Vacant(e) = event_cluster.entry(idx) {
-                e.insert(prefix.clone());
-                cluster_indices.entry(prefix.clone()).or_default().push(idx);
-            }
-        }
+        // Claim every candidate, in the window or not.
+        claimed.extend(candidates.iter().copied());
+        cluster_indices.insert(prefix.clone(), candidates);
     }
 
     // Step 4: build PromotedCluster entries with salience sums.
@@ -337,19 +359,16 @@ pub struct SelectedLesson {
     pub events: Vec<AgentLearning>,
 }
 
-/// Select the lesson for `promoted`: the top cluster by `salience_sum`, then
-/// its exemplar (`pick_exemplar`).
+/// Select the lesson for `promoted`: the first cluster in `top_cluster_order`
+/// (`salience_sum`, then more events, then the newest event, then the key
+/// ascending; DRM-117), then its exemplar (`pick_exemplar`).
 ///
 /// `None` means **nothing promoted**. Pure: it reads nothing and stages
 /// nothing. On a real cycle [`crate::plan::plan_cycle`] turns `None` into the
 /// retirement of any existing `LESSONS.md` (AILAB-699).
 #[must_use]
 pub fn select_lesson(promoted: &[PromotedCluster], now_sec: i64) -> Option<SelectedLesson> {
-    let top_cluster = promoted.iter().max_by(|a, b| {
-        a.salience_sum
-            .partial_cmp(&b.salience_sum)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
+    let top_cluster = promoted.iter().min_by(|a, b| top_cluster_order(a, b))?;
 
     let exemplar = pick_exemplar(&top_cluster.events, now_sec);
 
@@ -479,6 +498,31 @@ pub fn run_deterministic_dream_cycle(
             Ok(())
         },
     )
+}
+
+/// The order `select_lesson` ranks promoted clusters by (DRM-117): `salience_sum`
+/// descending (`total_cmp`, NaN lowest), then more events, then the newest
+/// event's timestamp, then `cluster_key` ascending.
+///
+/// `-0.0` counts as `0.0`, so two zero sums tie as they did before.
+fn top_cluster_order(a: &PromotedCluster, b: &PromotedCluster) -> std::cmp::Ordering {
+    fn sum_key(sum: f64) -> f64 {
+        if sum.is_nan() {
+            f64::NEG_INFINITY
+        } else if sum == 0.0 {
+            0.0
+        } else {
+            sum
+        }
+    }
+    fn newest(cluster: &PromotedCluster) -> Option<DateTime<Utc>> {
+        cluster.events.iter().map(|e| e.timestamp).max()
+    }
+    sum_key(b.salience_sum)
+        .total_cmp(&sum_key(a.salience_sum))
+        .then_with(|| b.events.len().cmp(&a.events.len()))
+        .then_with(|| newest(b).cmp(&newest(a)))
+        .then_with(|| a.cluster_key.cmp(&b.cluster_key))
 }
 
 /// Pick the cluster exemplar: highest salience, then pain, then importance,
@@ -937,7 +981,7 @@ mod tests {
         let dir = unique_tmpdir("win7");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
-        // 3 events 1, 2, 5 days ago — all within the 7-day window.
+        // 3 events 1, 2, 5 days ago — all within the 30-day window.
         let events = vec![
             make_event_at(0, "rust::borrow", NOW_SEC - 86400),
             make_event_at(1, "rust::borrow", NOW_SEC - 2 * 86400),
@@ -955,7 +999,7 @@ mod tests {
         let dir = unique_tmpdir("win30");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
-        // 3 events at 8, 15, 25 days ago — outside 7-day window but inside 30-day.
+        // 3 events at 8, 15, 25 days ago — all within the 30-day window.
         let events = vec![
             make_event_at(0, "go::testing", NOW_SEC - 8 * 86400),
             make_event_at(1, "go::testing", NOW_SEC - 15 * 86400),
@@ -973,7 +1017,7 @@ mod tests {
         let dir = unique_tmpdir("noprom");
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
-        // 2 events within 7 days + 1 beyond 30 days = neither window hits threshold.
+        // 2 events within the 30-day window + 1 beyond it: under the threshold.
         let events = vec![
             make_event_at(0, "py::async", NOW_SEC - 86400),
             make_event_at(1, "py::async", NOW_SEC - 3 * 86400),
@@ -1099,7 +1143,7 @@ mod tests {
         let _g = DirGuard(dir.clone());
         let root = AgentRoot::new(&dir);
 
-        // Cycle 1: PROMOTION_THRESHOLD events at NOW_SEC — inside the 7-day
+        // Cycle 1: PROMOTION_THRESHOLD events at NOW_SEC — inside the 30-day
         // window, so the cluster promotes and a lesson is written.
         let events: Vec<AgentLearning> = (0..PROMOTION_THRESHOLD)
             .map(|i| make_event_at(i as u32, "rust::types", NOW_SEC))
@@ -1273,5 +1317,231 @@ mod tests {
         let selected = select_lesson(&compute_promoted_clusters(&events, NOW_SEC), NOW_SEC)
             .expect("both clusters promote");
         assert_eq!(selected.cluster_key, "rust::small");
+    }
+
+    // ── DRM-117: the promotion rule and the cluster tie-break ──────────────
+    //
+    // Each fixture's clock is `NOW_SEC`, and its events are dated back from
+    // it, so the newest event sits the stated number of days before the clock
+    // (drift entry `fixture-now-sec-is-not-the-corpus-clock`).
+
+    const DAY: f64 = 86_400.0;
+
+    /// An event `days` before `NOW_SEC`, with its own pain and importance.
+    fn aged(id: u32, key: &str, days: f64, pain: f32, importance: f32) -> AgentLearning {
+        let mut e = make_event_at(id, key, NOW_SEC - (days * DAY) as i64);
+        e.pain = pain;
+        e.importance = importance;
+        e
+    }
+
+    /// `(cluster_key, event count)` for each promoted cluster, in key order.
+    fn promoted_keys(events: &[AgentLearning]) -> Vec<(String, usize)> {
+        compute_promoted_clusters(events, NOW_SEC)
+            .into_iter()
+            .map(|c| (c.cluster_key, c.events.len()))
+            .collect()
+    }
+
+    fn one(key: &str, count: usize) -> Vec<(String, usize)> {
+        vec![(key.to_string(), count)]
+    }
+
+    /// The lever-pass 2a store (LP-GEARS-01): three old `rust::eh::axum`
+    /// events and one fresh, painful `rust::eh::tokio` one-off.
+    fn store_2a() -> Vec<AgentLearning> {
+        vec![
+            aged(0, "rust::eh::axum", 25.0, 5.0, 5.0),
+            aged(1, "rust::eh::axum", 26.0, 5.0, 5.0),
+            aged(2, "rust::eh::axum", 27.0, 5.0, 5.0),
+            aged(3, "rust::eh::tokio", 0.1, 9.0, 9.0),
+        ]
+    }
+
+    /// DRM-117 test 1 (2a): `rust::eh` used to promote on the three events
+    /// `rust::eh::axum` had claimed, take the one-off, and win the cycle.
+    #[test]
+    fn a_parent_counts_only_unclaimed_events() {
+        let events = store_2a();
+        let promoted = compute_promoted_clusters(&events, NOW_SEC);
+        let keys: Vec<(&str, usize)> = promoted
+            .iter()
+            .map(|c| (c.cluster_key.as_str(), c.events.len()))
+            .collect();
+        assert_eq!(keys, [("rust::eh::axum", 3)]);
+
+        let selected = select_lesson(&promoted, NOW_SEC).expect("one cluster promotes");
+        assert_eq!(selected.cluster_key, "rust::eh::axum");
+
+        let sidecar: RecurrenceSidecar =
+            serde_json::from_slice(&sidecar_bytes(&promoted).unwrap()).unwrap();
+        let counts: Vec<(&str, u32)> = sidecar
+            .clusters
+            .iter()
+            .map(|c| (c.skill_action.as_str(), c.count))
+            .collect();
+        assert_eq!(counts, [("rust::eh::axum", 3)]);
+    }
+
+    /// DRM-117 test 2 (2b): a one-off under another branch of `rust` does not
+    /// make `rust` promote on the three `rust::eh::axum` events.
+    #[test]
+    fn an_unrelated_one_off_does_not_promote_its_root() {
+        let events = vec![
+            aged(0, "rust::eh::axum", 20.0, 5.0, 5.0),
+            aged(1, "rust::eh::axum", 21.0, 5.0, 5.0),
+            aged(2, "rust::eh::axum", 22.0, 5.0, 5.0),
+            aged(3, "rust::build::cargo", 0.1, 9.0, 9.0),
+        ];
+        assert_eq!(promoted_keys(&events), one("rust::eh::axum", 3));
+    }
+
+    /// DRM-117 test 3 (Austin's ruling, 2026-11-19): a one-segment prefix
+    /// promotes only on events filed as exactly that key.
+    #[test]
+    fn a_one_segment_root_counts_only_its_own_key() {
+        // LP-JOURNEY-03: four unrelated one-offs used to make `rust` the
+        // cycle's lesson.
+        let journey = vec![
+            aged(0, "rust::testing::flaky", 3.0, 5.0, 5.0),
+            aged(1, "rust::testing::flaky", 2.0, 5.0, 5.0),
+            aged(2, "rust::testing::flaky", 1.0, 5.0, 5.0),
+            aged(3, "rust::api::auth", 2.5, 5.0, 5.0),
+            aged(4, "rust::db::pool", 2.2, 5.0, 5.0),
+            aged(5, "rust::logging::tracing", 1.5, 5.0, 5.0),
+            aged(6, "rust::deps::openssl", 1.2, 5.0, 5.0),
+        ];
+        assert_eq!(promoted_keys(&journey), one("rust::testing::flaky", 3));
+        let selected = select_lesson(&compute_promoted_clusters(&journey, NOW_SEC), NOW_SEC)
+            .expect("one cluster promotes");
+        assert_eq!(selected.cluster_key, "rust::testing::flaky");
+
+        // Three `rust` events and one `rust::x`: `rust` promotes with the
+        // three, and the child is not among them.
+        let three = vec![
+            aged(0, "rust", 1.0, 5.0, 5.0),
+            aged(1, "rust", 2.0, 5.0, 5.0),
+            aged(2, "rust", 3.0, 5.0, 5.0),
+            aged(3, "rust::x", 1.0, 5.0, 5.0),
+        ];
+        let promoted = compute_promoted_clusters(&three, NOW_SEC);
+        assert_eq!(promoted.len(), 1, "only `rust` promotes");
+        assert_eq!(promoted[0].cluster_key, "rust");
+        let ids: Vec<EventId> = promoted[0].events.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids, [test_id(0), test_id(1), test_id(2)]);
+        assert!(
+            promoted[0].events.iter().all(|e| e.skill_action == "rust"),
+            "`rust::x` is not among the root's events"
+        );
+
+        // Two `rust` events and one `rust::x`: nothing promotes.
+        let two = vec![
+            aged(0, "rust", 1.0, 5.0, 5.0),
+            aged(1, "rust", 2.0, 5.0, 5.0),
+            aged(2, "rust::x", 1.0, 5.0, 5.0),
+        ];
+        assert!(promoted_keys(&two).is_empty(), "nothing promotes");
+    }
+
+    /// DRM-117 test 4 (SPEC's example): siblings with too few events each
+    /// promote together under their shared parent.
+    #[test]
+    fn siblings_promote_together_under_their_parent() {
+        let events = vec![
+            aged(0, "rust::errors::a", 1.0, 5.0, 5.0),
+            aged(1, "rust::errors::b", 2.0, 5.0, 5.0),
+            aged(2, "rust::errors::b", 3.0, 5.0, 5.0),
+        ];
+        assert_eq!(promoted_keys(&events), one("rust::errors", 3));
+    }
+
+    /// A promoted cluster built by hand: `key`, `sum`, and one event per age
+    /// in `days`, numbered from `first_id`.
+    fn cluster(key: &str, sum: f64, days: &[f64], first_id: u32) -> PromotedCluster {
+        PromotedCluster {
+            cluster_key: key.to_string(),
+            events: days
+                .iter()
+                .zip(first_id..)
+                .map(|(&d, id)| aged(id, key, d, 5.0, 5.0))
+                .collect(),
+            salience_sum: sum,
+        }
+    }
+
+    /// DRM-117 test 5: `select_lesson` ranks clusters by `salience_sum`, then
+    /// more events, then the newest event, then the key ascending, in either
+    /// input order. The base took the last of equal maxima.
+    #[test]
+    fn top_cluster_ties_follow_the_documented_order() {
+        let cases = [
+            (
+                "equal sums: more events",
+                cluster("zzz::many", 1.0, &[1.0, 2.0, 3.0, 4.0], 0),
+                cluster("aaa::few", 1.0, &[1.0, 2.0, 3.0], 10),
+            ),
+            (
+                "equal sums and counts: the newer newest event",
+                cluster("zzz::new", 1.0, &[0.5, 2.0, 3.0], 0),
+                cluster("aaa::old", 1.0, &[1.0, 2.0, 3.0], 10),
+            ),
+            (
+                "all equal: the key ascending",
+                cluster("aaa::x", 1.0, &[1.0, 2.0, 3.0], 0),
+                cluster("zzz::x", 1.0, &[1.0, 2.0, 3.0], 10),
+            ),
+            (
+                "a NaN sum loses to any number",
+                cluster("zzz::zero", 0.0, &[20.0, 21.0, 22.0], 0),
+                cluster("aaa::nan", f64::NAN, &[1.0, 2.0, 3.0, 4.0], 10),
+            ),
+        ];
+        for (name, winner, loser) in cases {
+            for order in [
+                [winner.clone(), loser.clone()],
+                [loser.clone(), winner.clone()],
+            ] {
+                let selected = select_lesson(&order, NOW_SEC).expect("two clusters");
+                assert_eq!(
+                    selected.cluster_key,
+                    winner.cluster_key,
+                    "{name}, input {:?}",
+                    order
+                        .iter()
+                        .map(|c| c.cluster_key.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// DRM-117 test 6: a prefix promotes on at least three candidates in 30
+    /// days; older events and events a child claimed do not count.
+    #[test]
+    fn the_window_is_thirty_days_of_candidates() {
+        let inside = vec![
+            aged(0, "py::pytest", 1.0, 5.0, 5.0),
+            aged(1, "py::pytest", 15.0, 5.0, 5.0),
+            aged(2, "py::pytest", 29.0, 5.0, 5.0),
+        ];
+        assert_eq!(promoted_keys(&inside), one("py::pytest", 3));
+
+        // One of the three at 31 days, and five more at 60: two in the window.
+        let mut outside = vec![
+            aged(0, "py::pytest", 1.0, 5.0, 5.0),
+            aged(1, "py::pytest", 15.0, 5.0, 5.0),
+            aged(2, "py::pytest", 31.0, 5.0, 5.0),
+        ];
+        outside.extend((3..8).map(|id| aged(id, "py::pytest", 60.0, 5.0, 5.0)));
+        assert!(promoted_keys(&outside).is_empty(), "nothing promotes");
+
+        // Three events the child claims, and one filed under the parent.
+        let claimed = vec![
+            aged(0, "py::pytest::fixtures", 1.0, 5.0, 5.0),
+            aged(1, "py::pytest::fixtures", 2.0, 5.0, 5.0),
+            aged(2, "py::pytest::fixtures", 3.0, 5.0, 5.0),
+            aged(3, "py::pytest", 1.0, 5.0, 5.0),
+        ];
+        assert_eq!(promoted_keys(&claimed), one("py::pytest::fixtures", 3));
     }
 }

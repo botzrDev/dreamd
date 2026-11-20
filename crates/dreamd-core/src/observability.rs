@@ -10,14 +10,18 @@
 //!     format is readable text whether or not stderr is a terminal, with ANSI
 //!     colour only on a terminal. `DREAMD_LOG_FORMAT=json` (exactly `json`)
 //!     prints one JSON object per line instead (BZR-1470 D1).
-//!   - **File → `~/.agent/dreamd.log`,** JSON always, non-blocking, truncated
-//!     at startup. There is no rotation. Optional, and **the caller decides**:
-//!     this module only consumes whatever path it is handed, and `None` means
-//!     console-only. The only caller that hands one over is the daemon
-//!     (`dreamd watch`, AILAB-184) — see `cli::wants_daemon_log`, which owns that
-//!     policy — because the truncating open below means a second process
-//!     pointed at the same path would wipe a running daemon's log. Resolved
-//!     via [`DaemonHome::log_file`].
+//!   - **File → the daemon log,** JSON always, non-blocking, appended to and
+//!     never truncated. Only the daemon (`dreamd watch`, AILAB-184) has one —
+//!     see `cli::wants_daemon_log`, which owns that policy. It installs
+//!     [`init_daemon_tracing`], whose file layer holds its lines in memory
+//!     until `watch` has bound its socket and calls [`open_daemon_log`]
+//!     (DRM-119). So a `watch` that stops at the writer lock, the config or the
+//!     bind never touches the file a running daemon writes. At that open, a
+//!     file of [`DAEMON_LOG_ROTATE_BYTES`] or more is renamed to `<log>.1`, and
+//!     the file is mode `0600`. The path is [`DaemonHome::log_file_for`] the
+//!     bound socket: `~/.agent/dreamd.log` for the default socket, else
+//!     `<socket>.log`. Every other process calls `init_tracing(None)` and is
+//!     console-only.
 //!
 //! Filters come from `DREAMD_LOG`. When it is unset, empty, invalid or not
 //! UTF-8, each layer gets its own default (BZR-1470 D2, D3, D4):
@@ -40,10 +44,12 @@
 //!
 //! [`server::http::router`]: crate::server::http
 //!
-//! [`DaemonHome::log_file`]: crate::layout::DaemonHome::log_file
+//! [`DaemonHome::log_file_for`]: crate::layout::DaemonHome::log_file_for
 
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -137,8 +143,9 @@ where
 
 /// Initialize the process-wide tracing subscriber.
 ///
-/// Pass the resolved log-file path (normally [`DaemonHome::log_file`]); pass
-/// `None` to run console-only. Returns the appender [`WorkerGuard`] whenever a
+/// Pass a log-file path to add a file layer that appends to it; pass `None`
+/// to run console-only, as every command but `watch` does. The daemon uses
+/// [`init_daemon_tracing`] instead. Returns the appender [`WorkerGuard`] whenever a
 /// file layer is installed — **the caller must hold it for the whole process
 /// lifetime** or buffered file logs are dropped on early drop. Returns `None`
 /// when running console-only (no path given, or the log dir is not writable —
@@ -149,26 +156,16 @@ where
 ///
 /// Idempotent: uses `try_init`, so a second call is a silent no-op rather than
 /// a panic.
-///
-/// [`DaemonHome::log_file`]: crate::layout::DaemonHome::log_file
 pub fn init_tracing(log_file: Option<PathBuf>) -> Option<WorkerGuard> {
     let dreamd_log = std::env::var("DREAMD_LOG").ok();
     let log_format = std::env::var("DREAMD_LOG_FORMAT").ok();
     let format =
         ConsoleFormat::from_env_value(log_format.as_deref(), std::io::stderr().is_terminal());
 
-    // File → JSON, truncate at startup, non-blocking. If the dir is not
-    // writable, this falls through to the console-only subscriber below.
+    // File → JSON, appended to, non-blocking. If the dir is not writable,
+    // this falls through to the console-only subscriber below.
     if let Some(path) = log_file {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-        {
+        if let Ok(file) = open_private_append(&path) {
             let (non_blocking, guard) = tracing_appender::non_blocking(file);
             let _ = build_subscriber(
                 dreamd_log.as_deref(),
@@ -190,6 +187,200 @@ pub fn init_tracing(log_file: Option<PathBuf>) -> Option<WorkerGuard> {
     )
     .try_init();
     None
+}
+
+/// A daemon log of this size or more is renamed to `<log>.1` when `watch`
+/// starts serving (DRM-119).
+pub const DAEMON_LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Lines logged before the daemon log opens are held up to this many bytes.
+/// A line that would pass it is dropped whole.
+const PRE_OPEN_CAP: usize = 1024 * 1024;
+
+/// The daemon's file writer: registered by [`init_daemon_tracing`], opened by
+/// [`open_daemon_log`].
+static DAEMON_LOG: OnceLock<Arc<DeferredLog>> = OnceLock::new();
+
+/// The daemon's subscriber: the console as `init_tracing`, plus a file layer
+/// whose file is not opened until [`open_daemon_log`] (DRM-119). The caller
+/// holds the guard for the process lifetime.
+///
+/// Until then the file layer's lines are held in memory, up to 1 MiB, so a
+/// `watch` that fails before it binds its socket never touches the log a
+/// running daemon writes, and one that binds keeps its earlier lines (WAL
+/// recovery, the index open). Reads `DREAMD_LOG` and `DREAMD_LOG_FORMAT` as
+/// [`init_tracing`] does, and like it uses `try_init`.
+pub fn init_daemon_tracing() -> WorkerGuard {
+    let dreamd_log = std::env::var("DREAMD_LOG").ok();
+    let log_format = std::env::var("DREAMD_LOG_FORMAT").ok();
+    let format =
+        ConsoleFormat::from_env_value(log_format.as_deref(), std::io::stderr().is_terminal());
+
+    let log = Arc::clone(DAEMON_LOG.get_or_init(|| Arc::new(DeferredLog::default())));
+    let (non_blocking, guard) = tracing_appender::non_blocking(DeferredWriter(log));
+    let _ = build_subscriber(
+        dreamd_log.as_deref(),
+        format,
+        std::io::stderr,
+        Some(non_blocking),
+    )
+    .try_init();
+    guard
+}
+
+/// Open the daemon log at `path`, once, after the socket is bound:
+/// - rotate it to `<path>.1` if it is at least [`DAEMON_LOG_ROTATE_BYTES`];
+/// - open it with create and append, and on Unix mode `0600`, also setting
+///   `0600` on a file that already existed;
+/// - write the held lines, then send every later line to the file.
+///
+/// A no-op without [`init_daemon_tracing`], and on any call after the first.
+/// On an error the file layer discards its lines from then on; nothing panics.
+pub fn open_daemon_log(path: &Path) -> std::io::Result<()> {
+    match DAEMON_LOG.get() {
+        Some(log) => log.open(path),
+        None => Ok(()),
+    }
+}
+
+/// Where the daemon's file layer writes (DRM-119). One lock covers the held
+/// lines and the switch to the file, so the held lines are written first and
+/// in order.
+#[derive(Debug, Default)]
+struct DeferredLog(Mutex<Sink>);
+
+#[derive(Debug)]
+enum Sink {
+    /// Before the open: whole lines, at most [`PRE_OPEN_CAP`] bytes.
+    Held(Vec<u8>),
+    /// After an open that succeeded.
+    Open(File),
+    /// After an open that failed: lines are discarded.
+    Discard,
+}
+
+impl Default for Sink {
+    fn default() -> Self {
+        Sink::Held(Vec::new())
+    }
+}
+
+impl DeferredLog {
+    /// Hold, write or discard one line. The non-blocking worker hands each
+    /// formatted line to one `write_all`, so `line` is a whole line.
+    fn write_line(&self, line: &[u8]) -> std::io::Result<()> {
+        let mut sink = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *sink {
+            Sink::Held(held) => {
+                if held.len() + line.len() <= PRE_OPEN_CAP {
+                    held.extend_from_slice(line);
+                }
+                Ok(())
+            }
+            Sink::Open(file) => file.write_all(line),
+            Sink::Discard => Ok(()),
+        }
+    }
+
+    /// Flush the file, once there is one.
+    fn flush(&self) -> std::io::Result<()> {
+        let mut sink = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *sink {
+            Sink::Open(file) => file.flush(),
+            Sink::Held(_) | Sink::Discard => Ok(()),
+        }
+    }
+
+    /// [`open_daemon_log`]'s body: a no-op unless the lines are still held.
+    fn open(&self, path: &Path) -> std::io::Result<()> {
+        let mut sink = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Sink::Held(held) = &mut *sink else {
+            return Ok(());
+        };
+        let held = std::mem::take(held);
+        let opened = rotate_if_large(path)
+            .and_then(|()| open_private_append(path))
+            .and_then(|mut file| file.write_all(&held).map(|()| file));
+        match opened {
+            Ok(file) => {
+                *sink = Sink::Open(file);
+                Ok(())
+            }
+            Err(e) => {
+                *sink = Sink::Discard;
+                Err(e)
+            }
+        }
+    }
+}
+
+/// The `Write` the non-blocking appender owns; every write goes to the shared
+/// [`DeferredLog`].
+struct DeferredWriter(Arc<DeferredLog>);
+
+impl Write for DeferredWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write_line(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// `<path>.1`: the name a rotated daemon log takes.
+fn rotated_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".1");
+    PathBuf::from(name)
+}
+
+/// Rename `path` to `<path>.1`, replacing an older `.1`, when it is at least
+/// [`DAEMON_LOG_ROTATE_BYTES`]. The renamed file is set to `0600` on Unix.
+fn rotate_if_large(path: &Path) -> std::io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() >= DAEMON_LOG_ROTATE_BYTES => {
+            let rotated = rotated_path(path);
+            std::fs::rename(path, &rotated)?;
+            set_private(&std::fs::File::open(&rotated)?)
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Open `path` to append, creating it (and its folder) if needed. On Unix the
+/// file is created `0600`, and an existing file is set to `0600`.
+fn open_private_append(path: &Path) -> std::io::Result<File> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    set_private(&file)?;
+    Ok(file)
+}
+
+/// Set an open file to mode `0600` on Unix; nothing elsewhere.
+fn set_private(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +599,73 @@ mod tests {
             .find(|l| l.contains(STATUS))
             .unwrap_or_else(|| panic!("status line missing: {lines:?}"));
         assert!(status.contains(r#""level":"INFO""#), "not INFO: {status}");
+    }
+
+    fn read(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// DRM-119 test 1: the held lines are written first, later lines append,
+    /// and only the first open counts.
+    #[test]
+    fn held_lines_go_first_and_later_lines_append() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.log");
+        let second = dir.path().join("second.log");
+        std::fs::write(&first, "old\n").unwrap();
+
+        let log = Arc::new(DeferredLog::default());
+        let mut writer = DeferredWriter(Arc::clone(&log));
+        writer.write_all(b"a\n").unwrap();
+        assert_eq!(read(&first), "old\n", "a held line reached the file");
+
+        log.open(&first).expect("first open");
+        assert_eq!(read(&first), "old\na\n");
+
+        writer.write_all(b"b\n").unwrap();
+        assert_eq!(read(&first), "old\na\nb\n");
+
+        log.open(&second).expect("second open is a no-op");
+        writer.write_all(b"c\n").unwrap();
+        assert!(
+            !second.exists(),
+            "a second open created {}",
+            second.display()
+        );
+        assert_eq!(read(&first), "old\na\nb\nc\n");
+    }
+
+    /// DRM-119 test 2: past the cap a line is dropped whole, so the file
+    /// gets only whole lines and at most `PRE_OPEN_CAP` bytes of them.
+    #[test]
+    fn the_hold_drops_whole_lines_past_the_cap() {
+        use std::io::Write as _;
+        // 1,001 bytes, so the cap is not a multiple of the line length.
+        let line = |i: usize| format!("{i:06} {}\n", "x".repeat(993));
+        let lines = PRE_OPEN_CAP / line(0).len() + 5;
+
+        let log = Arc::new(DeferredLog::default());
+        let mut writer = DeferredWriter(Arc::clone(&log));
+        for i in 0..lines {
+            writer.write_all(line(i).as_bytes()).unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.log");
+        log.open(&path).expect("open");
+
+        let text = read(&path);
+        assert!(text.len() <= PRE_OPEN_CAP, "{} bytes held", text.len());
+        assert!(
+            text.len() > PRE_OPEN_CAP - line(0).len(),
+            "the hold stopped early: {} bytes",
+            text.len()
+        );
+        assert!(text.ends_with('\n'), "the file ends inside a line");
+        let kept: Vec<&str> = text.split_inclusive('\n').collect();
+        assert!(kept.len() < lines, "nothing was dropped");
+        for (i, got) in kept.iter().enumerate() {
+            assert_eq!(*got, line(i), "line {i} is not whole, or out of order");
+        }
     }
 }

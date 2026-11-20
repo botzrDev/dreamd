@@ -67,7 +67,7 @@ DREAMD_LOG_FORMAT=json dreamd watch  # console lines as JSON
 4. A `DREAMD_SOCK` the daemon was not started with. `dreamd watch` and every client resolve it the same way, so the daemon and the MCP client need the same value, or neither sets it (then both use `~/.agent/dreamd.sock`). A relative value is refused: `dreamd mcp: DREAMD_SOCK is not an absolute path: …`, exit 1, and `dreamd watch` exits 1 the same way
 5. `dream_cycle_mode = "auto"` in `config.toml` — `dreamd mcp` and `dreamd watch` both exit 1 on it (see [configuration.md](./configuration.md#dream_cycle_mode))
 6. Native Windows — the npx shim has no Windows binary and exits 1. Build `dreamd` and start `dreamd watch` first (see [windows.md](./windows.md))
-7. A daemon of another dreamd version, such as a 1.2.x `dreamd watch` that `setup` started before an upgrade. The tool call fails with `version mismatch: client …, daemon …`, or `daemon unknown` for a daemon from a release without this check. Under `npx -y dreamd-mcp`, run `npx -y dreamd-mcp update` to stop it, then `npx -y dreamd-mcp watch`, then reload the harness. With a `dreamd` binary, stop it and run `dreamd watch`. If a `dreamd service` unit runs the daemon, follow `update` with `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`, because the unit names the old version's binary. Or point `DREAMD_SOCK` at a daemon of this version
+7. A daemon of another dreamd version, such as a 1.2.x `dreamd watch` that `setup` started before an upgrade. The tool call fails before anything is sent to the daemon, so nothing is written: the client asks the daemon its version first. The message is `version mismatch: client …, daemon …`, or `daemon unknown` for a daemon from a release without this check. When the message says `This client is older than the daemon`, update the client instead of restarting the daemon: install the daemon's version, or under npx, if your MCP config pins a version with an `@` after `dreamd-mcp`, change it to the floating `npx -y dreamd-mcp` and reload the harness. Otherwise the daemon is the older side. Under `npx -y dreamd-mcp`, run `npx -y dreamd-mcp update` to stop it, then `npx -y dreamd-mcp watch`, then reload the harness. With a `dreamd` binary, stop it and run `dreamd watch`. If a `dreamd service` unit runs the daemon, follow `update` with `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart` in place of `watch`, because the unit names the old version's binary. Or point `DREAMD_SOCK` at a daemon of this version
 8. A resumed Claude Code session from another folder. Claude Code reads a project's `.mcp.json` from the folder the session started in. A session that was started in another folder and is then resumed does not load this repo's `.mcp.json`, so dreamd's tools are missing from it. Start a new session from the repo root.
 
 **Fix:**
@@ -84,6 +84,28 @@ Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (da
 Running `dreamd mcp` or `npx -y dreamd-mcp` by hand starts the stdio server, which waits for a harness. On a terminal it prints `dreamd mcp: MCP server on stdio, waiting for a harness. …` to stderr and serves until Ctrl-C. To connect a harness, run `dreamd setup` (or `npx -y dreamd-mcp setup`).
 
 **Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per user login.
+
+---
+
+## A tool call or `dreamd dream` times out, or `status` says `not responding`
+
+**Symptom:** `search_nodes` or `append_node` fails with `the daemon at <socket> did not answer within 30 s`, `dreamd dream` exits 1 with the same sentence (`within 120 s`), or `dreamd status` prints `daemon: not responding (it accepted a connection but did not answer within 2 s)` and exits 1.
+
+**Cause:** a process accepts connections on the daemon socket but does not answer. Usually that is a `dreamd watch` stopped with Ctrl-Z or `kill -STOP`, or one that is wedged. A stopped process's socket still accepts connections, so the clients wait for the deadline and then give up. They do not fall back to running in-process, because that daemon still holds the store's writer lock.
+
+**Fix:**
+
+```bash
+pgrep -a dreamd                 # find the watch's pid
+kill -CONT <pid>                # a stopped watch runs again
+dreamd status                   # daemon: running
+```
+
+If it is not stopped but wedged, stop it with `kill -KILL <pid>` and start `dreamd watch` again. Use SIGKILL for a stopped process too if you do not want it to run on: a stopped process does not act on SIGTERM until it runs again.
+
+An `append_node` that timed out may have been written. Retry it with the same `client_dedup_key`, and the daemon will not store it twice.
+
+On a slow machine, where a healthy first call for a large project takes longer than 30 s, set `DREAMD_CLIENT_TIMEOUT` (whole seconds) for the harness and for `dreamd dream`. See [Client deadlines](./http-api.md#client-deadlines).
 
 ---
 
@@ -210,7 +232,7 @@ Or add `.agent/` to `.gitignore` to keep memory out of git; doctor then prints `
 | Clear session scratchpad | `dreamd reset workspace` (asks first; `--yes` skips the prompt and is required when stdin is not a tty) |
 | Remove one memory | `dreamd forget <event id>` — stop the daemon first; `--dry-run` previews. Find the id with `dreamd recall <query>` |
 | Uninstall dreamd (stop servers, unregister project, clear caches; keeps `.agent/` stores) | `dreamd uninstall` — flags and details: [packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md#uninstall--reset) |
-| Update to the latest release | `dreamd update`, then re-run `npx -y dreamd-mcp` to fetch the new binary |
+| Update to the latest release | `dreamd update`, then reload your MCP harness and re-run `npx -y dreamd-mcp`: floating npx runs the newest published dreamd-mcp |
 | Remove project from daemon registry only (keep everything else) | `dreamd init --uninstall-project`. The store stays. Run `dreamd init` again to put the registry entry back. |
 | Remove the login service (systemd unit / LaunchAgent / scheduled task) | `dreamd service uninstall` — see [install.md](./install.md#removing-the-service) |
 | Wipe episodic log | Stop the daemon, truncate `.agent/episodic/AGENT_LEARNINGS.jsonl`, then rebuild the index with `dreamd doctor --repair --allow-empty-log`; `--repair` alone refuses while the index holds events the log does not (or use *Full fresh store* below for a clean slate) |
@@ -293,7 +315,7 @@ daemon_home_store: /home/you/.agent holds a project store (events: N)  [WARNING:
 
 and `dreamd service uninstall --purge` exits 2 with `refusing to purge /home/you/.agent: it holds a project store (…)` or `… it holds the store of the registered project /home/you …`.
 
-**Cause:** `~/.agent/` is the daemon home: it holds `registry.toml`, the socket, `dreamd.log` and, on Windows, `auth.json`. It is never a project store. A dreamd before 1.3.3 could still use it as one: a folder under your home with no store of its own bound to your home directory, so an MCP append landed in `~/.agent/episodic/`, and `dreamd init` in a git repo at your home directory registered it. dreamd now skips that store. Nothing reads it, nothing moves it, and `--purge` will not delete it for you.
+**Cause:** `~/.agent/` is the daemon home: it holds `registry.toml`, the socket, `dreamd.log` and, on Windows, `auth.json`. It is never a project store. A dreamd before 1.4.0 could still use it as one: a folder under your home with no store of its own bound to your home directory, so an MCP append landed in `~/.agent/episodic/`, and `dreamd init` in a git repo at your home directory registered it. dreamd now skips that store. Nothing reads it, nothing moves it, and `--purge` will not delete it for you.
 
 **Fix with events (`events: N`, N > 0):** move the store into the project it belongs to, one that has no `.agent/` yet. Stop the daemon first: `systemctl --user stop dreamd.service`, or end `dreamd watch`. There is no `dreamd service stop`.
 
@@ -353,7 +375,13 @@ curl --unix-socket ~/.agent/dreamd.sock \
 
 `AGENT_LEARNINGS.jsonl` and `~/.agent/registry.toml` are plain files you may edit. The write paths (`append_node`, `POST /api/v1/learn`, `dreamd init`) refuse what these warnings describe; a line written by hand skips those checks. The readers keep working, and `dreamd doctor` tells you what they are doing with the line. Each of these warnings makes `dreamd doctor` exit 1. Line numbers are lines of the file, blank and malformed lines included; doctor lists the first five.
 
-The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNINGS.jsonl` rebuild it: stop `dreamd watch`, run `dreamd doctor --repair`, start `dreamd watch` again.
+To fix a line by hand, stop dreamd's writer for the project first (`dreamd watch`, or the harness session running `dreamd mcp`), edit the line, then run `dreamd doctor --repair`. Until the repair, the index keeps the old text and scores, and `dreamd doctor` reports `index_freshness: stale content`. Add new records through `append_node` or `POST /api/v1/learn`, not by writing the file.
+
+### `index_freshness: stale content`
+
+**What the reader does:** Recall scores and returns the indexed copy of the record: its `content`, `skill_action`, timestamp, `pain` and `importance` as they were when it was indexed, not the line as it reads now. A writer's open does not re-index a changed line. Doctor names the first three changed ids.
+
+**Fix:** Stop dreamd's writer for the project (`dreamd watch`, or the harness session running `dreamd mcp`), then run `dreamd doctor --repair`, which rebuilds the index from the log.
 
 ### `score_range: N line(s) …`
 

@@ -239,13 +239,15 @@ async fn version_mismatch_header_returns_426_naming_both_versions() {
                 crate::launcher::Launcher::Binary
             )
         );
+        // DRM-122: 0.0.0 is older than the daemon, so the sentence says to
+        // update the client, not to restart the daemon.
         if client == "0.0.0" {
             assert_eq!(
                 error,
                 format!(
-                    "version mismatch: client 0.0.0, daemon {DAEMON}. Stop the other daemon \
-                     and start this one with `dreamd watch`, or point DREAMD_SOCK at a \
-                     daemon of this version."
+                    "version mismatch: client 0.0.0, daemon {DAEMON}. This client is older \
+                     than the daemon. Install dreamd {DAEMON} and restart your MCP harness, \
+                     or point DREAMD_SOCK at a daemon of version 0.0.0."
                 )
             );
         }
@@ -1860,6 +1862,155 @@ async fn preferences_large_file_returns_truncated() {
     );
 }
 
+/// A registry for a fresh project, its `personal/` folder, and a router.
+fn preferences_fixture() -> (tempfile::TempDir, String, std::path::PathBuf, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root_str = dir.path().to_str().unwrap().to_string();
+    write_registry(&registry_path, &root_str);
+    let pref_path = crate::layout::AgentRoot::new(dir.path()).preferences_md();
+    std::fs::create_dir_all(pref_path.parent().unwrap()).unwrap();
+    let router = build_router(make_test_state(registry_path));
+    (dir, root_str, pref_path, router)
+}
+
+/// `GET /api/v1/preferences` for `root`, with the time it took.
+async fn get_preferences_timed(
+    router: axum::Router,
+    root: &str,
+) -> (axum::response::Response, std::time::Duration) {
+    let req = with_peer_uid(
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/preferences")
+            .header("x-agent-root", root)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let resp = router.into_service().oneshot(req).await.unwrap();
+    (resp, started.elapsed())
+}
+
+/// The `error` string of a `500` answer.
+async fn error_text(resp: axum::response::Response) -> String {
+    let json = body_json(resp).await;
+    json["error"].as_str().unwrap_or_default().to_string()
+}
+
+/// DRM-120 test 5: a FIFO at `PREFERENCES.md` is refused at once. A helper
+/// opens the FIFO for writing from 3 s to 6 s, which frees an `open` that
+/// blocked on it, so the base fails this test instead of hanging.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_fifo_is_refused_at_once() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (_dir, root, pref_path, router) = preferences_fixture();
+    nix::unistd::mkfifo(&pref_path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+
+    let done = Arc::new(AtomicBool::new(false));
+    let helper = {
+        let done = Arc::clone(&done);
+        let fifo = pref_path.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(6) {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                if started.elapsed() >= std::time::Duration::from_secs(3) {
+                    // A writer frees a reader blocked in `open`; ENXIO while
+                    // no reader has it open.
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(nix::libc::O_NONBLOCK)
+                        .open(&fifo);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        })
+    };
+
+    let (resp, took) = get_preferences_timed(router, &root).await;
+    done.store(true, Ordering::Relaxed);
+    helper.join().unwrap();
+
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+/// DRM-120 test 6: a `PREFERENCES.md` symlink is followed only within
+/// `personal/`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_outside_personal_is_refused() {
+    let (dir, root, pref_path, router) = preferences_fixture();
+
+    // A regular file outside `personal/`.
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "private\n").unwrap();
+    std::os::unix::fs::symlink(&outside, &pref_path).unwrap();
+    let (resp, _) = get_preferences_timed(router.clone(), &root).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("resolves outside"), "{error}");
+
+    // A device outside `personal/`, answered at once.
+    std::fs::remove_file(&pref_path).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &pref_path).unwrap();
+    let (resp, took) = get_preferences_timed(router.clone(), &root).await;
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = error_text(resp).await;
+    assert!(error.contains("resolves outside"), "{error}");
+
+    // A file within `personal/` is served.
+    std::fs::remove_file(&pref_path).unwrap();
+    let notes = pref_path.parent().unwrap().join("notes.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    std::os::unix::fs::symlink(&notes, &pref_path).unwrap();
+    let (resp, _) = get_preferences_timed(router, &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["body"], serde_json::json!("# Notes\n"));
+}
+
+/// DRM-120 test 7 (LP-HTTP-14): the body is UTF-8 cut at a character
+/// boundary, and `x-dreamd-lossy` marks replaced bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn preferences_body_is_bounded_utf8() {
+    let (_dir, root, pref_path, router) = preferences_fixture();
+
+    let mut content = "x".repeat(16_383);
+    content.push('€');
+    std::fs::write(&pref_path, &content).unwrap();
+    let (resp, _) = get_preferences_timed(router.clone(), &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let header = |resp: &axum::response::Response, name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    assert_eq!(header(&resp, "x-dreamd-truncated").as_deref(), Some("true"));
+    assert_eq!(
+        header(&resp, "x-dreamd-original-size").as_deref(),
+        Some("16386")
+    );
+    assert_eq!(header(&resp, "x-dreamd-lossy"), None);
+    let json = body_json(resp).await;
+    assert_eq!(json["body"].as_str().unwrap().len(), 16_383);
+
+    std::fs::write(&pref_path, b"ok \xff end\n").unwrap();
+    let (resp, _) = get_preferences_timed(router, &root).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header(&resp, "x-dreamd-lossy").as_deref(), Some("true"));
+}
+
 /// Missing X-Agent-Root header → 400.
 #[tokio::test]
 async fn preferences_missing_agent_root_header_400() {
@@ -2005,6 +2156,11 @@ async fn dream_reports_a_held_autobiography_commit() {
 
     let resp = router.into_service().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    // DRM-115: the cycle also kept the hand edit, and says so.
+    let held = crate::dream_cycle::LessonHold {
+        reason: "user_dirty_tree",
+        file: ".agent/semantic/LESSONS.md".to_string(),
+    };
     assert_eq!(
         body_json(resp).await,
         serde_json::json!({
@@ -2014,7 +2170,16 @@ async fn dream_reports_a_held_autobiography_commit() {
                 "reason": "user_dirty_tree",
                 "files": [".agent/semantic/LESSONS.md"],
             },
+            "lesson_held": {
+                "reason": "user_dirty_tree",
+                "file": ".agent/semantic/LESSONS.md",
+            },
+            "notices": [crate::dream_cycle::lesson_held_notice(&held)],
         })
+    );
+    assert_eq!(
+        std::fs::read(agent_root.lessons_md()).unwrap(),
+        b"my hand edit\n"
     );
     assert_eq!(
         repo.head()
@@ -3942,6 +4107,65 @@ async fn recall_of(router: &axum::Router, root: &str, q: &str) -> (StatusCode, s
         .unwrap();
     let status = resp.status();
     (status, body_json(resp).await)
+}
+
+/// DRM-109 test 3: a `k` over the limit is a 400 with the shared message,
+/// before any search; at the limit every match comes back, and `k=0` returns
+/// none. `k=101` goes first, so the base fails before the huge value.
+#[tokio::test]
+async fn recall_refuses_k_over_100() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let root = dir.path().to_str().unwrap().to_owned();
+    write_registry(&registry_path, &root);
+    let state = make_real_state_with_cadence(
+        dir.path(),
+        registry_path,
+        std::time::Duration::from_secs(3600),
+    );
+    let router = build_router(state);
+    for content in ["drm109 one", "drm109 two", "drm109 three"] {
+        post_learn(&router, &root, content).await;
+    }
+
+    let recall_k = |k: &'static str| {
+        let router = router.clone();
+        let root = root.clone();
+        async move {
+            let resp = router
+                .into_service()
+                .oneshot(with_peer_uid(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/recall?q=drm109&k={k}"))
+                        .header("x-agent-root", &root)
+                        .body(Body::empty())
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            let status = resp.status();
+            (status, body_json(resp).await)
+        }
+    };
+
+    for k in ["101", "4294967295"] {
+        let (status, json) = recall_k(k).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "k={k}: {json}");
+        assert_eq!(
+            json,
+            serde_json::json!({ "error": "k must be at most 100" }),
+            "k={k}"
+        );
+    }
+
+    let (status, json) = recall_k("100").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["results"].as_array().map(Vec::len), Some(3), "{json}");
+
+    let (status, json) = recall_k("0").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["results"], serde_json::json!([]), "{json}");
 }
 
 /// BZR-1468 test 7: the `GET /api/v1/recall` hit for a learning carries the

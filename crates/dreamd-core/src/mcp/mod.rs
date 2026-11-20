@@ -176,7 +176,12 @@ const APPEND_NODE_DESCRIPTION: &str = "Append a raw episodic event -- use when: 
 pub struct SearchNodesParams {
     /// Free-text search query (BM25 × salience).
     pub query: String,
-    /// Maximum number of results to return (default [`DEFAULT_RECALL_K`]).
+    // The schema's description is the doc comment, so it spells the numbers
+    // (`DEFAULT_RECALL_K`, `MAX_RECALL_K`), and so does `range`, which takes
+    // a literal. `search_nodes_k_schema_names_default_and_maximum` binds both
+    // to the consts (DRM-109).
+    /// Maximum number of results to return: a whole number from 0 to 100; default 5.
+    #[schemars(range(max = 100))]
     pub k: Option<u32>,
 }
 
@@ -510,7 +515,6 @@ skill_action FORMAT
 SCORES (0-10)
 - importance: how broadly applicable across sessions (8+ changes behavior on familiar domains)
 - pain: how disruptive if unknown (8+ causes bugs, rework, or failed attempts)
-- Call GET /api/v1/preferences at session start to read per-user thresholds
 
 client_dedup_key
 - Optional, and only for retrying one write: resend the same key with the same arguments
@@ -948,6 +952,27 @@ mod tests {
         );
     }
 
+    /// DRM-109 test 6: the `search_nodes` input schema's `k` says its maximum
+    /// and its default as numbers, not as a rustdoc link.
+    #[test]
+    fn search_nodes_k_schema_names_default_and_maximum() {
+        use crate::ingress::MAX_RECALL_K;
+
+        let tool = MemoryMcpServer::search_nodes_tool_attr();
+        let k = &tool.input_schema["properties"]["k"];
+        assert_eq!(k["maximum"], serde_json::json!(MAX_RECALL_K), "{k}");
+        let description = k["description"].as_str().expect("k has a description");
+        assert!(
+            description.contains(&format!("default {DEFAULT_RECALL_K}")),
+            "{description}"
+        );
+        assert!(
+            description.contains(&format!("0 to {MAX_RECALL_K}")),
+            "{description}"
+        );
+        assert!(!description.contains("DEFAULT_RECALL_K"), "{description}");
+    }
+
     /// AILAB-191: server instructions must not contradict the tool copy -- the
     /// WHEN TO CALL search_nodes block names the `source` field too.
     #[test]
@@ -993,6 +1018,29 @@ mod tests {
             !instructions.contains("stable slug"),
             "no per-topic slug: {instructions}"
         );
+    }
+
+    /// DRM-153 test 10 (LP-MCP-12): the instructions send agents to no HTTP
+    /// endpoint, since no MCP tool reaches one, and keep both score lines.
+    #[test]
+    fn instructions_name_no_preferences_endpoint() {
+        use rmcp::ServerHandler;
+
+        let instructions = MemoryMcpServer::new()
+            .get_info()
+            .instructions
+            .expect("server instructions present");
+        assert!(!instructions.contains("preferences"), "{instructions}");
+        assert!(!instructions.contains("/api/v1/"), "{instructions}");
+        for want in [
+            "- importance: how broadly applicable across sessions (8+ changes behavior on familiar domains)",
+            "- pain: how disruptive if unknown (8+ causes bugs, rework, or failed attempts)",
+        ] {
+            assert!(
+                instructions.lines().any(|line| line == want),
+                "missing the line {want:?}: {instructions}"
+            );
+        }
     }
 
     /// DRM-108 test 6: the `search_nodes` copy and the instructions name no

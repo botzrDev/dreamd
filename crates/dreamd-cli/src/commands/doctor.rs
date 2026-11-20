@@ -141,15 +141,16 @@ pub fn run(
     };
 
     // Index vs JSONL: the set difference between the log's ids and the
-    // committed index's (BZR-1236), read without a writer or the lock.
+    // committed index's (BZR-1236), and the content check of each indexed
+    // record (DRM-118), read without a writer or the lock.
     #[cfg(unix)]
-    let coverage = dreamd_core::server::assess_index_coverage(agent_root);
+    let assessment = dreamd_core::server::assess_index(agent_root);
     // Events only the index still holds, counted only while the log holds no
     // record. With records in the log, `not_in_log` is the drift the next
     // writer open re-covers (DRM-100).
     #[cfg(unix)]
-    let only_in_index = match &coverage {
-        Ok(c) if !log_has_records => c.not_in_log,
+    let only_in_index = match &assessment {
+        Ok(a) if !log_has_records => a.coverage.not_in_log,
         _ => 0,
     };
     #[cfg(not(unix))]
@@ -159,18 +160,14 @@ pub fn run(
     };
     #[cfg(unix)]
     {
-        match coverage {
-            Ok(coverage) if !coverage.present => {
+        match assessment {
+            Ok(a) if !a.coverage.present => {
                 writeln!(
                     out,
                     "index_freshness: no index yet  (the next writer open builds it)"
                 )?;
             }
-            Ok(coverage)
-                if coverage.missing == 0
-                    && coverage.not_in_log == 0
-                    && coverage.duplicated == 0 =>
-            {
+            Ok(a) if !set_drift(&a.coverage) && a.content.changed == 0 => {
                 writeln!(out, "index_freshness: ok")?;
             }
             Ok(_) if only_in_index > 0 => {
@@ -182,13 +179,39 @@ pub fn run(
                 )?;
                 all_ok = false;
             }
-            Ok(coverage) => {
+            Ok(a) if a.content.changed == 0 => {
                 writeln!(
                     out,
                     "index_freshness: stale  [WARNING: {} event(s) not indexed, \
                      {} indexed event(s) not in the log, {} duplicated; the next \
                      writer open re-covers the log, or run `dreamd doctor --repair`]",
-                    coverage.missing, coverage.not_in_log, coverage.duplicated,
+                    a.coverage.missing, a.coverage.not_in_log, a.coverage.duplicated,
+                )?;
+                all_ok = false;
+            }
+            // A writer open does not re-index a changed record, so neither
+            // stale-content line names one (DRM-118).
+            Ok(a) if set_drift(&a.coverage) => {
+                writeln!(
+                    out,
+                    "index_freshness: stale  [WARNING: {} event(s) not indexed, \
+                     {} indexed event(s) not in the log, {} duplicated, {} changed in \
+                     the log since indexed; run `dreamd doctor --repair`]",
+                    a.coverage.missing,
+                    a.coverage.not_in_log,
+                    a.coverage.duplicated,
+                    a.content.changed,
+                )?;
+                all_ok = false;
+            }
+            Ok(a) => {
+                writeln!(
+                    out,
+                    "index_freshness: stale content  [WARNING: {} event(s) changed in the \
+                     log since they were indexed ({}); recall returns the old text and \
+                     scores until you run `dreamd doctor --repair`]",
+                    a.content.changed,
+                    changed_ids(&a.content),
                 )?;
                 all_ok = false;
             }
@@ -389,6 +412,23 @@ pub fn run(
     }
 
     Ok(all_ok)
+}
+
+/// Whether the log's ids and the committed index's differ (BZR-1236).
+#[cfg(unix)]
+fn set_drift(coverage: &dreamd_core::server::IndexCoverage) -> bool {
+    coverage.missing > 0 || coverage.not_in_log > 0 || coverage.duplicated > 0
+}
+
+/// The ids on the `stale content` line: the first ones, joined with ", ",
+/// then ` and {n} more` past them (DRM-118).
+#[cfg(unix)]
+fn changed_ids(content: &dreamd_core::server::ContentDrift) -> String {
+    let ids = content.first_ids.join(", ");
+    match content.changed.saturating_sub(content.first_ids.len()) {
+        0 => ids,
+        more => format!("{ids} and {more} more"),
+    }
 }
 
 /// Hard integrity over the five dirs `dreamd init` scaffolds. `skills/` and
@@ -2563,6 +2603,7 @@ mod tests {
             NOW_SEC,
             &cycle_date_from_now_sec(NOW_SEC),
             true,
+            false,
             false,
         ))
         .expect("the next cycle runs");

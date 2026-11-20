@@ -14,7 +14,7 @@ with the code.
   working/      # Session scratchpad. Format and lifecycle are implementation-defined;
                 # an implementation MAY omit this directory entirely.
   episodic/     # Append-only event log, one JSON object per line. Canonical file:
-                # AGENT_LEARNINGS.jsonl — never hand-edited; appends go through a writer.
+                # AGENT_LEARNINGS.jsonl — appends go through a writer; a hand fix needs dreamd doctor --repair.
   semantic/     # Lessons distilled from episodic by the dream cycle. Canonical file: LESSONS.md.
   personal/     # Preferences scoped to the human, not the project. Markdown.
 ```

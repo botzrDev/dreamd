@@ -1,5 +1,5 @@
 //! `dreamd forget <id> [--dry-run | --proof <path>]` — remove one episodic
-//! event and the lesson state that names it (BZR-151).
+//! event and the lesson state built from it (BZR-151).
 //!
 //! The removal is [`dreamd_core::forget::cascade`] (BZR-158). This module adds
 //! the daemon guard, the index refresh, and the receipt file.

@@ -67,9 +67,13 @@ a `CONVENTIONS.md`, or an agent-rule file — that tells the agent to:
   [http-api.md](./http-api.md); the daemon mints `id`, `timestamp` and
   `schema_version`, and ignores placeholders for them in the body). This needs
   a running `dreamd watch` — an in-process MCP session opens no socket.
-  Never `echo >>` or hand-edit `AGENT_LEARNINGS.jsonl` — durable appends go
-  through the coordinator. Include `source_harness` and a `skill_action` cluster
-  key.
+  Never `echo >>` a record onto `AGENT_LEARNINGS.jsonl`: durable appends go
+  through the coordinator. To fix a line by hand, stop dreamd's writer for the
+  project first (`dreamd watch`, or the harness session running `dreamd mcp`),
+  edit the line, then run `dreamd doctor --repair`. Until the repair, the index
+  keeps the old text and scores, and `dreamd doctor` reports
+  `index_freshness: stale content`. Include `source_harness` and a
+  `skill_action` cluster key.
 
 In-repo patterns to copy from:
 
@@ -95,8 +99,10 @@ relearning. These names are locked; do not rename them or document aliases. See
 
 `append_node` requires a `skill_action` cluster key of the form
 `language::domain::specific` — `[a-z0-9_]` segments joined by `::`, lowercase,
-≤ 256 bytes. Dots, hyphens, and slashes are rejected. The dream cycle counts
-every `::` prefix and promotes the deepest one that clears the threshold.
+≤ 256 bytes. Dots, hyphens, and slashes are rejected. The dream cycle visits
+every `::` prefix, deepest first, and promotes one when at least 3 of its
+events that no deeper key has claimed fall in the last 30 days. A one-segment
+key such as `rust` counts only events filed as exactly `rust`.
 
 - Good: `rust::error_handling::axum_rejection`
 - Bad: `rust/error-handling` (slashes and hyphens are rejected)

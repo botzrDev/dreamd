@@ -595,7 +595,7 @@ async fn case_11_no_promotion_cycle_retires_the_lesson_from_recall() {
     };
 
     let (_dir, root) = scaffold();
-    // Enough events inside the 7-day window to clear PROMOTION_THRESHOLD.
+    // Enough events inside the 30-day window to clear PROMOTION_THRESHOLD.
     let events: Vec<AgentLearning> = ['0', '1', '2']
         .into_iter()
         .take(PROMOTION_THRESHOLD)

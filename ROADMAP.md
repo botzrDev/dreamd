@@ -112,6 +112,16 @@ BM25 × salience.
   longer drops learnings, and `watch` no longer deletes a file that is not a
   socket.
 
+## Shipped — v1.4.0
+
+- **Hardening**, listed in [`CHANGELOG.md`](CHANGELOG.md). Recall takes any
+  text in one order, with `k` at most 100. Each project is redacted and
+  configured by its own config, and an API key goes only to its own vendor. A
+  dream cycle keeps a hand-edited `LESSONS.md` and commits only on a branch.
+  Every client call to the daemon has a deadline and checks the daemon's
+  version first, and `dreamd setup` keeps a repo's `AGENTS.md` loaded in
+  Claude Code.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

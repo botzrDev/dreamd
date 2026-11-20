@@ -12,7 +12,7 @@ Arguments:
 
 Options:
   -k, --k <K>
-          Max results
+          Maximum results, 0 to 100
           
           [default: 5]
 

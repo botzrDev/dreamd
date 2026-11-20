@@ -11,7 +11,7 @@ dreamd setup
 
 `dreamd setup` writes `.agent/` and the MCP config for Claude Code, Cursor, or both. The harness then spawns `dreamd mcp` over stdio (`search_nodes`, `append_node`). A shared writer is `dreamd watch`.
 
-The files are plain JSONL and Markdown. `dreamd blame` shows what a recall used. `dreamd forget` removes an event and the lesson state that names it.
+The files are plain JSONL and Markdown. `dreamd blame` shows what a recall used. `dreamd forget` removes an event and the lesson state built from it.
 
 npm users can stay on `npx -y dreamd-mcp`. Same binary, downloaded for you.
 

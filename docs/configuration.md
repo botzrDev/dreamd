@@ -69,9 +69,9 @@ A fully commented project config parses successfully and yields built-in default
 | `redaction` | boolean | `true` | user, project | When `true`, secret patterns are redacted from `content` before the durable write — on `POST /api/v1/learn` and on the in-process MCP `append_node` path |
 | `log_level` | string | `"info"` | user, project | **Parsed but unused.** The live log filter is the `DREAMD_LOG` env var, not this TOML key. |
 | `dream_cycle_mode` | string | `"manual"` | user, project | `"manual"` or `"auto"`. 1.0.0 is manual-only: `dreamd watch` and `dreamd mcp` **hard-error** (exit 1) if mode is `"auto"` (not a silent ignore). Auto scheduling is not shipped |
-| `provider` | string | `""` | user, project | LLM provider id — `"anthropic"` or `"openai"`. Empty (default) infers the provider from the model name. Read by the dream cycle (AILAB-204) |
+| `provider` | string | `""` | user, project | LLM provider id — `"anthropic"` or `"openai"`. Empty (default) infers the provider from the model name. The API key follows this vendor ([LLM credentials](#llm-credentials)). Read by the dream cycle (AILAB-204) |
 | `model` | string | `"claude-haiku-4-5"` | user, project | LLM model id used to compose `LESSONS.md` bodies. Read by the dream cycle (AILAB-204) |
-| `endpoint` | string | `""` | user, project | Base URL override for the LLM provider. Empty (default) uses the provider's own endpoint. Read by the dream cycle (AILAB-204) |
+| `endpoint` | string | `""` | user, project | Base URL override for the LLM provider. Empty (default) uses the provider's own endpoint. The key sent is still the vendor's own. Read by the dream cycle (AILAB-204) |
 | `cost_cap_usd` | float | `0.10` | user, project | Per-cycle USD spend cap, **enforced** by the dream cycle (AILAB-196). The composition prompt is priced before the model call; over the cap the call is skipped and the deterministic exemplar body is written instead. The estimate is approximate — see [llm-cost-accuracy.md](./llm-cost-accuracy.md) |
 
 ### `redaction`
@@ -110,7 +110,7 @@ Limits:
 
 - A secret in a shape the table does not list is stored as written.
 - An unquoted value after `:` or an `=` with spaces is kept unless it looks like a credential (8 or more characters with a letter, plus a digit, `+`, `/` or `=`, or 32 or more characters).
-- Records stored before 1.3.3, or while `redaction` was off, are not changed.
+- Records stored before 1.4.0, or while `redaction` was off, are not changed.
 
 While `redaction` is on, `dreamd doctor` runs the same patterns over the stored log. For each record that matches, it prints the record's line and id under `stored_secrets: N record(s)`, and fails the run. It never prints the content and changes nothing. Check each record, and remove one with `dreamd forget <id>`; see [troubleshooting](./troubleshooting.md#stored_secrets-n-records-).
 
@@ -145,6 +145,8 @@ export DREAMD_LOG=debug
 npx -y dreamd-mcp watch
 ```
 
+At `debug` or `trace`, the MCP server logs each request in full, before redaction, so a secret in an `append_node` reaches stderr and your harness's MCP log. See [SECURITY.md](../SECURITY.md).
+
 **User-wide redaction off (all projects on this machine):**
 
 ```toml
@@ -174,13 +176,14 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 | Variable | Default | Used by | Purpose |
 |---|---|---|---|
 | `DREAMD_SOCK` | `~/.agent/dreamd.sock` | `dreamd watch` (the path it binds), the MCP client, the `dreamd dream` proxy, and every command that probes the daemon (`status`, `doctor`, `archive`, `forget`, `setup`, `uninstall`, `update`; not `memory checkout`, which looks only at `~/.agent/dreamd.sock`) | Override the Unix socket path. `dreamd watch` and every client resolve it the same way, so a daemon started with it and a client run with it meet at that path. Must be an absolute path. Unix only. |
+| `DREAMD_CLIENT_TIMEOUT` | unset (30 s; 120 s for a proxied dream cycle) | the MCP client and the `dreamd dream` proxy | A whole number of seconds, 1 or more, that replaces the deadline of each call to the daemon: connect through the last byte of the answer. Any other value logs one WARN and keeps the defaults. `dreamd status` keeps its 2 s. See [Client deadlines](./http-api.md#client-deadlines). |
 | `DREAMD_BIN` | (shim download) | `npx dreamd-mcp` shim only | Dev override: run a local `dreamd` binary instead of the cached release artifact. Requires `DREAMD_BIN_ALLOW_UNVERIFIED=1` or the shim exits 1. Skips SHA-256 verification. |
 | `DREAMD_BIN_ALLOW_UNVERIFIED` | unset | `npx dreamd-mcp` shim only | Must be `1` alongside `DREAMD_BIN` to accept an unverified local binary. |
 | `DREAMD_LAUNCHER` | unset | `dreamd setup` | The `npx dreamd-mcp` shim sets it to `npx` when it runs the binary. When the value is exactly `npx`, setup's hints print `npx -y dreamd-mcp <command>` instead of `dreamd <command>`. Not meant to be set by hand. |
-| `DREAMD_LOG` | dreamd `info`, libraries `warn` | CLI / daemon tracing | Live log filter (`trace`, `debug`, `info`, `warn`, `error`, or `EnvFilter` directives). Not a TOML key. A set, valid value replaces the defaults for both the console and `~/.agent/dreamd.log`; an empty or invalid value gets the defaults. `info` shows library INFO lines (tantivy, rmcp) and `dreamd watch`'s per-request lines on the console. |
+| `DREAMD_LOG` | dreamd `info`, libraries `warn` | CLI / daemon tracing | Live log filter (`trace`, `debug`, `info`, `warn`, `error`, or `EnvFilter` directives). Not a TOML key. A set, valid value replaces the defaults for both the console and the daemon log (`~/.agent/dreamd.log`); an empty or invalid value gets the defaults. `info` shows library INFO lines (tantivy, rmcp) and `dreamd watch`'s per-request lines on the console. `debug` and `trace` log MCP requests in full, before redaction. |
 | `DREAMD_LOG_FORMAT` | `text` | CLI / daemon console | `json` (exactly) prints the console's lines on stderr as JSON objects, one per line. Any other value is text. `~/.agent/dreamd.log` is JSON either way. |
 | `HOME` | (OS default) | CLI / daemon layout | Resolves every `~/.agent` path (registry, socket, daemon log). Override in tests/CI sandboxes. An empty value counts as unset. On Windows only, `USERPROFILE` is used when `HOME` is unset or empty. |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | unset | dream cycle | API key for the opt-in LLM-assisted dream cycle. See [LLM credentials](#llm-credentials). |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | unset | dream cycle | API key for the opt-in LLM-assisted dream cycle: the key for the vendor the model goes to. See [LLM credentials](#llm-credentials). |
 | `SOURCE_DATE_EPOCH` | unset (wall clock) | `dreamd dream` (in-process cycle and `--dry`; not a cycle proxied to the daemon) | Integer unix timestamp that pins the dream-cycle clock, for reproducible fixtures. A non-integer value is an error, not a fallback. |
 | `HF_HOME` | unset | `dreamd vectors enable` in a `--features vectors` build | Where the optional embedding model is downloaded instead of `~/.agent/models`. Has no effect on the default binary, where the command exits 2. |
 
@@ -188,7 +191,7 @@ These are **not** TOML keys. They override runtime paths and shim behavior.
 
 There is one daemon socket per user, at `~/.agent/dreamd.sock` by default. One `dreamd watch` serves every project the user has registered: each request names its project in `X-Agent-Root`, and the daemon looks it up in `~/.agent/registry.toml`.
 
-`dreamd watch` and every client (MCP, `dreamd dream` when proxying, `status`, `doctor`, `archive`, `forget`, …) resolve `DREAMD_SOCK` the same way: the variable's value when it is set, else `~/.agent/dreamd.sock`. Use it when one user needs a second daemon, for example a release binary and a development build side by side. Start that daemon and its clients with the same value. `dreamd memory checkout` looks only at `~/.agent/dreamd.sock`.
+`dreamd watch` and every client (MCP, `dreamd dream` when proxying, `status`, `doctor`, `archive`, `forget`, …) resolve `DREAMD_SOCK` the same way: the variable's value when it is set, else `~/.agent/dreamd.sock`. Use it when one user needs a second daemon, for example a release binary and a development build side by side. Start that daemon and its clients with the same value. The second daemon logs to its socket path plus `.log` (`/tmp/my-dreamd.sock.log` below), and `dreamd status` run with the same `DREAMD_SOCK` shows that file's tail. `dreamd memory checkout` looks only at `~/.agent/dreamd.sock`.
 
 The value must be absolute. With a relative path, `dreamd watch` and `dreamd mcp` exit 1 (`DREAMD_SOCK is not an absolute path: …`). The one-shot commands treat it as "no daemon address": `dreamd status` reports `daemon: not running`, and `dreamd dream` runs in-process instead of proxying.
 
@@ -229,13 +232,15 @@ See [../packages/dreamd-mcp/README.md](../packages/dreamd-mcp/README.md) and [..
 
 ### LLM credentials
 
-The dream cycle is deterministic unless an API key is found. Keys are never TOML keys in `config.toml`; they are resolved in this order:
+The dream cycle is deterministic unless an API key is found for the vendor the model goes to. Keys are never TOML keys in `config.toml`. `secrets.toml` sits next to the user `config.toml` (`~/.config/dreamd/secrets.toml` on Linux).
 
-1. `ANTHROPIC_API_KEY` in the environment
-2. `OPENAI_API_KEY` in the environment
-3. `anthropic_api_key`, then `openai_api_key`, in `secrets.toml` — next to the user `config.toml` (`~/.config/dreamd/secrets.toml` on Linux)
+- The vendor is `provider` when it is set, else it is inferred from `model`: `claude-*` is Anthropic, and `gpt-*`, `o1`, `o3` and `o4` are OpenAI.
+- Anthropic uses `ANTHROPIC_API_KEY`, then `anthropic_api_key` in `secrets.toml`. OpenAI uses `OPENAI_API_KEY`, then `openai_api_key`.
+- A key is sent only to its own vendor, with an `endpoint` override too: a proxy that speaks the OpenAI API gets the OpenAI key.
+- A model that goes to any other adapter gets no key.
+- With no key for the vendor, the cycle runs deterministically, and `dreamd dream` names what it looked for.
 
-An empty value counts as unset. On Unix `secrets.toml` is read only when its mode is exactly `0600`; any other mode is ignored with a warning (`chmod 600` to enable it). With no key the cycle runs deterministically. `dreamd dream --no-llm` forces the deterministic cycle even when a key is present. A daemon reads its own environment, so a key exported in your shell is not seen by a `dreamd watch` started elsewhere (a login service, for example) — use `secrets.toml` there.
+An empty value counts as unset. On Unix `secrets.toml` is read only when its mode is exactly `0600`; any other mode is ignored with a warning (`chmod 600` to enable it). `dreamd dream --no-llm` forces the deterministic cycle even when a key is present. A daemon reads its own environment, so a key exported in your shell is not seen by a `dreamd watch` started elsewhere (a login service, for example) — use `secrets.toml` there. A `dreamd dream` proxied to such a daemon says when the daemon has no key.
 
 ---
 

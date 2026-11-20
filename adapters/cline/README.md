@@ -27,6 +27,8 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
 
 > **npm note:** `dreamd-mcp` is live on npm — `npx -y dreamd-mcp` resolves the latest published version directly. The local-binary config below is for local development (and native Windows).
 
+Cline's MCP settings are global, so the server starts outside your project: `--project-root` tells dreamd which project's `.agent/` folder to use. Replace `/absolute/path/to/your-project` with the absolute path of the folder you ran `setup` in.
+
 **Published npm path:**
 
 ```json
@@ -34,7 +36,7 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
   "mcpServers": {
     "dreamd": {
       "command": "npx",
-      "args": ["-y", "dreamd-mcp"],
+      "args": ["-y", "dreamd-mcp", "--project-root", "/absolute/path/to/your-project"],
       "disabled": false,
       "autoApprove": []
     }
@@ -49,7 +51,7 @@ For VS Code Insiders, replace `Code` with `Code - Insiders`. Open via Cline side
   "mcpServers": {
     "dreamd": {
       "command": "/absolute/path/to/target/release/dreamd",
-      "args": ["mcp"],
+      "args": ["mcp", "--project-root", "/absolute/path/to/your-project"],
       "disabled": false,
       "autoApprove": []
     }

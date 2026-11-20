@@ -108,10 +108,21 @@ fn parse_autobiography(body: &Bytes) -> Option<AutobiographyReport> {
     serde_json::from_value(report.clone()).ok()
 }
 
+/// The deadline a proxied dream cycle takes (DRM-121): the model's whole retry
+/// budget plus the cycle, not a learn or recall call's.
+pub(crate) const DREAM_PROXY_CALL: crate::daemon_client::CallKind =
+    crate::daemon_client::CallKind::Dream;
+
 /// Connect to `sock_path` and `POST /api/v1/dream` with `x-agent-root =
 /// project_root` (sent raw — the daemon canonicalizes). A connect that fails
 /// with NotFound/ConnectionRefused → `Ok(NotReachable)` (no live daemon);
-/// other connect/handshake/transport failures → `Err(Transport)`.
+/// other connect/handshake/transport failures → `Err(Transport)`. The call
+/// has the dream deadline (`CallKind::Dream`); running out is
+/// `Err(Transport)` naming the socket, never `NotReachable` (DRM-121).
+///
+/// The version probe runs first (DRM-122), and `POST /api/v1/dream` is sent
+/// only when it passes, so a daemon of another version never runs the cycle.
+/// Its errors map the same way as the call's.
 ///
 /// `no_llm` travels as the [`NO_LLM_HEADER`] header, not as a reason to skip
 /// the proxy: skipping would run a second cycle in this process while the
@@ -124,7 +135,7 @@ pub async fn proxy_dream_cycle(
     no_llm: bool,
     share_personal: bool,
 ) -> Result<DreamProxyOutcome, DreamProxyError> {
-    use crate::daemon_client::{send_one, DaemonTransportError};
+    use crate::daemon_client::{deadline_for, preflight_version, send_one_within};
 
     let mut builder = hyper::Request::builder()
         .method(hyper::Method::POST)
@@ -141,18 +152,34 @@ pub async fn proxy_dream_cycle(
         .body(Full::new(Bytes::new()))
         .map_err(|e| DreamProxyError::Transport(format!("build request: {e}")))?;
 
-    let (status, body) = match send_one(sock_path, req).await {
+    if let Err(e) = preflight_version(sock_path).await {
+        return proxy_transport_error(e);
+    }
+    let (status, body) = match send_one_within(sock_path, req, deadline_for(DREAM_PROXY_CALL)).await
+    {
         Ok(pair) => pair,
-        Err(DaemonTransportError::Unreachable) => return Ok(DreamProxyOutcome::NotReachable),
+        Err(e) => return proxy_transport_error(e),
+    };
+    map_dream_status(status.as_u16(), &body)
+}
+
+/// The dream proxy's answer to a transport failure, for the probe and the
+/// call alike.
+fn proxy_transport_error(
+    e: crate::daemon_client::DaemonTransportError,
+) -> Result<DreamProxyOutcome, DreamProxyError> {
+    use crate::daemon_client::DaemonTransportError;
+    match e {
+        DaemonTransportError::Unreachable => Ok(DreamProxyOutcome::NotReachable),
         // A daemon answered, so this is an error, never `NotReachable`:
         // running the cycle in-process would race that daemon's coordinator.
         // The sentence is printed as is (BZR-1519).
-        Err(DaemonTransportError::VersionMismatch(msg)) => {
-            return Err(DreamProxyError::Transport(msg))
-        }
-        Err(e) => return Err(DreamProxyError::Transport(format!("{e:?}"))),
-    };
-    map_dream_status(status.as_u16(), &body)
+        DaemonTransportError::VersionMismatch(msg) => Err(DreamProxyError::Transport(msg)),
+        // Something holds the socket and did not answer: an error, never
+        // `NotReachable`, for the same reason (DRM-121).
+        e @ DaemonTransportError::TimedOut { .. } => Err(DreamProxyError::Transport(e.to_string())),
+        e => Err(DreamProxyError::Transport(format!("{e:?}"))),
+    }
 }
 
 #[cfg(test)]
@@ -280,46 +307,63 @@ mod tests {
 
         let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<CapturedRequest>();
 
+        // DRM-122: the version probe comes first, on its own connection, so
+        // the fake serves every connection.
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let io = TokioIo::new(stream);
-            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let io = TokioIo::new(stream);
                 let req_tx = req_tx.clone();
-                async move {
-                    let header = |name: &str| {
-                        req.headers()
-                            .get(name)
-                            .and_then(|v| v.to_str().ok())
-                            .map(str::to_string)
-                    };
-                    let _ = req_tx.send(CapturedRequest {
-                        method: req.method().to_string(),
-                        uri: req.uri().to_string(),
-                        agent_root: header("x-agent-root"),
-                        no_llm: header(NO_LLM_HEADER),
-                        share_personal: header(SHARE_PERSONAL_HEADER),
-                    });
-                    Ok::<_, std::convert::Infallible>(
-                        hyper::Response::builder()
-                            .status(200)
-                            .header(
-                                crate::daemon_client::VERSION_HEADER,
-                                env!("CARGO_PKG_VERSION"),
-                            )
-                            .body(Full::new(Bytes::from_static(b"{\"status\":\"ok\"}")))
-                            .unwrap(),
-                    )
-                }
-            });
-            let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                .serve_connection(io, svc)
-                .await;
+                let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let req_tx = req_tx.clone();
+                    async move {
+                        let header = |name: &str| {
+                            req.headers()
+                                .get(name)
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string)
+                        };
+                        let _ = req_tx.send(CapturedRequest {
+                            method: req.method().to_string(),
+                            uri: req.uri().to_string(),
+                            agent_root: header("x-agent-root"),
+                            no_llm: header(NO_LLM_HEADER),
+                            share_personal: header(SHARE_PERSONAL_HEADER),
+                        });
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .status(200)
+                                .header(
+                                    crate::daemon_client::VERSION_HEADER,
+                                    env!("CARGO_PKG_VERSION"),
+                                )
+                                .body(Full::new(Bytes::from_static(b"{\"status\":\"ok\"}")))
+                                .unwrap(),
+                        )
+                    }
+                });
+                tokio::spawn(async move {
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
         });
 
         let project_root = Path::new("/some/project/root");
         let outcome = proxy_dream_cycle(&sock_path, project_root, no_llm, share_personal)
             .await
             .expect("proxy ok");
+        let probe = req_rx.recv().await.expect("the probe captured");
+        assert_eq!(
+            (
+                probe.method.as_str(),
+                probe.uri.as_str(),
+                probe.agent_root.as_deref()
+            ),
+            ("GET", "/api/v1/health", None),
+            "the version probe comes first"
+        );
         let captured = req_rx.recv().await.expect("request captured");
         (outcome, captured)
     }
@@ -409,6 +453,67 @@ mod tests {
         assert_eq!(
             req.share_personal.as_deref(),
             Some(SHARE_PERSONAL_HEADER_VALUE)
+        );
+    }
+
+    /// DRM-122 test 5: a daemon that sends no version is refused at the
+    /// probe, and no `POST /api/v1/dream` reaches it.
+    #[tokio::test]
+    async fn the_dream_proxy_refuses_an_old_daemon_before_the_cycle() {
+        use std::io::{BufRead, Write};
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("old.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let log = Arc::clone(&log);
+                std::thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+                    log.lock()
+                        .unwrap()
+                        .push(request_line.trim_end().to_string());
+                    let body = r#"{"status":"ok"}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+
+        match proxy_dream_cycle(&sock, Path::new("/x"), true, false).await {
+            Err(DreamProxyError::Transport(msg)) => {
+                assert!(msg.contains("daemon unknown"), "{msg}")
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .all(|line| !line.starts_with("POST /api/v1/dream")),
+            "no cycle may reach an old daemon: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|line| line.starts_with("GET /api/v1/health")),
+            "the probe reached it: {seen:?}"
         );
     }
 

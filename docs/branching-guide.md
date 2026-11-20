@@ -71,7 +71,7 @@ The provenance ledger (`.agent/.dreamd/provenance/ledger.jsonl`, see [`provenanc
 
 New learns keep appending to the live episodic log. The branch ref does not move when they do. To save what you have learned since, make a new branch.
 
-Durable appends go through the daemon: start `dreamd watch`, then `POST /api/v1/learn`. The request shape is in [`http-api.md`](http-api.md#post-apiv1learn). Do not edit the episodic log by hand. Remember that checkout needs the daemon stopped, so stop `dreamd watch` again before you switch branches.
+Durable appends go through the daemon: start `dreamd watch`, then `POST /api/v1/learn`. The request shape is in [`http-api.md`](http-api.md#post-apiv1learn). Do not append to the episodic log by hand; to fix a line, see [troubleshooting](troubleshooting.md#dreamd-doctor-warns-about-a-hand-edited-line). Remember that checkout needs the daemon stopped, so stop `dreamd watch` again before you switch branches.
 
 ## Delete a branch
 

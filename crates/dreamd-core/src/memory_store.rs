@@ -14,6 +14,7 @@
 //! * [`DaemonStore`] — the daemon proxy. HTTP-over-UDS on Unix (WEG-259),
 //!   loopback TCP + `Authorization: Bearer` off Unix (AILAB-192). Same requests,
 //!   same `X-Agent-Root` contract, same per-call connect on both transports.
+//!   Each call has a deadline, `deadline_for(CallKind::Request)` (DRM-121).
 //!
 //! The HTTP handlers are not adapters. `GET /api/v1/recall` keeps its reader
 //! pinned to the primary handle through `AppState::with_index_handle` and
@@ -32,6 +33,7 @@
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::Mutex;
@@ -42,9 +44,10 @@ use tokio::sync::mpsc;
 
 use crate::config::load_config;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg, MAX_LEARNING_LINE_BYTES};
+use crate::daemon_client::{deadline_for, CallKind, DaemonTransportError};
 use crate::ingress::{
-    query_too_long_message, LearnIngress, LearnRequest, LearnResponse, RecallIngress,
-    DEFAULT_SCORE, MAX_RECALL_QUERY_BYTES,
+    k_too_large_message, query_too_long_message, LearnIngress, LearnRequest, LearnResponse,
+    RecallIngress, DEFAULT_SCORE, MAX_RECALL_K, MAX_RECALL_QUERY_BYTES,
 };
 use crate::recurrence::RecallReader;
 use crate::AgentRoot;
@@ -122,7 +125,8 @@ pub struct AppendRequest {
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Recall up to `k` hits for `query`, as the canonical
-    /// `{"results":[...]}` JSON string.
+    /// `{"results":[...]}` JSON string. A `k` over [`MAX_RECALL_K`] is
+    /// `InvalidParams` with [`k_too_large_message`] (DRM-109).
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError>;
 
     /// Durably append one learning.
@@ -258,10 +262,13 @@ impl InProcessStore {
 #[async_trait::async_trait]
 impl MemoryStore for InProcessStore {
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError> {
-        // The same limit the daemon and its client apply (BZR-1301), so one
-        // query gets one answer in both modes.
+        // The same limits the daemon and its client apply (BZR-1301,
+        // DRM-109), so one call gets one answer in both modes.
         if query.len() > MAX_RECALL_QUERY_BYTES {
             return Err(MemoryStoreError::params(query_too_long_message()));
+        }
+        if k > MAX_RECALL_K {
+            return Err(MemoryStoreError::params(k_too_large_message()));
         }
         let Some(root) = &self.agent_root else {
             return Ok(EMPTY_RESULTS.to_string());
@@ -412,7 +419,16 @@ pub struct DaemonStore {
     token: AuthToken,
     agent_root_header: String,
     not_registered: String,
+    /// Each call's deadline: `deadline_for(CallKind::Request)` (DRM-121).
+    deadline: std::time::Duration,
+    /// The daemon passed the version probe (DRM-122). Only a pass is kept, so
+    /// a daemon fixed mid-session is probed again on the next call.
+    version_ok: AtomicBool,
 }
+
+/// What a timed-out append adds to its error (DRM-121): the daemon may have
+/// stored it before the deadline ran out.
+pub const APPEND_MAY_HAVE_BEEN_WRITTEN: &str = "The append may have been written. Retry with the same client_dedup_key so it cannot be stored twice.";
 
 impl DaemonStore {
     /// Unix: proxy over the daemon's UDS socket. `launcher` picks the
@@ -427,6 +443,8 @@ impl DaemonStore {
             sock_path,
             not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
+            deadline: deadline_for(CallKind::Request),
+            version_ok: AtomicBool::new(false),
         }
     }
 
@@ -444,21 +462,42 @@ impl DaemonStore {
             token,
             not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
+            deadline: deadline_for(CallKind::Request),
+            version_ok: AtomicBool::new(false),
         }
     }
 
+    /// The same store with another deadline, so a test need not wait 30 s.
+    #[cfg(test)]
+    fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// One request within [`Self::deadline`], after the version probe while
+    /// no probe has passed (DRM-122). A failed probe is mapped by
+    /// [`map_transport_error`] and the call is not sent. The call's own
+    /// transport error goes through `map_call`, so `append` can tell a
+    /// timeout apart.
     async fn send(
         &self,
         req: hyper::Request<Full<Bytes>>,
+        map_call: fn(DaemonTransportError) -> MemoryStoreError,
     ) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
+        if !self.version_ok.load(Ordering::Acquire) {
+            #[cfg(unix)]
+            let probe = crate::daemon_client::preflight_version(&self.sock_path).await;
+            #[cfg(not(unix))]
+            let probe =
+                crate::daemon_client::preflight_version_tcp(&self.endpoint, &self.token).await;
+            probe.map_err(map_transport_error)?;
+            self.version_ok.store(true, Ordering::Release);
+        }
         #[cfg(unix)]
-        {
-            send_remote(&self.sock_path, req).await
-        }
+        let sent = send_remote(&self.sock_path, req, self.deadline).await;
         #[cfg(not(unix))]
-        {
-            send_remote_tcp(&self.endpoint, &self.token, req).await
-        }
+        let sent = send_remote_tcp(&self.endpoint, &self.token, req, self.deadline).await;
+        sent.map_err(map_call)
     }
 }
 
@@ -466,7 +505,7 @@ impl DaemonStore {
 impl MemoryStore for DaemonStore {
     async fn recall_json(&self, query: &str, k: u32) -> Result<String, MemoryStoreError> {
         let req = build_recall_request(query, k, &self.agent_root_header)?;
-        let (status, body) = self.send(req).await?;
+        let (status, body) = self.send(req, map_transport_error).await?;
         if status.is_success() {
             // The daemon already returns the canonical {"results":[...]} shape;
             // forward it verbatim.
@@ -478,7 +517,7 @@ impl MemoryStore for DaemonStore {
 
     async fn append(&self, req: AppendRequest) -> Result<LearnResponse, MemoryStoreError> {
         let http_req = build_learn_request(&req, &self.agent_root_header)?;
-        let (status, body) = self.send(http_req).await?;
+        let (status, body) = self.send(http_req, append_transport_error).await?;
         if status.is_success() {
             // The daemon serialized this with `LearnResponse` too, so the
             // round trip is lossless.
@@ -516,7 +555,9 @@ fn percent_encode_query(value: &str) -> String {
 ///
 /// A query over [`MAX_RECALL_QUERY_BYTES`] is refused before anything is
 /// built, with the daemon's `414` message (BZR-1301). Below that limit the
-/// encoded URI always fits the `http` crate's 65,534 bytes.
+/// encoded URI always fits the `http` crate's 65,534 bytes. A `k` over
+/// [`MAX_RECALL_K`] is refused the same way, with the daemon's `400` message
+/// (DRM-109), so nothing is sent that the daemon would refuse.
 pub(crate) fn build_recall_request(
     query: &str,
     k: u32,
@@ -524,6 +565,9 @@ pub(crate) fn build_recall_request(
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
     if query.len() > MAX_RECALL_QUERY_BYTES {
         return Err(MemoryStoreError::params(query_too_long_message()));
+    }
+    if k > MAX_RECALL_K {
+        return Err(MemoryStoreError::params(k_too_large_message()));
     }
     let uri = format!("/api/v1/recall?q={}&k={k}", percent_encode_query(query));
     hyper::Request::builder()
@@ -682,44 +726,55 @@ fn remote_internal(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError 
 
 /// Map a transport failure to the stage that failed. Never includes a token.
 /// A version mismatch is the sentence alone (BZR-1519): it names its own fix.
-fn map_transport_error(e: crate::daemon_client::DaemonTransportError) -> MemoryStoreError {
-    use crate::daemon_client::DaemonTransportError;
+/// A timed-out call is its own sentence, which names the socket (DRM-121).
+fn map_transport_error(e: DaemonTransportError) -> MemoryStoreError {
     let stage = match e {
         DaemonTransportError::Unreachable | DaemonTransportError::Connect(_) => "connect",
         DaemonTransportError::Handshake(_) => "handshake",
         DaemonTransportError::Send(_) => "request",
         DaemonTransportError::ReadBody(_) => "response read",
         DaemonTransportError::VersionMismatch(msg) => return MemoryStoreError::internal(msg),
+        DaemonTransportError::TimedOut { .. } => return MemoryStoreError::internal(e.to_string()),
     };
     MemoryStoreError::internal(format!("daemon {stage} failed: {e:?}"))
 }
 
+/// [`map_transport_error`] for an append. A timed-out append may have reached
+/// the daemon, so its error adds [`APPEND_MAY_HAVE_BEEN_WRITTEN`] (DRM-121).
+fn append_transport_error(e: DaemonTransportError) -> MemoryStoreError {
+    let timed_out = matches!(e, DaemonTransportError::TimedOut { .. });
+    match map_transport_error(e) {
+        MemoryStoreError::Internal(msg) if timed_out => {
+            MemoryStoreError::Internal(format!("{msg} {APPEND_MAY_HAVE_BEEN_WRITTEN}"))
+        }
+        other => other,
+    }
+}
+
 /// Open a fresh HTTP-over-UDS connection to the daemon, send one request, and
-/// collect the response into `(status, body)`. Per-call connect (no pooling):
-/// MCP tool calls are infrequent, so a pool would hold idle connections for
-/// nothing (WEG-78-A).
+/// collect the response into `(status, body)` within `deadline`. Per-call
+/// connect (no pooling): MCP tool calls are infrequent, so a pool would hold
+/// idle connections for nothing (WEG-78-A).
 #[cfg(unix)]
 async fn send_remote(
     sock_path: &Path,
     req: hyper::Request<Full<Bytes>>,
-) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
-    crate::daemon_client::send_one(sock_path, req)
-        .await
-        .map_err(map_transport_error)
+    deadline: std::time::Duration,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    crate::daemon_client::send_one_within(sock_path, req, deadline).await
 }
 
 /// Loopback-TCP sibling of `send_remote` (AILAB-192). The credential is
-/// inserted by [`crate::daemon_client::send_one_tcp`], not here, so no
+/// inserted by [`crate::daemon_client::send_one_tcp_within`], not here, so no
 /// request-building site can forget it.
 #[cfg(not(unix))]
 async fn send_remote_tcp(
     endpoint: &DaemonEndpoint,
     token: &AuthToken,
     req: hyper::Request<Full<Bytes>>,
-) -> Result<(hyper::StatusCode, Bytes), MemoryStoreError> {
-    crate::daemon_client::send_one_tcp(endpoint, token, req)
-        .await
-        .map_err(map_transport_error)
+    deadline: std::time::Duration,
+) -> Result<(hyper::StatusCode, Bytes), DaemonTransportError> {
+    crate::daemon_client::send_one_tcp_within(endpoint, token, req, deadline).await
 }
 
 /// A store behind an `Arc`, as the MCP server holds it.
@@ -1073,6 +1128,245 @@ mod tests {
         );
     }
 
+    /// DRM-121 test 6: a timed-out append says it may have been written and
+    /// how to retry it; a timed-out recall does not. The fake answers the
+    /// version probe (DRM-122) and nothing else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_append_says_it_may_have_been_written() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("silent.sock");
+        let fake = FakeDaemon::start(&sock, |line| {
+            line.starts_with("GET /api/v1/health ")
+                .then(|| fake_response("400 Bad Request", Some(THIS_VERSION), "{}"))
+        });
+        let store = DaemonStore::uds(sock.clone(), "/r/proj".to_string(), Launcher::Binary)
+            .with_deadline(std::time::Duration::from_millis(200));
+
+        // Bounded, so a call with no deadline fails here instead of hanging.
+        let bound = std::time::Duration::from_secs(5);
+        let appended = tokio::time::timeout(
+            bound,
+            store.append(learn("rust::deadline", Some(5.0), Some(5.0))),
+        )
+        .await
+        .expect("the append ran 5 s past its deadline");
+        match appended {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("may have been written"), "{msg}");
+                assert!(msg.contains("client_dedup_key"), "{msg}");
+                assert!(msg.contains(&sock.display().to_string()), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        let recalled = tokio::time::timeout(bound, store.recall_json("deadline", 5))
+            .await
+            .expect("the recall ran 5 s past its deadline");
+        match recalled {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("did not answer within 200 ms"), "{msg}");
+                assert!(!msg.contains("may have been written"), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(fake.count("GET /api/v1/health"), 1, "one probe passed");
+    }
+
+    /// This binary's version, as the fakes below answer it.
+    #[cfg(unix)]
+    const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    /// One raw HTTP/1.1 response.
+    #[cfg(unix)]
+    fn fake_response(status: &str, version: Option<&str>, body: &str) -> Vec<u8> {
+        let version = version
+            .map(|v| format!("x-dreamd-version: {v}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\n{version}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// A UDS fake daemon: each connection on its own thread. It records every
+    /// request line, then writes what `answer` gives for it, or holds the
+    /// connection open without answering when `answer` gives `None`.
+    #[cfg(unix)]
+    struct FakeDaemon {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[cfg(unix)]
+    impl FakeDaemon {
+        fn start(
+            sock: &Path,
+            answer: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+        ) -> Self {
+            use std::io::{BufRead, Write};
+
+            let listener = std::os::unix::net::UnixListener::bind(sock).expect("bind");
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let answer = Arc::new(answer);
+            let log = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let log = Arc::clone(&log);
+                    let answer = Arc::clone(&answer);
+                    std::thread::spawn(move || {
+                        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut length = 0usize;
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(v) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = v.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        let mut body = vec![0u8; length];
+                        let _ = std::io::Read::read_exact(&mut reader, &mut body);
+                        let request_line = request_line.trim_end().to_string();
+                        log.lock().unwrap().push(request_line.clone());
+                        match answer(&request_line) {
+                            Some(bytes) => {
+                                let _ = stream.write_all(&bytes);
+                            }
+                            // Hold the connection without answering.
+                            None => std::thread::sleep(std::time::Duration::from_secs(30)),
+                        }
+                    });
+                }
+            });
+            Self { seen }
+        }
+
+        /// How many requests began with `prefix` (method and path).
+        fn count(&self, prefix: &str) -> usize {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with(prefix))
+                .count()
+        }
+    }
+
+    /// A learn body the store parses.
+    #[cfg(unix)]
+    const LEARN_BODY: &str = r#"{"id":"evt_01ARZ3NDEKTSV4RRFFQ69G5FAV","timestamp":"2026-11-20T00:00:00+00:00","deduplicated":false}"#;
+
+    /// DRM-122 test 2: a daemon that sends no version is refused at the
+    /// probe, before any learn reaches it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_store_checks_the_version_before_the_first_write() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("old.sock");
+        let fake = FakeDaemon::start(&sock, |_| {
+            Some(fake_response("201 Created", None, LEARN_BODY))
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        match store.append(learn("rust::preflight", None, None)).await {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("daemon unknown"), "{msg}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(fake.count("GET /api/v1/health"), 1);
+        assert_eq!(fake.count("POST /api/v1/learn"), 0, "nothing was written");
+    }
+
+    /// DRM-122 test 3: a probe that passes is kept: two appends and a recall
+    /// cost one probe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_passing_probe_runs_once() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("current.sock");
+        let fake = FakeDaemon::start(&sock, |line| {
+            Some(if line.starts_with("POST /api/v1/learn ") {
+                fake_response("201 Created", Some(THIS_VERSION), LEARN_BODY)
+            } else if line.starts_with("GET /api/v1/recall") {
+                fake_response("200 OK", Some(THIS_VERSION), r#"{"results":[]}"#)
+            } else {
+                fake_response("400 Bad Request", Some(THIS_VERSION), "{}")
+            })
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("first append");
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("second append");
+        store.recall_json("preflight", 5).await.expect("recall");
+        assert_eq!(fake.count("GET /api/v1/health"), 1, "one probe");
+        assert_eq!(fake.count("POST /api/v1/learn"), 2);
+        assert_eq!(fake.count("GET /api/v1/recall"), 1);
+    }
+
+    /// DRM-122 test 4: a failed probe is not kept. The first append fails and
+    /// sends nothing; the second probes again and goes through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_probe_is_tried_again() {
+        use crate::launcher::Launcher;
+        use std::sync::atomic::AtomicUsize;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("fixed.sock");
+        let probes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&probes);
+        let fake = FakeDaemon::start(&sock, move |line| {
+            Some(if line.starts_with("GET /api/v1/health ") {
+                let version = (counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+                    .then_some(THIS_VERSION);
+                fake_response("400 Bad Request", version, "{}")
+            } else {
+                fake_response("201 Created", Some(THIS_VERSION), LEARN_BODY)
+            })
+        });
+        let store = DaemonStore::uds(sock, "/r/proj".to_string(), Launcher::Binary);
+        match store.append(learn("rust::preflight", None, None)).await {
+            Err(MemoryStoreError::Internal(msg)) => {
+                assert!(msg.contains("daemon unknown"), "{msg}")
+            }
+            other => panic!("expected the first append to fail, got {other:?}"),
+        }
+        assert_eq!(
+            fake.count("POST /api/v1/learn"),
+            0,
+            "the first append sent nothing"
+        );
+        store
+            .append(learn("rust::preflight", None, None))
+            .await
+            .expect("the second append, after a passing probe");
+        assert_eq!(fake.count("GET /api/v1/health"), 2, "probed again");
+        assert_eq!(fake.count("POST /api/v1/learn"), 1);
+    }
+
     /// Test 8: a query at the limit builds, and its URI fits the `http`
     /// crate's 65,534 bytes even when every byte is percent-encoded.
     #[test]
@@ -1081,7 +1375,7 @@ mod tests {
         let encoded = "é".repeat(MAX_RECALL_QUERY_BYTES / 2);
         assert_eq!(encoded.len(), MAX_RECALL_QUERY_BYTES);
         for query in [ascii, encoded] {
-            let req = build_recall_request(&query, u32::MAX, "/home/u/project")
+            let req = build_recall_request(&query, MAX_RECALL_K, "/home/u/project")
                 .expect("a query at the limit builds");
             assert!(req.uri().to_string().len() <= 65_534);
         }
@@ -1114,6 +1408,38 @@ mod tests {
             }
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    /// DRM-109 test 4: in-process `search_nodes` refuses a `k` over the
+    /// limit with the daemon's message, though the store could search.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn in_process_search_refuses_k_over_100() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".agent")).expect(".agent");
+        let store = InProcessStore::new(
+            Some(AgentRoot::new(dir.path())),
+            None,
+            None,
+            new_index_map(),
+        );
+        assert_eq!(
+            store.recall_json("tokio", 101).await.unwrap_err(),
+            MemoryStoreError::InvalidParams("k must be at most 100".to_string())
+        );
+    }
+
+    /// DRM-109 test 5: the daemon client refuses a `k` over the limit before
+    /// it builds a request, with the daemon's message.
+    #[test]
+    fn build_recall_request_refuses_k_over_100() {
+        assert_eq!(
+            build_recall_request("tokio", 101, "/home/u/project").unwrap_err(),
+            MemoryStoreError::InvalidParams("k must be at most 100".to_string())
+        );
+        let req = build_recall_request("tokio", MAX_RECALL_K, "/home/u/project")
+            .expect("k at the limit builds");
+        assert_eq!(req.uri().to_string(), "/api/v1/recall?q=tokio&k=100");
     }
 
     fn learn(skill_action: &str, pain: Option<f64>, importance: Option<f64>) -> AppendRequest {

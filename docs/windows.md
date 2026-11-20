@@ -189,9 +189,8 @@ Stop the daemon, then run the repair. The log is not a repair target.
 
 `GET /api/v1/health` on Windows does not read the in-memory marks the Unix
 route uses. It compares the JSONL tail with `index_progress.json`. `stale` is
-true when the log has events past that watermark. `dreamd doctor`'s
-`index_freshness` line is the set difference between the log and the committed
-index.
+true when the log has events past that watermark. `dreamd doctor` prints no
+`index_freshness` line on Windows.
 
 ## Still open
 

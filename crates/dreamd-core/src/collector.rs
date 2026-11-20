@@ -10,7 +10,7 @@
 //!
 //! Production path: HTTP/MCP recall → `TantivyIndexHandle::reader` → [`recall`].
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -87,14 +87,81 @@ pub struct ScoredDoc {
 impl Eq for ScoredDoc {}
 
 impl PartialOrd for ScoredDoc {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+/// Score order only: `score_key` under `f64::total_cmp` (DRM-110). The heaps
+/// cannot see `event_id`, so documents that tie here are kept at the top-`k`
+/// boundary and ordered by `recall_order` after hydration.
 impl Ord for ScoredDoc {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.score.cmp(&other.score)
+    fn cmp(&self, other: &Self) -> Ordering {
+        score_key(self.score.0).total_cmp(&score_key(other.score.0))
+    }
+}
+
+/// The score key every recall comparison uses (DRM-110): NaN is lowest, and
+/// `-0.0` equals `0.0`.
+fn score_key(score: f64) -> f64 {
+    if score.is_nan() {
+        f64::NEG_INFINITY
+    } else if score == 0.0 {
+        0.0
+    } else {
+        score
+    }
+}
+
+/// Recall's one total order (DRM-110): score descending ([`score_key`],
+/// `f64::total_cmp`), then `event_id` ascending. So an event comes before a
+/// lesson that ties with it (`evt_` < `lsn_`), and the order depends on
+/// neither the index's segments nor `k`.
+fn recall_order(a: &RecallResult, b: &RecallResult) -> Ordering {
+    score_key(b.score)
+        .total_cmp(&score_key(a.score))
+        .then_with(|| a.event_id.cmp(&b.event_id))
+}
+
+/// Offer `doc` to a top-`k` min-heap, keeping the ties at its boundary
+/// (DRM-110). `ties` holds documents whose score equals the heap's minimum:
+///
+/// * heap not full: push;
+/// * heap full, score above the minimum: pop the minimum into `ties`, push
+///   `doc`, and drop every tie below the new minimum;
+/// * heap full, score equal to the minimum: `doc` joins `ties`;
+/// * heap full, score below the minimum (or `k == 0`): drop it.
+///
+/// The heap plus `ties` is then every document scoring at least the `k`-th
+/// best score, so the caller can decide the boundary by `event_id`.
+fn offer(
+    heap: &mut BinaryHeap<Reverse<ScoredDoc>>,
+    ties: &mut Vec<ScoredDoc>,
+    k: usize,
+    doc: ScoredDoc,
+) {
+    if heap.len() < k {
+        heap.push(Reverse(doc));
+        return;
+    }
+    let Some(Reverse(min)) = heap.peek() else {
+        return;
+    };
+    match doc.cmp(min) {
+        Ordering::Less => {}
+        Ordering::Equal => ties.push(doc),
+        Ordering::Greater => {
+            let Some(Reverse(old)) = heap.pop() else {
+                return;
+            };
+            heap.push(Reverse(doc));
+            // Every tie equals `old`. They stay only while the new minimum
+            // still equals it.
+            match heap.peek() {
+                Some(Reverse(new_min)) if new_min.cmp(&old) == Ordering::Equal => ties.push(old),
+                _ => ties.clear(),
+            }
+        }
     }
 }
 
@@ -147,9 +214,11 @@ pub fn cluster_prefix_matches(skill_action: &str, prefix: &str) -> bool {
 }
 
 /// Per-segment collector. Tantivy invokes `collect()` once per matching
-/// doc; the min-heap (`BinaryHeap<Reverse<…>>`) caps at `k` entries.
+/// doc; the min-heap (`BinaryHeap<Reverse<…>>`) caps at `k` entries, and
+/// `ties` keeps the documents that tie its minimum (`offer`, DRM-110).
 pub struct SalienceSegmentCollector {
     heap: BinaryHeap<Reverse<ScoredDoc>>,
+    ties: Vec<ScoredDoc>,
     k: usize,
     segment_ord: SegmentOrdinal,
     timestamp_col: Column<u64>,
@@ -174,7 +243,7 @@ impl SegmentCollector for SalienceSegmentCollector {
         let sal = salience_with_context(self.now_sec, ts, p, imp, RecurrenceContext::recall(rec));
         let final_score = bm25 * sal;
 
-        let entry = Reverse(ScoredDoc {
+        let entry = ScoredDoc {
             score: OrderedFloat(final_score),
             doc_address: DocAddress::new(self.segment_ord, doc),
             timestamp_sec: ts as u64,
@@ -183,26 +252,29 @@ impl SegmentCollector for SalienceSegmentCollector {
             recurrence: rec,
             bm25,
             salience: sal,
-        });
-
-        if self.heap.len() < self.k {
-            self.heap.push(entry);
-        } else if let Some(Reverse(min)) = self.heap.peek() {
-            if entry.0.score > min.score {
-                self.heap.pop();
-                self.heap.push(entry);
-            }
-        }
+        };
+        offer(&mut self.heap, &mut self.ties, self.k, entry);
     }
 
+    /// The segment's top `k`, plus the documents that tie the `k`-th.
     fn harvest(self) -> Vec<ScoredDoc> {
-        self.heap.into_iter().map(|Reverse(d)| d).collect()
+        self.heap
+            .into_iter()
+            .map(|Reverse(d)| d)
+            .chain(self.ties)
+            .collect()
     }
 }
 
 /// Top-level collector handed to `Searcher::search`. Stateless apart from
 /// `k`, `now_sec` and the searcher's recurrence table; per-segment work
 /// happens in [`SalienceSegmentCollector`].
+///
+/// Its fruit is the top `k` documents by score plus every document that ties
+/// the `k`-th, in no particular order (DRM-110): the `event_id` that breaks
+/// those ties is a stored field, which a collector cannot read cheaply.
+/// [`recall`] and [`score_by_salience`] hydrate the fruit, order it by score
+/// descending then `event_id` ascending, and keep the first `k`.
 pub struct SalienceCollector {
     k: usize,
     now_sec: i64,
@@ -242,8 +314,12 @@ impl Collector for SalienceCollector {
                     segment.segment_id().uuid_string()
                 ))
             })?;
+        // DRM-109: a segment never holds more than `max_doc` hits, so a huge
+        // `k` sizes nothing beyond the segment.
+        let capacity = self.k.min(segment.max_doc() as usize).saturating_add(1);
         Ok(SalienceSegmentCollector {
-            heap: BinaryHeap::with_capacity(self.k + 1),
+            heap: BinaryHeap::with_capacity(capacity),
+            ties: Vec::new(),
             k: self.k,
             segment_ord: segment_local_id,
             // The pinned Tantivy's `FastFieldReaders::{u64,f64}` take `&str`, not Field IDs.
@@ -260,24 +336,24 @@ impl Collector for SalienceCollector {
     }
 
     fn merge_fruits(&self, segment_fruits: Vec<Vec<ScoredDoc>>) -> tantivy::Result<Vec<ScoredDoc>> {
-        // Each segment already kept its own top-k; re-apply a global min-heap of
-        // size `k` so cross-segment recall cannot return more than `k` hits.
-        let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(self.k + 1);
+        // Each segment already kept its own top-k and its ties; re-apply the
+        // same rule globally ([`offer`]), so the fruit is the global top `k`
+        // plus the documents that tie the `k`-th (DRM-110). Hydration orders
+        // them by `event_id` and cuts to `k`. Sized by the hits there are,
+        // not by `k` alone (DRM-109).
+        let total: usize = segment_fruits.iter().map(Vec::len).sum();
+        let capacity = self.k.min(total).saturating_add(1);
+        let mut merged: BinaryHeap<Reverse<ScoredDoc>> = BinaryHeap::with_capacity(capacity);
+        let mut ties = Vec::new();
         for doc in segment_fruits.into_iter().flatten() {
-            if merged.len() < self.k {
-                merged.push(Reverse(doc));
-            } else if let Some(Reverse(min)) = merged.peek() {
-                if doc.score > min.score {
-                    merged.pop();
-                    merged.push(Reverse(doc));
-                }
-            }
+            offer(&mut merged, &mut ties, self.k, doc);
         }
-        Ok(merged.into_iter().map(|Reverse(d)| d).collect())
+        Ok(merged.into_iter().map(|Reverse(d)| d).chain(ties).collect())
     }
 }
 
-/// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s and sort descending by score.
+/// Hydrate [`ScoredDoc`] fruit into [`RecallResult`]s, sort them by
+/// [`recall_order`] and keep the first `limit` (DRM-110).
 ///
 /// Shared by [`recall`] and [`score_by_salience`]. `doc_address` is private to
 /// this module on [`ScoredDoc`], so hydration must stay inside it.
@@ -285,8 +361,9 @@ fn hydrate_scored(
     searcher: &tantivy::Searcher,
     fields: &SchemaFields,
     top_docs: Vec<ScoredDoc>,
+    limit: usize,
 ) -> tantivy::Result<Vec<RecallResult>> {
-    Ok(hydrate_addressed(searcher, fields, top_docs)?
+    Ok(hydrate_addressed(searcher, fields, top_docs, limit)?
         .into_iter()
         .map(|(_, result)| result)
         .collect())
@@ -294,10 +371,15 @@ fn hydrate_scored(
 
 /// [`hydrate_scored`], keeping each result's [`DocAddress`] so
 /// [`rank_missing_tokens`] can tell documents apart across searches.
+///
+/// `top_docs` is a [`SalienceCollector`] fruit: the top `limit` plus the
+/// documents that tie the `limit`-th. The `event_id` that decides those ties
+/// is a stored field, so the boundary is cut here, after hydration.
 fn hydrate_addressed(
     searcher: &tantivy::Searcher,
     fields: &SchemaFields,
     top_docs: Vec<ScoredDoc>,
+    limit: usize,
 ) -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
     let mut results = Vec::with_capacity(top_docs.len());
     for scored in top_docs {
@@ -348,11 +430,8 @@ fn hydrate_addressed(
         ));
     }
 
-    results.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| recall_order(&a.1, &b.1));
+    results.truncate(limit);
     Ok(results)
 }
 
@@ -360,6 +439,10 @@ fn hydrate_addressed(
 ///
 /// `query_text` is any text. `words_query` turns it into words, and no
 /// character in it is an operator, so no text is an error (DRM-108).
+///
+/// Results are ordered by score descending, then `event_id` ascending, on
+/// every path (DRM-110), so the order depends on neither the index's
+/// segments nor `k`.
 ///
 /// `now_sec` is caller-provided so tests stay deterministic: this function
 /// reads no clock.
@@ -418,7 +501,7 @@ pub fn recall_excluding(
         );
         let collector = SalienceCollector::new(limit, now_sec, Arc::clone(&recurrence));
         let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
-        hydrate_addressed(&searcher, fields, top_docs)
+        hydrate_addressed(&searcher, fields, top_docs, limit)
     };
 
     let bag = search(query_text, k)?;
@@ -578,7 +661,7 @@ fn rank_missing_tokens(
 
     // A hit found only by a token search may still sit inside a wider bag.
     let wide = if union.len() > bag_len {
-        search(query_text, k + token_hits.len())?
+        search(query_text, k.saturating_add(token_hits.len()))?
     } else {
         union[..bag_len].to_vec()
     };
@@ -601,12 +684,7 @@ fn rank_missing_tokens(
             hit
         })
         .collect();
-    ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.event_id.cmp(&b.event_id))
-    });
+    ranked.sort_by(recall_order);
     ranked.truncate(k);
     Ok(ranked)
 }
@@ -665,7 +743,7 @@ pub fn score_by_salience(
     let recurrence = reader.recurrence(&searcher)?;
     let collector = SalienceCollector::new(n, now_sec, recurrence);
     let top_docs: Vec<ScoredDoc> = searcher.search(&AllQuery, &collector)?;
-    hydrate_scored(&searcher, fields, top_docs)
+    hydrate_scored(&searcher, fields, top_docs, n)
 }
 
 #[cfg(test)]
@@ -1081,12 +1159,299 @@ mod tests {
 
         assert_eq!(merged.len(), 3, "merge must cap at k");
         let mut kept: Vec<f64> = merged.iter().map(|d| d.score.into_inner()).collect();
-        kept.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        kept.sort_by(|a, b| b.total_cmp(a));
         assert_eq!(
             kept,
             vec![0.9, 0.8, 0.7],
             "merge must keep the highest scores"
         );
+    }
+
+    /// DRM-109 test 1: a `k` far past the index sizes no heap by `k`. Over
+    /// three documents, `k = usize::MAX` returns the three; on the base the
+    /// segment heap's `k + 1` overflows or the allocation aborts.
+    #[test]
+    fn a_huge_k_allocates_for_the_documents_only() {
+        let docs: Vec<_> = ["evt_a", "evt_b", "evt_c"]
+            .into_iter()
+            .map(|id| ("tokio", id, "rust::a", NOW_SEC, 5.0, Layer::Episodic))
+            .collect();
+        let (_idx, fields, reader) = build_exclusion_index(&docs);
+        let results = recall(&reader, &fields, "tokio", usize::MAX, NOW_SEC).expect("recall");
+        assert_eq!(results.len(), 3, "every match comes back");
+    }
+
+    /// DRM-110 fixtures: `(content, event_id, skill_action, timestamp_sec,
+    /// pain, importance, layer)`.
+    type TieDoc = (&'static str, String, &'static str, i64, f64, f64, Layer);
+
+    /// An in-RAM index with one commit per group of `commits`, in order, and
+    /// no merges, so each group stays its own segment.
+    fn build_committed_index(commits: &[Vec<TieDoc>]) -> (Index, SchemaFields, RecallReader) {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).expect("create writer");
+        writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+        for group in commits {
+            for (content, event_id, skill_action, ts, pain, importance, layer) in group {
+                writer
+                    .add_document(doc!(
+                        fields.content => *content,
+                        fields.timestamp_sec => *ts as u64,
+                        fields.pain => *pain,
+                        fields.importance => *importance,
+                        fields.layer => layer.as_str(),
+                        fields.last_updated_sec => *ts as u64,
+                        fields.cited_event_count => 0_u64,
+                        fields.event_id => event_id.as_str(),
+                        fields.skill_action => *skill_action,
+                        fields.source_harness => "claude-code",
+                    ))
+                    .expect("add doc");
+            }
+            writer.commit().expect("commit");
+        }
+        let reader = RecallReader::open(&index, ReloadPolicy::Manual).expect("reader");
+        (index, fields, reader)
+    }
+
+    fn owned_ids(results: &[RecallResult]) -> Vec<String> {
+        results.iter().map(|r| r.event_id.clone()).collect()
+    }
+
+    /// DRM-110 test 1 (LP-READ-10): an event and the lesson built from it
+    /// score exactly the same. In every segment layout, `k = 1` returns the
+    /// event, `k = 4` lists the event then the lesson, and the three layouts
+    /// give the same lists.
+    #[test]
+    fn ties_follow_event_id_across_segment_layouts() {
+        const TEXT: &str = "tokio runtime panics under load";
+        let event: TieDoc = (
+            TEXT,
+            "evt_01TIE".into(),
+            "rust::tokio",
+            NOW_SEC,
+            9.0,
+            9.0,
+            Layer::Episodic,
+        );
+        let lesson: TieDoc = (
+            TEXT,
+            "lsn_evt_01TIE".into(),
+            "rust::tokio",
+            NOW_SEC,
+            9.0,
+            9.0,
+            Layer::Semantic,
+        );
+        let others: Vec<TieDoc> = (1..=6)
+            .map(|n| {
+                (
+                    "tokio runtime notes",
+                    format!("evt_01OTHER{n}"),
+                    "rust::other",
+                    NOW_SEC - n * DAY_SECS,
+                    f64::from(n as u8),
+                    5.0,
+                    Layer::Episodic,
+                )
+            })
+            .collect();
+
+        // One commit with the lesson first; one commit per document; the
+        // lesson's commit before the event's.
+        let mut one: Vec<TieDoc> = vec![lesson.clone()];
+        one.extend(others.iter().cloned());
+        one.push(event.clone());
+        let mut each: Vec<Vec<TieDoc>> = vec![vec![event.clone()]];
+        each.extend(others.iter().cloned().map(|d| vec![d]));
+        each.push(vec![lesson.clone()]);
+        let mut split: Vec<Vec<TieDoc>> = vec![vec![lesson.clone()], others[..3].to_vec()];
+        let mut last = vec![event.clone()];
+        last.extend(others[3..].iter().cloned());
+        split.push(last);
+
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        for (name, layout) in [
+            ("one commit", vec![one]),
+            ("per doc", each),
+            ("lesson first", split),
+        ] {
+            let (_idx, fields, reader) = build_committed_index(&layout);
+            let top = owned_ids(&recall(&reader, &fields, "tokio", 1, NOW_SEC).expect("k=1"));
+            let four = owned_ids(&recall(&reader, &fields, "tokio", 4, NOW_SEC).expect("k=4"));
+            assert_eq!(top, ["evt_01TIE"], "{name}: k=1");
+            assert_eq!(
+                &four[..2],
+                ["evt_01TIE", "lsn_evt_01TIE"],
+                "{name}: k=4 {four:?}"
+            );
+            assert!(
+                four.starts_with(&top),
+                "{name}: {top:?} is not a prefix of {four:?}"
+            );
+            lists.push(four);
+        }
+        assert!(
+            lists.windows(2).all(|w| w[0] == w[1]),
+            "layouts disagree: {lists:?}"
+        );
+    }
+
+    /// A hand-made hit for the re-rank tests.
+    fn hit(
+        doc: u32,
+        id: &str,
+        content: &str,
+        bm25: f64,
+        salience: f64,
+    ) -> (DocAddress, RecallResult) {
+        (
+            DocAddress::new(0, doc),
+            RecallResult {
+                score: bm25 * salience,
+                bm25,
+                salience,
+                content: content.to_owned(),
+                timestamp_sec: 0,
+                pain: 5.0,
+                importance: 5.0,
+                recurrence: 0,
+                layer: Layer::Episodic,
+                skill_action: "rust::x".to_owned(),
+                source_harness: "claude-code".to_owned(),
+                event_id: id.to_owned(),
+            },
+        )
+    }
+
+    /// DRM-110 test 2: the BZR-1522 re-rank orders two hits that tie after
+    /// it by `event_id`, though its token search found the higher id first,
+    /// and its whole output is in score-then-id order.
+    #[test]
+    fn rank_missing_tokens_orders_ties_like_the_plain_path() {
+        let top = hit(0, "evt_t", "alpha alpha", 5.0, 1.0);
+        let other = hit(1, "evt_o", "alpha", 2.0, 1.0);
+        // Both hold the missing token and score the same.
+        let high = hit(2, "evt_q", "alpha beta", 1.0, 0.5);
+        let low = hit(3, "evt_p", "alpha beta", 1.0, 0.5);
+        let search =
+            |text: &str, _limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
+                Ok(match text {
+                    "beta" => vec![high.clone(), low.clone()],
+                    _ => vec![top.clone(), other.clone(), high.clone(), low.clone()],
+                })
+            };
+        let ranked = rank_missing_tokens(vec![top.clone(), other.clone()], "alpha beta", 4, search)
+            .expect("re-rank");
+        assert_eq!(ids(&ranked), ["evt_t", "evt_p", "evt_q", "evt_o"]);
+        assert_eq!(
+            ranked[1].score, ranked[2].score,
+            "the two promoted hits tie"
+        );
+        assert!(
+            ranked.windows(2).all(|w| {
+                w[0].score > w[1].score
+                    || (w[0].score == w[1].score && w[0].event_id < w[1].event_id)
+            }),
+            "score descending, then event_id ascending: {:?}",
+            ids(&ranked)
+        );
+    }
+
+    /// DRM-110 test 3: NaN orders last, and `-0.0` ties `0.0`, so the id
+    /// decides between them.
+    #[test]
+    fn score_key_orders_nan_last_and_zeroes_equal() {
+        let results = |scores: &[(f64, &str)]| -> Vec<RecallResult> {
+            scores
+                .iter()
+                .map(|&(score, id)| hit(0, id, "", score, 1.0).1)
+                .collect()
+        };
+        let mut mixed = results(&[
+            (f64::NAN, "e1"),
+            (1.0, "e2"),
+            (0.0, "e3"),
+            (-0.0, "e4"),
+            (f64::INFINITY, "e5"),
+        ]);
+        mixed.sort_by(recall_order);
+        assert_eq!(ids(&mixed), ["e5", "e2", "e3", "e4", "e1"]);
+
+        let mut zeros = results(&[(0.0, "b"), (-0.0, "a")]);
+        zeros.sort_by(recall_order);
+        assert_eq!(
+            ids(&zeros),
+            ["a", "b"],
+            "-0.0 equals 0.0, so the id decides"
+        );
+    }
+
+    mod prefix {
+        use super::*;
+        use proptest::prelude::*;
+
+        const CONTENTS: [&str; 4] = [
+            "tokio runtime",
+            "tokio axum handler",
+            "axum runtime error",
+            "tokio",
+        ];
+        const WORDS: [&str; 5] = ["tokio", "runtime", "axum", "handler", "error"];
+        const KEYS: [&str; 2] = ["rust::tokio", "rust::axum"];
+
+        /// One document: content, pain, importance, age, key and commit slot,
+        /// each from a small set so that whole documents repeat and tie.
+        fn doc() -> impl Strategy<Value = (usize, usize, usize, usize, usize, usize)> {
+            (
+                0..CONTENTS.len(),
+                0..3usize,
+                0..3usize,
+                0..2usize,
+                0..KEYS.len(),
+                0..3usize,
+            )
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// DRM-110 test 4: on a store full of ties, `recall(k)` is a
+            /// prefix of `recall(k + 1)`, for any segment layout. The event
+            /// ids are a random permutation of the documents' order, so a
+            /// segment does not meet its ties in id order.
+            #[test]
+            fn prefix_property(
+                (docs, ids) in prop::collection::vec(doc(), 1..=40).prop_flat_map(|docs| {
+                    let order: Vec<usize> = (0..docs.len()).collect();
+                    (Just(docs), Just(order).prop_shuffle())
+                }),
+                commits in 1..=3usize,
+                word in 0..WORDS.len(),
+                k in 0..=20usize,
+            ) {
+                let mut groups: Vec<Vec<TieDoc>> = vec![Vec::new(); commits];
+                for (n, &(content, pain, importance, age, key, slot)) in docs.iter().enumerate() {
+                    groups[slot % commits].push((
+                        CONTENTS[content],
+                        format!("evt_{:04}", ids[n]),
+                        KEYS[key],
+                        NOW_SEC - age as i64 * DAY_SECS,
+                        [3.0, 6.0, 9.0][pain],
+                        [3.0, 6.0, 9.0][importance],
+                        Layer::Episodic,
+                    ));
+                }
+                let (_idx, fields, reader) = build_committed_index(&groups);
+                let at = |k: usize| owned_ids(&recall(&reader, &fields, WORDS[word], k, NOW_SEC).expect("recall"));
+                let (shorter, longer) = (at(k), at(k + 1));
+                prop_assert!(
+                    longer.starts_with(&shorter),
+                    "k={}: {:?} is not a prefix of k+1: {:?}", k, shorter, longer
+                );
+            }
+        }
     }
 
     /// BZR-194 fixtures: `(content, event_id, skill_action, timestamp_sec, pain, layer)`.
@@ -1695,7 +2060,7 @@ mod tests {
                     let parsed = parser.parse_query(text)?;
                     let collector = SalienceCollector::new(limit, NOW_SEC, Arc::clone(&recurrence));
                     let top: Vec<ScoredDoc> = searcher.search(&*parsed, &collector)?;
-                    hydrate_addressed(&searcher, &self.fields, top)
+                    hydrate_addressed(&searcher, &self.fields, top, limit)
                 };
             let bag = search(query, k).unwrap_or_else(|e| panic!("parser {query:?}: {e}"));
             if !rerank {
@@ -1769,6 +2134,9 @@ mod tests {
             "axum handler error",
             "zzznotindexed",
             "rust error handling axum",
+            // DRM-109 (from DRM-108's verify): a tab and a newline split words
+            // as a space does.
+            "axum\thandler\nerror tokio",
             gap.as_str(),
         ] {
             let want = store.parser_recall(query, 20);

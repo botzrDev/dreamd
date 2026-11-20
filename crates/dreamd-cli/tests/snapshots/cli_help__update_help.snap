@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"update\")"
 ---
-Stop local dreamd servers and clear the native binary cache so `npx -y dreamd-mcp` fetches the latest release
+Stop local dreamd servers, keep this version's cached binary and remove the others
 
 Usage: update [OPTIONS]
 

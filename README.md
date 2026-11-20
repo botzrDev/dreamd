@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.3.2-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.4.0-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -103,7 +103,7 @@ dreamd is built for that response:
 | See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
 | Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
 | Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
-| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state that names it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
+| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state built from it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
 | Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
 | Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
 
@@ -157,7 +157,7 @@ Recall ranks episodes and lessons with BM25 × salience (age decay, pain, import
 | `~/.agent/dreamd.sock` | Daemon API socket (while running) | No |
 | `~/.agent/star-asked` | Set after setup has asked for a GitHub star, once per user | No |
 
-`setup` scaffolds the store by calling `init`, then writes the harness MCP config. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall`. On a tty it waits for `y`; pass `--yes` in a script. Without a tty and without `--yes` it exits 2 and changes nothing. Project `.agent/` stores are left in place. `npx -y` is npx's flag, not dreamd's `--yes`. `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
+`setup` scaffolds the store by calling `init`, then writes the harness MCP config. For Claude Code it also writes a dreamd block. With an `AGENTS.md` at the project root, the block goes there, and a missing `CLAUDE.md` becomes the one line `@AGENTS.md`, which Claude Code needs to keep loading `AGENTS.md`; a `CLAUDE.md` of your own that does not import `AGENTS.md` keeps the block instead. Without an `AGENTS.md`, the block goes into `CLAUDE.md`. Both are idempotent. To uninstall from a machine, run `npx -y dreamd-mcp uninstall`. On a tty it waits for `y`; pass `--yes` in a script. Without a tty and without `--yes` it exits 2 and changes nothing. Project `.agent/` stores are left in place. `npx -y` is npx's flag, not dreamd's `--yes`. `npx -y dreamd-mcp init --uninstall-project` drops only the registry entry; `dreamd init` puts it back and does not rewrite the store.
 
 ---
 
@@ -172,7 +172,7 @@ The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is
 | `dreamd score` | Top memories by salience alone, no query |
 | `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from seven days earlier. See [docs/observability.md](./docs/observability.md) |
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
-| `dreamd forget <event-id>` | Remove one episodic event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
+| `dreamd forget <event-id>` | Remove one episodic event and the lesson state built from it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
 | `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges and corrupt lines. Read-only. See [docs/provenance.md](./docs/provenance.md) |
 | `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.2.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
 
@@ -198,6 +198,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.4.0** (2026-11-20) | Recall takes any text, in one order, with `k` at most 100; each project is redacted and configured by its own config; an API key goes only to its own vendor; a dream cycle keeps a hand-edited `LESSONS.md` and commits only on a branch; every client call has a deadline and checks the daemon's version first; `setup` keeps a repo's `AGENTS.md` loaded in Claude Code |
 | **v1.3.2** (2026-11-17) | `dreamd watch` opens a project again when `git clean -fdX` deletes its `.agent/.dreamd/`, and no dreamd process writes into a store that replaced its own; an empty dedup key no longer drops learnings; `watch` no longer deletes a file at `DREAMD_SOCK` that is not a socket |
 | **v1.3.1** (2026-11-16) | A failed dream cycle no longer blocks the next one; an event's content can no longer forge a lesson; the first requests to a project, at once or after it idles, no longer fail on the daemon's own writer lock; an idle `dreamd mcp` session no longer holds a connection to the daemon |
 | **v1.3.0** (2026-11-07) | Recall ranks the event that has a multi-word query's missing words, and a fat `skill_action` parent no longer outweighs a more painful child (`SPEC.md` v0.2); recall hits carry their `id`; the dream cycle's git commit runs again; a client and a daemon of different versions say so |
@@ -221,9 +222,9 @@ Full notes: [CHANGELOG.md](./CHANGELOG.md).
 
 **Do I need Rust?** No. `npx -y dreamd-mcp` downloads a prebuilt binary for Linux x86_64 and macOS. The Linux binary is static, with no glibc requirement, and is checked on Ubuntu 20.04, Ubuntu 22.04, Debian 12 and Alpine 3.20. Rust is only needed to build from source (and for native Windows).
 
-**Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand; durable appends should go through the daemon or MCP so there is one writer.
+**Where does memory live?** In `<project>/.agent/`. The daemon state and index under `.agent/.dreamd/` are local and gitignored. You can read and edit the JSONL and Markdown by hand. To fix a line by hand, stop dreamd's writer for the project first (`dreamd watch`, or the harness session running `dreamd mcp`), edit the line, then run `dreamd doctor --repair`. Until the repair, the index keeps the old text and scores, and `dreamd doctor` reports `index_freshness: stale content`. Add new records through `append_node` or `POST /api/v1/learn`, not by writing the file.
 
-**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` asks for `y` on a tty (`--yes` in a script) before it stops processes and clears caches. `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store; it refuses while `~/.agent/` holds one, which a dreamd before 1.3.3 could leave there ([docs/install.md](./docs/install.md)).
+**What if I want a full wipe?** See [Full fresh store](./docs/troubleshooting.md#how-do-i-reset-or-clear-memory). There is no `dreamd reset --all`. `dreamd uninstall` asks for `y` on a tty (`--yes` in a script) before it stops processes and clears caches. `dreamd service uninstall --purge` deletes the daemon home `~/.agent/` and never a project `.agent/` store; it refuses while `~/.agent/` holds one, which a dreamd before 1.4.0 could leave there ([docs/install.md](./docs/install.md)).
 
 **Windows?** `dreamd watch` serves the HTTP API on loopback TCP with a bearer token from `auth.json`. Learn, the dream cycle and the Tantivy index run there. The directory flush follows the Unix call order and is not a power-loss proof. There is no prebuilt npm binary for Windows. Details: [docs/windows.md](./docs/windows.md).
 
@@ -235,7 +236,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.3.2** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.4.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
