@@ -38,8 +38,11 @@ Max 256 bytes.
 
 ## client_dedup_key
 
-Set this when the same learning could be written twice in a session (e.g. you call append_node at both
-mid-session discovery and end-of-session wrap-up). Use a stable slug: `"session:YYYY-MM-DD:skill.topic"`.
+Optional, and only for retrying one write: if an `append_node` call may not have gone through, resend it
+with the same key and the same arguments, and you get the first call's id back without a second record.
+A key matches one learning, so the same key with different content is stored as a new record. Derive the
+key from the content, or use a per-attempt id; never use one key per topic or per session. Keys are
+forgotten when the MCP server or the daemon restarts.
 
 ## What NOT to store
 

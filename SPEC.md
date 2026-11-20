@@ -70,7 +70,7 @@ Each line in `episodic/AGENT_LEARNINGS.jsonl` MUST deserialize into the followin
 
 | Field | Type | Notes |
 |---|---|---|
-| `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop duplicate appends. The reference implementation accepts it per request (MCP `append_node`, or the `X-Client-Dedup-Key` header) and does not write it into the JSONL line. The drop lasts for the life of that writer process. |
+| `client_dedup_key` | string | Optional idempotency key. Implementations MAY use it to drop a repeat of the same learning. The reference implementation accepts it per request (MCP `append_node`, or `POST /api/v1/learn`'s `client_dedup_key` field or `X-Client-Dedup-Key` header) and does not write it into the JSONL line. It drops an append only when both the key and the learning match an earlier one; the same key with new content is a new record. The drop lasts as long as that project's writer keeps it in memory: a restart or an idle eviction forgets the key. |
 
 `recurrence` is **not** an event field. For recall it is derived from the store: the number of live events whose `skill_action` equals the candidate's or extends it with `::`. Promotion uses its own windowed count.
 
@@ -145,7 +145,7 @@ The frontmatter block MUST contain `last_updated` (ISO 8601 UTC timestamp of the
 
 **Idempotency.** The lesson body, `cluster_key`, `prompt_version`, and lesson id are a function of the input, including `pinned` state set by previous runs. `last_updated` is the timestamp of the cycle run, so two runs are not byte-identical. At a fixed clock the deterministic body matches. Two consecutive no-promotion cycles over the same input MUST agree on absence: the first leaves the file absent (removing one if present) and the second is a no-op.
 
-**Pruning.** An implementation MAY archive unpinned episodic events. The reference implementation archives an event when it is unpinned and older than 90 days. It also evaluates a salience floor of 2.0, which does not currently spare any event the age gate would archive, because past 90 days the recency term alone sits below that floor. Archived events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted. Pinned events MUST NOT be pruned.
+**Pruning.** An implementation MAY archive unpinned episodic events. The reference implementation archives an event when it is unpinned and older than 90 days. It also evaluates a salience floor of 2.0, which does not currently spare any event the age gate would archive, because past 90 days the recency term alone sits below that floor. Archived events MUST be moved to the implementation's hidden subfolder (e.g., `.<impl>/snapshots/`), never deleted. Pinned events MUST NOT be pruned. An event whose `id` appears on more than one line is pinned when any of those lines is, and none of its lines is pruned.
 
 ## Concurrency and file operations
 

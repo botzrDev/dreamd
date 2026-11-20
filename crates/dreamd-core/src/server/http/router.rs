@@ -260,7 +260,22 @@ pub async fn version_middleware(
     resp
 }
 
+/// 400 for a request with no `X-Agent-Root` (DRM-102).
+pub(crate) const AGENT_ROOT_MISSING: &str =
+    "X-Agent-Root header missing: send the absolute path of the folder that holds .agent/";
+/// 400 for an `X-Agent-Root` whose bytes are not UTF-8 (DRM-102).
+pub(crate) const AGENT_ROOT_NOT_UTF8: &str =
+    "X-Agent-Root is not UTF-8: send the absolute path of the folder that holds .agent/";
+/// 400 for an empty or relative `X-Agent-Root`; the value follows (DRM-102).
+pub(crate) const AGENT_ROOT_NOT_ABSOLUTE: &str =
+    "X-Agent-Root must be the absolute path of the folder that holds .agent/";
+
 /// Validate `X-Agent-Root` and resolve the project via `registry.toml`.
+///
+/// The value is the project path's UTF-8 text, sent as raw bytes with no
+/// percent-encoding, so a path with non-ASCII letters is accepted. It must be
+/// absolute: nothing is resolved against the daemon's working directory
+/// (DRM-102).
 ///
 /// The lookup goes through [`AppState::registry`], which parses the file once
 /// per file identity, and runs on `spawn_blocking`, because it stats the file
@@ -269,7 +284,9 @@ pub async fn version_middleware(
 /// success.
 ///
 /// # Errors
-/// * `400` — header missing or non-UTF-8
+/// * `400` — header missing, not UTF-8, or empty or relative; each message
+///   starts `X-Agent-Root` and states the rule, and a relative value is
+///   quoted after it
 /// * `404` — path not registered
 /// * `500` — registry read/parse failure
 pub async fn agent_root_middleware(
@@ -277,15 +294,15 @@ pub async fn agent_root_middleware(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let agent_root_str = match req
-        .headers()
-        .get("x-agent-root")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(s) => s.to_owned(),
-        None => {
-            return error_400("missing or non-UTF-8 X-Agent-Root header");
-        }
+    let agent_root_str = match req.headers().get("x-agent-root") {
+        None => return error_400(AGENT_ROOT_MISSING),
+        Some(value) => match std::str::from_utf8(value.as_bytes()) {
+            Err(_) => return error_400(AGENT_ROOT_NOT_UTF8),
+            Ok(s) if !std::path::Path::new(s).is_absolute() => {
+                return error_400(&format!("{AGENT_ROOT_NOT_ABSOLUTE}; got {s:?}"));
+            }
+            Ok(s) => s.to_owned(),
+        },
     };
 
     let cache = std::sync::Arc::clone(&state.registry);

@@ -23,6 +23,9 @@ const RERUN_MSG: &str = "dreamd: already initialized — .agent/ exists. nothing
 const RERUN_MSG_QUIET: &str = "dreamd: already initialized.";
 /// One line when `.agent/` is already on disk and the registry had no entry.
 const REREGISTER_MSG: &str = "dreamd: registered existing .agent/ in ~/.agent/registry.toml";
+/// The start of the line naming the folders an existing store got back
+/// (DRM-107).
+const RECREATED_PREFIX: &str = "dreamd: re-created missing .agent/ folders: ";
 
 /// Failure modes for init scaffolding and registry operations.
 #[derive(Debug)]
@@ -75,14 +78,54 @@ struct State {
     last_dream_cycle_status: &'static str,
 }
 
+/// Re-create the scaffold folders an existing store lacks, in scaffold
+/// order, and return their names (DRM-107). Git keeps no empty folder and
+/// ignores `.dreamd/`, so a fresh clone or worktree has no `personal/`, no
+/// `.dreamd/`, and no `semantic/` until a dream cycle has written
+/// `LESSONS.md`. Creates folders only: a missing log, `LESSONS.md` or
+/// `config.toml` stays missing. Every path is checked before the first is
+/// created, so a path that exists but is not a directory is an error with
+/// nothing written.
+fn recreate_missing_folders(agent: &AgentRoot) -> std::io::Result<Vec<&'static str>> {
+    let scaffold = [
+        ("working/", agent.working_dir()),
+        ("episodic/", agent.episodic_dir()),
+        ("semantic/", agent.semantic_dir()),
+        ("personal/", agent.personal_dir()),
+        (".dreamd/", agent.dreamd_dir()),
+    ];
+    let mut missing = Vec::new();
+    for (name, path) in &scaffold {
+        if path.is_dir() {
+            continue;
+        }
+        // `symlink_metadata` sees a file, or a symlink that does not resolve
+        // to a directory, where `exists` would miss a dangling one.
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!(".agent/{} is not a directory", name.trim_end_matches('/')),
+            ));
+        }
+        missing.push((*name, path));
+    }
+    for (_, path) in &missing {
+        fs::create_dir(path)?;
+    }
+    Ok(missing.into_iter().map(|(name, _)| name).collect())
+}
+
 /// Scaffold the per-project `.agent/` directory tree and register it with
 /// the daemon home registry (`~/.agent/registry.toml`).
 ///
-/// Idempotent. If `.agent/` already exists and the project is registered,
-/// prints the rerun message and returns [`InitOutcome::AlreadyInitialized`]
-/// without touching the store. If `.agent/` exists but the registry has no
-/// entry, registers it, prints one line, does not rewrite anything under
-/// `.agent/`, and returns [`InitOutcome::Registered`]. Otherwise it scaffolds
+/// Idempotent. If `.agent/` already exists, it first re-creates any of the
+/// five scaffold folders that is missing, as a clone or a worktree lacks
+/// them, and creates no file (DRM-107); a scaffold path that is not a
+/// directory is an error, before anything is written. Then, if the project is
+/// registered, it returns [`InitOutcome::AlreadyInitialized`]; if the
+/// registry has no entry, it registers it and returns
+/// [`InitOutcome::Registered`]. Neither path rewrites a file under `.agent/`.
+/// Otherwise it scaffolds
 /// and returns [`InitOutcome::Scaffolded`]. Staging a new store is done in a
 /// temp dir; the final rename is atomic within a single filesystem.
 ///
@@ -121,16 +164,23 @@ pub fn run(
 
     let agent = AgentRoot::new(&project_root);
 
-    // The store is already there. Register it when the registry lost the
-    // entry; otherwise the rerun message, and neither path rewrites `.agent/`.
+    // The store is already there. Re-create the folders git does not carry
+    // (DRM-107), then register it when the registry lost the entry. Neither
+    // step rewrites a file under `.agent/`.
     if agent.agent_dir().exists() {
+        let recreated = recreate_missing_folders(&agent)?;
         let added = register_project(daemon_home, &project_root)?;
+        if !quiet && !recreated.is_empty() {
+            writeln!(out, "{RECREATED_PREFIX}{}", recreated.join(", "))?;
+        }
         if added {
             if !quiet {
                 writeln!(out, "{REREGISTER_MSG}")?;
             }
-        } else {
-            writeln!(out, "{}", if quiet { RERUN_MSG_QUIET } else { RERUN_MSG })?;
+        } else if quiet {
+            writeln!(out, "{RERUN_MSG_QUIET}")?;
+        } else if recreated.is_empty() {
+            writeln!(out, "{RERUN_MSG}")?;
         }
         let outcome = if added {
             InitOutcome::Registered
@@ -508,9 +558,13 @@ mod tests {
         let mut err = Vec::new();
         run(project.path(), &daemon_home, false, &mut out, &mut err).expect("init");
 
+        // DRM-107: the store has only `episodic/`, so init first re-creates
+        // the other four scaffold folders.
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{REREGISTER_MSG}\n")
+            format!(
+                "{RECREATED_PREFIX}working/, semantic/, personal/, .dreamd/\n{REREGISTER_MSG}\n"
+            )
         );
         assert!(err.is_empty());
         assert_eq!(

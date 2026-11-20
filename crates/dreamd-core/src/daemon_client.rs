@@ -110,6 +110,16 @@ pub enum DaemonTransportError {
 /// parsed as semver.
 pub const VERSION_HEADER: &str = "x-dreamd-version";
 
+/// Every 400 `agent_root_middleware` gives starts with this (DRM-102). The
+/// MCP client maps those to `-32600`: the caller cannot fix them by changing
+/// a tool's arguments.
+pub const AGENT_ROOT_REJECTED_PREFIX: &str = "X-Agent-Root";
+
+/// How a project config that does not load is reported, in both modes
+/// (DRM-103). The MCP client answers it as `-32600`: the user fixes the file,
+/// not the tool's arguments.
+pub const CONFIG_LOAD_FAILED: &str = "config load failed";
+
 /// The sentence for a daemon whose version differs from this client's.
 ///
 /// A client builds it from the daemon's [`VERSION_HEADER`], naming the

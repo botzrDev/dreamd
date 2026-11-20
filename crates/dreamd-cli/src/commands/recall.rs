@@ -40,7 +40,7 @@ pub enum RecallError {
     /// The index directory is missing / empty / failed to open. Carries a
     /// user-facing hint (append learnings or run the daemon once).
     IndexUnavailable(String),
-    /// Query parse or search failure from the recall collector.
+    /// Search failure from the recall collector.
     Search(tantivy::TantivyError),
     /// Failure writing to the `out`/`err` sinks.
     Io(std::io::Error),

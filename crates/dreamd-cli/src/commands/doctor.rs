@@ -317,7 +317,8 @@ pub fn run(
     }
 
     // The read above backs the record-schema check, the three hand-edit
-    // checks and --cluster-health (an absent log reads as no records).
+    // checks, `stored_secrets` and --cluster-health (an absent log reads as no
+    // records).
     // `events` is what `read_all` returns, in the same order; `lines[i]` is the
     // file line of `events[i]`, the numbering `malformed line(s)` uses (blank,
     // malformed and torn lines count too).
@@ -342,6 +343,9 @@ pub fn run(
         all_ok &= check_score_range(lines, events, out)?;
         all_ok &= check_duplicate_ids(lines, events, out)?;
         all_ok &= check_future_timestamps(lines, events, now_sec, out)?;
+        if config.redaction {
+            all_ok &= check_stored_secrets(lines, events, out)?;
+        }
     }
     let events = records.as_ref().map(|(_, events)| events.as_slice());
     all_ok &= check_memory_in_git(agent_root, events, out)?;
@@ -555,6 +559,41 @@ fn check_future_timestamps(
          AGENT_LEARNINGS.jsonl; recall scores these lines as new until the clock reaches them]",
         lines_head(&flagged)
     )?;
+    Ok(false)
+}
+
+/// The `stored_secrets` warning, after the count.
+const STORED_SECRETS_HINT: &str = "[WARNING: their content matches a redaction pattern, so \
+                                   it was stored before dreamd caught that shape or while \
+                                   redaction was off. Check each one, and remove it with \
+                                   `dreamd forget <id>`]";
+
+/// Records whose content a redaction pattern matches (DRM-105): stored before
+/// dreamd caught that shape, or while redaction was off. Called only when the
+/// store's `redaction` is on. Lists every flagged record, in file order, by
+/// line and id, for `dreamd forget`. Prints no content and rewrites nothing.
+fn check_stored_secrets(
+    lines: &[usize],
+    events: &[AgentLearning],
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    let flagged: Vec<(usize, &AgentLearning)> = lines
+        .iter()
+        .zip(events)
+        .filter(|(_, record)| dreamd_core::redaction::would_redact(&record.content))
+        .map(|(&line, record)| (line, record))
+        .collect();
+    if flagged.is_empty() {
+        return Ok(true);
+    }
+    writeln!(
+        out,
+        "stored_secrets: {} record(s)  {STORED_SECRETS_HINT}",
+        flagged.len()
+    )?;
+    for (line, record) in flagged {
+        writeln!(out, "  line {line}: {}", record.id)?;
+    }
     Ok(false)
 }
 
@@ -2697,6 +2736,10 @@ mod tests {
     const FUTURE_TIMESTAMP_HINT: &str = "[WARNING: timestamp more than 24 h ahead of the \
                                          clock in AGENT_LEARNINGS.jsonl; recall scores these \
                                          lines as new until the clock reaches them]";
+    const STORED_SECRETS_LINE: &str = "stored_secrets: 1 record(s)  [WARNING: their content \
+                                       matches a redaction pattern, so it was stored before \
+                                       dreamd caught that shape or while redaction was off. \
+                                       Check each one, and remove it with `dreamd forget <id>`]";
 
     fn duplicate_id_hint(ids: usize) -> String {
         format!(
@@ -2941,6 +2984,50 @@ mod tests {
         assert!(!output.contains("score_range:"), "got:\n{output}");
         assert!(!output.contains("duplicate_id:"), "got:\n{output}");
         assert!(!ok);
+    }
+
+    /// DRM-105 test 5: with redaction on, doctor lists each stored record a
+    /// pattern matches, by line and id, and never prints its content. With
+    /// redaction off it does not run.
+    #[test]
+    fn stored_secrets_lists_each_record_by_line_and_id() {
+        let (root, _dir) = setup_agent_root("stored-secrets");
+        let with_content = |suffix: char, content: &str| {
+            clean_record(suffix).replace(
+                &format!("\"content\":\"entry {suffix}\""),
+                &format!("\"content\":{}", serde_json::to_string(content).unwrap()),
+            )
+        };
+        write_log(
+            &root,
+            &[
+                clean_record('A'),
+                with_content('1', "export API_KEY=supersecret"),
+                with_content('2', "export API_KEY=[REDACTED]"),
+                clean_record('B'),
+            ],
+        );
+
+        let (ok, output, _) = run_default(&Config::default(), &root, None);
+        let lines: Vec<&str> = output.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| *line == STORED_SECRETS_LINE)
+            .unwrap_or_else(|| panic!("expected the line {STORED_SECRETS_LINE:?}\ngot:\n{output}"));
+        assert_eq!(
+            lines.get(at + 1).copied(),
+            Some(format!("  line 2: {}", evt_id('1')).as_str()),
+            "got:\n{output}"
+        );
+        assert!(!output.contains("supersecret"), "got:\n{output}");
+        assert!(!ok, "got:\n{output}");
+
+        let off = Config {
+            redaction: false,
+            ..Config::default()
+        };
+        let (_, output, _) = run_default(&off, &root, None);
+        assert!(!output.contains("stored_secrets"), "got:\n{output}");
     }
 
     /// BZR-1302 test 3b.

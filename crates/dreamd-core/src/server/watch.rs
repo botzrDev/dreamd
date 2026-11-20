@@ -266,7 +266,7 @@ async fn run_watch_uds(cwd: &Path) -> Result<(), WatchError> {
     // the same form.
     let primary_root = std::fs::canonicalize(agent_root.project_root())
         .unwrap_or_else(|_| agent_root.project_root().to_path_buf());
-    let state = AppState::new(registry_path, supervisor, config, daemon_uid)
+    let state = AppState::new(registry_path, supervisor, daemon_uid)
         .with_primary(primary_root, primary_handle);
     // Retain shutdown handles before `state` moves into `build_router`
     // (AILAB-162). After the move the only owners are the router and its live
@@ -438,7 +438,7 @@ async fn run_watch_loopback(cwd: &Path, listen: WatchListen) -> Result<(), Watch
     //    `nix` is a `cfg(unix)` dependency, so `Uid::current()` does not even
     //    exist here to ask. `with_auth_json` is mandatory: `auth_json: None` is
     //    fail-closed, and a router built without it 401s every request.
-    let state = AppState::new(daemon_home.registry_toml(), supervisor, config, 0)
+    let state = AppState::new(daemon_home.registry_toml(), supervisor, 0)
         .with_auth_json(daemon_home.auth_json())
         .with_primary(
             agent_root.project_root().to_path_buf(),

@@ -272,6 +272,23 @@ dreamd doctor --provenance
 
 ---
 
+## 9. Clones and worktrees
+
+A clone or a `git worktree` of a project whose `.agent/` is committed has that memory. Part of `.agent/` travels with git, and part belongs to each checkout.
+
+- **Shared through git:** the committed files under `.agent/`, such as the episodic log (`episodic/AGENT_LEARNINGS.jsonl`) and `semantic/LESSONS.md`.
+- **Each checkout's own:** `.agent/.dreamd/`, which git ignores. It holds the index, `writer.lock`, the provenance ledger and the project `config.toml`. A clone starts without it: the first open builds the index from the log, and the project's own `config.toml` is missing until you copy it, so the user config (`~/.config/dreamd/config.toml` on Linux; [configuration](docs/configuration.md#config-file-locations) gives the macOS and Windows paths) and the built-in defaults apply. Git keeps no empty folder, so a clone has no `personal/`, and no `semantic/` until a dream cycle has written `LESSONS.md`.
+- **With a daemon running:** run `dreamd init` (or `npx -y dreamd-mcp init`) once in each clone and worktree. Until then every call answers with the folder and the command:
+
+  ```
+  the store in /path/to/clone is not registered with the running daemon. Run `dreamd init` in /path/to/clone once: it registers the existing store without changing its files (a clone or a worktree is not registered until then), and the next call works without a restart.
+  ```
+
+  `init` registers the store, re-creates the missing folders and changes no file. In-process mode needs nothing for the tools to work; `init` still re-creates the folders `dreamd doctor` checks.
+- **Merging two checkouts:** each checkout appends to its own copy of the log, so a merge usually conflicts at the end of `AGENT_LEARNINGS.jsonl`. Keep both sides' new lines: each one is an event with its own id. A line that was in the log before the checkouts split is still one event when a side changed it (a dream cycle pins the events its lessons cite, and `dreamd archive --force-unpin` unpins one), so keep only the changed copy. A line one side removed (`dreamd forget`, or decay in a dream cycle) stays removed. If both sides ran a dream cycle, `semantic/LESSONS.md` conflicts as well; keep one side's file whole. Then run `dreamd doctor`: `duplicate_id` lists any id left on two lines.
+
+---
+
 ## Next steps
 
 | Topic | Doc |

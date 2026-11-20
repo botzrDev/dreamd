@@ -107,6 +107,8 @@ dreamd is built for that response:
 | Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
 | Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
 
+A clone or a worktree of the project has the committed memory. With a daemon running, run `dreamd init` once in it; see [GUIDE §9](./GUIDE.md#9-clones-and-worktrees).
+
 **What dreamd does not do.** It does not detect or block poisoned writes, and it does not filter injected lesson content ([SECURITY.md](./SECURITY.md)). `source_harness` is asserted by the caller, not verified. The provenance ledger and the forget receipt are unsigned, and there are no trust labels yet. dreamd makes bad memory traceable and removable; it does not make it impossible. See [Roadmap](#roadmap) for what comes next.
 
 ---

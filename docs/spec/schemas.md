@@ -25,9 +25,12 @@ never pretty-printed, one whole record per `\n`-terminated line:
 | `pinned` | boolean | `false` unless the event must survive pruning. Do not unset a `true` another writer set. |
 
 `client_dedup_key` is the one optional field. dreamd does not write it into
-the record: it takes the key per request (the `X-Client-Dedup-Key` header, or
-the `client_dedup_key` argument of `append_node`) and uses it only to drop a
-duplicate append for as long as that writer process keeps running. `recurrence` is **not** a field on
+the record: it takes the key per request (the `client_dedup_key` argument of
+`append_node`, or the `client_dedup_key` field or `X-Client-Dedup-Key` header
+of `POST /api/v1/learn`). It uses the key only to drop a repeat of the same
+learning; the same key with new content is a new record. A key lasts as long
+as that project's writer keeps it in memory, and a restart or an idle
+eviction forgets it. `recurrence` is **not** a field on
 the record. For recall it is the number of live events whose `skill_action`
 equals the candidate's or extends it with `::`, which dreamd counts from the
 index. Promotion uses its own windowed count, which the dream cycle writes to

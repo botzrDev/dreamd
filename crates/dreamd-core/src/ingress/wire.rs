@@ -16,7 +16,7 @@ pub struct LearnResponse {
     pub id: String,
     /// RFC 3339 timestamp stamped at durable append.
     pub timestamp: String,
-    /// `true` when `client_dedup_key` matched a prior append (no second write).
+    /// `true` when `client_dedup_key` and the learning matched a prior append (no second write).
     pub deduplicated: bool,
 }
 

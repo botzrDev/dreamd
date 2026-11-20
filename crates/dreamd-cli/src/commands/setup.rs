@@ -12,7 +12,7 @@
 //! `dreamd reset`.
 //!
 //! A real run closes with the fixed-copy success card. Everything it claims is
-//! observed, not assumed: `wired` lists the labels `wire_mcp` actually wrote,
+//! observed, not assumed: `wired` lists the labels `apply_mcp` actually wrote,
 //! and `daemon` reports a liveness probe of the daemon's own listener (the
 //! socket on Unix, the loopback address in `server.json` elsewhere). A
 //! `--dry-run` prints the plan and the next-steps list instead — a plan is not
@@ -298,17 +298,21 @@ pub fn run(
                 DaemonHome::new(req.daemon_home).registry_toml().display()
             )?;
         }
-        wire_mcp(req, &project_root, out, err)?;
+        plan_mcp(req, &project_root, out, err)?;
         write_habit_plan(req, out)?;
         writeln!(out, "dry-run: no changes made")?;
         // A dry run is a plan, not a completed setup — the success card would
         // be a lie here, so the plan keeps the next-steps list.
         write_next_steps(req, out)?;
     } else {
+        // DRM-158: read and classify every MCP target before the scaffold, so
+        // a refusal writes nothing. `init::run` touches neither MCP file, so
+        // the plan is still exact when it is applied below.
+        let wiring = plan_mcp(req, &project_root, out, err)?;
         // Reuse init verbatim (non-quiet): the scaffold lines and the first-run
         // privacy disclosure are exactly what a first-run user needs to see.
         let init_outcome = init::run(req.cwd, &DaemonHome::new(req.daemon_home), false, out, err)?;
-        let wired = wire_mcp(req, &project_root, out, err)?;
+        let wired = apply_mcp(&wiring, out, err)?;
         let habits = install_habit(&project_root, req.harness)?;
         // After the config is on disk, and before `watch` takes the log: a
         // sentence typed here is appended through the coordinator, then the
@@ -321,7 +325,12 @@ pub fn run(
             let mut input = stdin.lock();
             match prompt_first_lesson(&mut input, err)? {
                 Some(sentence) => {
-                    match record_first_lesson(&project_root, req.daemon_home, &sentence) {
+                    match record_first_lesson(
+                        &project_root,
+                        req.daemon_home,
+                        &sentence,
+                        req.launcher,
+                    ) {
                         Ok(recorded) => Some(recorded),
                         Err(e) => {
                             writeln!(
@@ -468,31 +477,41 @@ pub(crate) fn prompt_start_watch(
     Ok(parse_yes_no(&read_answer(input)).unwrap_or(false))
 }
 
-/// Merge `mcpServers.dreamd` into every harness config target (or report the
-/// dry-run plan). Runs after the scaffold so a refusal here never leaves a
-/// half-made `.agent/`.
+/// What the MCP step will do, decided before anything is written (DRM-158).
+enum McpWiring {
+    /// `--no-write-mcp` or `--harness none`: the status line to print.
+    Skipped(&'static str),
+    /// Every target, read and classified. Empty only under `--dry-run`.
+    Planned(Vec<TargetPlan>),
+}
+
+/// Read and classify every harness config target. Refuses (`Malformed`, or
+/// `Conflict` without `--force`) before anything is written: setup calls this
+/// before the scaffold, so a refusal writes nothing (DRM-158). Under
+/// `--dry-run`, reports the plan, or prints the skip line. Writes nothing.
 ///
-/// `--harness both` is all-or-nothing: every target is read and
-/// classified before any of them is written.
-///
-/// Returns the labels that end up carrying the dreamd block — what the success
-/// card reports as `wired`, and what its `Undo:` line names. Empty when wiring
-/// was skipped (`--no-write-mcp` / `--harness none`) or under `--dry-run`, where
-/// nothing was written and there is nothing to undo.
-fn wire_mcp(
+/// `--harness both` is all-or-nothing: every target is read and classified
+/// before any of them is written.
+fn plan_mcp(
     req: &SetupRequest<'_>,
     project_root: &Path,
     out: &mut dyn Write,
     err: &mut dyn Write,
-) -> Result<Vec<&'static str>, SetupError> {
+) -> Result<McpWiring, SetupError> {
     let targets = req.harness.config_targets();
-    if !req.write_mcp {
-        writeln!(out, "mcp config: skipped (--no-write-mcp)")?;
-        return Ok(Vec::new());
-    }
-    if targets.is_empty() {
-        writeln!(out, "mcp config: skipped (--harness none)")?;
-        return Ok(Vec::new());
+    let skipped = if !req.write_mcp {
+        Some("mcp config: skipped (--no-write-mcp)")
+    } else if targets.is_empty() {
+        Some("mcp config: skipped (--harness none)")
+    } else {
+        None
+    };
+    if let Some(line) = skipped {
+        // The real run prints it from `apply_mcp`, after init's lines.
+        if req.dry_run {
+            writeln!(out, "{line}")?;
+        }
+        return Ok(McpWiring::Skipped(line));
     }
 
     let mut plans = Vec::with_capacity(targets.len());
@@ -509,7 +528,7 @@ fn wire_mcp(
         for planned in &plans {
             report_dry_run(req, planned, out)?;
         }
-        return Ok(Vec::new());
+        return Ok(McpWiring::Planned(Vec::new()));
     }
 
     if !req.force {
@@ -524,12 +543,34 @@ fn wire_mcp(
             return Err(report_mcp_error(e, err)?);
         }
     }
+    Ok(McpWiring::Planned(plans))
+}
 
-    // Everything still standing here gets written: Create, Merge, AlreadyWired
-    // (a no-op that leaves the block in place), and — past the guard above —
-    // a `--force`-resolved Conflict. All four leave the file wired.
+/// Print the skip line, or write each plan `plan_mcp` made and print its
+/// status line. Any refusal already happened in `plan_mcp`, before the
+/// scaffold, so it wrote nothing (DRM-158).
+///
+/// Returns the labels that end up carrying the dreamd block — what the success
+/// card reports as `wired`, and what its `Undo:` line names. Empty when wiring
+/// was skipped (`--no-write-mcp` / `--harness none`).
+fn apply_mcp(
+    wiring: &McpWiring,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Vec<&'static str>, SetupError> {
+    let plans = match wiring {
+        McpWiring::Skipped(line) => {
+            writeln!(out, "{line}")?;
+            return Ok(Vec::new());
+        }
+        McpWiring::Planned(plans) => plans,
+    };
+
+    // Everything `plan_mcp` let through gets written: Create, Merge,
+    // AlreadyWired (a no-op that leaves the block in place), and — under
+    // `--force` — a resolved Conflict. All four leave the file wired.
     let mut wired = Vec::with_capacity(plans.len());
-    for planned in &plans {
+    for planned in plans {
         if let Err(e) = setup_mcp::apply(planned) {
             return Err(report_mcp_error(e, err)?);
         }
@@ -1235,6 +1276,7 @@ fn record_first_lesson(
     project_root: &Path,
     daemon_home: &Path,
     sentence: &str,
+    launcher: Launcher,
 ) -> Result<RecordedLesson, String> {
     let redaction = dreamd_core::config::load_config(project_root)
         .map(|config| config.redaction)
@@ -1243,8 +1285,8 @@ fn record_first_lesson(
     if stored.trim().is_empty() {
         return Err("the sentence was empty after redaction".to_string());
     }
-    let event_id = if open_daemon_store(daemon_home, project_root).is_some() {
-        append_via_daemon(daemon_home, project_root, &stored)?
+    let event_id = if open_daemon_store(daemon_home, project_root, launcher).is_some() {
+        append_via_daemon(daemon_home, project_root, &stored, launcher)?
     } else {
         append_in_process(project_root, &stored)?
     };
@@ -1261,8 +1303,7 @@ fn learning_for(stored: &str) -> Result<dreamd_protocol::AgentLearning, String> 
         FIRST_LESSON_SKILL,
         None,
         None,
-        // `stored` is already redacted. A second pass would be a no-op on
-        // ordinary text and a second mask on a value redaction already replaced.
+        // `stored` is already redacted, and `redact` is idempotent, so a second pass would change nothing.
         false,
     )
     .map_err(|e| e.to_string())
@@ -1315,8 +1356,9 @@ fn append_via_daemon(
     daemon_home: &Path,
     project_root: &Path,
     stored: &str,
+    launcher: Launcher,
 ) -> Result<String, String> {
-    let store = open_daemon_store(daemon_home, project_root)
+    let store = open_daemon_store(daemon_home, project_root, launcher)
         .ok_or_else(|| "daemon is not reachable".to_string())?;
     let req = dreamd_core::memory_store::AppendRequest {
         content: stored.to_string(),
@@ -1346,6 +1388,7 @@ fn append_via_daemon(
 fn open_daemon_store(
     daemon_home: &Path,
     project_root: &Path,
+    launcher: Launcher,
 ) -> Option<dreamd_core::memory_store::DaemonStore> {
     let header = std::fs::canonicalize(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf())
@@ -1358,7 +1401,9 @@ fn open_daemon_store(
         if !socket_is_live(&path) {
             return None;
         }
-        Some(dreamd_core::memory_store::DaemonStore::uds(path, header))
+        Some(dreamd_core::memory_store::DaemonStore::uds(
+            path, header, launcher,
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -1370,7 +1415,7 @@ fn open_daemon_store(
         let endpoint = dreamd_core::daemon_client::read_server_json(&server_json).ok()?;
         let token = dreamd_core::daemon_client::read_auth_token(&home.auth_json()).ok()?;
         Some(dreamd_core::memory_store::DaemonStore::tcp(
-            endpoint, token, header,
+            endpoint, token, header, launcher,
         ))
     }
 }

@@ -57,8 +57,7 @@ fn recall_to_json_excluding(
 /// # Responses
 /// * `200` — `{"results":[{"id","score","bm25","salience","source","content","metadata":{…}}]}`,
 ///   plus `"citations":[…]` when `explain=1`
-/// * `400` — `q` missing, `k` not an unsigned integer, or a `q` the query
-///   parser rejects (`recall failed: …`, BZR-1301)
+/// * `400` — `q` missing, or `k` not an unsigned integer
 /// * `414` — `q` over [`MAX_RECALL_QUERY_BYTES`] once decoded (BZR-1301)
 /// * `500` — the index could not be opened or searched
 pub(crate) async fn get_recall(
@@ -136,11 +135,6 @@ pub(crate) async fn get_recall(
             json,
         )
             .into_response(),
-        // tantivy turns every query-parser error into `InvalidArgument`: the
-        // caller's mistake, so a 400 the MCP client forwards (BZR-1301 D1).
-        Err(e @ tantivy::TantivyError::InvalidArgument(_)) => {
-            error_400(&format!("recall failed: {e}"))
-        }
         Err(e) => error_500(&format!("recall failed: {e}")),
     }
 }

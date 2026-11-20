@@ -18,6 +18,55 @@ pub enum LearnValidationError {
     ImportanceOutOfRange,
 }
 
+/// What an omitted MCP score becomes. HTTP has no default: both scores are
+/// required there.
+pub const DEFAULT_SCORE: f64 = 5.0;
+
+/// The one wire body of `POST /api/v1/learn`. The daemon deserializes it in
+/// `post_learn`, and the daemon-mode MCP client serializes it in
+/// `memory_store::build_learn_request`, so the two cannot disagree on a field
+/// (DRM-104).
+///
+/// Deliberately not the domain [`AgentLearning`]: `id`, `schema_version`, and
+/// `timestamp` are daemon-owned (minted and stamped in `coordinator.rs` on every
+/// durable write), but `AgentLearning` is also the *disk* record, where `id` is
+/// authoritative and must keep parsing strictly (`episodic.rs`). One
+/// `Deserialize` impl cannot serve both surfaces, so the wire gets its own type
+/// rather than the protocol struct gaining a `skip_deserializing` that would
+/// weaken the disk read. AILAB-175.
+///
+/// No `deny_unknown_fields`: a client that still sends `id` (older doc
+/// examples did) has it **ignored, not rejected**, and serde's default
+/// ignore-unknown gives that for free.
+///
+/// `pain` and `importance` are `f64`, so a score is checked as sent. The
+/// record stores the nearest `f32`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LearnRequest {
+    /// 0.0..=10.0 subjective friction. Required on HTTP, which has never
+    /// defaulted it.
+    pub pain: f64,
+    /// 0.0..=10.0 long-term relevance. Required, same reasoning as `pain`.
+    pub importance: f64,
+    /// Sticky flag, with a serde default matching `AgentLearning::pinned`.
+    /// Client-settable and preserved.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Clustering key; validated and normalized at ingress.
+    pub skill_action: String,
+    /// Provenance tag, e.g. `"cursor"`, `"claude-code"`.
+    pub source_harness: String,
+    /// Free-text body; redacted at ingress, 4 KiB cap enforced downstream.
+    pub content: String,
+    /// Optional retry key (DRM-106). A second append with the same key and
+    /// the same learning answers the first write's id without a second
+    /// write; the same key with a different learning is a new record. Any
+    /// characters are allowed. Daemon-mode MCP sends it here; an HTTP client
+    /// may send it here or in `X-Client-Dedup-Key`.
+    #[serde(default)]
+    pub client_dedup_key: Option<String>,
+}
+
 /// Shared learn ingress: validate, redact, and map inbound payloads before the
 /// coordinator receives them.
 pub struct LearnIngress;
@@ -70,21 +119,14 @@ impl LearnIngress {
         Ok(())
     }
 
-    /// Validate, normalize, and redact an inbound HTTP [`AgentLearning`].
-    pub fn prepare_agent_learning(
-        learning: &mut AgentLearning,
-        redaction_enabled: bool,
-    ) -> Result<(), LearnValidationError> {
-        let skill_action = Self::validate_skill_action(&learning.skill_action)?;
-        learning.skill_action = skill_action.into_string();
-        Self::validate_pain(learning.pain)?;
-        Self::validate_importance(learning.importance)?;
-        learning.content = redact(&learning.content, redaction_enabled);
-        Ok(())
-    }
-
-    /// Build an [`AgentLearning`] from MCP append params; omitted scores become
-    /// `5.0` (see [`Self::placeholder_learning`]).
+    /// The one ingress function: every append goes through it once, in the
+    /// process that owns the store. In-process MCP calls it from
+    /// `InProcessStore::append`, and the daemon from `post_learn` for HTTP
+    /// and daemon-mode MCP alike (DRM-104).
+    ///
+    /// It checks `skill_action`, then `pain`, then `importance`, and then
+    /// redacts `content`; the first failure is the answer. Omitted scores
+    /// become [`DEFAULT_SCORE`] (see [`Self::placeholder_learning`]).
     ///
     /// The placeholder `id` is overwritten by the coordinator on persist.
     pub fn build_agent_learning(
@@ -114,11 +156,9 @@ impl LearnIngress {
     /// `false`. The coordinator overwrites `id`, `timestamp`, and
     /// `schema_version` on durable write.
     ///
-    /// Performs no validation or redaction. [`Self::build_agent_learning`]
-    /// validates first. The daemon proxy (`memory_store::build_learn_request`)
-    /// checks `pain` and `importance` itself, because the `f32` cast below
-    /// loses the caller's value, and forwards `skill_action` and `content` raw
-    /// for the daemon's own ingress to check (BZR-1301).
+    /// Performs no validation or redaction: [`Self::build_agent_learning`]
+    /// checks first, so the `f32` cast below only stores a score already
+    /// checked as `f64`.
     pub fn placeholder_learning(
         content: &str,
         source_harness: &str,
@@ -131,8 +171,8 @@ impl LearnIngress {
             id: EventId::parse("evt_00000000000000000000000000")
                 .expect("static placeholder EventId is valid"),
             timestamp: chrono::Utc::now(),
-            pain: pain.unwrap_or(5.0) as f32,
-            importance: importance.unwrap_or(5.0) as f32,
+            pain: pain.unwrap_or(DEFAULT_SCORE) as f32,
+            importance: importance.unwrap_or(DEFAULT_SCORE) as f32,
             pinned: false,
             skill_action: skill_action.to_owned(),
             source_harness: source_harness.to_owned(),
@@ -185,33 +225,13 @@ mod tests {
         );
     }
 
+    /// DRM-104: the redaction case of the removed `prepare_agent_learning`
+    /// tests, through the one ingress function alone.
     #[test]
-    fn prepare_agent_learning_redacts_content() {
+    fn build_agent_learning_redacts_content() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let mut learning = AgentLearning {
-            schema_version: RECORD_SCHEMA_VERSION.to_string(),
-            id: EventId::parse("evt_00000000000000000000000000").unwrap(),
-            timestamp: chrono::Utc::now(),
-            pain: 5.0,
-            importance: 5.0,
-            pinned: false,
-            skill_action: "rust::test".to_string(),
-            source_harness: "test".to_string(),
-            content: format!("key is {secret}"),
-        };
-
-        LearnIngress::prepare_agent_learning(&mut learning, true).expect("prepare ok");
-        assert!(!learning.content.contains(secret));
-        assert!(learning.content.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn build_agent_learning_matches_prepare_redaction() {
-        let secret = "AKIAIOSFODNN7EXAMPLE";
-        let content = format!("key is {secret}");
-
         let built = LearnIngress::build_agent_learning(
-            &content,
+            &format!("key is {secret}"),
             "test-harness",
             "rust::test",
             None,
@@ -220,22 +240,10 @@ mod tests {
         )
         .expect("build ok");
 
-        let mut prepared = AgentLearning {
-            schema_version: RECORD_SCHEMA_VERSION.to_string(),
-            id: EventId::parse("evt_00000000000000000000000000").unwrap(),
-            timestamp: chrono::Utc::now(),
-            pain: 5.0,
-            importance: 5.0,
-            pinned: false,
-            skill_action: "rust::test".to_string(),
-            source_harness: "test-harness".to_string(),
-            content: content.clone(),
-        };
-        LearnIngress::prepare_agent_learning(&mut prepared, true).expect("prepare ok");
-
-        assert_eq!(built.content, prepared.content);
-        assert_eq!(built.skill_action, prepared.skill_action);
-        assert_eq!(built.pain, prepared.pain);
-        assert_eq!(built.importance, prepared.importance);
+        assert!(!built.content.contains(secret));
+        assert!(built.content.contains("[REDACTED]"));
+        assert_eq!(built.skill_action, "rust::test");
+        assert_eq!(built.pain, DEFAULT_SCORE as f32);
+        assert_eq!(built.importance, DEFAULT_SCORE as f32);
     }
 }

@@ -1,6 +1,6 @@
 # Configuration reference
 
-dreamd loads runtime configuration from layered TOML files. Missing files are silently skipped; malformed TOML is a parse error at startup (`dreamd watch: config load: config parse error: …`, exit 1).
+dreamd loads runtime configuration from layered TOML files. Missing files are silently skipped. Malformed TOML stops `dreamd watch`, `dreamd mcp`, `dreamd doctor` and `dreamd dream` at start with exit 1 (for `watch`: `dreamd watch: config load: config parse error: …`), and fails an append made after the file went bad; see [When dreamd reads a project's config](#when-dreamd-reads-a-projects-config).
 
 **Canonical source:** `crates/dreamd-core/src/config.rs`
 
@@ -15,6 +15,17 @@ Later layers override earlier ones:
 3. **Project config** — `<project>/.agent/.dreamd/config.toml`
 
 `dreamd init` writes a commented template to the project config path. Uncomment keys to override.
+
+---
+
+## When dreamd reads a project's config
+
+- `dreamd watch` reads the config of the project it starts in once, at start, for the `dream_cycle_mode = "auto"` refusal.
+- The daemon reads each project's own config on every append (`POST /api/v1/learn`, and `append_node` through it). An edit to `redaction` applies to the next append, with no restart. In-process `dreamd mcp` does the same.
+- The dream cycle reads the project's config when the cycle starts.
+- `dreamd doctor`, `dreamd dream` and `dreamd mcp` read the config of the store they find from the working directory (or from `--project-root`), never the working directory's own. From `<project>/src` they read `<project>/.agent/.dreamd/config.toml`.
+- A malformed file stops `watch`, `mcp`, `doctor` and `dream` at start, with exit 1.
+- An append made after the file goes bad writes nothing. Over MCP it answers `-32600` with `config load failed: …`; over HTTP it is `500` with `{"error":"config load failed: …"}`.
 
 ---
 
@@ -36,7 +47,7 @@ This is the exact template written by `dreamd init` (`CONFIG_TEMPLATE`):
 ```toml
 # dreamd config — all keys optional. Precedence: this file > ~/.config/dreamd/config.toml > built-in defaults.
 
-# redaction = true              # redact secrets/PII on POST /api/v1/learn
+# redaction = true              # redact known secret shapes on every append
 # log_level = "info"            # parsed but unused; logs follow the DREAMD_LOG env var
 # dream_cycle_mode = "manual"   # "manual" | "auto" — manual only; auto is rejected
 
@@ -65,7 +76,43 @@ A fully commented project config parses successfully and yields built-in default
 
 ### `redaction`
 
-When enabled (default), content passed to `POST /api/v1/learn` (or to MCP `append_node`) is scanned for a narrow set of high-confidence secret patterns — AWS access key ids (`AKIA…`), `Bearer <token>`, `sk-…` / `sk-ant-…` API keys, and `API_KEY=` / `SECRET=` / `TOKEN=` / `PASSWORD=` style assignments — and each match is replaced with `[REDACTED]` before append. There is no per-request opt-out — only this config flag controls redaction.
+While `redaction` is `true` (the default), every append (MCP `append_node` in process or through the daemon, and `POST /api/v1/learn`) replaces the secret shapes below in `content` with `[REDACTED]` before the record is written. There is no per-request opt-out; only this setting controls it.
+
+The patterns run in this order:
+
+| # | Shape | What matches | Replaced | Example | Stored as |
+|---|---|---|---|---|---|
+| 1 | PEM private key | `-----BEGIN … PRIVATE KEY-----` through its `-----END … PRIVATE KEY-----` line, or to the end of the content when that line is missing | whole block | `pasted -----BEGIN RSA PRIVATE KEY----- MIIEFAKEFAKE truncated` | `pasted [REDACTED]` |
+| 2 | URL password | `scheme://user:password@` | the password | `DATABASE_URL=postgres://admin:fakedbpass@db.invalid/app` | `DATABASE_URL=postgres://admin:[REDACTED]@db.invalid/app` |
+| 3 | JSON Web Token | `eyJ…` `.` `eyJ…` `.` signature | whole | `jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.ZmFrZXNpZ2` | `jwt [REDACTED]` |
+| 4 | Anthropic key | `sk-ant-` and 10 or more letters, digits, `_` or `-` | whole | `key=sk-ant-api03-abc123` | `key=[REDACTED]` |
+| 5 | OpenAI and other `sk-` keys | `sk-` and 20 or more letters, digits, `_` or `-`, so `sk-proj-`, `sk-admin-` and `sk-svcacct-` keys too | whole | `openai project key sk-proj-FAKEfake_1234567890-abcdefghijklmnopqrst` | `openai project key [REDACTED]` |
+| 6 | Stripe live key | `sk_live_` or `rk_live_` and 10 or more letters or digits | whole | `stripe sk_live_FAKEfake12` | `stripe [REDACTED]` |
+| 7 | GitHub token | `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_` and 36 or more letters or digits | whole | `pushed with ghp_FAKEfakeFAKEfakeFAKEfakeFAKEfake1234` | `pushed with [REDACTED]` |
+| 8 | GitHub fine-grained token | `github_pat_` and 22 or more letters, digits or `_` | whole | `github_pat_11FAKEFAKE0fakefakefake_FAKEfakeFAKEfake` | `[REDACTED]` |
+| 9 | Slack token | `xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-` or `xoxr-` and 10 or more letters, digits or `-` | whole | `bot token xoxb-FAKE-fake-FAKEfake` | `bot token [REDACTED]` |
+| 10 | npm token | `npm_` and 20 or more letters or digits | whole | `//registry.npmjs.org/:_authToken=npm_FAKEfakeFAKEfakeFAKEfake1234` | `//registry.npmjs.org/:_authToken=[REDACTED]` |
+| 11 | Google API key | `AIza` and 30 or more letters, digits, `_` or `-` | whole | `maps key AIzaFAKEfakeFAKEfakeFAKEfakeFAKEfa` | `maps key [REDACTED]` |
+| 12 | AWS access key id | `AKIA` or `ASIA` and 16 uppercase letters or digits | whole | `aws temp key ASIAFAKEFAKEFAKE5678` | `aws temp key [REDACTED]` |
+| 13 | Bearer token | `Bearer` in any case, then a token of letters, digits and `. _ ~ + / = -` | the token, if it looks like a credential | `Authorization: Bearer ZmFrZS1zZWNyZXQ+ZXQ/dG9rZW4=` | `Authorization: Bearer [REDACTED]` |
+| 14 | Secret-named assignment | a name that ends in `password`, `passwd`, `secret`, `token`, `api_key`, `secret_key`, `access_key` or `private_key` (any case; `_`, `-` or nothing between the two words), an optional closing quote, `=` or `:`, then a quoted string or a run without spaces | the value, by the rules below | `{"api_key": "fakejsonkey789"}` | `{"api_key": "[REDACTED]"}` |
+
+Shapes 2 to 11 and 13 to 14 start at a word boundary, so `task-based-approach` is not an `sk-` key and `NO_VAULT_TOKEN=1` is read as the name `NO_VAULT_TOKEN`. Shape 14's name must end in the secret word, so `TOKENIZER=cl100k_base` and `max_tokens: 1024` do not match.
+
+For shapes 2, 13 and 14 only the value is replaced; the name, the separator and any quotes stay. An assignment's value is handled like this:
+
+- **Always kept:** an empty value, a number made only of digits, `true`, `false`, `yes`, `no`, `on`, `off`, `null` or `none` in any case, a value that is already `[REDACTED]`, and a variable reference such as `$OPENAI_API_KEY` or `${NPM_TOKEN}`. So `MAX_TOKEN=4096` and `USE_TOKEN=true` stay.
+- **Quoted:** otherwise replaced inside its quotes: `PASSWORD="fake pass phrase here"` becomes `PASSWORD="[REDACTED]"`.
+- **Unquoted, after a bare `=`** (`NAME=value`): replaced. `SECRET=hunter2` becomes `SECRET=[REDACTED]`.
+- **Unquoted, after `:` or an `=` with spaces** (YAML, headers, code): replaced only if it looks like a credential, the same test a bearer token gets. It needs 8 or more characters with at least one letter, and also a digit, `+`, `/` or `=`, or 32 or more characters. So `token: fakeyamltoken321` is replaced, and `secret: keep the cache warm`, `token = get_token()` and `Bearer authentication` stay.
+
+Limits:
+
+- A secret in a shape the table does not list is stored as written.
+- An unquoted value after `:` or an `=` with spaces is kept unless it looks like a credential (8 or more characters with a letter, plus a digit, `+`, `/` or `=`, or 32 or more characters).
+- Records stored before 1.3.3, or while `redaction` was off, are not changed.
+
+While `redaction` is on, `dreamd doctor` runs the same patterns over the stored log. For each record that matches, it prints the record's line and id under `stored_secrets: N record(s)`, and fails the run. It never prints the content and changes nothing. Check each record, and remove one with `dreamd forget <id>`; see [troubleshooting](./troubleshooting.md#stored_secrets-n-records-).
 
 To disable for local development:
 

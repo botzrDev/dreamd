@@ -8,7 +8,7 @@ mod learn;
 mod recall;
 pub mod wire;
 
-pub use learn::{LearnIngress, LearnValidationError};
+pub use learn::{LearnIngress, LearnRequest, LearnValidationError, DEFAULT_SCORE};
 pub use recall::RecallIngress;
 pub use wire::{
     query_too_long_message, CitationJson, LearnResponse, RecallMeta, RecallParams, RecallResponse,

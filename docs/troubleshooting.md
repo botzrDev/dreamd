@@ -81,6 +81,8 @@ npx -y dreamd-mcp doctor       # verify store health
 
 Check MCP stderr for `dreamd mcp: daemon reachable at … — serving Remote (daemon proxy)`. If no daemon is running there is no default-stderr fallback line; `DREAMD_LOG=debug` logs `daemon not found … running in-process`.
 
+Running `dreamd mcp` or `npx -y dreamd-mcp` by hand starts the stdio server, which waits for a harness. On a terminal it prints `dreamd mcp: MCP server on stdio, waiting for a harness. …` to stderr and serves until Ctrl-C. To connect a harness, run `dreamd setup` (or `npx -y dreamd-mcp setup`).
+
 **Prevention:** Run `npx -y dreamd-mcp init` (or `dreamd init`) before first MCP session. For multi-agent setups, start `npx -y dreamd-mcp watch` once per user login.
 
 ---
@@ -275,6 +277,8 @@ dreamd init
 
 For Cursor global MCP config, pass `--project-root /absolute/path/to/project` (see [adapters/cursor/README.md](../adapters/cursor/README.md)).
 
+That folder must hold `.agent/` itself; a subfolder does not count. A relative path is taken from the working directory the harness starts `dreamd mcp` in, and `~` is not expanded in an MCP config, so write the full path. Otherwise `dreamd mcp` exits 2 and says why.
+
 **Prevention:** Run `dreamd init` once per repo; commit `.agent/` (except `.agent/.dreamd/` which is gitignored). After `dreamd setup` (or `init`) in a folder your harness already had open, restart its MCP server: one that started with no store keeps answering "not set up" until it starts again.
 
 ---
@@ -369,6 +373,14 @@ The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNING
 
 **Fix:** Set `timestamp` to when the learning happened, in RFC 3339 UTC (for example `2026-10-31T09:30:00Z`), then rebuild the index as above. Doctor flags a timestamp more than 24 hours ahead of this machine's clock; if it flags every recent line, check the clock first.
 
+### `stored_secrets: N record(s) …`
+
+The lines after it name one record each, as `line N: evt_…`. Doctor lists every record that matches, not the first five, and prints none of their content. The check runs only while `redaction` is on.
+
+**What the reader does:** Nothing different. The content is stored, indexed and recalled as written. A record is listed when a redaction pattern matches its content: it was stored before dreamd caught that shape, or while `redaction` was off. Doctor lists both kinds.
+
+**Fix:** Check each line doctor names, for example with `sed -n '12p' .agent/episodic/AGENT_LEARNINGS.jsonl`. If it holds a secret, `dreamd forget <id>` removes the record from the log, the index, and any lesson it is the exemplar of. `forget` refuses while a daemon is live, so stop `dreamd watch` first. A log you committed keeps the secret in git history, so rotate the secret as well. If the match is not a secret, set `redaction = false` in the project's config ([configuration.md](./configuration.md#redaction)), which also turns this check off.
+
 ### `registry: parse error at line N`
 
 **Symptom:** Besides the doctor line, `dreamd status` prints `(not registered)` for a project you registered, and the daemon answers every request with `500 {"error":"registry read failed"}`. `dreamd mcp` in daemon mode reports that as `daemon error 500 Internal Server Error: {"error":"registry read failed"}`. `registry: error  [WARNING: could not read …]` is the same failure for a file that is not UTF-8 or cannot be read.
@@ -378,6 +390,28 @@ The index keeps the values it indexed, so after fixing a line in `AGENT_LEARNING
 **Fix:** Edit the line doctor names. Each entry is a `[[projects]]` line followed by `root = "/absolute/path/to/project"`. Or delete `~/.agent/registry.toml` and run `dreamd init` in each project; `init` registers an existing `.agent/` without changing it. The daemon reads the fixed file on its next request; no restart is needed.
 
 **Prevention:** Write learnings through `append_node` or `POST /api/v1/learn`, and change the registry with `dreamd init` and `dreamd init --uninstall-project`.
+
+---
+
+## A clone or a worktree
+
+A clone or a `git worktree` of a project has the committed memory, but not what git leaves out. [GUIDE §9](../GUIDE.md#9-clones-and-worktrees) says what is shared and what each checkout keeps.
+
+### `the store in … is not registered with the running daemon`
+
+**Symptom:** With `dreamd watch` running, both MCP tools answer `-32600` `` the store in <folder> is not registered with the running daemon. Run `dreamd init` in <folder> once: it registers the existing store without changing its files (a clone or a worktree is not registered until then), and the next call works without a restart. `` Under the npm shim the command it names is `npx -y dreamd-mcp init`. Over HTTP the same request is `404 {"error":"agent root not registered"}`.
+
+**Cause:** The daemon serves only the stores in `~/.agent/registry.toml`. A fresh clone or worktree is a new path, so it is not registered until `init` runs there.
+
+**Fix:** Run the command the message names, in the folder it names. `init` registers the existing store, re-creates the folders git does not keep, and changes no file. The daemon reads the registry again when it changes, so the next call works without restarting the daemon or the MCP server.
+
+### ``missing_subdir: …  [WARNING: run `dreamd init` to re-scaffold]``
+
+**Symptom:** `dreamd doctor` prints `missing_subdir: personal/` (or `semantic/`, `working/`, `episodic/`, `.dreamd/`) and exits 1, typically in a fresh clone or worktree.
+
+**Cause:** Git keeps no empty folder and ignores `.agent/.dreamd/`, so a clone has no `personal/`, no `.dreamd/`, and no `semantic/` until a dream cycle has written `LESSONS.md`.
+
+**Fix:** Run `dreamd init` in the project. On an existing store it re-creates each missing folder and prints `dreamd: re-created missing .agent/ folders: …`. It creates no file: a missing `episodic/AGENT_LEARNINGS.jsonl` stays missing (see [`git clean -fd` deleted the episodic log](#git-clean--fd-deleted-the-episodic-log)), and the project's `config.toml` stays missing, so the user config and the defaults apply. If a scaffold path is a file rather than a folder, `init` prints `dreamd: error — .agent/<name> is not a directory`, exits 1 and writes nothing; move that file away and run `init` again.
 
 ---
 

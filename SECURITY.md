@@ -85,7 +85,7 @@ Passing `dreamd dream --share-personal` — or sending `x-dreamd-share-personal:
 
 `GET /api/v1/preferences` is unaffected — it serves `PREFERENCES.md` to the local agent over the UDS and is not an LLM call.
 
-On every append — `POST /api/v1/learn` and MCP `append_node` alike — a pattern scrubber runs over `content` **before persistence** (on by default; disable with `redaction = false` in config). It replaces AWS access key ids (`AKIA…`), `Bearer <token>` values, `sk-…` / `sk-ant-…` keys, and `API_KEY=` / `SECRET=` / `TOKEN=` / `PASSWORD=` / `AWS_SECRET_ACCESS_KEY=` assignments with `[REDACTED]` — logging `redaction_hits` but not rejecting the request. It is a fixed pattern list, not a guarantee: a secret in any other shape is stored as written.
+On every append — `POST /api/v1/learn` and MCP `append_node` alike — a pattern scrubber runs over `content` **before persistence** (on by default; disable with `redaction = false` in config). It replaces the secret shapes listed in [configuration.md](docs/configuration.md#redaction) with `[REDACTED]` — logging `redaction_hits` but not rejecting the request. `dreamd doctor` lists the stored records that match, by line and event id. It is a fixed pattern list, not a guarantee: a secret in any other shape is stored as written.
 
 ## Untrusted-input caps
 

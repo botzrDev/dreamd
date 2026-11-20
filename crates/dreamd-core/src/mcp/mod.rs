@@ -40,6 +40,7 @@
 //! before any backend is chosen. `--bind` is not a way around "proxy or
 //! refuse": off Unix it still needs a live daemon.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -161,7 +162,7 @@ impl McpRunError {
 /// `not(unix)`); `tool_attr_descriptions_match_description_consts` asserts the
 /// generated `Tool.description` equals this const so the copies cannot drift.
 #[allow(dead_code)] // referenced by the drift test; the attributes need literals
-const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed.";
+const SEARCH_NODES_DESCRIPTION: &str = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass the user's request or a few words from it. Any text works: punctuation, code and paths are split into words, and quotes, colons, AND/OR, + and - are not operators. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed.";
 
 /// Companion to [`SEARCH_NODES_DESCRIPTION`] for the `append_node` tool. Names
 /// the real write target: `append_node` appends an episodic event to
@@ -193,8 +194,10 @@ pub struct AppendNodeParams {
     pub pain: Option<f64>,
     /// Importance score 0–10: how broadly applicable is this?
     pub importance: Option<f64>,
-    /// Optional idempotency key. Duplicate calls with the same key return the
-    /// cached id without a second write. An empty key counts as no key.
+    /// Optional retry key. A second call with the same key and the same learning
+    /// returns the first call's id without a second write; the same key with a
+    /// different learning is stored as a new record. An empty key counts as no
+    /// key. Keys are forgotten when the server restarts.
     pub client_dedup_key: Option<String>,
 }
 
@@ -327,11 +330,16 @@ impl MemoryMcpServer {
     /// Create a daemon-backed server: tool calls are proxied to the running
     /// daemon over HTTP-over-UDS ([`DaemonStore::uds`]). `agent_root_header`
     /// must be the canonicalized project-root string (see `run_mcp_server`).
+    /// A `404` names this process's launcher's `init` command (DRM-107).
     #[cfg(unix)]
     pub fn with_remote(sock_path: PathBuf, agent_root_header: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            store: Arc::new(DaemonStore::uds(sock_path, agent_root_header)),
+            store: Arc::new(DaemonStore::uds(
+                sock_path,
+                agent_root_header,
+                crate::launcher::Launcher::from_env(),
+            )),
             #[cfg(test)]
             index_map: new_index_map(),
         }
@@ -370,7 +378,12 @@ impl MemoryMcpServer {
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            store: Arc::new(DaemonStore::tcp(endpoint, token, agent_root_header)),
+            store: Arc::new(DaemonStore::tcp(
+                endpoint,
+                token,
+                agent_root_header,
+                crate::launcher::Launcher::from_env(),
+            )),
         }
     }
 
@@ -391,7 +404,7 @@ impl MemoryMcpServer {
     /// never opens an index per call (WEG-252).
     #[cfg(unix)]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass the user's request or a few words from it. Any text works: punctuation, code and paths are split into words, and quotes, colons, AND/OR, + and - are not operators. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -419,7 +432,7 @@ impl MemoryMcpServer {
     /// above and to [`SEARCH_NODES_DESCRIPTION`].
     #[cfg(not(unix))]
     #[tool(
-        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass plain words from the user's request: a colon is query syntax, and a skill_action pasted as the query fails. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
+        description = "Search memory (events + lessons) at the start of the current task -- use when: the user's request, recall, did we discuss, what did we decide, previously decided. Hits mix raw events (source=episodic, recent/specific) and consolidated lessons (source=semantic, recurring patterns), ranked together by BM25 × salience. There is no layer argument. Each hit has an id: an evt_ id for an event, an lsn_ id for a lesson. Factor citations are on GET /api/v1/recall?explain=1 only; this tool does not take explain. Pass the user's request or a few words from it. Any text works: punctuation, code and paths are split into words, and quotes, colons, AND/OR, + and - are not operators. Every memory saved with append_node before the search is included, unless indexing it takes more than one second; then the search answers from what is already indexed."
     )]
     async fn search_nodes(
         &self,
@@ -479,7 +492,7 @@ WHEN TO CALL search_nodes
 - At the start of the current task, with the user's request as the query
 - Session start on any domain you have worked in before (language, framework, project area)
 - Before reasoning from scratch on a topic; you may already have a relevant note
-- Use 2-4 keywords matching the current task
+- Any text works: the user's own words, code, paths; nothing is query syntax
 - Hits may be raw events (source=episodic) or consolidated lessons (source=semantic); there is no layer filter
 - If a hit overlaps the task, quote one line and its id. If the search is empty, say nothing about memory
 
@@ -500,8 +513,10 @@ SCORES (0-10)
 - Call GET /api/v1/preferences at session start to read per-user thresholds
 
 client_dedup_key
-- Set when the same learning could be written twice in a session
-- Use a stable slug: "session:YYYY-MM-DD:skill.topic"
+- Optional, and only for retrying one write: resend the same key with the same arguments
+- A key matches one learning; the same key with different content is stored as a new record
+- Derive it from the content or use a per-attempt id; never one key per topic or per session
+- Keys are forgotten when the MCP server or the daemon restarts
 
 DO NOT STORE
 - Task status, progress notes, or ephemeral in-session state
@@ -738,6 +753,15 @@ pub async fn run_mcp_server(cwd: &Path, listen: Option<WatchListen>) -> Result<(
         .await
 }
 
+/// The line `dreamd mcp` writes to stderr when stdin is a terminal and the
+/// transport is stdio (DRM-151): a hand-run server otherwise looks hung.
+pub fn stdio_terminal_hint(launcher: crate::launcher::Launcher) -> String {
+    format!(
+        "dreamd mcp: MCP server on stdio, waiting for a harness. To connect Claude Code or Cursor, run `{}`. Ctrl-C quits.",
+        launcher.command("setup")
+    )
+}
+
 /// Which transport a [`run_mcp_server`] call serves its [`MemoryMcpServer`]
 /// over, decided (and, for HTTP, bound) before the backend is chosen.
 enum Transport {
@@ -779,9 +803,20 @@ impl Transport {
     ///
     /// In the stdio arm `svc.waiting()` must resolve on stdin EOF
     /// (`mcp_stdin_eof.rs`), so nothing wraps it.
+    ///
+    /// Every stdio path ends here, after its banner and mode line, so when
+    /// stdin is a terminal the [`stdio_terminal_hint`] line is the last one
+    /// before the server waits (DRM-151). It goes to stderr: stdout is
+    /// JSON-RPC only. `eprintln!` holds the stderr lock for that one line.
     async fn serve(self, server: MemoryMcpServer) -> Result<(), McpRunError> {
         match self {
             Transport::Stdio => {
+                if std::io::stdin().is_terminal() {
+                    eprintln!(
+                        "{}",
+                        stdio_terminal_hint(crate::launcher::Launcher::from_env())
+                    );
+                }
                 let svc = server
                     .serve(rmcp::transport::stdio())
                     .await
@@ -930,6 +965,83 @@ mod tests {
         assert!(
             instructions.contains("source=semantic"),
             "instructions must name source=semantic: {instructions}"
+        );
+    }
+
+    /// DRM-106 test 7: the instructions teach a key for retrying one write,
+    /// line for line, and no longer a per-topic slug.
+    #[test]
+    fn instructions_teach_a_retry_key() {
+        use rmcp::ServerHandler;
+
+        let instructions = MemoryMcpServer::new()
+            .get_info()
+            .instructions
+            .expect("server instructions present");
+        for want in [
+            "- Optional, and only for retrying one write: resend the same key with the same arguments",
+            "- A key matches one learning; the same key with different content is stored as a new record",
+            "- Derive it from the content or use a per-attempt id; never one key per topic or per session",
+            "- Keys are forgotten when the MCP server or the daemon restarts",
+        ] {
+            assert!(
+                instructions.lines().any(|line| line == want),
+                "missing the line {want:?}: {instructions}"
+            );
+        }
+        assert!(
+            !instructions.contains("stable slug"),
+            "no per-topic slug: {instructions}"
+        );
+    }
+
+    /// DRM-108 test 6: the `search_nodes` copy and the instructions name no
+    /// grammar: any text works, and nothing asks for a count of keywords.
+    #[test]
+    fn search_nodes_description_names_no_syntax() {
+        use rmcp::ServerHandler;
+
+        assert!(
+            SEARCH_NODES_DESCRIPTION.contains(
+                "Pass the user's request or a few words from it. Any text works: punctuation, \
+                 code and paths are split into words, and quotes, colons, AND/OR, + and - are \
+                 not operators."
+            ),
+            "{SEARCH_NODES_DESCRIPTION}"
+        );
+        for gone in ["query syntax", "a colon"] {
+            assert!(
+                !SEARCH_NODES_DESCRIPTION.contains(gone),
+                "{gone:?}: {SEARCH_NODES_DESCRIPTION}"
+            );
+        }
+        let instructions = MemoryMcpServer::new()
+            .get_info()
+            .instructions
+            .expect("server instructions present");
+        assert!(
+            instructions.lines().any(|line| line
+                == "- Any text works: the user's own words, code, paths; nothing is query syntax"),
+            "{instructions}"
+        );
+        assert!(!instructions.contains("2-4 keywords"), "{instructions}");
+    }
+
+    /// DRM-151 test 1: the terminal hint names the launcher's own `setup`
+    /// command, so a shim user is told the `npx` form.
+    #[test]
+    fn stdio_terminal_hint_names_the_launchers_setup() {
+        use crate::launcher::Launcher;
+
+        assert_eq!(
+            stdio_terminal_hint(Launcher::Binary),
+            "dreamd mcp: MCP server on stdio, waiting for a harness. To connect Claude Code or \
+             Cursor, run `dreamd setup`. Ctrl-C quits."
+        );
+        assert_eq!(
+            stdio_terminal_hint(Launcher::Npx),
+            "dreamd mcp: MCP server on stdio, waiting for a harness. To connect Claude Code or \
+             Cursor, run `npx -y dreamd-mcp setup`. Ctrl-C quits."
         );
     }
 
@@ -1531,9 +1643,11 @@ mod tests {
     }
 
     /// Unit: `build_learn_request` sets POST, `Content-Type: application/json`,
-    /// `X-Agent-Root`, `X-Client-Dedup-Key`, and a body that round-trips
-    /// through `AgentLearning`. `#[tokio::test]` only to collect the in-memory
-    /// body — there is no socket.
+    /// `X-Agent-Root`, and a body that round-trips through `LearnRequest`, the
+    /// type the daemon deserializes (DRM-104). The dedup key travels in the
+    /// body, not as `X-Client-Dedup-Key` (DRM-106).
+    /// `#[tokio::test]` only to collect the in-memory body — there is no
+    /// socket.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_build_learn_request_sets_correct_method_content_type_and_header() {
@@ -1561,19 +1675,20 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("/home/u/project")
         );
-        assert_eq!(
-            req.headers()
-                .get("x-client-dedup-key")
-                .and_then(|v| v.to_str().ok()),
-            Some("dedup-1")
+        assert!(
+            req.headers().get("x-client-dedup-key").is_none(),
+            "the key is not sent as a header"
         );
 
         let body = req.into_body().collect().await.expect("collect").to_bytes();
-        let parsed: AgentLearning =
-            serde_json::from_slice(&body).expect("body round-trips as AgentLearning");
+        let parsed: crate::ingress::LearnRequest =
+            serde_json::from_slice(&body).expect("body round-trips as LearnRequest");
+        assert_eq!(parsed.client_dedup_key, Some("dedup-1".to_string()));
         assert_eq!(parsed.skill_action, "rust::cargo::test");
         assert_eq!(parsed.source_harness, "claude-code");
         assert_eq!(parsed.content, "body content");
+        assert_eq!(parsed.pain, 7.0);
+        assert_eq!(parsed.importance, 8.0);
     }
 
     /// Spawn an in-process daemon over UDS for the daemon-store integration tests.
@@ -1586,7 +1701,6 @@ mod tests {
         sock_path: &std::path::Path,
         with_coordinator: bool,
     ) {
-        use crate::config::Config;
         use crate::server::uds_server::{bind_api_socket, serve_uds};
         use crate::server::{build_router, AppState, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 
@@ -1600,7 +1714,6 @@ mod tests {
         let state = AppState::new(
             registry_path,
             supervisor,
-            Config::default(),
             nix::unistd::Uid::current().as_raw(),
         );
         let router = build_router(state);
@@ -1833,10 +1946,9 @@ mod tests {
         );
     }
 
-    /// Integration: the daemon store checks `pain` before it sends, with the
-    /// same validator the in-process store and the daemon use, because the
-    /// `f32` cast would turn `1e40` into `null` (BZR-1301 test 16). Nothing is
-    /// persisted.
+    /// Integration: `1e40` goes over the wire as an `f64`, and the daemon's
+    /// one ingress call refuses it with the same message as in-process
+    /// (DRM-104; BZR-1301 test 16). Nothing is persisted.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_rejects_out_of_range_pain_via_daemon() {
@@ -1888,7 +2000,7 @@ mod tests {
     /// **must** redo the redaction the in-process path performs, so the secret
     /// never reaches disk. This is the redaction half of "the daemon redoes
     /// what `build_learn_request` skips"; `skill_action` is the sibling
-    /// rejection test above. Scores are checked before sending (BZR-1301).
+    /// rejection test above.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_append_redacts_content_via_daemon() {
@@ -1961,9 +2073,13 @@ mod tests {
             rmcp::model::ErrorCode::INVALID_REQUEST,
             "404 must map to invalid_request; got: {err:?}"
         );
+        // DRM-107: the message names this store and this process's `init`.
         assert_eq!(
             err.message,
-            "project not registered with daemon; run dreamd init"
+            crate::memory_store::not_registered_message(
+                &canonical.to_string_lossy(),
+                crate::launcher::Launcher::from_env(),
+            )
         );
     }
 
@@ -2004,15 +2120,19 @@ mod tests {
         }
     }
 
-    /// BZR-1301 test 22 (D1): a query the parser rejects is the caller's
-    /// mistake in daemon mode too: the daemon answers 400 and the caller gets
-    /// `-32602` with the same text the in-process store gives.
+    /// BZR-1301 test 22 (D1) asserted that a query the parser rejected was the
+    /// caller's mistake in daemon mode too: the daemon answered 400 and the
+    /// caller got `-32602` with the same text the in-process store gave.
+    /// DRM-108 changed the expectation: recall takes any text, so the same
+    /// query is `Ok` in daemon mode and in process, with the same ids in the
+    /// same order.
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_remote_search_nodes_parser_rejection_is_invalid_params() {
+    async fn test_remote_search_nodes_takes_a_skill_action_query() {
         let dir = tempfile::tempdir().expect("tempdir");
         let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let root = setup_agent_root(&canonical);
+        seed_rust_tokio_log(&root);
         let canonical_str = canonical.to_string_lossy().into_owned();
         let registry_path = canonical.join("registry.toml");
         let sock_path = canonical.join("daemon.sock");
@@ -2020,44 +2140,40 @@ mod tests {
         spawn_test_daemon(&root, registry_path, &sock_path, false).await;
 
         let server = MemoryMcpServer::with_remote(sock_path, canonical_str);
-        let err = server
+        let remote = server
             .search_nodes(Parameters(SearchNodesParams {
                 query: "rust::tokio".to_string(),
                 k: Some(3),
             }))
             .await
-            .expect_err("a skill_action pasted as the query is rejected");
-        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert_eq!(
-            serde_json::to_value(&err).expect("serialize")["code"],
-            -32602
-        );
-        assert!(
-            err.message.starts_with("recall failed: "),
-            "{}",
-            err.message
-        );
+            .expect("daemon mode takes a skill_action as the query");
 
         let other = tempfile::tempdir().expect("tempdir");
-        let in_process = MemoryMcpServer::with_agent_root(setup_agent_root(other.path()))
+        let other_root = setup_agent_root(other.path());
+        seed_rust_tokio_log(&other_root);
+        let local = MemoryMcpServer::with_agent_root(other_root)
             .search_nodes(Parameters(SearchNodesParams {
                 query: "rust::tokio".to_string(),
                 k: Some(3),
             }))
             .await
-            .expect_err("in-process rejects it too");
-        assert_eq!(err.message, in_process.message);
+            .expect("in process takes it too");
+        let ids = result_ids(&remote);
+        assert!(!ids.is_empty(), "the seeded events match rust::tokio");
+        assert_eq!(ids, result_ids(&local));
     }
 
-    /// BZR-1301 test 24 (Amendment 1 item 9): in-process, a query the parser
-    /// rejects is `-32602` too, with the text daemon mode gives for the same
-    /// query.
+    /// BZR-1301 test 24 (Amendment 1 item 9) asserted that, in process, a
+    /// query the parser rejected was `-32602` too, with the text daemon mode
+    /// gave for the same query. DRM-108 changed the expectation: both queries
+    /// are `Ok` in both modes, with the same ids in the same order.
     #[cfg(unix)]
     #[tokio::test]
-    async fn search_nodes_in_process_parser_rejection_is_invalid_params() {
+    async fn search_nodes_takes_former_parse_errors_in_both_modes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let root = setup_agent_root(&canonical);
+        seed_rust_tokio_log(&root);
         let canonical_str = canonical.to_string_lossy().into_owned();
         let registry_path = canonical.join("registry.toml");
         let sock_path = canonical.join("daemon.sock");
@@ -2066,7 +2182,9 @@ mod tests {
         let daemon = MemoryMcpServer::with_remote(sock_path, canonical_str);
 
         let other = tempfile::tempdir().expect("tempdir");
-        let in_process = MemoryMcpServer::with_agent_root(setup_agent_root(other.path()));
+        let other_root = setup_agent_root(other.path());
+        seed_rust_tokio_log(&other_root);
+        let in_process = MemoryMcpServer::with_agent_root(other_root);
 
         async fn search(server: &MemoryMcpServer, query: &str) -> Result<CallToolResult, McpError> {
             server
@@ -2080,29 +2198,62 @@ mod tests {
         for query in ["\"unbalanced", "rust::tokio"] {
             let local = search(&in_process, query)
                 .await
-                .expect_err("in-process rejects the query");
-            assert_eq!(
-                local.code,
-                rmcp::model::ErrorCode::INVALID_PARAMS,
-                "{query}"
-            );
-            assert_eq!(
-                serde_json::to_value(&local).expect("serialize")["code"],
-                -32602,
-                "{query}"
-            );
-            assert!(
-                local.message.starts_with("recall failed: "),
-                "{query}: {}",
-                local.message
-            );
-
+                .unwrap_or_else(|e| panic!("in process takes {query}: {e:?}"));
             let remote = search(&daemon, query)
                 .await
-                .expect_err("daemon rejects the query");
-            assert_eq!(remote.code, local.code, "{query}");
-            assert_eq!(remote.message, local.message, "{query}");
+                .unwrap_or_else(|e| panic!("daemon mode takes {query}: {e:?}"));
+            assert_eq!(result_ids(&remote), result_ids(&local), "{query}");
         }
+        let hits = search(&in_process, "rust::tokio").await.expect("search");
+        assert!(
+            !result_ids(&hits).is_empty(),
+            "rust::tokio matches the seeded events"
+        );
+    }
+
+    /// DRM-108: write the same two events, with fixed ids, to `root`'s log
+    /// before anything opens the store, so two stores answer with the same
+    /// ids. The first open's coverage pass indexes them. Both hold the phrase
+    /// `rust tokio`, which is what the one piece `rust::tokio` matches.
+    #[cfg(unix)]
+    fn seed_rust_tokio_log(root: &AgentRoot) {
+        use chrono::{DateTime, Utc};
+        for (suffix, content) in [
+            ('0', "rust tokio channel closed early"),
+            ('1', "the rust tokio runtime in the integration tests"),
+        ] {
+            let id = EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5FA{suffix}"))
+                .expect("valid event id");
+            append_to_log(
+                root,
+                &AgentLearning {
+                    schema_version: "1.0.0".to_string(),
+                    id,
+                    timestamp: DateTime::parse_from_rfc3339("2026-05-22T10:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    pain: 7.0,
+                    importance: 8.0,
+                    pinned: false,
+                    skill_action: "rust::tokio".to_string(),
+                    source_harness: "test-harness".to_string(),
+                    content: content.to_string(),
+                },
+            );
+        }
+    }
+
+    /// The `id` of each `search_nodes` hit, in order.
+    #[cfg(unix)]
+    fn result_ids(result: &CallToolResult) -> Vec<String> {
+        let json: serde_json::Value =
+            serde_json::from_str(&tool_text(result)).expect("results JSON");
+        json["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|hit| hit["id"].as_str().expect("hit id").to_owned())
+            .collect()
     }
 
     // ── BZR-1437: a search sees every append acked before it ─────────────────
@@ -2274,7 +2425,6 @@ mod tests {
         sock_path: &std::path::Path,
         cadence: std::time::Duration,
     ) -> Arc<TantivyIndexHandle> {
-        use crate::config::Config;
         use crate::server::uds_server::{bind_api_socket, serve_uds};
         use crate::server::{build_router, AppState, Supervisor, COORDINATOR_CHANNEL_CAPACITY};
 
@@ -2291,7 +2441,6 @@ mod tests {
         let state = AppState::new(
             registry_path,
             supervisor,
-            Config::default(),
             nix::unistd::Uid::current().as_raw(),
         )
         .with_primary(canonical, Arc::clone(&index));

@@ -30,7 +30,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Redact secrets/PII on `POST /api/v1/learn`. Default `true`.
+    /// Redact known secret shapes in `content` on every append. Default `true`.
     pub redaction: bool,
     /// Parsed and merged like any other key, but nothing reads it: the log
     /// filter is the `DREAMD_LOG` environment variable (default: dreamd's
@@ -112,7 +112,7 @@ Cycles run only when you invoke them.";
 pub const CONFIG_TEMPLATE: &str = "\
 # dreamd config — all keys optional. Precedence: this file > ~/.config/dreamd/config.toml > built-in defaults.
 
-# redaction = true              # redact secrets/PII on POST /api/v1/learn
+# redaction = true              # redact known secret shapes on every append
 # log_level = \"info\"            # parsed but unused; logs follow the DREAMD_LOG env var
 # dream_cycle_mode = \"manual\"   # \"manual\" | \"auto\" — manual only; auto is rejected
 

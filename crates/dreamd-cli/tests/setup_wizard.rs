@@ -346,6 +346,18 @@ fn skipped_wiring_card_omits_wired_rows_and_the_mcp_undo() {
     );
 }
 
+/// Append a malformed `\n`-terminated line to the project's log. Readers
+/// skip it and keep it, and `doctor` warns `episodic_log: 1 malformed
+/// line(s)`; nothing in `setup` repairs it.
+fn damage_the_log(project: &Path) {
+    let mut log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.join(".agent/episodic/AGENT_LEARNINGS.jsonl"))
+        .expect("open the log");
+    log.write_all(b"not a record\n")
+        .expect("append a malformed line");
+}
+
 /// `doctor` runs as an advisory beat: whichever verdict it reaches, `setup`
 /// still exits 0.
 ///
@@ -353,10 +365,10 @@ fn skipped_wiring_card_omits_wired_rows_and_the_mcp_undo() {
 /// scaffold passes every check, so a single run only ever observes
 /// `doctor: all checks passed` — and would go on passing if `Ok(false)` were
 /// wired to a nonzero exit. Between the two runs the store is damaged by
-/// removing the scaffolded `.agent/working/`, which `doctor`'s `check_subdirs`
-/// reports as `missing_subdir: working/`. `init` is idempotent on the presence
-/// of `.agent/` itself, so the second `setup` does not silently re-scaffold the
-/// warning away.
+/// [`damage_the_log`], which `doctor` reports as `episodic_log: 1 malformed
+/// line(s)`. Neither `init` nor `setup` rewrites the log, so the second
+/// `setup` cannot repair the warning away (DRM-107: `init` now re-creates a
+/// missing scaffold folder, so removing one no longer damages the store).
 #[test]
 fn doctor_warnings_do_not_change_exit_code() {
     let (project, home) = project_and_home();
@@ -374,8 +386,7 @@ fn doctor_warnings_do_not_change_exit_code() {
         stdout_of(&clean)
     );
 
-    std::fs::remove_dir_all(project.path().join(".agent").join("working"))
-        .expect("remove the scaffolded working/ dir");
+    damage_the_log(project.path());
 
     let out = run_setup(
         project.path(),
@@ -546,8 +557,7 @@ fn doctor_warning_names_the_npx_doctor_command() {
         &["--yes", "--harness", "claude"],
     );
     assert_ok(&clean);
-    std::fs::remove_dir_all(project.path().join(".agent").join("working"))
-        .expect("remove the scaffolded working/ dir");
+    damage_the_log(project.path());
 
     let out = run_setup_with_env(
         project.path(),

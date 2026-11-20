@@ -344,26 +344,30 @@ fn mcp_with_no_store_names_the_launchers_setup_command() {
 }
 
 /// DRM-101 test 11 (LP-MCP-09, D4): with cwd `$HOME`, a literal
-/// `--project-root "~/realproject"` is a relative path whose walk ends in
-/// `./.agent`, the daemon home. The skip compares real directories, so both
-/// tools answer "not set up", naming `~/realproject`, and `$HOME` is
-/// unchanged.
+/// `--project-root "~/realproject"` is a relative path, and no shell expands
+/// its `~`. Under DRM-102 the flag must name a store folder, so `mcp` exits
+/// 2, says the `~` is not expanded, and `$HOME` is unchanged.
 #[test]
 fn mcp_tilde_project_root_does_not_reach_the_daemon_home() {
     let home = home_with_registry();
     std::fs::create_dir(home.path().join("realproject")).unwrap();
     let before = tree(home.path());
 
-    let mut cmd = dreamd(home.path(), home.path());
-    cmd.args(["mcp", "--project-root", "~/realproject"]);
-    let mut mcp = spawn_mcp(cmd);
-    for message in both_not_set_up(&mut mcp, TIMEOUT) {
-        assert!(
-            message.contains("store in ~/realproject or a folder above it"),
-            "{message}"
-        );
-    }
-    mcp.close();
+    let out = dreamd(home.path(), home.path())
+        .args(["mcp", "--project-root", "~/realproject"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run dreamd mcp");
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--project-root ~/realproject: no .agent/ store in"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("A leading ~ is not expanded here"),
+        "{stderr}"
+    );
 
     assert_eq!(tree(home.path()), before, "$HOME must be unchanged");
 }

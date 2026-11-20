@@ -19,10 +19,11 @@ use ordered_float::OrderedFloat;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
 use tantivy::query::{
-    AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery, TermSetQuery,
+    AllQuery, BooleanQuery, EmptyQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery,
+    TermSetQuery,
 };
 use tantivy::schema::{IndexRecordOption, TantivyDocument, Term, Value};
-use tantivy::{DocAddress, DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
+use tantivy::{DocAddress, DocId, Index, Score, SegmentOrdinal, SegmentReader, TantivyError};
 
 use crate::index::{Layer, SchemaFields, IMPORTANCE_FIELD, PAIN_FIELD, TIMESTAMP_SEC_FIELD};
 use crate::recurrence::{RecallReader, RecurrenceTables, SegmentRecurrence};
@@ -357,6 +358,9 @@ fn hydrate_addressed(
 
 /// Execute a salience-scored BM25 recall query.
 ///
+/// `query_text` is any text. `words_query` turns it into words, and no
+/// character in it is an operator, so no text is an error (DRM-108).
+///
 /// `now_sec` is caller-provided so tests stay deterministic: this function
 /// reads no clock.
 pub fn recall(
@@ -377,6 +381,9 @@ pub fn recall(
 }
 
 /// [`recall`] with counterfactual exclusion (BZR-194).
+///
+/// `query_text` is any text: the query is its `words_query`, and there is
+/// no grammar (DRM-108). The only errors are the index's own.
 ///
 /// A non-empty `exclusion` wraps the query in a [`BooleanQuery`]: the query as
 /// one `Must` clause, then `MustNot` clauses for the excluded ids (one
@@ -400,12 +407,15 @@ pub fn recall_excluding(
 ) -> tantivy::Result<Vec<RecallResult>> {
     let searcher = reader.searcher();
     let recurrence = reader.recurrence(&searcher)?;
-    let query_parser = QueryParser::for_index(searcher.index(), vec![fields.content]);
 
-    // One parsed query, the exclusion's `MustNot` clauses, and the salience
+    // One word query, the exclusion's `MustNot` clauses, and the salience
     // collector. The bag and every token search go through it.
     let search = |text: &str, limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
-        let final_query = exclude(query_parser.parse_query(text)?, fields, exclusion);
+        let final_query = exclude(
+            words_query(searcher.index(), fields, text)?,
+            fields,
+            exclusion,
+        );
         let collector = SalienceCollector::new(limit, now_sec, Arc::clone(&recurrence));
         let top_docs: Vec<ScoredDoc> = searcher.search(&*final_query, &collector)?;
         hydrate_addressed(&searcher, fields, top_docs)
@@ -413,6 +423,57 @@ pub fn recall_excluding(
 
     let bag = search(query_text, k)?;
     rank_missing_tokens(bag, query_text, k, search)
+}
+
+/// The query for any recall text (DRM-108), built as Tantivy's parser builds
+/// text that has no grammar, so a query that parsed before scores bit for bit
+/// as it did.
+///
+/// Split on whitespace. A piece that repeats an earlier piece byte for byte
+/// is dropped, as the parser did. Run each other piece through the content
+/// field's tokenizer: a piece with one token is a [`TermQuery`], a piece with
+/// several is a [`PhraseQuery`] with each term at its token's position (a
+/// token `RemoveLongFilter` drops keeps its gap), and a piece with none adds
+/// nothing. Every clause is `Should`, in input order; one clause is returned
+/// bare, and no clause at all is an [`EmptyQuery`].
+///
+/// No text is an error. The only error is the content field's tokenizer
+/// missing from the index, which no input causes.
+fn words_query(
+    index: &Index,
+    fields: &SchemaFields,
+    text: &str,
+) -> tantivy::Result<Box<dyn Query>> {
+    let mut analyzer = index.tokenizer_for_field(fields.content)?;
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for piece in text.split_whitespace() {
+        if pieces.contains(&piece) {
+            continue;
+        }
+        pieces.push(piece);
+        let mut terms: Vec<(usize, Term)> = Vec::new();
+        analyzer.token_stream(piece).process(&mut |token| {
+            terms.push((
+                token.position,
+                Term::from_field_text(fields.content, &token.text),
+            ));
+        });
+        let query: Box<dyn Query> = match terms.len() {
+            0 => continue,
+            1 => {
+                let (_, term) = terms.remove(0);
+                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+            }
+            _ => Box::new(PhraseQuery::new_with_offset(terms)),
+        };
+        clauses.push((Occur::Should, query));
+    }
+    Ok(match clauses.len() {
+        0 => Box::new(EmptyQuery),
+        1 => clauses.remove(0).1,
+        _ => Box::new(BooleanQuery::new(clauses)),
+    })
 }
 
 /// The query's tokens when it is plain: two or more whitespace-separated
@@ -612,6 +673,7 @@ mod tests {
     use super::*;
     use crate::index::build_schema;
     use tantivy::doc;
+    use tantivy::query::QueryParser;
     use tantivy::{Index, ReloadPolicy};
 
     const DAY_SECS: i64 = 86_400;
@@ -1398,5 +1460,398 @@ mod tests {
                 "one-off pain {one_off_pain}"
             );
         }
+    }
+
+    // ── DRM-108: recall takes plain words, not Tantivy's grammar ─────────────
+
+    /// Event A of [`WordsStore`]: `tokio runtime panics`.
+    const WORDS_A: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    /// Event B of [`WordsStore`]: `axum handler`.
+    const WORDS_B: &str = "evt_01ARZ3NDEKTSV4RRFFQ69G5FB1";
+
+    /// One fixed store for the DRM-108 tests: 20 events written to the
+    /// episodic log first, then indexed by the first open's coverage pass, as
+    /// every store is (AGENTS.md: the index is a function of the log). Fields
+    /// drop in order: the handle goes before its lock and the folder.
+    struct WordsStore {
+        handle: crate::server::tantivy_handle::TantivyIndexHandle,
+        _lock: crate::writer_lock::WriterLock,
+        fields: SchemaFields,
+        _dir: tempfile::TempDir,
+    }
+
+    impl WordsStore {
+        /// The 41-letter run between `foo_` and `_bar` that `RemoveLongFilter`
+        /// drops, leaving a position gap (Amendment 2).
+        fn long_word() -> String {
+            "a".repeat(41)
+        }
+
+        /// Write the log, then open the store. Call inside a tokio runtime:
+        /// the open starts the indexer task.
+        fn open() -> Self {
+            use crate::layout::AgentRoot;
+            use crate::server::tantivy_handle::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
+            use crate::writer_lock::{WriterKind, WriterLock};
+            use dreamd_protocol::{AgentLearning, EventId};
+
+            let gap = format!("foo_{}_bar appears in a generated name", Self::long_word());
+            // (id suffix, content, skill_action, days old, pain, importance)
+            let events: Vec<(&str, &str, &str, i64, f32, f32)> = vec![
+                ("B0", "tokio runtime panics", "rust::tokio", 1, 8.0, 8.0),
+                ("B1", "axum handler", "rust::axum", 1, 6.0, 6.0),
+                (
+                    "B2",
+                    "tokio scheduler starves the runtime under load",
+                    "rust::tokio",
+                    3,
+                    5.0,
+                    6.0,
+                ),
+                (
+                    "B3",
+                    "axum handler error returns a rejection",
+                    "rust::axum::error",
+                    2,
+                    7.0,
+                    7.0,
+                ),
+                (
+                    "B4",
+                    "error handling in rust with thiserror",
+                    "rust::error_handling",
+                    5,
+                    6.0,
+                    5.0,
+                ),
+                (
+                    "B5",
+                    "an axum extractor error",
+                    "rust::axum::extract",
+                    4,
+                    5.0,
+                    8.0,
+                ),
+                (
+                    "B6",
+                    "rust error handling: rust error handling notes",
+                    "rust::error_handling",
+                    1,
+                    6.0,
+                    6.0,
+                ),
+                ("B7", "foo_bar baz config", "rust::config", 2, 6.0, 6.0),
+                ("B8", "bar then foo and baz", "rust::config", 2, 6.0, 6.0),
+                (
+                    "B9",
+                    "dead-lock in a tokio mutex",
+                    "rust::tokio::sync",
+                    3,
+                    7.0,
+                    6.0,
+                ),
+                (
+                    "BA",
+                    "the lock is dead after a panic",
+                    "rust::sync",
+                    2,
+                    6.0,
+                    6.0,
+                ),
+                ("BB", gap.as_str(), "rust::codegen", 2, 6.0, 6.0),
+                (
+                    "BC",
+                    "We don't deploy on Fridays.",
+                    "ops::deploy",
+                    6,
+                    6.0,
+                    9.0,
+                ),
+                (
+                    "BD",
+                    "parse_config() panics on an empty file",
+                    "rust::config",
+                    2,
+                    7.0,
+                    6.0,
+                ),
+                (
+                    "BE",
+                    "update README.md with an install section",
+                    "docs::readme",
+                    8,
+                    4.0,
+                    5.0,
+                ),
+                (
+                    "BF",
+                    "std::sync::Mutex poisoning after a panic",
+                    "rust::sync",
+                    3,
+                    8.0,
+                    7.0,
+                ),
+                (
+                    "BG",
+                    "what's the runtime cost of tokio::spawn",
+                    "rust::tokio",
+                    2,
+                    5.0,
+                    5.0,
+                ),
+                (
+                    "BH",
+                    "retry on 4xx responses is a bug",
+                    "http::retry",
+                    4,
+                    6.0,
+                    7.0,
+                ),
+                (
+                    "BJ",
+                    "run the tests with --verbose",
+                    "rust::testing",
+                    7,
+                    3.0,
+                    4.0,
+                ),
+                (
+                    "BK",
+                    "cargo test fails to pass on CI",
+                    "rust::testing",
+                    2,
+                    6.0,
+                    6.0,
+                ),
+            ];
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = AgentRoot::new(dir.path());
+            std::fs::create_dir_all(root.episodic_dir()).expect("episodic dir");
+            let mut log = String::new();
+            for (suffix, content, skill_action, days, pain, importance) in &events {
+                let learning = AgentLearning {
+                    schema_version: "1.0.0".to_string(),
+                    id: EventId::parse(&format!("evt_01ARZ3NDEKTSV4RRFFQ69G5F{suffix}"))
+                        .expect("event id"),
+                    timestamp: chrono::DateTime::from_timestamp(NOW_SEC - days * DAY_SECS, 0)
+                        .expect("timestamp"),
+                    pain: *pain,
+                    importance: *importance,
+                    pinned: false,
+                    skill_action: skill_action.to_string(),
+                    source_harness: "drm-108".to_string(),
+                    content: content.to_string(),
+                };
+                log.push_str(&serde_json::to_string(&learning).expect("serialize"));
+                log.push('\n');
+            }
+            std::fs::write(root.episodic_jsonl(), log).expect("write the log");
+
+            let lock = WriterLock::acquire(&root, WriterKind::Watch).expect("writer lock");
+            let handle =
+                TantivyIndexHandle::open(&root, &lock, DEFAULT_COMMIT_CADENCE).expect("open");
+            let (_, fields) = build_schema();
+            let store = Self {
+                handle,
+                _lock: lock,
+                fields,
+                _dir: dir,
+            };
+            assert_eq!(
+                store.recall("", 0).len(),
+                0,
+                "sanity: an empty query matches nothing"
+            );
+            store
+        }
+
+        fn reader(&self) -> &RecallReader {
+            self.handle.reader()
+        }
+
+        fn try_recall(&self, query: &str, k: usize) -> tantivy::Result<Vec<RecallResult>> {
+            recall(self.reader(), &self.fields, query, k, NOW_SEC)
+        }
+
+        fn recall(&self, query: &str, k: usize) -> Vec<RecallResult> {
+            self.try_recall(query, k)
+                .unwrap_or_else(|e| panic!("{query:?}: {e}"))
+        }
+
+        /// What recall returned before DRM-108: the same search, with the
+        /// query built by Tantivy's `QueryParser`, through the same collector
+        /// and the same BZR-1522 re-rank. With `rerank` false, the bag alone.
+        fn parser_recall(&self, query: &str, k: usize) -> Vec<RecallResult> {
+            self.parser_search(query, k, true)
+        }
+
+        fn parser_search(&self, query: &str, k: usize, rerank: bool) -> Vec<RecallResult> {
+            let searcher = self.reader().searcher();
+            let recurrence = self.reader().recurrence(&searcher).expect("recurrence");
+            let parser = QueryParser::for_index(searcher.index(), vec![self.fields.content]);
+            let search =
+                |text: &str, limit: usize| -> tantivy::Result<Vec<(DocAddress, RecallResult)>> {
+                    let parsed = parser.parse_query(text)?;
+                    let collector = SalienceCollector::new(limit, NOW_SEC, Arc::clone(&recurrence));
+                    let top: Vec<ScoredDoc> = searcher.search(&*parsed, &collector)?;
+                    hydrate_addressed(&searcher, &self.fields, top)
+                };
+            let bag = search(query, k).unwrap_or_else(|e| panic!("parser {query:?}: {e}"));
+            if !rerank {
+                return bag.into_iter().map(|(_, result)| result).collect();
+            }
+            rank_missing_tokens(bag, query, k, search).expect("parser re-rank")
+        }
+    }
+
+    /// Each hit's id, BM25 bits, salience bits and score bits, in order.
+    fn bits(results: &[RecallResult]) -> Vec<(String, u64, u64, u64)> {
+        results
+            .iter()
+            .map(|r| {
+                (
+                    r.event_id.clone(),
+                    r.bm25.to_bits(),
+                    r.salience.to_bits(),
+                    r.score.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    /// DRM-108 test 1: no text is an error, whatever its punctuation.
+    #[tokio::test]
+    async fn any_text_is_a_query() {
+        let store = WordsStore::open();
+        for query in [
+            "What's the best way to handle errors here?",
+            "Don't retry on 4xx",
+            "I can't get `cargo test` to pass",
+            "run with --verbose",
+            "why does parse_config() panic",
+            "Update README.md: add an install section",
+            "see https://docs.rs/tokio/latest",
+            "add [dev-dependencies]",
+            "Handle the case where x > 10 && y < 5",
+            "We don't deploy on Fridays.",
+            "std::sync::Mutex",
+            "fn main() {",
+            "axum AND",
+            "*",
+            "timestamp_sec:[0 TO 9999999999]",
+            "+axum +tokio",
+            "NOT tokio",
+            "\"unbalanced",
+            "(open",
+            "rust::error",
+        ] {
+            let result = store.try_recall(query, 5);
+            assert!(result.is_ok(), "{query:?}: {result:?}");
+        }
+    }
+
+    /// DRM-108 test 2 (D1, Amendment 2): every query the parser took scores
+    /// bit for bit as it did: the same ids in the same order, with the same
+    /// BM25, salience and score. `rust error handling axum` takes the
+    /// BZR-1522 re-rank, so the reference runs it too.
+    #[tokio::test]
+    async fn plain_queries_score_as_the_parser_did() {
+        let store = WordsStore::open();
+        let gap = format!("foo_{}_bar", WordsStore::long_word());
+        for query in [
+            "tokio",
+            "tokio runtime",
+            "tokio tokio runtime",
+            "Tokio tokio runtime",
+            "foo_bar baz",
+            "dead-lock tokio",
+            "axum handler error",
+            "zzznotindexed",
+            "rust error handling axum",
+            gap.as_str(),
+        ] {
+            let want = store.parser_recall(query, 20);
+            assert_eq!(
+                want.is_empty(),
+                query == "zzznotindexed",
+                "{query:?}: the fixture matches every query but zzznotindexed"
+            );
+            assert_eq!(bits(&store.recall(query, 20)), bits(&want), "{query:?}");
+        }
+        // The BZR-1522 path changed the top hit: the bag's lacks `axum`.
+        const RERANKED: &str = "rust error handling axum";
+        let bag_top = store.parser_search(RERANKED, 20, false)[0].content.clone();
+        let top = store.recall(RERANKED, 20)[0].content.clone();
+        assert!(
+            !bag_top.contains("axum") && top.contains("axum"),
+            "the re-rank ran: bag top {bag_top:?}, top {top:?}"
+        );
+    }
+
+    /// DRM-108 test 3: text with no words matches nothing.
+    #[tokio::test]
+    async fn text_with_no_words_matches_nothing() {
+        let store = WordsStore::open();
+        let long = WordsStore::long_word();
+        for query in ["", "   ", "*", "!!! ???", long.as_str()] {
+            assert_eq!(bits(&store.recall(query, 20)), vec![], "{query:?}");
+        }
+    }
+
+    /// DRM-108 test 4 (D3): operators and quote marks are words.
+    #[tokio::test]
+    async fn operators_are_words() {
+        let store = WordsStore::open();
+        let ids_of = |query: &str| -> Vec<String> {
+            store
+                .recall(query, 20)
+                .into_iter()
+                .map(|r| r.event_id)
+                .collect()
+        };
+        let both = ids_of("+axum +tokio");
+        assert!(
+            both.iter().any(|id| id == WORDS_A) && both.iter().any(|id| id == WORDS_B),
+            "+axum +tokio returns A and B: {both:?}"
+        );
+        assert_eq!(
+            ids_of("\"tokio runtime\"").first().map(String::as_str),
+            Some(WORDS_A),
+            "\"tokio runtime\" is two words, and A ranks first"
+        );
+        assert!(
+            ids_of("NOT tokio").iter().any(|id| id == WORDS_A),
+            "NOT tokio returns A"
+        );
+    }
+
+    /// DRM-108 test 5: the exclusion wraps the word query. A is gone, and
+    /// every other hit scores as in [`recall`].
+    #[tokio::test]
+    async fn exclusion_wraps_the_word_query() {
+        let store = WordsStore::open();
+        const QUERY: &str = "What's tokio";
+        let all = store.recall(QUERY, 20);
+        assert!(
+            all.iter().any(|r| r.event_id == WORDS_A),
+            "A matches {QUERY:?} without the exclusion"
+        );
+        let exclusion = RecallExclusion {
+            ids: vec![WORDS_A.to_string()],
+            cluster_prefixes: Vec::new(),
+        };
+        let kept = recall_excluding(
+            store.reader(),
+            &store.fields,
+            QUERY,
+            20,
+            &exclusion,
+            NOW_SEC,
+        )
+        .expect("recall_excluding");
+        let without_a: Vec<RecallResult> =
+            all.into_iter().filter(|r| r.event_id != WORDS_A).collect();
+        assert_eq!(bits(&kept), bits(&without_a));
     }
 }

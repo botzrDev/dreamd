@@ -29,7 +29,7 @@ A search finds every node whose `append_node` returned before it. If the index n
 | `query` | string | yes      | —       |
 | `k`     | number | no       | 5       |
 
-Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Use plain words. A colon is query syntax, and a `skill_action` pasted as the query (for example `rust::error`) fails the search.
+Returns `{"results": [...]}`: raw events and consolidated lessons ranked together by BM25 × salience (recency, pain, importance, recurrence). `query` and `k` are the only arguments — there is no layer filter. Any text works as `query`: the user's request, code, paths and a `skill_action` are split into words, and quotes, colons, `AND`/`OR`, `+` and `-` are not operators.
 
 Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a lesson. It also carries `source` (`episodic` = a raw event, `semantic` = a lesson from `LESSONS.md`; lessons report `source_harness: "dreamd"`), `metadata.skill_action` (its cluster key) and `metadata.source_harness` (the harness that authored it), so you can quote the hit and see which tool taught it.
 
@@ -62,7 +62,7 @@ Each result's first key is `id`: an `evt_` id for an event, an `lsn_` id for a l
 | `skill_action`     | string | **yes**  | Clustering key. See naming rules below.                                                                           |
 | `pain`             | number | no       | 0–10. How disruptive is it to not know this? Default 5.0.                                                         |
 | `importance`       | number | no       | 0–10. How broadly applicable is this? Default 5.0.                                                                |
-| `client_dedup_key` | string | no       | Idempotency key (any string; convention: first 60 chars of content, lowercased, spaces → underscores). Prevents duplicate writes on retry. |
+| `client_dedup_key` | string | no       | Optional retry key, derived from the content. Resend the same key with the same arguments to retry one write: you get the first id back, with no second record. The same key with different content is stored as a new record. Keys are forgotten when the server restarts. |
 
 Returns an MCP JSON-RPC `CallToolResult` after the coordinator has `sync_data`'d the JSONL line (fdatasync-equivalent on Unix). The result text is `{"id":"evt_…","timestamp":"…","deduplicated":false}` — the server mints the id and timestamp. The HTTP learn path returns 201; the MCP tool does not.
 
@@ -174,7 +174,7 @@ All files are UTF-8 plaintext. `.agent/` is checked into git (except `.dreamd/`)
 | Treating an empty `search_nodes` just after `append_node` as a timing miss | The search commits pending appends and waits at most one second. Empty after that usually means the query did not match. Under heavy disk load the commit can take longer, so search once more before concluding |
 | Using slashes in `skill_action` (`rust/borrow-checker`) | Use `::` (`rust::borrow_checker`) — slashes are rejected                            |
 | Omitting `source_harness`                               | Required field; omitting causes a deserialization error                             |
-| No `.agent/` in the project                             | In-process, `search_nodes` returns empty and `append_node` errors; run `setup` first |
+| No `.agent/` in the project                             | Both tools answer `this folder is not set up for dreamd` (-32600) and name the setup command; run `setup`, then restart the MCP server. `~/.agent/` is the daemon home, never a project store |
 | Writing vague content                                   | One concrete fact per node; vague content scores low on recall                      |
 | Not calling `search_nodes` at session start             | You will re-discover things already known; call it first                            |
 | Waiting for a lesson after `append_node`               | Lessons are written by `npx -y dreamd-mcp dream`, which does not run on its own     |

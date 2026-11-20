@@ -43,7 +43,8 @@ use tokio::sync::mpsc;
 use crate::config::load_config;
 use crate::coordinator::{CoordinatorError, MemoryCoordinatorMsg, MAX_LEARNING_LINE_BYTES};
 use crate::ingress::{
-    query_too_long_message, LearnIngress, LearnResponse, RecallIngress, MAX_RECALL_QUERY_BYTES,
+    query_too_long_message, LearnIngress, LearnRequest, LearnResponse, RecallIngress,
+    DEFAULT_SCORE, MAX_RECALL_QUERY_BYTES,
 };
 use crate::recurrence::RecallReader;
 use crate::AgentRoot;
@@ -72,12 +73,14 @@ const EMPTY_RESULTS: &str = r#"{"results":[]}"#;
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryStoreError {
     /// The tool arguments are wrong: a bad `skill_action`, a score outside
-    /// `0.0..=10.0`, a learning or query over its size limit, a query the
-    /// parser rejects, or any other `400` the daemon explains. MCP `-32602`.
+    /// `0.0..=10.0`, a learning or query over its size limit, or any other
+    /// `400` the daemon explains. MCP `-32602`.
     #[error("{0}")]
     InvalidParams(String),
-    /// An unregistered project, a rejected content type, or an index that
-    /// cannot be opened or searched. MCP `-32600`.
+    /// An unregistered project, a project path the daemon refuses
+    /// (`X-Agent-Root`, DRM-102), a project config that does not load
+    /// (DRM-103), a rejected content type, or an index that cannot be opened
+    /// or searched. MCP `-32600`.
     #[error("{0}")]
     InvalidRequest(String),
     /// Coordinator, transport, or daemon failure. MCP `-32603`.
@@ -247,14 +250,8 @@ impl InProcessStore {
             handle.reader().clone()
         };
         let now_sec = chrono::Utc::now().timestamp();
-        recall_to_json(&reader, query, k, now_sec).map_err(|e| match e {
-            // tantivy turns every query-parser error into `InvalidArgument`:
-            // the caller's to fix, as `get_recall`'s 400 says in daemon mode.
-            e @ tantivy::TantivyError::InvalidArgument(_) => {
-                MemoryStoreError::params(format!("recall failed: {e}"))
-            }
-            e => MemoryStoreError::invalid(format!("recall failed: {e}")),
-        })
+        recall_to_json(&reader, query, k, now_sec)
+            .map_err(|e| MemoryStoreError::invalid(format!("recall failed: {e}")))
     }
 }
 
@@ -304,9 +301,10 @@ impl MemoryStore for InProcessStore {
             ));
         };
 
-        let config = load_config(agent_root.project_root())
-            .map_err(|e| MemoryStoreError::internal(format!("config load failed: {e}")))?;
-        // Sole skill_action gate for the in-process path (ARCHITECTURE.md §9).
+        let config = load_config(agent_root.project_root()).map_err(|e| {
+            MemoryStoreError::invalid(format!("{}: {e}", crate::daemon_client::CONFIG_LOAD_FAILED))
+        })?;
+        // ARCHITECTURE.md §9: the one ingress call for this path.
         let mut learning = LearnIngress::build_agent_learning(
             &req.content,
             &req.source_harness,
@@ -403,6 +401,8 @@ impl MemoryStore for NotSetUpStore {
 ///
 /// `agent_root_header` is the canonicalized project-root string sent as
 /// `X-Agent-Root` (matches `resolve_project`'s server-side lookup).
+/// `not_registered` is the daemon's `404` answer for that store, built once
+/// from the header and the launcher ([`not_registered_message`], DRM-107).
 pub struct DaemonStore {
     #[cfg(unix)]
     sock_path: PathBuf,
@@ -411,24 +411,38 @@ pub struct DaemonStore {
     #[cfg(not(unix))]
     token: AuthToken,
     agent_root_header: String,
+    not_registered: String,
 }
 
 impl DaemonStore {
-    /// Unix: proxy over the daemon's UDS socket.
+    /// Unix: proxy over the daemon's UDS socket. `launcher` picks the
+    /// command the `404` message names.
     #[cfg(unix)]
-    pub fn uds(sock_path: PathBuf, agent_root_header: String) -> Self {
+    pub fn uds(
+        sock_path: PathBuf,
+        agent_root_header: String,
+        launcher: crate::launcher::Launcher,
+    ) -> Self {
         Self {
             sock_path,
+            not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
         }
     }
 
     /// Off Unix: proxy over loopback TCP with a bearer credential.
+    /// `launcher` picks the command the `404` message names.
     #[cfg(not(unix))]
-    pub fn tcp(endpoint: DaemonEndpoint, token: AuthToken, agent_root_header: String) -> Self {
+    pub fn tcp(
+        endpoint: DaemonEndpoint,
+        token: AuthToken,
+        agent_root_header: String,
+        launcher: crate::launcher::Launcher,
+    ) -> Self {
         Self {
             endpoint,
             token,
+            not_registered: not_registered_message(&agent_root_header, launcher),
             agent_root_header,
         }
     }
@@ -458,7 +472,7 @@ impl MemoryStore for DaemonStore {
             // forward it verbatim.
             Ok(String::from_utf8_lossy(&body).into_owned())
         } else {
-            Err(map_remote_status_error(status, &body))
+            Err(map_remote_status_error(status, &body, &self.not_registered))
         }
     }
 
@@ -472,7 +486,7 @@ impl MemoryStore for DaemonStore {
                 MemoryStoreError::internal(format!("daemon learn response parse failed: {e}"))
             })
         } else {
-            Err(map_remote_status_error(status, &body))
+            Err(map_remote_status_error(status, &body, &self.not_registered))
         }
     }
 }
@@ -522,57 +536,78 @@ pub(crate) fn build_recall_request(
 }
 
 /// Build `POST /api/v1/learn` with `X-Agent-Root`, `Content-Type:
-/// application/json`, an optional `X-Client-Dedup-Key`, and a JSON body built
-/// by [`LearnIngress::placeholder_learning`] — the same placeholder
-/// constructor the in-process path uses, so `schema_version` is
-/// `RECORD_SCHEMA_VERSION` and the `EventId` is the shared placeholder.
+/// application/json`, and a [`LearnRequest`] body: the type the daemon
+/// deserializes. The dedup key travels in the body, never as
+/// `X-Client-Dedup-Key`, so a key with `\n` or non-ASCII characters works as
+/// it does in process (DRM-106).
 ///
-/// `pain` and `importance` are checked here first, with the shared
-/// `LearnIngress` validators, because the placeholder stores them as `f32`:
-/// the cast would turn `1e40` into infinity, which serializes as `null`, and
-/// round `10.0000001` to `10.0` (BZR-1301). The daemon mints the real `id`
-/// and `timestamp`, and re-runs every `LearnIngress` check (skill_action,
-/// score range, redaction) on arrival, so the raw skill_action and content
-/// are forwarded as given. Pure: unit-tested directly, and cfg-free — see
-/// [`build_recall_request`].
+/// The daemon runs the one ingress call on arrival
+/// ([`LearnIngress::build_agent_learning`]: `skill_action`, then `pain`, then
+/// `importance`, then redaction), so both modes answer a bad append the same
+/// way (DRM-104). The client converts nothing: the fields go as given, `f64`
+/// scores included, and an omitted score is [`DEFAULT_SCORE`], as in process.
+/// It refuses nothing: a score JSON cannot carry goes as [`wire_score`] makes
+/// it. The daemon mints `id` and `timestamp`. Pure: unit-tested directly, and
+/// cfg-free — see [`build_recall_request`].
 pub(crate) fn build_learn_request(
     req: &AppendRequest,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
-    LearnIngress::validate_optional_pain(req.pain)
-        .and_then(|()| LearnIngress::validate_optional_importance(req.importance))
-        .map_err(|e| MemoryStoreError::params(e.to_string()))?;
-    let mut learning = LearnIngress::placeholder_learning(
-        &req.content,
-        &req.source_harness,
-        &req.skill_action,
-        req.pain,
-        req.importance,
-    );
-    learning.pinned = req.pinned;
-    let body = serde_json::to_vec(&learning)
-        .map_err(|e| MemoryStoreError::internal(format!("serialize learning failed: {e}")))?;
+    let pain = wire_score(req.pain.unwrap_or(DEFAULT_SCORE));
+    let importance = wire_score(req.importance.unwrap_or(DEFAULT_SCORE));
+    let body = serde_json::to_vec(&LearnRequest {
+        pain,
+        importance,
+        pinned: req.pinned,
+        skill_action: req.skill_action.clone(),
+        source_harness: req.source_harness.clone(),
+        content: req.content.clone(),
+        client_dedup_key: req.client_dedup_key.clone(),
+    })
+    .map_err(|e| MemoryStoreError::internal(format!("serialize learning failed: {e}")))?;
 
-    let mut builder = hyper::Request::builder()
+    hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri("/api/v1/learn")
         .header(hyper::header::HOST, "localhost")
         .header("x-agent-root", agent_root_header)
-        .header(hyper::header::CONTENT_TYPE, "application/json");
-    if let Some(key) = req.client_dedup_key.as_deref() {
-        builder = builder.header("x-client-dedup-key", key);
-    }
-    builder
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
         .map_err(|e| MemoryStoreError::internal(format!("build learn request failed: {e}")))
+}
+
+/// A score as it goes over the wire: `v` when it is finite, else `f64::MAX`.
+///
+/// JSON has no infinity or NaN. Send the largest finite `f64` instead: the
+/// daemon's one ingress call refuses it in its own order, with the message
+/// in-process gives for the original value (DRM-104). `f64::MAX` survives the
+/// JSON round trip exactly, and it is out of range, as every non-finite score
+/// is in process.
+fn wire_score(v: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        f64::MAX
+    }
 }
 
 /// Label for a `400` whose body is not the daemon's `{"error": …}` envelope.
 const DAEMON_REJECTED_400: &str = "daemon rejected the request (HTTP 400)";
 
-/// The `404` message. The daemon's only `404` on these routes is a registry
-/// miss.
-const NOT_REGISTERED: &str = "project not registered with daemon; run dreamd init";
+/// The daemon-mode answer to a 404 (DRM-107): the daemon serves only
+/// registered stores, and a clone or worktree is a new path. The daemon's
+/// only `404` on these routes is a registry miss. `root` is the store folder
+/// the call was for (the `X-Agent-Root` header); `launcher` picks the `init`
+/// command.
+pub fn not_registered_message(root: &str, launcher: crate::launcher::Launcher) -> String {
+    format!(
+        "the store in {root} is not registered with the running daemon. Run `{init}` in \
+         {root} once: it registers the existing store without changing its files (a clone \
+         or a worktree is not registered until then), and the next call works without a \
+         restart.",
+        init = launcher.command("init"),
+    )
+}
 
 /// The one message for a learning over the JSONL line cap, in both modes
 /// (BZR-1301): the daemon client's `413` arm and the in-process store's
@@ -594,32 +629,55 @@ fn daemon_error_message(body: &[u8]) -> Option<String> {
 /// Map a non-success daemon HTTP status to a [`MemoryStoreError`]. Never
 /// panics. Cfg-free: one status table for both transports, so a Windows
 /// client and a Unix client explain the same 404 the same way (BZR-1301).
+/// `not_registered` is the store's [`not_registered_message`], which only the
+/// caller knows (DRM-107).
 ///
 /// | Status | `message` | Kind |
 /// |---|---|---|
-/// | 400 | the daemon's `error` string, or [`DAEMON_REJECTED_400`] for any other body | `InvalidParams` |
-/// | 404 | [`NOT_REGISTERED`] | `InvalidRequest` |
+/// | 400 | an `X-Agent-Root …` string, as is | `InvalidRequest` |
+/// | 400 | any other `error` string, or [`DAEMON_REJECTED_400`] for any other body | `InvalidParams` |
+/// | 404 | `not_registered`, the store's [`not_registered_message`] | `InvalidRequest` |
 /// | 413 | [`learning_too_large_message`] | `InvalidParams` |
 /// | 414 | [`query_too_long_message`] | `InvalidParams` |
 /// | 415 | `content-type rejected (defensive)` | `InvalidRequest` |
+/// | 500 | a `config load failed: …` string, as is | `InvalidRequest` |
 /// | other | `daemon error {status}: {body}` | `Internal` |
 ///
 /// 413 comes only from learn and 414 only from recall, and hyper's own `414`
 /// has an empty body, so both ignore the body.
-fn map_remote_status_error(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
+fn map_remote_status_error(
+    status: hyper::StatusCode,
+    body: &Bytes,
+    not_registered: &str,
+) -> MemoryStoreError {
     match status.as_u16() {
-        400 => MemoryStoreError::params(
-            daemon_error_message(body).unwrap_or_else(|| DAEMON_REJECTED_400.to_owned()),
-        ),
-        404 => MemoryStoreError::invalid(NOT_REGISTERED),
+        400 => match daemon_error_message(body) {
+            Some(msg) if msg.starts_with(crate::daemon_client::AGENT_ROOT_REJECTED_PREFIX) => {
+                MemoryStoreError::invalid(msg)
+            }
+            Some(msg) => MemoryStoreError::params(msg),
+            None => MemoryStoreError::params(DAEMON_REJECTED_400.to_owned()),
+        },
+        404 => MemoryStoreError::invalid(not_registered),
         413 => MemoryStoreError::params(learning_too_large_message()),
         414 => MemoryStoreError::params(query_too_long_message()),
         415 => MemoryStoreError::invalid("content-type rejected (defensive)"),
-        _ => MemoryStoreError::internal(format!(
-            "daemon error {status}: {}",
-            String::from_utf8_lossy(body)
-        )),
+        500 => match daemon_error_message(body) {
+            Some(msg) if msg.starts_with(crate::daemon_client::CONFIG_LOAD_FAILED) => {
+                MemoryStoreError::invalid(msg)
+            }
+            _ => remote_internal(status, body),
+        },
+        _ => remote_internal(status, body),
     }
+}
+
+/// The `Internal` text for a daemon status with no mapping of its own.
+fn remote_internal(status: hyper::StatusCode, body: &Bytes) -> MemoryStoreError {
+    MemoryStoreError::internal(format!(
+        "daemon error {status}: {}",
+        String::from_utf8_lossy(body)
+    ))
 }
 
 /// Map a transport failure to the stage that failed. Never includes a token.
@@ -786,8 +844,15 @@ mod tests {
         hyper::StatusCode::from_u16(code).expect("valid status")
     }
 
+    /// The store folder the status-map tests' client is for.
+    const MAP_ROOT: &str = "/r/proj";
+
     fn map(code: u16, body: &[u8]) -> MemoryStoreError {
-        map_remote_status_error(status(code), &Bytes::copy_from_slice(body))
+        map_remote_status_error(
+            status(code),
+            &Bytes::copy_from_slice(body),
+            &not_registered_message(MAP_ROOT, crate::launcher::Launcher::Binary),
+        )
     }
 
     /// Test 1: a 400 carries the daemon's own `error` string, unchanged.
@@ -809,19 +874,52 @@ mod tests {
         );
     }
 
-    /// Test 2: the score and header 400s are forwarded the same way.
+    /// Test 2 (DRM-102 test 5): a score 400 is forwarded as `InvalidParams`.
     #[test]
-    fn status_400_forwards_score_and_header_strings() {
+    fn status_400_forwards_score_strings_as_params() {
+        let msg = "pain must be in 0.0..=10.0";
+        let body = serde_json::json!({ "error": msg }).to_string();
+        assert_eq!(
+            map(400, body.as_bytes()),
+            MemoryStoreError::InvalidParams(msg.to_string())
+        );
+    }
+
+    /// DRM-102 test 6: the middleware's `X-Agent-Root` 400s are
+    /// `InvalidRequest` (-32600) with the same text. The caller cannot fix
+    /// them by changing a tool's arguments.
+    #[test]
+    fn status_400_agent_root_strings_are_invalid_request() {
         for msg in [
-            "pain must be in 0.0..=10.0",
-            "missing or non-UTF-8 X-Agent-Root header",
+            "X-Agent-Root header missing: send the absolute path of the folder that holds .agent/",
+            "X-Agent-Root is not UTF-8: send the absolute path of the folder that holds .agent/",
+            "X-Agent-Root must be the absolute path of the folder that holds .agent/; got \".\"",
         ] {
             let body = serde_json::json!({ "error": msg }).to_string();
             assert_eq!(
                 map(400, body.as_bytes()),
-                MemoryStoreError::InvalidParams(msg.to_string())
+                MemoryStoreError::InvalidRequest(msg.to_string()),
+                "{msg}"
             );
         }
+    }
+
+    /// DRM-103 test 6: a 500 that says the project's config did not load is
+    /// `InvalidRequest` (-32600) with the daemon's text; any other 500 stays
+    /// `Internal`.
+    #[test]
+    fn status_500_config_load_failed_is_invalid_request() {
+        assert_eq!(
+            map(500, br#"{"error":"config load failed: x"}"#),
+            MemoryStoreError::InvalidRequest("config load failed: x".to_string())
+        );
+        assert!(
+            matches!(
+                map(500, br#"{"error":"index open failed"}"#),
+                MemoryStoreError::Internal(_)
+            ),
+            "any other 500 stays Internal"
+        );
     }
 
     /// Test 3: any other 400 body gets the generic label, which never names
@@ -852,15 +950,53 @@ mod tests {
         }
     }
 
-    /// Test 4: a 404 keeps the `dreamd init` hint and drops the raw body.
+    /// Test 4: a 404 is the store's not-registered message, whatever the
+    /// body; the raw body is dropped (DRM-107 changed the message).
     #[test]
-    fn status_404_keeps_the_init_hint() {
+    fn status_404_is_the_not_registered_message() {
         for body in [br#"{"error":"agent root not registered"}"#.as_slice(), b""] {
             assert_eq!(
                 map(404, body),
                 MemoryStoreError::InvalidRequest(
-                    "project not registered with daemon; run dreamd init".to_string()
+                    "the store in /r/proj is not registered with the running daemon. Run \
+                     `dreamd init` in /r/proj once: it registers the existing store without \
+                     changing its files (a clone or a worktree is not registered until \
+                     then), and the next call works without a restart."
+                        .to_string()
                 )
+            );
+        }
+    }
+
+    /// DRM-107 test 1: a `DaemonStore` for `/r/proj` answers a 404 with its
+    /// own root and the `init` command its launcher runs.
+    #[cfg(unix)]
+    #[test]
+    fn status_404_names_the_root_and_the_init_command() {
+        use crate::launcher::Launcher;
+        for (launcher, init) in [
+            (Launcher::Binary, "dreamd init"),
+            (Launcher::Npx, "npx -y dreamd-mcp init"),
+        ] {
+            let store = DaemonStore::uds(
+                PathBuf::from("/nonexistent/dreamd.sock"),
+                "/r/proj".to_string(),
+                launcher,
+            );
+            let want = format!(
+                "the store in /r/proj is not registered with the running daemon. Run `{init}` \
+                 in /r/proj once: it registers the existing store without changing its files \
+                 (a clone or a worktree is not registered until then), and the next call \
+                 works without a restart."
+            );
+            assert_eq!(
+                map_remote_status_error(
+                    status(404),
+                    &Bytes::from_static(br#"{"error":"agent root not registered"}"#),
+                    &store.not_registered,
+                ),
+                MemoryStoreError::InvalidRequest(want),
+                "{launcher:?}"
             );
         }
     }
@@ -992,35 +1128,132 @@ mod tests {
         }
     }
 
-    /// Test 10: scores are checked before the `f32` cast; skill_action is
-    /// still forwarded raw for the daemon to check.
-    #[tokio::test]
-    async fn build_learn_request_checks_scores_before_the_cast() {
+    /// The JSON body of a built learn request.
+    async fn sent_body(req: hyper::Request<Full<Bytes>>) -> serde_json::Value {
         use http_body_util::BodyExt;
 
-        for pain in [1e9, 1e40, -0.5, 10.000_000_1] {
-            assert_eq!(
-                build_learn_request(&learn("rust::x", Some(pain), None), "/r")
-                    .expect_err("pain out of range"),
-                MemoryStoreError::InvalidParams("pain must be in 0.0..=10.0".to_string()),
-                "pain {pain}"
-            );
-        }
-        for importance in [11.0, f64::INFINITY] {
-            assert_eq!(
-                build_learn_request(&learn("rust::x", None, Some(importance)), "/r")
-                    .expect_err("importance out of range"),
-                MemoryStoreError::InvalidParams("importance must be in 0.0..=10.0".to_string()),
-                "importance {importance}"
-            );
-        }
-        build_learn_request(&learn("rust::x", Some(10.0), Some(0.0)), "/r").expect("in range");
-        build_learn_request(&learn("rust::x", None, Some(0.0)), "/r").expect("pain omitted");
-
-        let req = build_learn_request(&learn("BAD::UPPER.dots", None, None), "/r")
-            .expect("skill_action is the daemon's to check");
         let body = req.into_body().collect().await.expect("body").to_bytes();
-        let sent: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-        assert_eq!(sent["skill_action"], "BAD::UPPER.dots");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    /// DRM-106 test 6: the dedup key travels in the body, so a key a header
+    /// cannot carry (`a\nb`) builds, and no `x-client-dedup-key` is sent.
+    #[tokio::test]
+    async fn build_learn_request_sends_the_key_in_the_body() {
+        let mut append = learn("rust::x", None, None);
+        append.client_dedup_key = Some("a\nb".to_string());
+        let req = build_learn_request(&append, "/r")
+            .unwrap_or_else(|e| panic!("key a\\nb: the request builds; got {e:?}"));
+        assert!(
+            req.headers().get("x-client-dedup-key").is_none(),
+            "the key is not sent as a header"
+        );
+        let sent = sent_body(req).await;
+        assert_eq!(sent["client_dedup_key"], "a\nb", "{sent}");
+    }
+
+    /// DRM-104 test 2 (was test 10): the client checks nothing the daemon
+    /// checks. A bad score and a bad `skill_action` are sent as given, for
+    /// the daemon's one ingress call to answer; an omitted score is `5.0`.
+    #[tokio::test]
+    async fn build_learn_request_sends_the_raw_fields() {
+        for pain in [12.0, -0.5, 10.000_000_1] {
+            let req = build_learn_request(&learn("Rust.Tokio", Some(pain), Some(pain)), "/r")
+                .unwrap_or_else(|e| panic!("pain {pain}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(sent["pain"].as_f64(), Some(pain), "pain {pain}: {sent}");
+            assert_eq!(
+                sent["importance"].as_f64(),
+                Some(pain),
+                "importance {pain}: {sent}"
+            );
+            assert_eq!(sent["skill_action"], "Rust.Tokio", "{sent}");
+        }
+
+        let req = build_learn_request(&learn("rust::x", None, None), "/r").expect("builds");
+        let sent = sent_body(req).await;
+        assert_eq!(sent["pain"].as_f64(), Some(5.0), "{sent}");
+        assert_eq!(sent["importance"].as_f64(), Some(5.0), "{sent}");
+    }
+
+    /// DRM-104 test 3 (Amendment 4): a score JSON cannot carry is sent as
+    /// `f64::MAX`, which the daemon's ingress refuses in its own order. The
+    /// client refuses nothing.
+    #[tokio::test]
+    async fn build_learn_request_sends_a_score_json_cannot_carry_as_out_of_range() {
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let req = build_learn_request(&learn("rust::x", Some(bad), None), "/r")
+                .unwrap_or_else(|e| panic!("pain {bad}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(sent["pain"].as_f64(), Some(f64::MAX), "pain {bad}: {sent}");
+            assert_eq!(sent["importance"].as_f64(), Some(5.0), "omitted: {sent}");
+
+            let req = build_learn_request(&learn("rust::x", None, Some(bad)), "/r")
+                .unwrap_or_else(|e| panic!("importance {bad}: the request builds; got {e:?}"));
+            let sent = sent_body(req).await;
+            assert_eq!(
+                sent["importance"].as_f64(),
+                Some(f64::MAX),
+                "importance {bad}: {sent}"
+            );
+            assert_eq!(sent["pain"].as_f64(), Some(5.0), "omitted: {sent}");
+        }
+    }
+
+    /// DRM-104 test 3b (Amendment 4): a call with a non-finite score answers in
+    /// daemon mode as it does in process. The daemon-mode answer is the
+    /// client's refusal if it makes one, else the daemon's ingress over the
+    /// body the client sends.
+    #[tokio::test]
+    async fn non_finite_scores_answer_like_in_process() {
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        for (skill_action, pain, importance) in [
+            ("Rust.Tokio", Some(nan), Some(5.0)),
+            ("rust::x", Some(12.0), Some(nan)),
+            ("rust::x", Some(nan), None),
+            ("rust::x", None, Some(f64::NEG_INFINITY)),
+            ("Rust.Tokio", Some(inf), Some(inf)),
+        ] {
+            let row = format!("({skill_action:?}, {pain:?}, {importance:?})");
+            let req = learn(skill_action, pain, importance);
+            let in_process = LearnIngress::build_agent_learning(
+                &req.content,
+                &req.source_harness,
+                &req.skill_action,
+                req.pain,
+                req.importance,
+                false,
+            )
+            .expect_err("in process refuses the row")
+            .to_string();
+
+            let daemon_mode = match build_learn_request(&req, "/r") {
+                Err(
+                    MemoryStoreError::InvalidParams(m)
+                    | MemoryStoreError::InvalidRequest(m)
+                    | MemoryStoreError::Internal(m),
+                ) => m,
+                Ok(http) => {
+                    let sent = sent_body(http).await;
+                    match (sent["pain"].as_f64(), sent["importance"].as_f64()) {
+                        (Some(p), Some(i)) => LearnIngress::build_agent_learning(
+                            sent["content"].as_str().expect("content"),
+                            sent["source_harness"].as_str().expect("source_harness"),
+                            sent["skill_action"].as_str().expect("skill_action"),
+                            Some(p),
+                            Some(i),
+                            false,
+                        )
+                        .expect_err("the daemon refuses the row")
+                        .to_string(),
+                        // Not a JSON number: the daemon's extractor refuses the
+                        // body before ingress runs.
+                        _ => format!("the daemon cannot read the body: {sent}"),
+                    }
+                }
+            };
+            assert_eq!(daemon_mode, in_process, "{row}");
+        }
     }
 }

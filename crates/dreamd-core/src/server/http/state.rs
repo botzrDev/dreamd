@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::config::Config;
 use crate::recurrence::RecallReader;
 use crate::registry::RegistryCache;
 use crate::server::tantivy_handle::RecallFlusher;
@@ -27,8 +26,6 @@ use crate::server::{
 /// started for `primary.0`). Handlers do not dispatch to it directly; they
 /// call `AppState::resolve_supervisor`, which returns this for the pinned
 /// boot project and a lazily-started per-root coordinator otherwise.
-///
-/// `config` — layered runtime config loaded at startup.
 ///
 /// `runtimes` — lazily-opened, LRU + idle-evicting [`ProjectRuntime`]s for
 /// every registered root that is not the pinned boot project. Each holds the
@@ -70,8 +67,6 @@ pub struct AppState {
     pub registry: Arc<RegistryCache>,
     /// Boot-project coordinator; prefer `Self::resolve_supervisor`.
     pub supervisor: Arc<Supervisor>,
-    /// Layered runtime config loaded at daemon start.
-    pub config: Arc<Config>,
     /// Lazy per-project lock + index + coordinator (LRU + idle eviction).
     pub runtimes: Arc<Mutex<ProjectResourceMap<ProjectRuntime>>>,
     /// One open at a time per root (DRM-50); see `AppState::with_runtime`.
@@ -86,17 +81,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        registry_path: PathBuf,
-        supervisor: Supervisor,
-        config: Config,
-        daemon_uid: u32,
-    ) -> Self {
+    pub fn new(registry_path: PathBuf, supervisor: Supervisor, daemon_uid: u32) -> Self {
         Self {
             registry: Arc::new(RegistryCache::new(registry_path.clone())),
             registry_path,
             supervisor: Arc::new(supervisor),
-            config: Arc::new(config),
             runtimes: Arc::new(Mutex::new(ProjectResourceMap::with_defaults())),
             opening: Arc::default(),
             daemon_uid,

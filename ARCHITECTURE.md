@@ -122,7 +122,7 @@ All appends to `episodic/AGENT_LEARNINGS.jsonl` flow through one `MemoryCoordina
 
 Write order:
 
-1. Idempotency-LRU lookup
+1. Idempotency-LRU lookup on the project, the key and a fingerprint of the learning
 2. Stat check (Unix): reopen the log if the path's device, inode or length differs from what the coordinator last wrote
 3. Mint `EventId` from the coordinator's `IdMinter` (`evt_` + 26-char Crockford ULID in `dreamd-core`, strictly increasing per coordinator; inbound `id` is overwritten)
 4. Serialize with trailing `\n`
@@ -133,7 +133,7 @@ Write order:
 
 **Append fd.** Open-time recovery runs on a plain read/write fd, which the coordinator closes before it opens the append fd with `O_APPEND`. A reopen after an outside change (a `git checkout`, `merge` or `pull` that replaced or edited the log) ends a foreign final line that lacks `\n`, raises the minter's floor to the largest id in the file, and logs a warning. The dream cycle reopens the fd on every exit path, error included. On Unix the stat check is device and inode. On Windows it is the volume serial and the file index from `file-id` (`GetFileInformationByHandle` stays in that crate). The minter is seeded from the largest ULID in the log; an id more than 24 h ahead of the clock does not seed it.
 
-`POST /api/v1/learn` returns 201 only after `sync_data` completes. Idempotency LRU is in-memory only (cap 1024, keyed by canonicalized agent-root path + `client_dedup_key`); restart clears it.
+`POST /api/v1/learn` returns 201 only after `sync_data` completes. Idempotency LRU is in-memory only (cap 1024, keyed by canonicalized agent-root path + `client_dedup_key` + a fingerprint of the learning, so the same key with new content is a new record); a restart, or an idle eviction of the project's coordinator, clears it.
 
 On startup, `episodic::recover` leaves every complete line where it is. A mid-file blank or malformed `\n`-terminated line stays in the log; readers skip it and `dreamd doctor` lists its line number. A final line with no trailing `\n` gets one when it parses as a record, and is truncated when it does not. Recovery writes nothing else: no rewrite and no sidecar. Writers must never emit blank lines.
 

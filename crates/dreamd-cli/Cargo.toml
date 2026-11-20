@@ -93,3 +93,8 @@ insta = { workspace = true }
 # with git2 instead of the `git` binary. The version dreamd-core resolves, so
 # no new crate enters the graph.
 git2 = "0.21"
+
+[target.'cfg(unix)'.dev-dependencies]
+# DRM-151: `nix::pty::openpty` gives `dreamd mcp` a terminal stdin in a test.
+# The nix 0.29 that dreamd-core resolves, so no new crate enters the graph.
+nix = { version = "0.29", default-features = false, features = ["term"] }

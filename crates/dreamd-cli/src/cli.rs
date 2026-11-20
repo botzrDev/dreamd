@@ -232,7 +232,7 @@ pub struct ArchiveArgs {
 /// (5, vs recall's 10). `--json` prints one compact JSON array instead.
 #[derive(Args)]
 pub struct BlameArgs {
-    /// Free-text query, matched with BM25 against stored events and lessons.
+    /// Free-text query (any text; nothing is query syntax), matched with BM25 against stored events and lessons.
     pub query: String,
     /// Max results.
     #[arg(short = 'k', long, default_value_t = 5)]
@@ -263,10 +263,12 @@ pub struct McpArgs {
     /// Hard-lock dream cycle to manual-only mode (overrides config.toml).
     #[arg(long)]
     pub manual_only: bool,
-    /// Override the project root used for agent-root discovery.
-    /// Required when the IDE launches the MCP server from a non-project CWD
-    /// (e.g. Cursor's global ~/.cursor/mcp.json). Must be an absolute path to
-    /// the directory that contains `.agent/`.
+    /// Use the `.agent/` store in this folder instead of discovering one from
+    /// the working directory. Needed when the IDE launches the MCP server
+    /// from a non-project CWD (e.g. Cursor's global ~/.cursor/mcp.json). The
+    /// folder must hold `.agent/` itself. A relative path is resolved against
+    /// the working directory, and a leading `~` is not expanded. If the folder
+    /// holds no store, or its `.agent/` is the daemon home, `dreamd mcp` exits 2.
     #[arg(long, value_name = "PATH")]
     pub project_root: Option<PathBuf>,
     /// Serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio: an IP
@@ -302,7 +304,7 @@ pub struct MigrateArgs {
 /// Arguments for the `dreamd recall` subcommand (WEG-51).
 #[derive(Args)]
 pub struct RecallArgs {
-    /// Free-text query, matched with BM25 against stored events and lessons.
+    /// Free-text query (any text; nothing is query syntax), matched with BM25 against stored events and lessons.
     pub query: String,
     /// Max results. HTTP and MCP recall default to 5.
     #[arg(short = 'k', long, default_value_t = 10)]
@@ -810,13 +812,6 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let config = match load_config(&cwd) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("dreamd: error — {e}");
-            return ExitCode::from(1);
-        }
-    };
     let agent_root = match discover_store_or_exit(&cwd) {
         Ok(r) => r,
         Err(code) => {
@@ -828,6 +823,14 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
                 eprintln!("{line}");
             }
             return code;
+        }
+    };
+    // DRM-103: the store's own config, not the working directory's.
+    let config = match load_config(agent_root.project_root()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dreamd: error — {e}");
+            return ExitCode::from(1);
         }
     };
     let skip = dreamd_core::autobiography::read_last_skip(&agent_root);
@@ -945,7 +948,12 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let config = match load_config(&cwd) {
+    let agent_root = match discover_store_or_exit(&cwd) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    // DRM-103: the store's own config, not the working directory's.
+    let config = match load_config(agent_root.project_root()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dreamd: {e}");
@@ -956,10 +964,6 @@ fn run_dream(args: DreamArgs) -> ExitCode {
         eprintln!("dreamd: {msg}");
         return ExitCode::from(2);
     }
-    let agent_root = match discover_store_or_exit(&cwd) {
-        Ok(r) => r,
-        Err(code) => return code,
-    };
     // AILAB-341: `--dry` writes nothing, so it forks off here — after config and
     // store resolution (a preview still needs to know which store it is
     // previewing), before the write path. It deliberately does not proxy to the
@@ -1052,12 +1056,35 @@ fn run_mcp(args: McpArgs) -> ExitCode {
         Err(code) => return code,
     };
     // --project-root overrides CWD-based agent-root discovery. Required when
-    // an IDE launches the MCP server from a non-project CWD.
-    let effective_root = match args.project_root.clone() {
-        Some(p) => p,
+    // an IDE launches the MCP server from a non-project CWD. It is resolved
+    // once, here, before any transport, socket probe or disclosure, so daemon
+    // and in-process mode refuse it the same way (DRM-102).
+    let effective_root = match args.project_root.as_deref() {
+        Some(raw) => {
+            let daemon_home = home_dir().map(|h| h.join(".agent"));
+            match commands::mcp::resolve_project_root(
+                raw,
+                &cwd,
+                daemon_home.as_deref(),
+                dreamd_core::launcher::Launcher::from_env(),
+            ) {
+                Ok(root) => root,
+                Err(msg) => {
+                    eprintln!("dreamd mcp: {msg}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
         None => cwd,
     };
-    let mut config = match load_config(&effective_root) {
+    // DRM-103: the config of the store this server will use, found from
+    // `effective_root` the way the server finds it. With no store it is the
+    // user-level config, as before.
+    let config_root = match dreamd_core::layout::AgentRoot::discover(&effective_root) {
+        Ok(root) => root.project_root().to_path_buf(),
+        Err(_) => effective_root.clone(),
+    };
+    let mut config = match load_config(&config_root) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dreamd: error — {e}");
