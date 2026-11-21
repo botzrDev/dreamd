@@ -242,7 +242,8 @@ Once the npm version is public, refresh the official MCP Registry entry
 (`io.github.botzrDev/dreamd`) so it points at the new version: from
 `packages/dreamd-mcp`, `mcp-publisher login github` (a GitHub identity
 authorized for `botzrDev` — org membership must be public), then
-`mcp-publisher publish server.json`. The login token expires within hours, so log in
+`mcp-publisher publish server.json`. Run `mcp-publisher validate server.json` first: the
+registry refuses a `description` longer than 100 characters. The login token expires within hours, so log in
 again right before you publish, even if you logged in earlier the same day. Full procedure, validation
 (`just mcp-registry-validate`), and the confirming `curl` live in
 `packages/dreamd-mcp/README.md` §Official MCP Registry. Deliberately not
@@ -261,11 +262,9 @@ Publish in dependency order. `cargo publish` uploads the crate and yanks nothing
 A version can be published once.
 
 ```sh
-cargo package -p dreamd-protocol --allow-dirty=false
-cargo package -p dreamd-core
-cargo package -p dreamd
+cargo package -p dreamd-protocol -p dreamd-core -p dreamd   # one run packages all three; a dirty tree fails it
 # log in once: https://crates.io/settings/tokens — not a CI secret
-cargo publish -p dreamd-protocol
+cargo publish -p dreamd-protocol   # may time out waiting for the index; check it before the next one
 cargo publish -p dreamd-core
 cargo publish -p dreamd
 cargo install dreamd --version X.Y.Z
