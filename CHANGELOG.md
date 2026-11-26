@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+
+- **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
+
 ### Changed
 
 - **`dreamd forget` clears the copies dreamd keeps, and says what it cleared and what remains** (DRM-168). It removed the event from the live log, `LESSONS.md`, the recurrence sidecar and recall, but full copies stayed in every autosnap and memory branch object under `.agent/.dreamd/branches/objects/`, in the decay archive, in `AGENT_LEARNINGS.jsonl.bak`, and in the index's segment files, and `dreamd memory checkout` of an autosnap brought the event back. Now one redo WAL commits the live files together with:
