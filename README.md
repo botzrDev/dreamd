@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml?query=branch%3Amain)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/botzrDev/dreamd/badge)](https://scorecard.dev/viewer/?uri=github.com/botzrDev/dreamd)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/17149/badge)](https://www.bestpractices.dev/projects/17149)
 [![Release](https://img.shields.io/github/v/release/botzrDev/dreamd?sort=semver)](https://github.com/botzrDev/dreamd/releases/latest)
 [![npm](https://img.shields.io/npm/v/dreamd-mcp?label=npm%20dreamd-mcp)](https://www.npmjs.com/package/dreamd-mcp)
 [![crates.io](https://img.shields.io/crates/v/dreamd)](https://crates.io/crates/dreamd)
