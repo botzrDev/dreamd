@@ -1,6 +1,6 @@
 # CI/CD pipeline reference
 
-dreamd runs four GitHub Actions workflows:
+dreamd runs six GitHub Actions workflows:
 
 | Workflow | File | Triggers |
 |---|---|---|
@@ -8,10 +8,12 @@ dreamd runs four GitHub Actions workflows:
 | **Release** | [`.github/workflows/release.yml`](../.github/workflows/release.yml) | Version tags (`v[0-9]+.[0-9]+.[0-9]+*`, e.g. `v1.0.0`, `v0.1.0-rc.5`) |
 | **Nightly** | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) | Daily at 06:00 UTC, or manual dispatch |
 | **MCP manifest** | [`.github/workflows/mcp-manifest.yml`](../.github/workflows/mcp-manifest.yml) | Manual dispatch only |
+| **CodeQL** | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) | Push and PR to `main`, weekly, or manual dispatch |
+| **Scorecard** | [`.github/workflows/scorecard.yml`](../.github/workflows/scorecard.yml) | Push to `main`, branch-protection changes, weekly, or manual dispatch |
 
-This document mostly covers the **CI** workflow. Contributors hit these gates on every pull request. The other three are summarized [at the end](#release-workflow-tags-only).
+This document mostly covers the **CI** workflow. Contributors hit these gates on every pull request. The others are summarized [at the end](#release-workflow-tags-only).
 
-Every Rust job in all four workflows installs the same pinned toolchain, `dtolnay/rust-toolchain@1.95.0`. [`rust-toolchain.toml`](../rust-toolchain.toml) pins the same `1.95.0` (with `rustfmt` and `clippy`) for local builds, so `cargo` in a checkout uses the CI compiler.
+Every Rust job installs the same pinned toolchain, `dtolnay/rust-toolchain` on its `1.95.0` branch. Every action in every workflow is pinned to a full commit SHA, with the release in a trailing comment; update the SHA and the comment together. [`rust-toolchain.toml`](../rust-toolchain.toml) pins the same `1.95.0` (with `rustfmt` and `clippy`) for local builds, so `cargo` in a checkout uses the CI compiler.
 
 ---
 
@@ -305,7 +307,7 @@ To promote 85% to a blocking gate, uncomment `exit 1` in the workflow's "Summari
 
 ## Notify on main CI failure
 
-Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
+Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny. Requires the `SLACK_WEBHOOK_URL` secret; without it the step logs a notice and passes. Does not run on PRs.
 
 ---
 
@@ -349,6 +351,18 @@ Nightly does not run the size gate, lint, or the full suite, so a green nightly 
 ## MCP manifest workflow
 
 Manual dispatch only, with a `version` input (semver, no leading `v`). A pre-release helper: it builds the three shim targets (`linux-x86_64`, `darwin-x86_64`, `darwin-aarch64`), runs `scripts/update-mcp-manifest.sh`, and uploads the resulting `manifest.json` as the `mcp-manifest` artifact. It commits nothing and opens no PR. The normal release path does not need it — `release.yml` produces the manifest that ships.
+
+---
+
+## CodeQL workflow
+
+Static analysis of the Rust workspace (`rust`), the Node shim (`javascript-typescript`) and the workflow files (`actions`), one matrix job per language, all with `build-mode: none`. Results show under the repository's Security tab → Code scanning. It is not a required check.
+
+---
+
+## Scorecard workflow
+
+Runs the [OpenSSF Scorecard](https://github.com/ossf/scorecard) and publishes the result to the public Scorecard API (the source for a README badge) and to code scanning. The publish API rejects a workflow that adds steps, top-level write permissions, or workflow-level `env`/`defaults`, so keep the job as it is.
 
 ---
 
