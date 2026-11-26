@@ -4,7 +4,12 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Email `austin@botzr.com` with the subject line `dreamd security: <short description>`. Please include:
+Report it privately in either of these ways:
+
+- Open a private advisory: [Report a vulnerability](https://github.com/botzrDev/dreamd/security/advisories/new) (Security tab → Report a vulnerability). Only the maintainers can see it.
+- Email `austin@botzr.com` with the subject line `dreamd security: <short description>`.
+
+Please include:
 
 - A description of the issue and its impact.
 - Steps to reproduce, or a proof-of-concept.
