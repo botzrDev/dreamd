@@ -32,6 +32,18 @@ Security fixes land on `main` and the latest release.
 
 `1.4.x` is the current release line. Fixes land on `main` and the latest release.
 
+## Verifying a release
+
+Release tarballs built by `release.yml` carry signed SLSA build provenance that names
+the repository, workflow, commit and tag that built them. Releases before the first
+one with provenance have only `checksums.txt`. To check a download:
+
+```sh
+gh attestation verify linux-x86_64.tar.gz --repo botzrDev/dreamd
+```
+
+`checksums.txt` on each release lists the SHA-256 of every asset.
+
 ## Threat model (summary)
 
 The reference implementation is local-first and single-tenant. It assumes:
