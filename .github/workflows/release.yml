@@ -144,6 +144,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # elevated only for this job; pushes the manifest branch
+      id-token: write  # OIDC token to sign the build provenance (Sigstore)
+      attestations: write  # store the provenance attestations on the repo
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -163,6 +165,14 @@ jobs:
         run: |
           find dist/ -maxdepth 2 -type f | sort | xargs sha256sum > checksums.txt
           cat checksums.txt
+
+      # Signed SLSA build provenance for every release tarball: which repo,
+      # workflow, commit and tag built it. Anyone can check a download with
+      # `gh attestation verify <file> --repo botzrDev/dreamd`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*/*.tar.gz
 
       - name: Extract changelog for this version
         id: changelog
@@ -196,6 +206,11 @@ jobs:
             **SHA-256 checksums**
             ```
             ${{ steps.checksums.outputs.content }}
+            ```
+
+            **Verify a download** (signed build provenance):
+            ```
+            gh attestation verify <file>.tar.gz --repo botzrDev/dreamd
             ```
           # A draft leaves the release notes and binaries for human review
           # before they go public.
