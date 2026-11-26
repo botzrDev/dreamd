@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Security
 
+- **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
 - **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
 
 ### Changed
