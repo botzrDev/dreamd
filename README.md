@@ -1,9 +1,13 @@
 # dreamd
 
+[![CI](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml?query=branch%3Amain)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/botzrDev/dreamd/badge)](https://scorecard.dev/viewer/?uri=github.com/botzrDev/dreamd)
+[![Release](https://img.shields.io/github/v/release/botzrDev/dreamd?sort=semver)](https://github.com/botzrDev/dreamd/releases/latest)
+[![npm](https://img.shields.io/npm/v/dreamd-mcp?label=npm%20dreamd-mcp)](https://www.npmjs.com/package/dreamd-mcp)
+[![crates.io](https://img.shields.io/crates/v/dreamd)](https://crates.io/crates/dreamd)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.4.0-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
