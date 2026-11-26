@@ -21,7 +21,7 @@ as `X.Y.Z` (e.g. `1.0.0`, or `0.1.0-rc.5` for a pre-release); substitute through
 
 ## 1. Bump every version-coupled surface (ONE commit)
 
-The version lives in **seven** places that MUST move together. Missing any one is how
+The version lives in **eight** places that MUST move together. Missing any one is how
 drift ships. Bump `X.Y.Z-1` → `X.Y.Z`:
 
 | # | File | What to change |
@@ -33,6 +33,7 @@ drift ships. Bump `X.Y.Z-1` → `X.Y.Z`:
 | 5 | `packages/dreamd-mcp/manifest.json` | `"version"` only — set the three `sha256` values to `PENDING_*` placeholders (they are filled in step 4 from the build) |
 | 6 | `crates/dreamd-cli/tests/snapshots/cli_help__version_short.snap` and `…__version_long.snap` | the embedded `dreamd X.Y.Z` string (the binary reports `CARGO_PKG_VERSION`) |
 | 7 | `crates/dreamd-core/Cargo.toml` and `crates/dreamd-cli/Cargo.toml` | the three path-dependency `version` fields (`dreamd-core` on `dreamd-protocol`; `dreamd-cli` on `dreamd-core` and `dreamd-protocol`) — set each to the same string as the workspace version |
+| 8 | `CITATION.cff` | `version` and `date-released` (the day the release is published, `YYYY-MM-DD`) |
 
 A bare `version = "0.1.0-rc.2"` is a caret requirement (`^0.1.0-rc.2`), which stops
 below `0.2.0`. `cargo check` rejects a workspace version of `0.2.0-alpha.1` until
