@@ -121,11 +121,15 @@ under its old name; there is no glibc Linux asset (BZR-1438). If the
 Windows build failed (it is `continue-on-error`) there are 6 and the release is still
 usable — the npm shim has no Windows manifest entry.
 
-## 4. Fill the bundled manifest FROM the release build (CI PR)
+## 4. Fill the bundled manifest FROM the release build (manifest PR)
 
 The `release.yml` run already regenerated `manifest.json` from the exact release
-binaries, attached it to the draft release, and opened a PR
-`chore/mcp-manifest-vX.Y.Z` with that fill. Review the PR: the shas in the diff must
+binaries, attached it to the draft release, and pushed the branch
+`chore/mcp-manifest-vX.Y.Z` with that fill. GitHub Actions is not allowed to open pull
+requests in this repository, so the run does not open the PR. Its summary page has an
+**Open the PR** link (also shown as a notice on the run) that opens the compare view
+with the title filled in. Open the PR from that link, or with the command below. Review
+the PR: the shas in the diff must
 match the `manifest.json` attached to the draft release (they are the same build —
 **take them from the release, do not regenerate separately**; local rebuilds are not
 byte-reproducible and would mismatch). Merge it with a merge commit. The PR branch is
@@ -143,12 +147,7 @@ gh pr merge --repo botzrDev/dreamd chore/mcp-manifest-vX.Y.Z --merge --admin
 git merge-base --is-ancestor vX.Y.Z origin/main && echo "tag is on main"   # after git fetch
 ```
 
-**If the run ends red at "Open PR with regenerated manifest":** the draft release and
-the pushed branch `chore/mcp-manifest-vX.Y.Z` both exist, and only `gh pr create`
-failed. That is what happens when the repository setting *Allow GitHub Actions to
-create and approve pull requests* is off (`GitHub Actions is not permitted to create or
-approve pull requests`). Open the PR by hand from the branch the workflow pushed, then
-review and merge as above:
+To open the PR from a terminal instead of the link:
 
 ```sh
 gh pr create --repo botzrDev/dreamd --base main --head chore/mcp-manifest-vX.Y.Z \
@@ -156,12 +155,9 @@ gh pr create --repo botzrDev/dreamd --base main --head chore/mcp-manifest-vX.Y.Z
   --body "Fills packages/dreamd-mcp/manifest.json from the binaries attached to draft release vX.Y.Z."
 ```
 
-A PR opened by a human this way does run CI.
-
-A PR opened by the workflow's `GITHUB_TOKEN` does not run CI (GitHub's recursion guard); `node --test`
-in `packages/dreamd-mcp` still runs on the merge to `main` (step 5 watch). If branch
-protection refuses the merge because checks never started, that is a founder
-PAT/GitHub-App follow-up — do not invent a secret here.
+A PR opened by a human runs CI. Releases up to v1.4.0 ended red at the old "Open PR
+with regenerated manifest" step for this reason (`GitHub Actions is not permitted to
+create or approve pull requests`); the draft release and branch were fine.
 
 ## 5. Publish the GitHub Release
 
@@ -287,8 +283,8 @@ docs.rs builds `dreamd` and `dreamd-core` without the `vectors` feature
   `require('../package.json').version`; a guard test (`test/version-consistency.test.js`)
   and the CI `mcp-shim` job keep it honest.
 - **Manifest sha drift:** `release.yml` regenerates `packages/dreamd-mcp/manifest.json`
-  on the runner and uploads it as a release asset, then opens a `chore/mcp-manifest-v*`
-  PR that writes it back to `main`. Step 4 is now "review and merge that PR" rather
+  on the runner and uploads it as a release asset, then pushes a `chore/mcp-manifest-v*`
+  branch and links the PR that writes it back to `main`. Step 4 is now "open, review and merge that PR" rather
   than a hand-sync, so the checked-in copy that ships in the npm package always matches
   the published binaries.
 - **Masked CI:** the `test` job's `needs: lint` means a fmt error skips every test.
