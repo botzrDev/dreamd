@@ -170,9 +170,17 @@ jobs:
       # workflow, commit and tag built it. Anyone can check a download with
       # `gh attestation verify <file> --repo botzrDev/dreamd`.
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*/*.tar.gz
+
+      # The same signed bundle, attached to the release so it can be checked
+      # offline and found by tools that look for a signature asset.
+      - name: Copy the provenance bundle for the release
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dreamd-${GITHUB_REF_NAME}-provenance.sigstore.json"
 
       - name: Extract changelog for this version
         id: changelog
@@ -221,6 +229,7 @@ jobs:
           files: |
             dist/**/*
             checksums.txt
+            dreamd-${{ github.ref_name }}-provenance.sigstore.json
             packages/dreamd-mcp/manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

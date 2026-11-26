@@ -49,9 +49,8 @@ Also:
   section" leaves the GitHub Release without the content. Add the `[X.Y.Z]` link
   reference at the bottom of the file and repoint `[Unreleased]` at `vX.Y.Z...HEAD`.
 
-- Move the version in seven places no test checks: the root `Dockerfile`'s
-  `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version badge at the
-  top of `README.md`, the version line in `GUIDE.md`'s first section, the `Version:`
+- Move the version in six places no test checks: the root `Dockerfile`'s
+  `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version line in `GUIDE.md`'s first section, the `Version:`
   line in `llms.txt`, the version note and scope heading in `llms-full.txt`, and both
   fields in `plugins/dreamd/.claude-plugin/plugin.json`: `"version"` and the
   `dreamd-mcp@X.Y.Z` pin in `mcpServers`, and the release line in `SECURITY.md`'s
@@ -114,12 +113,14 @@ Watch it: `gh run watch $(gh run list --workflow release.yml --limit 1 --json da
 
 ## 3. (nothing — wait for the draft release)
 
-When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 7 assets: five
+When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 8 assets: five
 tarballs (`linux-x86_64`, `linux-x86_64-musl`, `darwin-x86_64`, `darwin-aarch64`,
-`windows-x86_64`, each `.tar.gz`), `checksums.txt`, and `manifest.json`.
+`windows-x86_64`, each `.tar.gz`), `checksums.txt`, `manifest.json`, and
+`dreamd-vX.Y.Z-provenance.sigstore.json` (the signed build provenance for the tarballs;
+`gh attestation verify <tarball> --repo botzrDev/dreamd` checks one).
 `linux-x86_64` is the static musl build, and `linux-x86_64-musl` is the same binary
 under its old name; there is no glibc Linux asset (BZR-1438). If the
-Windows build failed (it is `continue-on-error`) there are 6 and the release is still
+Windows build failed (it is `continue-on-error`) there are 7 and the release is still
 usable — the npm shim has no Windows manifest entry.
 
 ## 4. Fill the bundled manifest FROM the release build (manifest PR)
