@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -419,7 +419,7 @@ impl MemoryMcpServer {
             .store
             .recall_json(&p.query, p.k.unwrap_or(DEFAULT_RECALL_K))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Search memory using BM25 × salience scoring, blending raw episodic
@@ -447,7 +447,7 @@ impl MemoryMcpServer {
             .store
             .recall_json(&p.query, p.k.unwrap_or(DEFAULT_RECALL_K))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Append a new learning node to episodic memory.
@@ -463,7 +463,7 @@ impl MemoryMcpServer {
         Parameters(p): Parameters<AppendNodeParams>,
     ) -> Result<CallToolResult, McpError> {
         let response = self.store.append(p.into()).await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string(&response)
                 .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string()),
         )]))
@@ -487,8 +487,8 @@ impl From<AppendNodeParams> for AppendRequest {
 
 #[tool_handler]
 impl ServerHandler for MemoryMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dreamd-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 r#"dreamd memory server -- search and append agent memory (events + lessons).
