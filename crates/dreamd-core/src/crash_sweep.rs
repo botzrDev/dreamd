@@ -13,6 +13,7 @@ use std::path::Path;
 use chrono::DateTime;
 use dreamd_protocol::{AgentLearning, EventId};
 
+use crate::copies;
 use crate::dream_cycle::{cycle_date_from_now_sec, run_filesystem_phases};
 use crate::episodic;
 use crate::forget;
@@ -21,7 +22,7 @@ use crate::invariants::check_store;
 use crate::layout::AgentRoot;
 use crate::lessons::{self, Lesson, LessonsFile};
 use crate::retention::AUTOSNAP_KEEP;
-use crate::snapshot::autosnap_ref_name;
+use crate::snapshot::{self, autosnap_ref_name};
 use crate::stage::{arm_crash, arm_error, crash_fired};
 use crate::test_support::{unique_tmpdir, DirGuard};
 use crate::wal;
@@ -44,6 +45,10 @@ enum Scenario {
     Retiring,
     ForgetCitation,
     ForgetExemplar,
+    /// `ForgetExemplar` with copies of the event outside the live log: an
+    /// autosnap and a named branch that hold it, a decay archive day and a
+    /// migrate backup (DRM-168).
+    ForgetCopies,
 }
 
 fn eid(c: char) -> EventId {
@@ -117,7 +122,7 @@ fn seed(scenario: Scenario) -> (AgentRoot, DirGuard) {
                 event('D', "go::old", 120, 5.0, false),
             ]
         }
-        Scenario::ForgetCitation | Scenario::ForgetExemplar => {
+        Scenario::ForgetCitation | Scenario::ForgetExemplar | Scenario::ForgetCopies => {
             write_lessons(&root, "rust::eh", 'X', &['X', 'Y']);
             vec![
                 event('X', "rust::eh", 1, 7.0, true),
@@ -127,6 +132,24 @@ fn seed(scenario: Scenario) -> (AgentRoot, DirGuard) {
         }
     };
     fs::write(root.episodic_jsonl(), lines(&log)).unwrap();
+    if scenario == Scenario::ForgetCopies {
+        snapshot::create_autosnap(&root, NOW - 120).unwrap();
+        fs::write(
+            root.episodic_jsonl(),
+            lines(&[log[0].clone(), log[2].clone()]),
+        )
+        .unwrap();
+        snapshot::create_branch(&root, "keep", NOW - 60).unwrap();
+        fs::write(root.episodic_jsonl(), lines(&log)).unwrap();
+        fs::create_dir_all(root.snapshots_dir()).unwrap();
+        let archived = event('P', "go::older", 200, 5.0, false);
+        fs::write(
+            root.snapshot_file(&date()),
+            lines(&[archived, log[0].clone()]),
+        )
+        .unwrap();
+        fs::write(copies::migrate_backup_path(&root), lines(&log)).unwrap();
+    }
     if scenario == Scenario::Pruning {
         fs::create_dir_all(root.branches_refs_dir()).unwrap();
         for i in 0..SEEDED_SNAPS {
@@ -184,6 +207,28 @@ fn image(root: &AgentRoot) -> Image {
     }
     walk(&agent, &root.snapshots_dir(), &mut out);
     walk(&agent, &root.branches_refs_dir(), &mut out);
+    add(
+        &agent,
+        &root.branches_dir().join(snapshot::HEAD_FILE),
+        &mut out,
+    );
+    add(&agent, &copies::migrate_backup_path(root), &mut out);
+    // What each ref restores: the files of the object it names. The objects
+    // directory itself is not compared: a forget writes its new objects
+    // before its commit and removes the old ones after it.
+    if let Ok(entries) = fs::read_dir(root.branches_refs_dir()) {
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let body = fs::read_to_string(&path).unwrap();
+            let id = body.lines().next().unwrap_or("");
+            if let Ok(files) = snapshot::read_object(root, id) {
+                for (rel, bytes) in files {
+                    out.insert(format!("named/{name}/{rel}"), bytes);
+                }
+            }
+        }
+    }
     out
 }
 
@@ -208,9 +253,11 @@ fn run(scenario: Scenario, root: &AgentRoot, lock: &WriterLock) -> Result<(), St
         Scenario::ForgetCitation => forget::cascade(root, lock.ledger(), &eid('Y'), NOW)
             .map(drop)
             .map_err(|e| e.to_string()),
-        Scenario::ForgetExemplar => forget::cascade(root, lock.ledger(), &eid('X'), NOW)
-            .map(drop)
-            .map_err(|e| e.to_string()),
+        Scenario::ForgetExemplar | Scenario::ForgetCopies => {
+            forget::cascade(root, lock.ledger(), &eid('X'), NOW)
+                .map(drop)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -317,6 +364,24 @@ fn clean_post(scenario: Scenario) -> Image {
         Scenario::ForgetExemplar => {
             assert!(!root.lessons_md().exists());
             assert!(!log_ids(&root).contains(&eid('X')));
+        }
+        Scenario::ForgetCopies => {
+            assert!(!root.lessons_md().exists());
+            assert!(!log_ids(&root).contains(&eid('X')));
+            let x = eid('X');
+            let left = copies::find(&root, &x).unwrap();
+            assert!(left.is_empty(), "{left:?}");
+            let archive = episodic::read_all(&root.snapshot_file(&date())).unwrap();
+            assert_eq!(
+                archive.into_iter().map(|e| e.id).collect::<Vec<_>>(),
+                vec![eid('P')]
+            );
+            let refs: Vec<String> = fs::read_dir(root.branches_refs_dir())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            // Two autosnaps (`create_branch` takes one too) and `keep`.
+            assert_eq!(refs.len(), 3, "every ref survives: {refs:?}");
         }
     }
     assert_eq!(status(&root), "complete");
@@ -613,6 +678,16 @@ fn error_sweep_forget_drops_a_citation() {
 #[test]
 fn error_sweep_forget_unlinks_the_lesson() {
     error_sweep(Scenario::ForgetExemplar);
+}
+
+#[test]
+fn crash_sweep_forget_clears_the_copies() {
+    sweep(Scenario::ForgetCopies);
+}
+
+#[test]
+fn error_sweep_forget_clears_the_copies() {
+    error_sweep(Scenario::ForgetCopies);
 }
 
 #[test]

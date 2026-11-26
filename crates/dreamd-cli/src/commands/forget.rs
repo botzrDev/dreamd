@@ -1,8 +1,11 @@
 //! `dreamd forget <id> [--dry-run | --proof <path>]` — remove one episodic
-//! event and the lesson state built from it (BZR-151).
+//! event, the lesson state built from it, and the copies of it dreamd keeps
+//! (BZR-151).
 //!
-//! The removal is [`dreamd_core::forget::cascade`] (BZR-158). This module adds
-//! the daemon guard, the index refresh, and the receipt file.
+//! The removal is [`dreamd_core::forget::cascade`] (BZR-158). It also clears
+//! the decay archive, the migrate backup and every memory branch object that
+//! holds the event. This module adds the daemon guard, the index refresh and
+//! merge, the git history count, and the receipt file.
 //!
 //! **Daemon-coexistence guard:** a live daemon holds an append fd on the JSONL
 //! and the Tantivy writer lock. The cascade replaces the log by rename, so the
@@ -12,18 +15,28 @@
 //! see). `--dry-run` writes nothing, does not probe and takes no lock. Its
 //! stdout says `would_remove=`, never `removed=`.
 //!
-//! **Index:** after a removal, when `.agent/.dreamd/index` already exists, the
-//! command opens it, prunes this one event id and re-indexes the lesson layer.
-//! An absent index directory is left absent. The refresh runs on Windows too.
+//! **Index:** after a forget that cleared anything, when `.agent/.dreamd/index`
+//! already exists, the command opens it, prunes this one event id and
+//! re-indexes the lesson layer, then merges every segment that holds a
+//! deleted document so the event's text leaves the segment files. An absent
+//! index directory is left absent. The refresh runs on Windows too.
 //!
-//! **Receipt:** `--proof <path>` writes a `forget-receipt/1.0` file
-//! ([`dreamd_core::forget::render_receipt`]). It is not the signed membership
+//! **Git:** the command never rewrites git history. It counts the commits
+//! whose dreamd files hold the id, prints the first and last, and prints a
+//! `git filter-repo` command the user can run.
+//!
+//! **Receipt:** `--proof <path>` writes a `forget-receipt/1.1` file
+//! ([`dreamd_core::forget::render_receipt`]), which lists what was cleared and
+//! where copies remain. It is unsigned, and it is not the signed membership
 //! proof in `docs/provenance.md`; this tree has no provenance key.
 
 use std::io::Write;
 use std::path::Path;
 
-use dreamd_core::forget::{self, ForgetError, ForgetReport};
+use dreamd_core::copies::{self, GitScan};
+use dreamd_core::forget::{
+    self, ForgetError, ForgetOutcome, ForgetReport, IndexOutcome, LessonEffect, Remaining,
+};
 use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 use dreamd_protocol::EventId;
@@ -104,9 +117,14 @@ fn daemon_liveness(path: &Path) -> bool {
 /// caller's clock, passed to the cascade. Must not be called from inside a
 /// Tokio runtime: the index refresh builds its own current-thread runtime.
 ///
-/// A well-formed id that is not in the log prints `removed=false` and returns
-/// `Ok`. A failed index refresh or receipt write is returned after the result
-/// line; the JSONL removal is not rolled back.
+/// stdout: line 1 is `removed=<bool> lesson=<effect>[ proof=<path>]`; then a
+/// `cleared:` line naming the places cleared, and one `remaining:` line per
+/// place a copy is still kept. stderr carries the git history note and the
+/// rewrite command.
+///
+/// A well-formed id found nowhere prints `removed=false` and returns `Ok`.
+/// A failed index refresh or receipt write is returned after the result
+/// lines; the removal is not rolled back.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     cwd: &Path,
@@ -133,15 +151,32 @@ pub fn run(
             return Err(ForgetCliError::NotFound);
         }
     };
+    let index_present = root
+        .dreamd_dir()
+        .join(dreamd_core::server::INDEX_DIR_NAME)
+        .is_dir();
 
     if dry_run {
         let report = forget::preview(&root, &event_id)?;
+        let git = copies::git_history(&root, &event_id);
+        let index = if index_present && !report.cleared.is_empty() {
+            IndexOutcome::Cleared
+        } else {
+            IndexOutcome::Absent
+        };
+        let outcome = ForgetOutcome::new(&root, &report, index, &git);
         writeln!(
             out,
             "would_remove={} lesson={}",
             report.removed,
             report.lesson.as_str()
         )?;
+        write_places(out, "would_clear", &outcome)?;
+        for path in touched_paths(&root, &report, index_present) {
+            writeln!(out, "would_touch: {path}")?;
+        }
+        write_remaining(out, &outcome.remaining)?;
+        write_git_note(err, &event_id, &git)?;
         writeln!(err, "dreamd: dry run; nothing written")?;
         return Ok(());
     }
@@ -158,27 +193,44 @@ pub fn run(
         WriterLock::acquire(&root, WriterKind::Forget).map_err(ForgetCliError::WriterLock)?;
 
     let report = forget::cascade(&root, lock.ledger(), &event_id, now_sec)?;
-    if !report.removed {
+    let git = copies::git_history(&root, &event_id);
+    if report.cleared.is_empty() {
+        let outcome = ForgetOutcome::new(&root, &report, IndexOutcome::Absent, &git);
         writeln!(out, "removed=false lesson={}", report.lesson.as_str())?;
+        write_remaining(out, &outcome.remaining)?;
+        write_git_note(err, &event_id, &git)?;
         return Ok(());
     }
 
-    let index_err = refresh_index(&root, &lock, &event_id).err();
+    let (index, index_err) = if index_present {
+        clear_index(&root, &lock, &event_id, err)?
+    } else {
+        (IndexOutcome::Absent, None)
+    };
+    let outcome = ForgetOutcome::new(&root, &report, index, &git);
 
     let mut proof_err = None;
     let mut proof_written = None;
     if let Some(path) = proof {
-        match write_receipt(&root, &event_id, report, path) {
+        match write_receipt(&root, &event_id, &report, &outcome, path) {
             Ok(()) => proof_written = Some(path),
             Err(e) => proof_err = Some(e),
         }
     }
 
-    write!(out, "removed=true lesson={}", report.lesson.as_str())?;
+    write!(
+        out,
+        "removed={} lesson={}",
+        report.removed,
+        report.lesson.as_str()
+    )?;
     if let Some(path) = proof_written {
         write!(out, " proof={}", path.display())?;
     }
     writeln!(out)?;
+    write_places(out, "cleared", &outcome)?;
+    write_remaining(out, &outcome.remaining)?;
+    write_git_note(err, &event_id, &git)?;
 
     match (index_err, proof_err) {
         (Some(e), _) | (None, Some(e)) => Err(e),
@@ -186,33 +238,203 @@ pub fn run(
     }
 }
 
-/// Recompute the ledger root and write the `forget-receipt/1.0` file.
+/// `<label>: <place> <place> …`, or nothing when no place is listed.
+fn write_places(out: &mut impl Write, label: &str, outcome: &ForgetOutcome) -> std::io::Result<()> {
+    if outcome.cleared.is_empty() {
+        return Ok(());
+    }
+    write!(out, "{label}:")?;
+    for place in &outcome.cleared {
+        write!(out, " {}", place.as_str())?;
+    }
+    writeln!(out)
+}
+
+/// One `remaining: <place> …` line per place a copy is still kept.
+fn write_remaining(out: &mut impl Write, remaining: &[Remaining]) -> std::io::Result<()> {
+    for r in remaining {
+        match r {
+            Remaining::GitHistory {
+                commits,
+                first,
+                last,
+                paths,
+            } => writeln!(
+                out,
+                "remaining: git_history commits={commits} first={first} last={last} paths={}",
+                paths.join(",")
+            )?,
+            Remaining::GitUnchecked { unchecked } => writeln!(
+                out,
+                "remaining: git_history unchecked (could not read the repository: {unchecked})"
+            )?,
+            Remaining::BranchObject {
+                object,
+                refs,
+                head,
+                reason,
+            } => {
+                write!(out, "remaining: branch_object {object} reason={reason}")?;
+                if !refs.is_empty() {
+                    write!(out, " refs={}", refs.join(","))?;
+                }
+                if *head {
+                    write!(out, " head")?;
+                }
+                writeln!(out)?
+            }
+            Remaining::DecayArchive { file } => writeln!(out, "remaining: decay_archive {file}")?,
+            Remaining::MigrateBackup { file } => writeln!(out, "remaining: migrate_backup {file}")?,
+            Remaining::Index { reason } => writeln!(out, "remaining: index reason={reason}")?,
+        }
+    }
+    Ok(())
+}
+
+/// When git history holds the id: how many commits, and the command that
+/// would rewrite them, with what a rewrite does not reach. dreamd runs none
+/// of it.
+fn write_git_note(err: &mut impl Write, id: &EventId, git: &GitScan) -> std::io::Result<()> {
+    let GitScan::Scanned(history) = git else {
+        return Ok(());
+    };
+    if history.commits == 0 {
+        return Ok(());
+    }
+    let short = |s: &Option<String>| {
+        s.as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(12)
+            .collect::<String>()
+    };
+    let range = if history.commits == 1 {
+        format!("commit {}", short(&history.first))
+    } else {
+        format!(
+            "{} commits, from {} to {}",
+            history.commits,
+            short(&history.first),
+            short(&history.last)
+        )
+    };
+    writeln!(
+        err,
+        "dreamd: git history still holds {id} in {range}. dreamd does not rewrite git history."
+    )?;
+    writeln!(
+        err,
+        "dreamd: to remove it, commit or stash your changes, then run this in {}:",
+        history.workdir.display()
+    )?;
+    writeln!(err, "  {}", copies::rewrite_command(id))?;
+    writeln!(
+        err,
+        "dreamd: that needs git-filter-repo (a separate install). It rewrites every commit id on every \
+         branch, ends with `git reset --hard`, and refuses a repository that is not a fresh clone \
+         unless you add --force."
+    )?;
+    writeln!(
+        err,
+        "dreamd: clones, forks and remotes keep their copies until each one rewrites too, and \
+         pushing the rewrite needs --force. Hosted copies (pull requests, caches) can keep it longer."
+    )?;
+    Ok(())
+}
+
+/// The paths a forget writes, relative to the project root, for `--dry-run`.
+fn touched_paths(root: &AgentRoot, report: &ForgetReport, index_present: bool) -> Vec<String> {
+    let rel = |p: &Path| {
+        p.strip_prefix(root.project_root())
+            .unwrap_or(p)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut paths = Vec::new();
+    if report.removed {
+        paths.push(rel(&root.episodic_jsonl()));
+        if report.lesson != LessonEffect::Untouched {
+            paths.push(rel(&root.lessons_md()));
+        }
+        paths.push(rel(&root.semantic_dir().join("recurrence_counts.json")));
+    }
+    for file in &report.copies.files {
+        paths.push(rel(&file.path));
+    }
+    for obj in &report.copies.objects {
+        if report.left.objects.iter().any(|left| left.id == obj.id) {
+            continue;
+        }
+        paths.push(rel(&root.branches_objects_dir().join(&obj.id)));
+        for name in &obj.refs {
+            paths.push(rel(&root.branches_refs_dir().join(name)));
+        }
+        if obj.head {
+            paths.push(rel(&root
+                .branches_dir()
+                .join(dreamd_core::snapshot::HEAD_FILE)));
+        }
+    }
+    if index_present && !report.cleared.is_empty() {
+        paths.push(format!(
+            "{}/",
+            rel(&root.dreamd_dir().join(dreamd_core::server::INDEX_DIR_NAME))
+        ));
+    }
+    paths
+}
+
+/// Recompute the ledger root and write the `forget-receipt/1.1` file.
 fn write_receipt(
     root: &AgentRoot,
     event_id: &EventId,
-    report: ForgetReport,
+    report: &ForgetReport,
+    outcome: &ForgetOutcome,
     path: &Path,
 ) -> Result<(), ForgetCliError> {
     let provenance = dreamd_core::provenance::verify(root)
         .map_err(|e| ForgetCliError::Io(std::io::Error::other(e.to_string())))?;
-    let text = forget::render_receipt(event_id, report.lesson, &provenance);
+    let text = forget::render_receipt(event_id, report, outcome, &provenance);
     dreamd_core::io::write_atomic(path, text.as_bytes())?;
     Ok(())
 }
 
+/// Refresh the index, then merge away the deleted documents' bytes. A failed
+/// refresh is an error; a failed merge is a warning on `err` and a
+/// `remaining: index` line, because the event no longer appears in recall
+/// either way.
+fn clear_index(
+    root: &AgentRoot,
+    lock: &WriterLock,
+    event_id: &EventId,
+    err: &mut impl Write,
+) -> Result<(IndexOutcome, Option<ForgetCliError>), ForgetCliError> {
+    if let Err(e) = refresh_index(root, lock, event_id) {
+        return Ok((IndexOutcome::RefreshFailed, Some(e)));
+    }
+    let outcome = match dreamd_core::server::compact_deletes(root, lock) {
+        Ok(c) if c.is_clean() => IndexOutcome::Cleared,
+        Ok(c) if c.segments_with_deletes > 0 => IndexOutcome::MergePending,
+        Ok(_) => IndexOutcome::FilesNotRemoved,
+        Err(e) => {
+            writeln!(err, "dreamd: warning — index merge failed: {e}")?;
+            IndexOutcome::MergePending
+        }
+    };
+    Ok((outcome, None))
+}
+
 /// Prune the forgotten event from an existing index and re-index the lesson
-/// layer through a `TantivyIndexHandle` opened under the writer lock. An
-/// absent index directory is left absent.
+/// layer through a `TantivyIndexHandle` opened under the writer lock.
 fn refresh_index(
     root: &AgentRoot,
     lock: &WriterLock,
     event_id: &EventId,
 ) -> Result<(), ForgetCliError> {
-    use dreamd_core::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE, INDEX_DIR_NAME};
+    use dreamd_core::server::{TantivyIndexHandle, DEFAULT_COMMIT_CADENCE};
 
-    if !root.dreamd_dir().join(INDEX_DIR_NAME).exists() {
-        return Ok(());
-    }
     let index_err = |e: dreamd_core::server::IndexError| ForgetCliError::Index(e.to_string());
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -330,7 +552,13 @@ mod tests {
         let (r, out, err) = run_capture(tmp.path(), None, &evt_id('A'), true, None);
 
         r.unwrap();
-        assert_eq!(out, "would_remove=true lesson=untouched\n");
+        assert_eq!(
+            out,
+            "would_remove=true lesson=untouched\n\
+             would_clear: live_log recurrence_sidecar\n\
+             would_touch: .agent/episodic/AGENT_LEARNINGS.jsonl\n\
+             would_touch: .agent/semantic/recurrence_counts.json\n"
+        );
         assert!(
             !out.contains("removed="),
             "dry-run must not say the event was removed: {out}"
@@ -347,7 +575,10 @@ mod tests {
         let (r, out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
 
         r.unwrap();
-        assert_eq!(out, "removed=true lesson=untouched\n");
+        assert_eq!(
+            out,
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n"
+        );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
         assert!(!root.wal_path().exists());
     }
@@ -381,7 +612,10 @@ mod tests {
         r.unwrap();
         assert_eq!(
             out,
-            format!("removed=true lesson=untouched proof={}\n", proof.display())
+            format!(
+                "removed=true lesson=untouched proof={}\ncleared: live_log recurrence_sidecar\n",
+                proof.display()
+            )
         );
         let ledger = fs::read_to_string(root.provenance_ledger()).unwrap();
         assert!(ledger.contains(line.trim_end()), "{ledger}");
@@ -389,7 +623,12 @@ mod tests {
         let text = fs::read_to_string(&proof).unwrap();
         assert!(!text.contains("\"signature\""), "{text}");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["schema_version"], "forget-receipt/1.0");
+        assert_eq!(v["schema_version"], "forget-receipt/1.1");
+        assert_eq!(
+            v["cleared"],
+            serde_json::json!(["live_log", "recurrence_sidecar"])
+        );
+        assert_eq!(v["remaining"], serde_json::json!([]));
         assert_eq!(v["event_id"], evt_id('A'));
         assert_eq!(
             v["root"],
@@ -478,7 +717,10 @@ mod tests {
         let (r, out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
 
         r.unwrap();
-        assert_eq!(out, "removed=true lesson=untouched\n");
+        assert_eq!(
+            out,
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n"
+        );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
         assert_ne!(
             dreamd_core::wal::read_last_cycle_status(&root).unwrap(),
@@ -526,7 +768,10 @@ mod tests {
 
         let (r, out, _err) = run_capture(tmp.path(), None, &evt_id('A'), false, None);
         r.unwrap();
-        assert_eq!(out, "removed=true lesson=untouched\n");
+        assert_eq!(
+            out,
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar index\n"
+        );
 
         assert!(!hits(&root).contains(&evt_id('A')));
     }

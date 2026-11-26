@@ -37,7 +37,7 @@ git diff .agent/
 | Cite | Every lesson in `.agent/semantic/LESSONS.md` cites the episodic events it was promoted from. The provenance ledger records which event fed which lesson and index entry |
 | `blame <query>` | Lists the stored memories behind a recall. `--explain` adds the salience factors for each hit; `--json` prints one array |
 | `doctor --provenance` | Recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
-| `forget <event-id>` | Removes the event and the lesson state that names it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file |
+| `forget <event-id>` | Removes the event, the lesson state that names it, and the copies dreamd keeps under `.agent/`. Prints what it cleared and where copies remain; git history keeps the event until you rewrite it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.1` file |
 | `git revert` | Each learning cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Revert that commit with the daemon stopped, then run `npx -y dreamd-mcp doctor --repair` to rebuild the recall index |
 
 After a `forget`, `doctor --provenance` reports the removed event's old ledger edges as orphans and exits 1. That is expected: the ledger is append-only, so it keeps the record that the event once existed.
