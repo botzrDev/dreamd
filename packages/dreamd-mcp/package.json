@@ -21,7 +21,7 @@
   ],
   "homepage": "https://github.com/botzrDev/dreamd#readme",
   "bugs": {
-    "url": "https://github.com/botzrDev/dreamd/issues"
+    "url": "https://github.com/botzrDev/dreamd/discussions"
   },
   "bin": {
     "dreamd-mcp": "bin/dreamd-mcp.js"

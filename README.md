@@ -286,7 +286,7 @@ The prebuilt Linux x86_64 binary is one static build with no glibc requirement, 
 
 ## Support dreamd
 
-dreamd is open source under Apache-2.0 and built by a small team. A star on the repo helps others find it. When a memory goes wrong, an issue with the `blame` output helps us fix it. Sponsorship funds core maintenance. You can sponsor dreamd on:
+dreamd is open source under Apache-2.0 and built by a small team. A star on the repo helps others find it. When a memory goes wrong, a post in [Discussions](https://github.com/botzrDev/dreamd/discussions) with the `blame` output helps us fix it. Sponsorship funds core maintenance. You can sponsor dreamd on:
 
 - [GitHub Sponsors](https://github.com/sponsors/botzrDev)
 - [Patreon](https://www.patreon.com/c/dreamd_dev)
@@ -310,7 +310,7 @@ None yet.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md) (do not open a public issue for vulnerabilities).
+dreamd is built by the core team and does not take outside pull requests. Bugs, questions and ideas go to [Discussions](https://github.com/botzrDev/dreamd/discussions); see [CONTRIBUTING.md](./CONTRIBUTING.md) for where each belongs and for building from source. By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md), never a public thread.
 
 ## License
 
