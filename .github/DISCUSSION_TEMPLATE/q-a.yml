@@ -1,0 +1,60 @@
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions and bug reports both go here. For a security vulnerability, do not post here: use a private advisory or email (see SECURITY.md).
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this?
+      options:
+        - A question / how do I…
+        - A bug, or something not working as documented
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, or what are you trying to do?
+      description: For a bug, include the steps to reproduce, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dreamd version
+      description: "`dreamd --version` or `npx -y dreamd-mcp version`"
+      placeholder: "dreamd 1.4.0"
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 15 arm64, Ubuntu 24.04 x86_64, Windows 11 x64"
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      multiple: true
+      options:
+        - Claude Code
+        - Cursor
+        - Cline
+        - Other MCP client
+        - HTTP API directly
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - npx dreamd-mcp
+        - cargo install
+        - Release binary
+        - Built from source
+  - type: textarea
+    id: blame
+    attributes:
+      label: "`dreamd blame` output, logs or `.agent/` files (optional)"
+      description: When a recall went wrong, `dreamd blame "<query>"` shows which memory caused it. Remove anything private first.
+      render: text

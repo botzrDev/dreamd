@@ -1,22 +1,24 @@
 # Contributing to dreamd
 
-Thanks for your interest. `dreamd` is at v1.0.0. The spec ([`SPEC.md`](./SPEC.md)) is the frozen on-disk contract; the implementation still churns within that contract.
+dreamd is built by the core team. The source is open under Apache-2.0: you can read it, build it, fork it and ship it under that license. The repository does not take pull requests from outside contributors.
+
+What helps most is a report: a bug with its `dreamd blame` output, a use case dreamd does not cover, a question the docs did not answer. Those go to [GitHub Discussions](https://github.com/botzrDev/dreamd/discussions).
+
+The spec ([`SPEC.md`](./SPEC.md)) is the frozen on-disk contract; the implementation still changes within that contract.
+
+## Where to go
+
+| You have | Go to |
+|---|---|
+| A bug, or something not working as documented | [Discussions → Q&A](https://github.com/botzrDev/dreamd/discussions/categories/q-a). The form asks for the version, OS, harness, steps, and `dreamd blame` output when a recall went wrong. |
+| A question or "how do I…" | [Discussions → Q&A](https://github.com/botzrDev/dreamd/discussions/categories/q-a) |
+| A feature idea or use case | [Discussions → Ideas](https://github.com/botzrDev/dreamd/discussions/categories/ideas): describe the use case and the gap |
+| A spec change proposal | [Discussions → Ideas](https://github.com/botzrDev/dreamd/discussions/categories/ideas), title prefixed `[RFC]` |
+| A security vulnerability | **Not** a public thread. See [SECURITY.md](./SECURITY.md): a private advisory or email |
 
 ## Code of Conduct
 
-Participation in this project is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md). By contributing you agree to uphold it.
-
-## Reporting bugs and proposing features
-
-- **Bug:** open an issue using the *Bug report* template. Include the version, OS, and a minimal reproduction.
-- **Feature or idea:** start a thread in [Discussions](https://github.com/botzrDev/dreamd/discussions) describing the use case and the gap. Blank issues are disabled; the issue chooser offers only the *Bug report* and *RFC* templates.
-- **Spec change:** open an issue using the *RFC* template, with the title prefixed `[RFC]`. Spec changes are decided by discussion on the issue.
-- **Security vulnerability:** **do not** open a public issue. See [SECURITY.md](./SECURITY.md).
-
-### Good first issues
-
-New to the codebase? Start here:
-https://github.com/botzrDev/dreamd/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22
+Participation in this project, Discussions included, is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Development setup
 
@@ -80,37 +82,17 @@ git config core.hooksPath .githooks
 
 CI runs lint and test on Linux and macOS as merge gates, plus Linux-only gates for binary size, idle RSS, the no-`.git` tarball build, the npm shim, and the install funnel. The Windows test matrix is `continue-on-error`. `windows-replace-probe` is a merge gate and runs the `io::tests` replace tests, including the production parent-flush test. Learn, the dream cycle, and the Tantivy index run on Windows. Linux and macOS gates must be green before merge. Every job is described in [`docs/ci.md`](./docs/ci.md).
 
-## Your first contribution in ~15 minutes
+## Pull requests (core team)
 
-A start-to-finish loop for your first PR. Each step links to the section with the details rather than repeating them.
+Only collaborators can open pull requests. This is the workflow for them, and for the coding agents working in this repository.
 
-1. **Clone the repo** (see [Development setup](#development-setup) for the requirements):
-
-   ```bash
-   git clone https://github.com/botzrDev/dreamd.git
-   cd dreamd
-   ```
-
-2. **Prove your toolchain works by running the lint gate.** Install `just` first if you don't have it — the [Task runner (`just`)](#task-runner-just) section covers installation and the full recipe table:
-
-   ```bash
-   just lint
-   ```
-
-   This runs formatting + clippy exactly as CI does; a clean pass means your environment is ready. (No `just`? Run the underlying cargo commands from the recipe table instead.)
-
-3. **Pick an issue** from the good-first-issue filter linked in [Good first issues](#good-first-issues).
-
-4. **Make your change and open a PR** following the checklist in [Pull requests](#pull-requests) — topic branch from `main`, one concern per PR, tests, a `CHANGELOG.md` entry for user-visible changes, and DCO sign-off (`git commit -s`).
-
-## Pull requests
-
-1. Fork the repo and create a topic branch from `main`.
-2. Reference the relevant story ID in the branch and commits when one exists. Story IDs (`DR-`, `WEG-`, `AILAB-`, `BZR-` — see [`STORY_IDS.md`](./STORY_IDS.md)) are assigned by the dreamd team — external contributors don't need to assign one.
+1. Create a topic branch from `main`.
+2. Reference the relevant story ID in the branch and commits when one exists. Story IDs (`DR-`, `WEG-`, `AILAB-`, `BZR-` — see [`STORY_IDS.md`](./STORY_IDS.md)) are assigned by the dreamd team.
 3. Keep PRs focused. One concern per PR. If you find yourself bundling, split it.
 4. Update [`CHANGELOG.md`](./CHANGELOG.md) under `## [Unreleased]` for any user-visible change.
 5. Update tests. New behavior gets new tests; bug fixes get regression tests.
 6. Run `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --all-features --workspace` locally before pushing (or `just lint` then `just test`).
+7. Merge when the required checks on `main` pass (lint, Linux tests, security audit, cargo-deny, DCO, MCP shim, binary size). [`docs/ci.md`](./docs/ci.md) describes each job.
 
 ### Commit messages
 
@@ -130,7 +112,7 @@ This project uses the [DCO](https://developercertificate.org/) instead of a CLA.
 git commit -s -m "feat: ..."
 ```
 
-The `Signed-off-by:` trailer certifies that you wrote the code or have the right to contribute it under the project's license (Apache-2.0). PRs without sign-off will be asked to amend before merge.
+The `Signed-off-by:` trailer certifies that you wrote the code or have the right to contribute it under the project's license (Apache-2.0). The DCO check fails a PR that has a commit without sign-off.
 
 ## Load-bearing engineering decisions
 

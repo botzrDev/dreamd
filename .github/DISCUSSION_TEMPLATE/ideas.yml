@@ -1,0 +1,25 @@
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the use case first, then the gap. To propose a change to the on-disk contract in SPEC.md, prefix the title with `[RFC]`.
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What are you or your agents trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: What dreamd does today, and the gap
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal (optional)
+      description: How you would close the gap, if you have an idea.
