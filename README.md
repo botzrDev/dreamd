@@ -22,6 +22,8 @@ Recorded live on dreamd 1.2.0, sped up 1.5x: `blame` finds the event behind a ba
 
 Self-hosted, single binary, Apache-2.0. Other MCP-aware harnesses use the same two tools.
 
+No telemetry: dreamd sends no usage data anywhere. Your memory stays on your machine, with one exception: when `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set (or a key is in `secrets.toml`), `dreamd dream` sends the episodes behind a new lesson to that provider to write it, and `--no-llm` turns this off. The only other network call is the `npx` launcher downloading the dreamd binary from GitHub releases.
+
 ---
 
 ## Install
