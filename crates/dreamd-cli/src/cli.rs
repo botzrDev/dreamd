@@ -78,11 +78,14 @@ pub struct ForgetArgs {
     /// The event id to remove (`evt_` + 26 Crockford base32 characters).
     #[arg(value_name = "EVENT_ID")]
     pub id: String,
-    /// Print what would be removed without writing anything.
+    /// Print what would be removed, and the memory files, branch objects and
+    /// refs that would change, without writing anything.
     #[arg(long)]
     pub dry_run: bool,
-    /// Write a forget-receipt/1.0 JSON file (event id, lesson effect, ledger
-    /// root, orphan edges) to PATH after a removal. Not a signed proof.
+    /// Write a forget-receipt/1.1 JSON file to PATH after a removal: the event
+    /// id, lesson effect, ledger root and orphan edges, plus `cleared` and
+    /// `remaining` (where copies are still kept, git history included). It
+    /// holds no memory content. Unsigned; not a proof.
     #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
     pub proof: Option<PathBuf>,
 }
@@ -146,7 +149,20 @@ pub enum Command {
     /// Run a dream cycle: write LESSONS.md and prune decayed episodic events.
     /// Uses a configured LLM, or the deterministic exemplar when there is no key.
     Dream(DreamArgs),
-    /// Remove one episodic event and the lesson state built from it.
+    /// Remove one episodic event, the lesson state built from it, and the
+    /// copies dreamd keeps of it.
+    ///
+    /// Clears the live log, LESSONS.md, the recurrence counts, the decay
+    /// archive, the migrate backup, every autosnap and memory branch (each is
+    /// rewritten without the event; refs keep their names), and the search
+    /// index (pruned, then merged so the text leaves the segment files).
+    /// Prints a `cleared:` line, and one `remaining:` line per place a copy
+    /// is still kept.
+    ///
+    /// It never rewrites git history. When committed `.agent/` files hold the
+    /// event, it prints how many commits, the first and last, and a
+    /// `git filter-repo` command you can run. Until you run it, and until
+    /// every clone and remote rewrites too, those commits keep the text.
     ///
     /// Stop a live `dreamd watch` first; the command refuses while the daemon
     /// is running.

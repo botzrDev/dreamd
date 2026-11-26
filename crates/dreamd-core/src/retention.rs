@@ -179,27 +179,7 @@ pub fn collect_objects(
     agent_root: &AgentRoot,
     cutoff: SystemTime,
 ) -> Result<usize, RetentionError> {
-    // A `Vec`, not a `HashSet`: there are few refs, and it links less code.
-    let mut named = Vec::new();
-    let refs = agent_root.branches_refs_dir();
-    match fs::read_dir(&refs) {
-        Ok(entries) => {
-            for entry in entries {
-                let path = entry.map_err(io_err(&refs))?.path();
-                let body = fs::read_to_string(&path).map_err(io_err(&path))?;
-                let id = body.lines().next().unwrap_or("");
-                if !is_object_id(id) {
-                    return Err(RetentionError::BadRef { path });
-                }
-                named.push(id.to_string());
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(&refs)(e)),
-    }
-    if let Head::Detached(id) = read_head(agent_root)? {
-        named.push(id);
-    }
+    let named = named_ids(agent_root)?;
 
     let objects = agent_root.branches_objects_dir();
     let entries = match fs::read_dir(&objects) {
@@ -223,6 +203,64 @@ pub fn collect_objects(
         }
         match fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(&path)(e)),
+        }
+    }
+    Ok(removed)
+}
+
+/// The object ids every file in `refs/` and a detached `HEAD` name. Any ref
+/// whose line 1 is not a 64-hex id is an error, so a caller removes nothing.
+fn named_ids(agent_root: &AgentRoot) -> Result<Vec<String>, RetentionError> {
+    // A `Vec`, not a `HashSet`: there are few refs, and it links less code.
+    let mut named = Vec::new();
+    let refs = agent_root.branches_refs_dir();
+    match fs::read_dir(&refs) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry.map_err(io_err(&refs))?.path();
+                let body = fs::read_to_string(&path).map_err(io_err(&path))?;
+                let id = body.lines().next().unwrap_or("");
+                if !is_object_id(id) {
+                    return Err(RetentionError::BadRef { path });
+                }
+                named.push(id.to_string());
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(&refs)(e)),
+    }
+    if let Head::Detached(id) = read_head(agent_root)? {
+        named.push(id);
+    }
+    Ok(named)
+}
+
+/// Remove each object in `ids` that no ref and no detached `HEAD` names, at
+/// any age. Returns the ids it removed; an id still named, or already gone,
+/// is skipped.
+///
+/// `dreamd forget` calls this after its commit for the objects it replaced,
+/// and for objects no ref named that hold the forgotten event and are past
+/// [`OBJECT_GC_GRACE`] (the caller checks their age). Unlike
+/// [`collect_objects`] it has no grace period of its own: every ref that named
+/// a replaced object was moved under the writer lock. It reads the refs first
+/// and fails closed like [`collect_objects`].
+pub(crate) fn remove_unnamed(
+    agent_root: &AgentRoot,
+    ids: &[String],
+) -> Result<Vec<String>, RetentionError> {
+    let named = named_ids(agent_root)?;
+    let objects = agent_root.branches_objects_dir();
+    let mut removed = Vec::new();
+    for id in ids {
+        if !is_object_id(id) || named.contains(id) {
+            continue;
+        }
+        let path = objects.join(id);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed.push(id.clone()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_err(&path)(e)),
         }

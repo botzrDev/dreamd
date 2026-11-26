@@ -40,7 +40,7 @@ Canonical map of every documentation artifact in this repository: what it is, wh
 |---|---|---|
 | [branching-guide.md](./branching-guide.md) | Existing installs | Deprecated `dreamd memory branch` / `checkout` / `branches` / `delete` / `diff` / `bisect`. Removed in 2.0. New work uses git |
 | [branching.md](./branching.md) | Contributors, implementers | Branch storage format (`branches/1.0`) under `.agent/.dreamd/branches/` — objects, refs, `HEAD`, the per-dream-cycle `snap-*` refs, `memory diff` and `memory bisect` |
-| [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) under `.agent/.dreamd/provenance/`. Edge recording, the read-only `dreamd doctor --provenance` check, and `dreamd forget` (with its `forget-receipt/1.0` file) are implemented; the signed proof and a standalone verifier are **not** |
+| [provenance.md](./provenance.md) | Contributors, implementers | Provenance ledger format (`provenance/1.0`) under `.agent/.dreamd/provenance/`. Edge recording, the read-only `dreamd doctor --provenance` check, and `dreamd forget` (with its `forget-receipt/1.1` file, which lists what was cleared and the git commits that still hold the event) are implemented; the signed proof and a standalone verifier are **not** |
 
 ## Optional features
 

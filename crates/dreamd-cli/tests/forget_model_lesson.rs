@@ -300,9 +300,14 @@ fn assert_the_poison_is_gone(store: &Store) {
     let receipt = store.root().join("receipt.json");
     let stdout = store.ok(&["forget", "--proof", receipt.to_str().unwrap(), POISON]);
     assert_eq!(
-        stdout,
-        format!("removed=true lesson=unlinked proof={}\n", receipt.display())
+        stdout.lines().next(),
+        Some(format!("removed=true lesson=unlinked proof={}", receipt.display()).as_str())
     );
+    let cleared = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("cleared: "))
+        .unwrap_or_else(|| panic!("no cleared line: {stdout}"));
+    assert!(cleared.contains("lessons"), "{stdout}");
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
     assert_eq!(parsed["lesson"], "unlinked", "receipt: {parsed}");
@@ -364,7 +369,7 @@ fn forget_outside_the_cluster_keeps_the_model_lesson() {
 
     let stdout = store.ok(&["forget", RELEASE]);
 
-    assert_eq!(stdout, "removed=true lesson=untouched\n");
+    assert_eq!(stdout.lines().next(), Some("removed=true lesson=untouched"));
     assert_eq!(
         store.lessons().as_deref(),
         Some(before.as_slice()),
@@ -387,6 +392,6 @@ fn forget_of_a_deterministic_exemplar_still_unlinks() {
 
     let stdout = store.ok(&["forget", RUN]);
 
-    assert_eq!(stdout, "removed=true lesson=unlinked\n");
+    assert_eq!(stdout.lines().next(), Some("removed=true lesson=unlinked"));
     assert!(store.lessons().is_none(), "LESSONS.md is gone");
 }

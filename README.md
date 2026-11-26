@@ -105,7 +105,7 @@ dreamd is built for that response:
 | See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
 | Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
 | Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
-| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state built from it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
+| Remove a bad memory | `dreamd forget <event-id>` removes the event, the lesson state built from it, and the copies dreamd keeps (decay archive, autosnaps and memory branches, search index). It does not rewrite git history: it lists the commits that still hold the event and prints the command to rewrite them. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.1` file that lists what was cleared and what remains |
 | Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
 | Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
 
@@ -174,7 +174,7 @@ The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is
 | `dreamd score` | Top memories by salience alone, no query |
 | `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from seven days earlier. See [docs/observability.md](./docs/observability.md) |
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
-| `dreamd forget <event-id>` | Remove one episodic event and the lesson state built from it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
+| `dreamd forget <event-id>` | Remove one episodic event, the lesson state built from it, and the copies dreamd keeps under `.agent/`. Prints what it cleared and where copies remain; git history keeps the event until you rewrite it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.1` file (a receipt, not a signed proof). Refuses while the daemon is running |
 | `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges and corrupt lines. Read-only. See [docs/provenance.md](./docs/provenance.md) |
 | `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.2.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
 

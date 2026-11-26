@@ -14,6 +14,7 @@ pub mod collector;
 pub mod config;
 pub mod consolidation;
 pub mod coordinator;
+pub mod copies;
 #[cfg(all(test, unix))]
 mod crash_sweep;
 pub mod daemon_client;

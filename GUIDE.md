@@ -263,12 +263,12 @@ To keep a copy of memory before an experiment, commit `.agent/` and branch it wi
 Remove one event (stop the daemon first — `forget` refuses while it is running):
 
 ```bash
-dreamd forget evt_… --dry-run                  # prints `would_remove=true lesson=…`; writes nothing
+dreamd forget evt_… --dry-run                  # prints `would_remove=true lesson=…` and what it would touch; writes nothing
 dreamd forget evt_… --proof forget-receipt.json
 dreamd doctor --provenance
 ```
 
-`forget` removes the event from the JSONL and drops or unlinks the lesson that names it. `--proof` writes a `forget-receipt/1.0` JSON file — a record of what was removed, not a signed proof. The provenance ledger under `.agent/.dreamd/provenance/` is append-only, so `doctor --provenance` afterwards lists the forgotten event's old edges as orphans and exits 1; after a `forget` that is expected. Format: [docs/provenance.md](./docs/provenance.md).
+`forget` removes the event from the JSONL, drops or unlinks the lesson that names it, and clears the copies dreamd keeps under `.agent/`: the decay archive, the migrate backup, every autosnap and memory branch (rewritten without the event), and the search index's segment files. It prints a `cleared:` line and one `remaining:` line per place a copy is still kept. It does not rewrite git history. If your project commits `.agent/` (a dream cycle does, after each cycle), the commits made while the event was in the log still hold it: `forget` prints how many, the first and last, and a `git filter-repo` command you can run. Clones and remotes keep their copies until each one rewrites too. `--proof` writes a `forget-receipt/1.1` JSON file — a record of what was cleared and what remains, not a signed proof. The provenance ledger under `.agent/.dreamd/provenance/` is append-only, so `doctor --provenance` afterwards lists the forgotten event's old edges as orphans and exits 1; after a `forget` that is expected. Format: [docs/provenance.md](./docs/provenance.md).
 
 ---
 

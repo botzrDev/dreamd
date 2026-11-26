@@ -59,6 +59,7 @@
 //! its `#[cfg(not(unix))]` arm.)
 
 pub mod http;
+pub mod index_compact;
 pub mod index_coverage;
 pub mod index_freshness;
 pub mod index_map;
@@ -78,6 +79,7 @@ pub mod uds_server;
 pub mod watch;
 
 pub use http::{build_router, AppState};
+pub use index_compact::{compact_deletes, Compaction};
 pub use index_coverage::{
     assess_index, assess_index_coverage, ContentDrift, CoverageReport, IndexAssessment,
     IndexCoverage,
