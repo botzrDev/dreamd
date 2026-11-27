@@ -72,7 +72,16 @@ jobs:
         run: npm install -g npm@11
       - name: Publish
         working-directory: packages/dreamd-mcp
-        run: npm publish --access public
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # A version publishes once; a rerun skips to the checks below.
+          if [ "$(npm view "dreamd-mcp@${TAG#v}" version 2>/dev/null)" = "${TAG#v}" ]; then
+            echo "dreamd-mcp@${TAG#v} is already on npm; not publishing again"
+          else
+            npm publish --access public
+          fi
       - name: Confirm the registry serves it
         env:
           TAG: ${{ inputs.tag }}
@@ -80,13 +89,19 @@ jobs:
           set -euo pipefail
           for i in $(seq 1 30); do
             if [ "$(npm view "dreamd-mcp@${TAG#v}" version 2>/dev/null)" = "${TAG#v}" ]; then
-              npm view dreamd-mcp dist-tags
               exit 0
             fi
             sleep 20
           done
           echo "::error::dreamd-mcp@${TAG#v} is not visible after 10 minutes"
           exit 1
+      - name: Move the next dist-tag to this version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          npm dist-tag add "dreamd-mcp@${TAG#v}" next
+          npm view dreamd-mcp dist-tags
 
   mcp-registry:
     name: MCP Registry
