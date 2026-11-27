@@ -189,6 +189,22 @@ pub const VERSION_HEADER: &str = "x-dreamd-version";
 /// a tool's arguments.
 pub const AGENT_ROOT_REJECTED_PREFIX: &str = "X-Agent-Root";
 
+/// `Some(message)` when `agent_root` cannot travel as `X-Agent-Root`: HTTP
+/// drops a trailing space or tab from a header value, so the daemon would
+/// read another folder's path (DRM-161). dreamd's clients refuse such a root
+/// in daemon mode before they send anything that carries the header.
+pub fn agent_root_header_refusal(agent_root: &str) -> Option<String> {
+    agent_root.ends_with([' ', '\t']).then(|| {
+        format!(
+            "{agent_root:?} ends in a space or tab, which HTTP drops from the \
+             X-Agent-Root header, so the daemon would read another folder's path. \
+             dreamd does not send daemon-mode calls for this project. Rename the \
+             folder so its name does not end in a space or tab, or use the project \
+             while no daemon is running."
+        )
+    })
+}
+
 /// How a project config that does not load is reported, in both modes
 /// (DRM-103). The MCP client answers it as `-32600`: the user fixes the file,
 /// not the tool's arguments.
@@ -956,6 +972,26 @@ mod tests {
 
     /// Serializes env-mutating resolver tests.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// DRM-161 test 1: a root that ends in a space or a tab is refused, and
+    /// the message quotes it so the trailing character shows. A space or tab
+    /// anywhere else, and a bare `/`, travel as they are.
+    #[test]
+    fn a_root_ending_in_a_space_or_tab_is_refused_drm161() {
+        for root in ["/p/x ", "/p/x\t", "/p/x \t", "/ "] {
+            let msg = agent_root_header_refusal(root)
+                .unwrap_or_else(|| panic!("{root:?} must be refused"));
+            assert!(msg.contains(&format!("{root:?}")), "{root:?}: {msg}");
+            assert!(msg.contains("ends in a space or tab"), "{root:?}: {msg}");
+        }
+        let spaced = agent_root_header_refusal("/p/x ").expect("refused");
+        assert!(spaced.contains("\"/p/x \""), "{spaced}");
+        let tabbed = agent_root_header_refusal("/p/x\t").expect("refused");
+        assert!(tabbed.contains("\"/p/x\\t\""), "{tabbed}");
+        for root in ["/p/x", "/p/a b/x", "/p/ x", "/"] {
+            assert_eq!(agent_root_header_refusal(root), None, "{root:?}");
+        }
+    }
 
     #[test]
     fn resolve_rejects_relative_dreamd_sock() {

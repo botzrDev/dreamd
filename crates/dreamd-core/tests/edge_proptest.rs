@@ -639,24 +639,19 @@ fn recall_k_is_a_prefix_of_k_plus_one_drm110() {
     );
 }
 
-/// 4 (DRM-102; LP-HTTP-03, LP-MCP-03, LP-MCP-02): a learning lands in the
-/// root its header names, and a header that is not an absolute path is a 400
-/// that writes nothing.
+/// 4 (DRM-102, DRM-161; LP-HTTP-03, LP-MCP-03, LP-MCP-02): a learning lands
+/// in the root its header names, and a header that is not an absolute path is
+/// a 400 that writes nothing. A root whose last folder name ends in a space
+/// or tab is refused by the client as `InvalidRequest` and writes nothing:
+/// HTTP would drop that character from the header.
 #[test]
 fn a_learning_lands_in_the_root_it_names_drm102() {
     let edge = Edge::new();
     let a = edge.project("fixed/a");
     let b = edge.project("fixed/b");
-    // DRM-161: HTTP drops a trailing space or tab from a header value, so a
-    // root whose last folder name ends in one reaches the daemon without it.
-    // Until that is fixed, the drawn name does not end in either; the ignored
-    // `a_root_ending_in_a_space_is_not_aliased_drm161` is the case itself.
-    let name = dir_name().prop_filter("DRM-161: no trailing space or tab", |name| {
-        !name.ends_with([' ', '\t'])
-    });
     let relative = prop_oneof![dir_name(), Just(String::new()), Just("./x".to_owned())];
 
-    check(config(16), (name, relative), |(name, rel)| {
+    check(config(16), (dir_name(), relative), |(name, rel)| {
         let target = edge.project(&format!("drawn/{name}"));
         let before = [
             log_lines(&target).len(),
@@ -674,18 +669,34 @@ fn a_learning_lands_in_the_root_it_names_drm102() {
                 client_dedup_key: None,
                 pinned: false,
             }));
-        prop_assert!(appended.is_ok(), "append to {:?}: {:?}", target, appended);
         let after = [
             log_lines(&target).len(),
             log_lines(&a).len(),
             log_lines(&b).len(),
         ];
-        prop_assert_eq!(
-            after,
-            [before[0] + 1, before[1], before[2]],
-            "one line in {:?}, none in a or b",
-            target
-        );
+        if name.ends_with([' ', '\t']) {
+            // The client's own refusal. A daemon's 404 for the root without
+            // the space is `InvalidRequest` too, so the kind alone would pass
+            // with no check at all.
+            prop_assert!(
+                matches!(
+                    &appended,
+                    Err(MemoryStoreError::InvalidRequest(m)) if m.contains("ends in a space or tab")
+                ),
+                "append to {:?}: {:?}",
+                target,
+                appended
+            );
+            prop_assert_eq!(after, before, "no line in {:?}, a or b", target);
+        } else {
+            prop_assert!(appended.is_ok(), "append to {:?}: {:?}", target, appended);
+            prop_assert_eq!(
+                after,
+                [before[0] + 1, before[1], before[2]],
+                "one line in {:?}, none in a or b",
+                target
+            );
+        }
 
         let header = HeaderValue::from_bytes(rel.as_bytes())
             .map_err(|e| TestCaseError::fail(format!("{rel:?} is no header: {e}")))?;
@@ -710,32 +721,41 @@ fn a_learning_lands_in_the_root_it_names_drm102() {
 }
 
 /// DRM-161, found by property 4: a root whose last folder name ends in a
-/// space. HTTP drops the space from `X-Agent-Root`, so on the base a
-/// daemon-mode append for `x ` is written to its registered sibling `x`.
-/// DRM-161 decides whether such a root is served or refused; this accepts
-/// either, but never a line in `x`, and an `Ok` must land in `x `.
+/// space or a tab. HTTP drops that character from `X-Agent-Root`, so before
+/// the fix a daemon-mode append for `x ` was written to its registered
+/// sibling `x`. The client now refuses such a root as `InvalidRequest`
+/// before it sends anything, so neither `x` nor the spaced root gets a line.
 #[test]
-#[ignore = "DRM-161"]
 fn a_root_ending_in_a_space_is_not_aliased_drm161() {
     let edge = Edge::new();
     let sibling = edge.project("drm161/x");
-    let spaced = edge.project("drm161/x ");
-    let appended = edge
-        .rt()
-        .block_on(edge.daemon(&spaced).append(AppendRequest {
-            content: "meant for x-space".to_owned(),
-            source_harness: "edge-proptest".to_owned(),
-            skill_action: "edge::root".to_owned(),
-            pain: Some(5.0),
-            importance: Some(5.0),
-            client_dedup_key: None,
-            pinned: false,
-        }));
-    assert_eq!(log_lines(&sibling), Vec::<String>::new(), "nothing in `x`");
-    let landed = log_lines(&spaced).len();
-    match appended {
-        Ok(_) => assert_eq!(landed, 1, "an Ok lands one line in `x `"),
-        Err(e) => assert_eq!(landed, 0, "a refusal ({e:?}) writes nothing"),
+    for name in ["drm161/x ", "drm161/x\t"] {
+        let spaced = edge.project(name);
+        let appended = edge
+            .rt()
+            .block_on(edge.daemon(&spaced).append(AppendRequest {
+                content: format!("meant for {name:?}"),
+                source_harness: "edge-proptest".to_owned(),
+                skill_action: "edge::root".to_owned(),
+                pain: Some(5.0),
+                importance: Some(5.0),
+                client_dedup_key: None,
+                pinned: false,
+            }));
+        assert!(
+            matches!(appended, Err(MemoryStoreError::InvalidRequest(_))),
+            "{name:?}: expected InvalidRequest, got {appended:?}"
+        );
+        assert_eq!(
+            log_lines(&sibling),
+            Vec::<String>::new(),
+            "{name:?}: nothing in `x`"
+        );
+        assert_eq!(
+            log_lines(&spaced),
+            Vec::<String>::new(),
+            "{name:?}: nothing in {spaced:?}"
+        );
     }
 }
 

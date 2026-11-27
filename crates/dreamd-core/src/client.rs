@@ -35,9 +35,10 @@ pub enum DreamProxyOutcome {
     InProgress,
 }
 
-/// Genuine proxy failures (connect-after-reachable, handshake, transport, or a
-/// daemon 4xx/5xx other than 404/409). The caller surfaces these and does not
-/// fall back to in-process.
+/// Genuine proxy failures (connect-after-reachable, handshake, transport, a
+/// daemon 4xx/5xx other than 404/409, or a project root the client refuses to
+/// send because it ends in a space or tab, DRM-161). The caller surfaces these
+/// and does not fall back to in-process.
 #[derive(Debug)]
 pub enum DreamProxyError {
     /// A transport stage failed after the daemon was found reachable.
@@ -124,6 +125,12 @@ pub(crate) const DREAM_PROXY_CALL: crate::daemon_client::CallKind =
 /// only when it passes, so a daemon of another version never runs the cycle.
 /// Its errors map the same way as the call's.
 ///
+/// A project root that ends in a space or tab is refused after the probe
+/// passes and before the call, as `Err(Transport)` naming the path (DRM-161):
+/// HTTP would drop that character from `X-Agent-Root`. The probe carries no
+/// `X-Agent-Root`, and with no daemon it still answers `NotReachable`, so the
+/// cycle runs in-process then, as before.
+///
 /// `no_llm` travels as the [`NO_LLM_HEADER`] header, not as a reason to skip
 /// the proxy: skipping would run a second cycle in this process while the
 /// daemon's coordinator still owns the JSONL. `--no-commit` is the only
@@ -154,6 +161,11 @@ pub async fn proxy_dream_cycle(
 
     if let Err(e) = preflight_version(sock_path).await {
         return proxy_transport_error(e);
+    }
+    if let Some(msg) =
+        crate::daemon_client::agent_root_header_refusal(&project_root.to_string_lossy())
+    {
+        return Err(DreamProxyError::Transport(msg));
     }
     let (status, body) = match send_one_within(sock_path, req, deadline_for(DREAM_PROXY_CALL)).await
     {
@@ -291,13 +303,15 @@ mod tests {
         share_personal: Option<String>,
     }
 
-    /// Stand up a one-shot UDS server using the same `serve_connection` +
-    /// `TokioIo` idiom the daemon uses (`uds_server.rs`), reply 200, and return
-    /// both the proxy outcome and the request the daemon actually saw.
-    async fn round_trip(
-        no_llm: bool,
-        share_personal: bool,
-    ) -> (DreamProxyOutcome, CapturedRequest) {
+    /// Stand up a UDS server using the same `serve_connection` + `TokioIo`
+    /// idiom the daemon uses (`uds_server.rs`). It replies 200 to every
+    /// request and sends each one it saw down the returned channel. Keep the
+    /// returned dir alive: the socket is in it.
+    fn capturing_daemon() -> (
+        tempfile::TempDir,
+        PathBuf,
+        tokio::sync::mpsc::UnboundedReceiver<CapturedRequest>,
+    ) {
         use hyper::service::service_fn;
         use hyper_util::rt::{TokioExecutor, TokioIo};
 
@@ -305,7 +319,7 @@ mod tests {
         let sock_path = dir.path().join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<CapturedRequest>();
+        let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<CapturedRequest>();
 
         // DRM-122: the version probe comes first, on its own connection, so
         // the fake serves every connection.
@@ -349,7 +363,16 @@ mod tests {
                 });
             }
         });
+        (dir, sock_path, req_rx)
+    }
 
+    /// Run the proxy against [`capturing_daemon`] and return both the proxy
+    /// outcome and the request the daemon actually saw.
+    async fn round_trip(
+        no_llm: bool,
+        share_personal: bool,
+    ) -> (DreamProxyOutcome, CapturedRequest) {
+        let (_dir, sock_path, mut req_rx) = capturing_daemon();
         let project_root = Path::new("/some/project/root");
         let outcome = proxy_dream_cycle(&sock_path, project_root, no_llm, share_personal)
             .await
@@ -366,6 +389,54 @@ mod tests {
         );
         let captured = req_rx.recv().await.expect("request captured");
         (outcome, captured)
+    }
+
+    /// DRM-161 test 5: with a daemon answering, a root that ends in a space
+    /// is refused after the version probe, naming the path, and no dream
+    /// call is sent.
+    #[tokio::test]
+    async fn proxy_dream_cycle_refuses_a_root_ending_in_a_space_drm161() {
+        let (_dir, sock_path, mut req_rx) = capturing_daemon();
+        let spaced = Path::new("/some/project/root ");
+        // Bounded, so a call that waits on its dream deadline fails here.
+        let proxied = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            proxy_dream_cycle(&sock_path, spaced, false, false),
+        )
+        .await
+        .expect("the proxy ran 5 s");
+        match proxied {
+            Err(DreamProxyError::Transport(m)) => {
+                assert!(m.contains("\"/some/project/root \""), "{m}");
+                assert!(m.contains("ends in a space or tab"), "{m}");
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        let mut seen = Vec::new();
+        while let Ok(req) = req_rx.try_recv() {
+            seen.push((req.method, req.uri));
+        }
+        assert_eq!(
+            seen,
+            [("GET".to_string(), "/api/v1/health".to_string())],
+            "the probe, and no POST /api/v1/dream"
+        );
+    }
+
+    /// DRM-161 test 6: with no daemon, a root that ends in a space still
+    /// gets `NotReachable`, so `dreamd dream` runs in-process as before.
+    #[tokio::test]
+    async fn proxy_dream_cycle_with_no_daemon_still_falls_back_for_a_spaced_root_drm161() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("nonexistent.sock");
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            proxy_dream_cycle(&sock, Path::new("/some/project/root "), false, false),
+        )
+        .await
+        .expect("the proxy ran 5 s")
+        .expect("no daemon is Ok(NotReachable), not Err");
+        assert_eq!(outcome, DreamProxyOutcome::NotReachable);
     }
 
     #[tokio::test]
