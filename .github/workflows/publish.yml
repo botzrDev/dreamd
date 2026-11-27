@@ -1,0 +1,170 @@
+name: Publish
+
+# Publishes a tagged release to npm, the MCP Registry and crates.io from CI, with
+# trusted publishing (GitHub OIDC). No registry token is stored in this repository.
+# Run it by hand (Actions > Publish > Run workflow) after the GitHub Release is
+# published (RELEASING.md step 5).
+#
+# One-time setup, done by a package owner on each registry's website:
+#   npm:       npmjs.com > dreamd-mcp > Settings > Trusted publisher > GitHub Actions,
+#              owner botzrDev, repository dreamd, workflow publish.yml
+#   crates.io: crates.io > each of dreamd-protocol, dreamd-core, dreamd > Settings >
+#              Trusted Publishing > GitHub, owner botzrDev, repository dreamd,
+#              workflow publish.yml
+#   MCP Registry: nothing; `login github-oidc` proves the run is in botzrDev/dreamd.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.4.1 (crates.io publishes from it)"
+        required: true
+        type: string
+      npm_ref:
+        description: "Commit with the filled manifest: the head of chore/mcp-manifest-<tag> (npm and the MCP Registry publish from it)"
+        required: true
+        type: string
+      targets:
+        description: "What to publish"
+        required: true
+        default: all
+        type: choice
+        options: [all, npm-and-mcp, npm, mcp-registry, crates]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  MCP_PUBLISHER_VERSION: v1.8.18
+
+jobs:
+  npm:
+    name: npm (dreamd-mcp)
+    if: inputs.targets == 'all' || inputs.targets == 'npm-and-mcp' || inputs.targets == 'npm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.npm_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Check the package matches the tag
+        working-directory: packages/dreamd-mcp
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          [ "v$version" = "$TAG" ] || { echo "::error::package.json is $version, tag is $TAG"; exit 1; }
+          if grep -q PENDING manifest.json; then echo "::error::manifest.json still holds PENDING shas"; exit 1; fi
+          node --test
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@11
+      - name: Publish
+        working-directory: packages/dreamd-mcp
+        run: npm publish --access public
+      - name: Confirm the registry serves it
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if [ "$(npm view "dreamd-mcp@${TAG#v}" version 2>/dev/null)" = "${TAG#v}" ]; then
+              npm view dreamd-mcp dist-tags
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::dreamd-mcp@${TAG#v} is not visible after 10 minutes"
+          exit 1
+
+  mcp-registry:
+    name: MCP Registry
+    needs: npm
+    # Runs after npm, or alone when npm already holds the version.
+    if: >-
+      always() &&
+      (inputs.targets == 'all' || inputs.targets == 'npm-and-mcp' || inputs.targets == 'mcp-registry') &&
+      (needs.npm.result == 'success' || needs.npm.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mcp-publisher login github-oidc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.npm_ref }}
+          persist-credentials: false
+      - name: Check server.json matches the tag
+        working-directory: packages/dreamd-mcp
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [ "$(jq -r .version server.json)" = "${TAG#v}" ] || { echo "::error::server.json version is not ${TAG#v}"; exit 1; }
+          [ "$(jq -r '.packages[0].version' server.json)" = "${TAG#v}" ] || { echo "::error::server.json packages[0].version is not ${TAG#v}"; exit 1; }
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      - name: Validate, log in and publish
+        working-directory: packages/dreamd-mcp
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/mcp-publisher" validate server.json
+          "$GITHUB_WORKSPACE/mcp-publisher" login github-oidc
+          "$GITHUB_WORKSPACE/mcp-publisher" publish server.json
+
+  crates:
+    name: crates.io
+    if: inputs.targets == 'all' || inputs.targets == 'crates'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1961bfc0c4a8bf07e0a0c98e1e2459c642ea70a0 # 1.95.0
+      - name: Check Cargo.toml matches the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dreamd") | .version')"
+          [ "v$version" = "$TAG" ] || { echo "::error::dreamd is $version, tag is $TAG"; exit 1; }
+      - name: Package all three crates
+        run: cargo package -p dreamd-protocol -p dreamd-core -p dreamd
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          for crate in dreamd-protocol dreamd-core dreamd; do
+            cargo publish -p "$crate" --no-verify
+          done

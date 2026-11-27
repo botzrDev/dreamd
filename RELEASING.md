@@ -179,6 +179,10 @@ package comes from `main`, so it carries the correct shas.)
 
 ## 6. Publish to npm — HUMAN ONLY (2FA)
 
+Steps 6, 8 and 9 can instead run in CI: Actions > Publish > Run workflow, with the tag and the
+fill commit (`docs/ci.md`, Publish workflow). It uses trusted publishing, so it needs the one-time npm and
+crates.io setup in `.github/workflows/publish.yml`'s header, and no local checkout.
+
 npm auth expires between releases; **log in FIRST**. The `dataprime1` account uses a
 **passkey** (WebAuthn), so the CLI OTP flow does not work — use the web flow. A
 `404 Not Found` on `npm publish` (or `401` on `npm whoami`) means "not logged in /
