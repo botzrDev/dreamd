@@ -26,6 +26,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::lifecycle_cleanup::{self, Stopper};
+use super::service::InstalledService;
 use super::version::VERSION_SHORT;
 
 /// The cache directory this binary's own version uses: the shim keys
@@ -79,6 +80,35 @@ pub struct UpdateRequest<'a> {
     /// set, or the running executable living under `.cargo/bin`). `Some`
     /// carries a short human-readable reason for the guidance line.
     pub cargo_install_hint: Option<String>,
+    /// The installed `dreamd service`, read by the caller with
+    /// [`super::service::read_installed_service`]. `None`: none installed,
+    /// or no home directory. Its cached binary is kept, and a binary it names
+    /// that is gone is reported (DRM-164).
+    pub service: Option<&'a InstalledService>,
+}
+
+impl UpdateRequest<'_> {
+    /// How the user runs dreamd, for the commands `update` prints: a
+    /// cargo-installed binary is `dreamd`, anything else the floating shim.
+    fn command_prefix(&self) -> &'static str {
+        if self.cargo_install_hint.is_some() {
+            "dreamd"
+        } else {
+            "npx -y dreamd-mcp"
+        }
+    }
+
+    /// The cached version directory the installed service's binary lives
+    /// in, when it lives in the shim cache: the first path component below
+    /// `cache_dir`. `None` for a service outside the cache, or no service.
+    fn service_cached_version(&self) -> Option<String> {
+        let service = self.service?;
+        let rel = service.exe.strip_prefix(self.cache_dir?).ok()?;
+        match rel.components().next()? {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
 }
 
 /// Step 2 of the restart contract: the harness spawned the old binary, and
@@ -107,13 +137,13 @@ fn write_contract(out: &mut dyn Write, header: &str, step_one: &str) -> std::io:
     writeln!(out, "  4. {PIN_STEP}")
 }
 
-/// Remove every entry directly under `cache_dir` whose file name is not
+/// Remove every entry directly under `cache_dir` whose file name is not in
 /// `keep`, and return the removed names, sorted (DRM-152).
 ///
 /// A missing `cache_dir` is an empty one. No symlink is followed: an entry
 /// that is a symlink is removed as a link. A name that is not UTF-8 is
 /// reported lossily.
-fn remove_other_versions(cache_dir: &Path, keep: &str) -> std::io::Result<Vec<String>> {
+fn remove_other_versions(cache_dir: &Path, keep: &[&str]) -> std::io::Result<Vec<String>> {
     let entries = match std::fs::read_dir(cache_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -123,7 +153,7 @@ fn remove_other_versions(cache_dir: &Path, keep: &str) -> std::io::Result<Vec<St
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        if name == keep {
+        if keep.iter().any(|k| name == *k) {
             continue;
         }
         let path = entry.path();
@@ -138,6 +168,40 @@ fn remove_other_versions(cache_dir: &Path, keep: &str) -> std::io::Result<Vec<St
     }
     removed.sort();
     Ok(removed)
+}
+
+/// Report the installed `dreamd service` (DRM-164), after the cache step (or
+/// in its place under `dry_run`). Prints nothing when no service is installed
+/// or it already runs this version's binary.
+///
+/// - Its binary is in another cached version: that version was kept (or would
+///   be), and the line names the commands that move the service to this one.
+/// - Its binary is gone: the service cannot start, and the line names the
+///   same commands. `update` did not remove it, because it keeps the version
+///   a service names; something else did, or an older `update` did.
+fn write_service_report(
+    req: &UpdateRequest<'_>,
+    dry_run: bool,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let Some(service) = req.service else {
+        return Ok(());
+    };
+    if let Some(report) = service.missing_binary_report(req.command_prefix()) {
+        return writeln!(out, "service: {report}");
+    }
+    let fix = service.fix_hint(req.command_prefix());
+    match req.service_cached_version() {
+        Some(version) if version != KEEP_VERSION => {
+            let verb = if dry_run { "would keep" } else { "kept" };
+            writeln!(
+                out,
+                "service: {verb} the cached dreamd {version}, because the dreamd service ({}) runs it. To move the service to {KEEP_VERSION}, {fix}",
+                service.file.display()
+            )
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `dreamd update` entry point. Order: before-version → (unless dry-run)
@@ -171,6 +235,7 @@ pub fn run(
                     "note: this dreamd binary looks cargo-installed ({hint}); `update` does not replace it — rebuild with `cargo install --path crates/dreamd-cli`"
                 )?;
             }
+            write_service_report(req, true, out)?;
             if req.restart {
                 writeln!(
                     out,
@@ -253,8 +318,12 @@ pub fn run(
     // npx cache is not touched on update.
     match req.cache_dir {
         Some(cache_dir) => {
-            let removed =
-                remove_other_versions(cache_dir, KEEP_VERSION).map_err(UpdateError::Io)?;
+            // DRM-164: the version an installed service runs stays too, so
+            // the service still starts after the update.
+            let service_version = req.service_cached_version();
+            let mut keep = vec![KEEP_VERSION];
+            keep.extend(service_version.as_deref());
+            let removed = remove_other_versions(cache_dir, &keep).map_err(UpdateError::Io)?;
             if !req.quiet {
                 let kept = cache_dir.join(KEEP_VERSION);
                 if kept.is_dir() {
@@ -285,6 +354,10 @@ pub fn run(
             }
         }
     }
+
+    // Printed even under --quiet: a service left on an old or missing
+    // binary is the one thing here the user has to act on (DRM-164).
+    write_service_report(req, false, out)?;
 
     if !req.quiet {
         if let Some(hint) = &req.cargo_install_hint {

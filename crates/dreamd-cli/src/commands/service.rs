@@ -183,6 +183,12 @@ pub(crate) const STATUS_LOG_TAIL_LINES: usize = 10;
 /// passes [`systemctl_user`]; tests pass a recording closure, so no unit test
 /// can ever spawn `systemctl` (a developer machine often has a live user
 /// manager; GHA runners mostly do not).
+/// The unit's restart bound (DRM-164): at most [`START_LIMIT_BURST`] starts
+/// in [`START_LIMIT_INTERVAL_SEC`] seconds, then systemd stops restarting it.
+pub(crate) const START_LIMIT_INTERVAL_SEC: u32 = 300;
+/// See [`START_LIMIT_INTERVAL_SEC`].
+pub(crate) const START_LIMIT_BURST: u32 = 5;
+
 type Systemctl<'a> = &'a mut dyn FnMut(&[&str]) -> Result<(), ServiceError>;
 
 /// How `install` / `start` / `restart` / `uninstall` reach launchd. Same shape
@@ -499,6 +505,151 @@ pub(crate) fn task_xml_path(home: &Path) -> PathBuf {
         .join(format!("{SCHTASKS_TASK_NAME}.xml"))
 }
 
+/// What an installed per-user service runs, read back from the file
+/// `service install` wrote (DRM-164). `update` keeps the cached binary it
+/// names, and `update`, `status` and `doctor` report one whose binary is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledService {
+    /// The unit, plist or task XML the service was read from.
+    pub file: PathBuf,
+    /// The executable the service starts (`ExecStart=`, the first
+    /// `ProgramArguments` string, or `<Command>`).
+    pub exe: PathBuf,
+    /// The project root the service runs `watch` in, when the file names one.
+    /// `service install` discovers the project from the directory it runs in,
+    /// so the fix has to be run from here.
+    pub working_dir: Option<PathBuf>,
+}
+
+impl InstalledService {
+    /// True when the executable the service starts is no longer on disk.
+    pub fn exe_missing(&self) -> bool {
+        !self.exe.exists()
+    }
+
+    /// One sentence for a service whose binary is gone, naming the fix, or
+    /// `None` while the binary is there. `update`, `status` and `doctor` all
+    /// print it (DRM-164).
+    pub fn missing_binary_report(&self, prefix: &str) -> Option<String> {
+        if !self.exe_missing() {
+            return None;
+        }
+        Some(format!(
+            "the dreamd service ({}) runs {}, which no longer exists, so it cannot start. To fix it, {}",
+            self.file.display(),
+            self.exe.display(),
+            self.fix_hint(prefix)
+        ))
+    }
+
+    /// The commands that point the service at the binary running them, for a
+    /// user who runs dreamd as `prefix` (`npx -y dreamd-mcp` or `dreamd`).
+    /// macOS and Windows need `--force` to overwrite an installed service.
+    pub fn fix_hint(&self, prefix: &str) -> String {
+        let force = if cfg!(any(target_os = "macos", windows)) {
+            " --force"
+        } else {
+            ""
+        };
+        let commands =
+            format!("`{prefix} service install{force}`, then `{prefix} service restart`");
+        match &self.working_dir {
+            Some(dir) => format!("from {}, run {commands}", dir.display()),
+            None => format!("from the project root, run {commands}"),
+        }
+    }
+}
+
+/// The executable and working directory a service file names.
+type ServicePaths = (PathBuf, Option<PathBuf>);
+
+/// Read the installed service under `home` for this platform's backend: the
+/// systemd unit on Linux and other Unix, the LaunchAgent plist on macOS, the
+/// task XML on Windows. `None` when no file is there or it names no
+/// executable. Only reads the file; never spawns the supervisor.
+pub fn read_installed_service(home: &Path) -> Option<InstalledService> {
+    let (file, parse): (PathBuf, fn(&str) -> Option<ServicePaths>) = if cfg!(target_os = "macos") {
+        (plist_path(home), parse_plist)
+    } else if cfg!(windows) {
+        (task_xml_path(home), parse_task_xml)
+    } else {
+        (unit_path(home), parse_user_unit)
+    };
+    let body = std::fs::read_to_string(&file).ok()?;
+    let (exe, working_dir) = parse(&body)?;
+    Some(InstalledService {
+        file,
+        exe,
+        working_dir,
+    })
+}
+
+/// The inverse of [`render_user_unit`] for the two paths it writes: the
+/// `ExecStart=` executable (quotes stripped, `%%` back to `%`, the trailing
+/// ` watch` dropped) and `WorkingDirectory=`. A hand-edited unit whose
+/// `ExecStart=` this cannot read gives `None`.
+pub(crate) fn parse_user_unit(body: &str) -> Option<ServicePaths> {
+    let unescape = |s: &str| s.replace("%%", "%");
+    let mut exe = None;
+    let mut working_dir = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("ExecStart=") {
+            let rest = rest.trim();
+            let path = if let Some(quoted) = rest.strip_prefix('"') {
+                quoted.split_once('"').map(|(p, _)| p)
+            } else {
+                rest.split_whitespace().next()
+            };
+            exe = path
+                .filter(|p| !p.is_empty())
+                .map(|p| PathBuf::from(unescape(p)));
+        } else if let Some(rest) = line.strip_prefix("WorkingDirectory=") {
+            working_dir = Some(PathBuf::from(unescape(rest.trim())));
+        }
+    }
+    exe.map(|exe| (exe, working_dir))
+}
+
+/// Undo [`xml_escape`]. `&amp;` goes last so an escaped entity is not
+/// unescaped twice.
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+/// The text of the first `<tag>…</tag>` at or after `from` in `body`.
+fn xml_text<'a>(body: &'a str, tag: &str, from: usize) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = from + body.get(from..)?.find(&open)? + open.len();
+    let end = start + body[start..].find(&close)?;
+    Some(&body[start..end])
+}
+
+/// The inverse of [`render_plist`] for its two paths: the first
+/// `ProgramArguments` string and `WorkingDirectory`.
+pub(crate) fn parse_plist(body: &str) -> Option<ServicePaths> {
+    let args = body.find("<key>ProgramArguments</key>")?;
+    let exe = xml_text(body, "string", args)?;
+    let working_dir = body
+        .find("<key>WorkingDirectory</key>")
+        .and_then(|at| xml_text(body, "string", at))
+        .map(|dir| PathBuf::from(xml_unescape(dir)));
+    Some((PathBuf::from(xml_unescape(exe)), working_dir))
+}
+
+/// The inverse of [`render_task_xml`] for its two paths: `<Command>` and
+/// `<WorkingDirectory>`.
+pub(crate) fn parse_task_xml(body: &str) -> Option<ServicePaths> {
+    let exe = xml_text(body, "Command", 0)?;
+    let working_dir =
+        xml_text(body, "WorkingDirectory", 0).map(|dir| PathBuf::from(xml_unescape(dir)));
+    Some((PathBuf::from(xml_unescape(exe)), working_dir))
+}
+
 /// Double every `%` so systemd reads it literally. Both `ExecStart=` and
 /// `WorkingDirectory=` undergo specifier expansion (`%h`, `%n`, …; see
 /// systemd.unit(5) "Specifiers"), so an unescaped `%` in a path either fails
@@ -528,9 +679,18 @@ pub(crate) fn render_user_unit(exe: &Path, project_root: &Path) -> String {
     // default.target `Wants=` this unit, and a target implicitly orders itself
     // `After=` the units it wants, so `After=default.target` on the unit would
     // form an ordering cycle that systemd breaks by deleting a job.
+    //
+    // `StartLimitIntervalSec=` / `StartLimitBurst=` bound the restarts
+    // (DRM-164). systemd's default window (10 s, 5 starts) never trips with
+    // `RestartSec=5`, so a unit whose binary is gone failed with 203/EXEC every
+    // 5 seconds for as long as the session lasted. Five starts in five minutes
+    // now leave the unit `failed` with `start-limit-hit`; `service install`,
+    // `start` and `restart` clear that with `reset-failed` first.
     let lines = [
         "[Unit]".to_string(),
         "Description=dreamd memory daemon".to_string(),
+        format!("StartLimitIntervalSec={START_LIMIT_INTERVAL_SEC}"),
+        format!("StartLimitBurst={START_LIMIT_BURST}"),
         String::new(),
         "[Service]".to_string(),
         "Type=simple".to_string(),
@@ -887,9 +1047,19 @@ pub(crate) fn run_install_with(
     let path = write_user_unit(home, &exe, root.project_root())?;
     println!("wrote {}", path.display());
     systemctl(&["daemon-reload"])?;
+    reset_failed(&mut *systemctl);
     systemctl(&["enable", "--now", UNIT_NAME])?;
     println!("enabled and started {UNIT_NAME} (systemctl --user)");
     Ok(())
+}
+
+/// Best-effort `systemctl --user reset-failed dreamd.service` (DRM-164). A
+/// unit that hit its start limit refuses `start` and `restart` until the
+/// window passes; this clears the counter so the verb the user just ran does
+/// what it says. It fails on a unit systemd has never loaded, which is not an
+/// error here, so the result is discarded.
+fn reset_failed(systemctl: Systemctl<'_>) {
+    let _ = systemctl(&["reset-failed", UNIT_NAME]);
 }
 
 /// `dreamd service start`: pick the backend, then `systemctl --user start
@@ -1102,6 +1272,7 @@ pub(crate) fn run_start_with(
     if !systemd_available {
         return Err(ServiceError::NoSystemd);
     }
+    reset_failed(&mut *systemctl);
     systemctl(&["start", UNIT_NAME])?;
     println!("started {UNIT_NAME} (systemctl --user)");
     Ok(())
@@ -1122,6 +1293,7 @@ pub(crate) fn run_restart_with(
     if !systemd_available {
         return Err(ServiceError::NoSystemd);
     }
+    reset_failed(&mut *systemctl);
     systemctl(&["restart", UNIT_NAME])?;
     println!("restarted {UNIT_NAME} (systemctl --user)");
     Ok(())
@@ -1890,6 +2062,8 @@ mod tests {
         let expected = "\
 [Unit]
 Description=dreamd memory daemon
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -1902,6 +2076,80 @@ RestartSec=5
 WantedBy=default.target
 ";
         assert_eq!(unit, expected);
+    }
+
+    /// DRM-164: the restart bound sits in `[Unit]`, where systemd reads it.
+    #[test]
+    fn render_user_unit_bounds_restarts_in_the_unit_section() {
+        let unit = render_user_unit(Path::new(FAKE_EXE), Path::new("/home/u/proj"));
+        let (unit_section, service_section) = unit.split_once("[Service]").unwrap();
+        assert!(unit_section.contains("StartLimitIntervalSec=300\n"));
+        assert!(unit_section.contains("StartLimitBurst=5\n"));
+        assert!(!service_section.contains("StartLimit"));
+    }
+
+    /// DRM-164: what install writes, the reader reads back, on all three
+    /// backends, through quoting, `%` doubling and XML escapes.
+    #[test]
+    fn installed_service_paths_round_trip_through_every_backend() {
+        for (exe, root) in [
+            (FAKE_EXE, "/home/u/proj"),
+            ("/opt/my tools/dreamd", "/home/u/my proj"),
+            ("/opt/100%/dreamd", "/home/u/50%done"),
+            ("/opt/a&b/<x>/\"q\"/dreamd", "/home/u/r&d"),
+        ] {
+            let want = (PathBuf::from(exe), Some(PathBuf::from(root)));
+            let (exe, root) = (Path::new(exe), Path::new(root));
+            if !exe.to_str().unwrap().contains('"') {
+                // The unit does not escape quotes (see render_user_unit).
+                assert_eq!(
+                    parse_user_unit(&render_user_unit(exe, root)),
+                    Some(want.clone())
+                );
+            }
+            assert_eq!(parse_plist(&render_plist(exe, root)), Some(want.clone()));
+            assert_eq!(parse_task_xml(&render_task_xml(exe, root)), Some(want));
+        }
+    }
+
+    #[test]
+    fn a_unit_without_exec_start_names_no_service() {
+        assert_eq!(parse_user_unit("[Service]\nType=simple\n"), None);
+        assert_eq!(parse_plist("<plist></plist>"), None);
+        assert_eq!(parse_task_xml("<Task></Task>"), None);
+    }
+
+    /// DRM-164: the service `install` wrote under HOME is read back, and a
+    /// binary that is gone is reported with the command that fixes it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn read_installed_service_reports_a_missing_binary() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(read_installed_service(home.path()), None);
+
+        let bin = home.path().join("cache").join("1.3.1").join("dreamd");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"bin").unwrap();
+        write_user_unit(home.path(), &bin, Path::new("/home/u/proj")).unwrap();
+
+        let service = read_installed_service(home.path()).unwrap();
+        assert_eq!(service.file, unit_path(home.path()));
+        assert_eq!(service.exe, bin);
+        assert_eq!(service.working_dir, Some(PathBuf::from("/home/u/proj")));
+        assert_eq!(service.missing_binary_report("dreamd"), None);
+
+        fs::remove_file(&bin).unwrap();
+        let report = service.missing_binary_report("npx -y dreamd-mcp").unwrap();
+        assert_eq!(
+            report,
+            format!(
+                "the dreamd service ({}) runs {}, which no longer exists, so it cannot start. \
+                 To fix it, from /home/u/proj, run `npx -y dreamd-mcp service install`, then \
+                 `npx -y dreamd-mcp service restart`",
+                unit_path(home.path()).display(),
+                bin.display()
+            )
+        );
     }
 
     #[test]
@@ -2115,6 +2363,7 @@ WantedBy=default.target
             argv,
             [
                 &["daemon-reload".to_string()][..],
+                &["reset-failed".to_string(), UNIT_NAME.to_string()][..],
                 &[
                     "enable".to_string(),
                     "--now".to_string(),
@@ -2175,7 +2424,13 @@ WantedBy=default.target
             Ok(())
         });
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(calls, [["start".to_string(), UNIT_NAME.to_string()]]);
+        assert_eq!(
+            calls,
+            [
+                ["reset-failed".to_string(), UNIT_NAME.to_string()],
+                ["start".to_string(), UNIT_NAME.to_string()]
+            ]
+        );
     }
 
     /// AILAB-185 — same refusal as `start` on a host with no supervisor: exit 2
@@ -2200,7 +2455,13 @@ WantedBy=default.target
             Ok(())
         });
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(calls, [["restart".to_string(), UNIT_NAME.to_string()]]);
+        assert_eq!(
+            calls,
+            [
+                ["reset-failed".to_string(), UNIT_NAME.to_string()],
+                ["restart".to_string(), UNIT_NAME.to_string()]
+            ]
+        );
     }
 
     #[test]

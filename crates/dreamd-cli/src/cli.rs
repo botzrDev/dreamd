@@ -6,7 +6,7 @@
 //!   - `1` -- runtime / I/O error
 //!   - `2` -- usage error (missing subcommand, no project root)
 
-use std::io::{BufRead, IsTerminal};
+use std::io::{BufRead, IsTerminal, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -883,7 +883,7 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    match commands::doctor::run(
+    let result = commands::doctor::run(
         &config,
         &agent_root,
         skip.as_ref(),
@@ -893,7 +893,18 @@ fn run_doctor(args: DoctorArgs) -> ExitCode {
         now_sec,
         &mut out,
         &mut err,
-    ) {
+    )
+    .and_then(|ok| {
+        // DRM-164: an installed service whose binary is gone.
+        match missing_service_binary() {
+            Some(report) => {
+                writeln!(out, "service_binary: missing  [WARNING: {report}]")?;
+                Ok(false)
+            }
+            None => Ok(ok),
+        }
+    });
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -1491,13 +1502,22 @@ fn run_status() -> ExitCode {
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match commands::status::run(
+    let result = commands::status::run(
         &cwd,
         socket.as_deref(),
         registry_path.as_deref(),
         &log_tail,
         &mut out,
-    ) {
+    )
+    .and_then(|live| {
+        // DRM-164: an installed service whose binary is gone. Reported, but
+        // the exit code stays the daemon's liveness.
+        if let Some(report) = missing_service_binary() {
+            writeln!(out, "service: {report}")?;
+        }
+        Ok(live)
+    });
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
@@ -1505,6 +1525,23 @@ fn run_status() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// DRM-164: the report line for an installed `dreamd service` whose binary is
+/// gone, or `None` (no home, no service, or its binary is there). The fix
+/// names the shim when this binary runs from the shim cache, else `dreamd`.
+fn missing_service_binary() -> Option<String> {
+    let service = commands::service::read_installed_service(&resolve_home()?)?;
+    let from_shim = match (std::env::current_exe(), resolve_shim_cache_dir()) {
+        (Ok(exe), Some(cache)) => exe.starts_with(cache),
+        _ => false,
+    };
+    let prefix = if from_shim {
+        "npx -y dreamd-mcp"
+    } else {
+        "dreamd"
+    };
+    service.missing_binary_report(prefix)
 }
 
 /// Native binary cache tree used by the npm shim: `~/.cache/dreamd-mcp`, the
@@ -1634,6 +1671,10 @@ fn run_update(args: UpdateArgs) -> ExitCode {
     let socket: Option<PathBuf> = None;
     let cache_dir = resolve_shim_cache_dir();
     let home = resolve_home();
+    // DRM-164: the installed service, whose cached binary update keeps.
+    let service = home
+        .as_deref()
+        .and_then(commands::service::read_installed_service);
     // lock-ok (AILAB-583): update never opens a Tantivy index — it signals this
     // user's local servers and removes the other versions' cached binaries.
     // See AGENTS.md no-hoisted-stdio-lock-across-tantivy.
@@ -1648,6 +1689,7 @@ fn run_update(args: UpdateArgs) -> ExitCode {
         quiet: args.quiet,
         restart: args.restart,
         cargo_install_hint: cargo_install_hint(),
+        service: service.as_ref(),
     };
     // AILAB-584 — see `run_uninstall`: scoped stop, captured not threaded.
     let scope = commands::lifecycle_cleanup::StopScope {
