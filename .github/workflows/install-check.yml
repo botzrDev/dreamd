@@ -60,9 +60,11 @@ jobs:
           pkg="dreamd-mcp@$VERSION"
           out="$(npx --yes "$pkg" version)"
           echo "$out"
-          case "$out" in
-            "dreamd $VERSION "*|"dreamd $VERSION") ;;
-            *) echo "version printed '$out', expected dreamd $VERSION"; exit 1 ;;
+          # Line 1 is "dreamd X.Y.Z"; build details follow on later lines.
+          first="$(printf '%s\n' "$out" | head -n 1)"
+          case "$first" in
+            "dreamd $VERSION"|"dreamd $VERSION "*) ;;
+            *) echo "version printed '$first', expected dreamd $VERSION"; exit 1 ;;
           esac
           mkdir -p /tmp/proj
           cd /tmp/proj
