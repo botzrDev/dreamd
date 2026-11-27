@@ -16,6 +16,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **In daemon mode, a project whose path ends in a space or tab is refused, and the message names the path** (DRM-161). HTTP drops a trailing space or tab from a header value, so `dreamd mcp`, setup's first lesson and `dreamd dream` sent such a project to the daemon as another folder's path: it got "not registered", or a write meant for `foo ` landed in a registered `foo`. Now all three refuse the project before they send anything that carries `X-Agent-Root`, quoting the path so the space or tab shows. `dreamd mcp` answers `-32600`. `dreamd dream` exits with the error while a daemon answers, and does not run the cycle in-process. With no daemon running, nothing changes.
 
   Library: new `daemon_client::agent_root_header_refusal`.
+- **After `update`, an installed `dreamd service` still starts, and a service whose binary is gone is reported** (DRM-164). `update` removed every cached version but its own, including the one the service's unit, plist or task names, so on Linux systemd failed to start it (203/EXEC) every 5 seconds with nothing saying so; one machine counted 15,841 restarts in about 22 hours. Now `update` keeps the cached version an installed service runs and prints the `service install` and `service restart` commands that move the service to the new version, even under `--quiet`. When the binary a service names is already gone, `update`, `dreamd status` and `dreamd doctor` say so with the same commands, and `doctor` exits 1.
+- **The Linux user unit stops restarting after 5 starts in 5 minutes** (DRM-164). It now carries `StartLimitIntervalSec=300` and `StartLimitBurst=5`; with `RestartSec=5`, systemd's default limit never tripped. `service install`, `start` and `restart` run `systemctl --user reset-failed dreamd.service` first, so they work on a unit that hit the limit. Rerun `service install` to get the new unit.
+
+  Library: new `service::InstalledService` and `service::read_installed_service`; `update::UpdateRequest` has a new `service` field.
 
 ### Changed
 

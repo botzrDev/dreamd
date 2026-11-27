@@ -14,6 +14,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use dreamd::commands::lifecycle_cleanup::StopReport;
+use dreamd::commands::service::InstalledService;
 use dreamd::commands::update;
 use dreamd::commands::version::VERSION_SHORT;
 
@@ -73,6 +74,7 @@ fn run_update(
         quiet,
         restart,
         cargo_install_hint: None,
+        service: None,
     };
     let mut out = Cursor::new(Vec::new());
     let mut err = Cursor::new(Vec::new());
@@ -480,4 +482,154 @@ fn a_cache_with_only_this_version_is_left_alone() {
     );
     let want = format!("no other cached versions in {}", cache.display());
     assert!(has_line(&stdout, &want), "want {want:?}; got: {stdout:?}");
+}
+
+/// Run update with an installed service read back as `service` (DRM-164).
+fn run_update_with_service(
+    f: &Fixture,
+    dry_run: bool,
+    quiet: bool,
+    service: &InstalledService,
+) -> String {
+    let socket = f.socket();
+    let cache_tree = f.cache_tree();
+    let mut stop = |_: &mut dyn std::io::Write| ATTEMPTED_NO_MATCH;
+    let req = update::UpdateRequest {
+        socket: Some(&socket),
+        cache_dir: Some(&cache_tree),
+        dry_run,
+        quiet,
+        restart: false,
+        cargo_install_hint: None,
+        service: Some(service),
+    };
+    let mut out = Cursor::new(Vec::new());
+    let mut err = Cursor::new(Vec::new());
+    update::run(&req, &mut stop, &mut out, &mut err).unwrap();
+    String::from_utf8(out.into_inner()).unwrap()
+}
+
+/// A service as `service install` writes it, running `exe` in `/home/u/proj`.
+fn service_running(f: &Fixture, exe: PathBuf) -> InstalledService {
+    InstalledService {
+        file: f.home.path().join("dreamd.service"),
+        exe,
+        working_dir: Some(PathBuf::from("/home/u/proj")),
+    }
+}
+
+const NPX: &str = "npx -y dreamd-mcp";
+
+/// DRM-164: the version an installed service runs is kept, so the service
+/// still starts, and update says how to move the service to this version.
+#[test]
+fn update_keeps_the_version_an_installed_service_runs() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let cache = f.cache_tree();
+    let service = service_running(&f, cache.join("1.0.0").join("dreamd"));
+
+    let stdout = run_update_with_service(&f, false, false, &service);
+
+    assert_eq!(
+        std::fs::read(cache.join("1.0.0").join("dreamd")).unwrap(),
+        b"old binary",
+        "the binary the service names must stay"
+    );
+    assert!(cache.join(THIS_VERSION).join("dreamd").is_file());
+    assert!(
+        !cache.join("0.9.0").exists(),
+        "an unnamed version still goes"
+    );
+    assert!(
+        has_line(&stdout, "removed 1 other cached version(s): 0.9.0"),
+        "got: {stdout:?}"
+    );
+    let want = format!(
+        "service: kept the cached dreamd 1.0.0, because the dreamd service ({}) runs it. \
+         To move the service to {THIS_VERSION}, {}",
+        service.file.display(),
+        service.fix_hint(NPX)
+    );
+    assert!(has_line(&stdout, &want), "want {want:?}; got: {stdout:?}");
+    assert!(
+        service
+            .fix_hint(NPX)
+            .contains("from /home/u/proj, run `npx -y dreamd-mcp service install"),
+        "the fix runs install from the service's project: {}",
+        service.fix_hint(NPX)
+    );
+}
+
+/// DRM-164: the service line survives `--quiet`; it is the one thing the
+/// user has to act on.
+#[test]
+fn quiet_update_still_reports_the_service() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let service = service_running(&f, f.cache_tree().join("1.0.0").join("dreamd"));
+
+    let stdout = run_update_with_service(&f, false, true, &service);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("service: kept the cached dreamd 1.0.0")),
+        "got: {stdout:?}"
+    );
+}
+
+/// DRM-164: a service whose binary is already gone is reported with the fix.
+#[test]
+fn update_reports_a_service_whose_binary_is_gone() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let service = service_running(&f, f.cache_tree().join("1.3.1").join("dreamd"));
+
+    let stdout = run_update_with_service(&f, false, false, &service);
+
+    let want = format!(
+        "service: the dreamd service ({}) runs {}, which no longer exists, so it cannot \
+         start. To fix it, {}",
+        service.file.display(),
+        service.exe.display(),
+        service.fix_hint(NPX)
+    );
+    assert!(has_line(&stdout, &want), "want {want:?}; got: {stdout:?}");
+}
+
+/// DRM-164: a service already on this version's binary needs nothing.
+#[test]
+fn update_is_quiet_about_a_service_on_this_version() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let service = service_running(&f, f.cache_tree().join(THIS_VERSION).join("dreamd"));
+
+    let stdout = run_update_with_service(&f, false, false, &service);
+
+    assert!(!stdout.contains("service:"), "got: {stdout:?}");
+    assert!(
+        has_line(&stdout, "removed 2 other cached version(s): 0.9.0, 1.0.0"),
+        "got: {stdout:?}"
+    );
+}
+
+/// DRM-164: the dry run says which version it would keep for the service and
+/// changes nothing.
+#[test]
+fn dry_run_names_the_version_kept_for_the_service() {
+    let f = Fixture::new();
+    versioned_cache(&f);
+    let before = snapshot(&f.cache_tree());
+    let service = service_running(&f, f.cache_tree().join("1.0.0").join("dreamd"));
+
+    let stdout = run_update_with_service(&f, true, false, &service);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("service: would keep the cached dreamd 1.0.0")),
+        "got: {stdout:?}"
+    );
+    assert_eq!(snapshot(&f.cache_tree()), before);
 }
