@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.4.1-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/version-1.4.2-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -200,6 +200,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.4.2** (2026-11-27) | Dependency security fixes: rmcp moves from 1.7.0 to 3.12.0, clearing five advisories (the one high-severity advisory affected only `mcp-http` builds), and rustix, anyhow and memmap2 move past unsound advisories. No behavior change |
 | **v1.4.1** (2026-11-27) | In daemon mode, a project whose path ends in a space or tab is refused instead of reaching another folder; after `update`, an installed `dreamd service` still starts, and one whose binary is gone is reported; a SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` also stops the native daemon |
 | **v1.4.0** (2026-11-20) | Recall takes any text, in one order, with `k` at most 100; each project is redacted and configured by its own config; an API key goes only to its own vendor; a dream cycle keeps a hand-edited `LESSONS.md` and commits only on a branch; every client call has a deadline and checks the daemon's version first; `setup` keeps a repo's `AGENTS.md` loaded in Claude Code |
 | **v1.3.2** (2026-11-17) | `dreamd watch` opens a project again when `git clean -fdX` deletes its `.agent/.dreamd/`, and no dreamd process writes into a store that replaced its own; an empty dedup key no longer drops learnings; `watch` no longer deletes a file at `DREAMD_SOCK` that is not a socket |
@@ -239,7 +240,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.4.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.4.2** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|

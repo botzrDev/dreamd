@@ -1,6 +1,6 @@
 {
   "name": "dreamd",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Shared memory for Claude Code, Cursor, and Cline, in files you can trace and roll back. A bad memory can be removed with a receipt. Local-first and open source.",
   "author": { "name": "botzrDev", "url": "https://github.com/botzrDev" },
   "homepage": "https://dreamd.dev",
@@ -10,6 +10,6 @@
   "privacyPolicyUrl": "https://dreamd.dev/privacy",
   "supportUrl": "https://github.com/botzrDev/dreamd/issues",
   "mcpServers": {
-    "dreamd": { "command": "npx", "args": ["-y", "dreamd-mcp@1.4.1"] }
+    "dreamd": { "command": "npx", "args": ["-y", "dreamd-mcp@1.4.2"] }
   }
 }

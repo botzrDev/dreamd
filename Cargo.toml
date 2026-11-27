@@ -7,8 +7,8 @@ members = [
 ]
 
 [workspace.package]
-# 1.4.1. Patch: daemon-mode project paths that end in a space or tab are refused, an installed service survives `update`, and the npm shim stops dreamd when npm's shell dies. 1.4.0 was the hardening release: recall takes any text in one order with a k limit, per-project config and redaction, per-vendor API keys, dream cycles that keep hand edits and commit only on a branch, client deadlines and a version check, and a setup that keeps AGENTS.md loaded. Recall is still BM25 × salience.
-version = "1.4.1"
+# 1.4.2. Patch: rmcp moves to 3.12, clearing five advisories, and rustix, anyhow and memmap2 move past unsound advisories. 1.4.1 was a patch: daemon-mode project paths that end in a space or tab are refused, an installed service survives `update`, and the npm shim stops dreamd when npm's shell dies. 1.4.0 was the hardening release: recall takes any text in one order with a k limit, per-project config and redaction, per-vendor API keys, dream cycles that keep hand edits and commit only on a branch, client deadlines and a version check, and a setup that keeps AGENTS.md loaded. Recall is still BM25 × salience.
+version = "1.4.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/botzrDev/dreamd"

@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-27
+
+A patch release of dependency security fixes, with no change to what dreamd does. rmcp moves to 3.12.0, and rustix, anyhow and memmap2 move past unsound advisories. Recall is still BM25 × salience. The record schema (`1.0.0`), the index schema (`index/1.3`) and `SPEC.md` (v0.2) are unchanged, so no store migration or index rebuild is needed.
+
+**Upgrading from 1.4.1.** A client refuses a daemon of another version, so a 1.4.1 `dreamd watch` left running answers every 1.4.2 MCP tool call with `version mismatch: client 1.4.2, daemon 1.4.1` until it stops. Run `npx -y dreamd-mcp update`, then `npx -y dreamd-mcp watch`, and reload your MCP harness. If a `dreamd service` unit runs the daemon, `update` prints the `service install` and `service restart` commands to run in place of `watch`. With a cargo-installed `dreamd`, stop the old daemon and run `dreamd watch`.
+
+### Security
+
+- **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
+- **rustix, anyhow and memmap2 move past unsound advisories, and the yanked chacha20 is replaced.** rustix moves from 1.1.4 to 1.1.6 (RUSTSEC-2026-0486), past xattr functions that marked unwritten bytes initialized on a zero-length buffer. anyhow moves from 1.0.102 to 1.0.105 (RUSTSEC-2026-0190), past an unsound `Error::downcast_mut()`. memmap2 moves from 0.9.10 to 0.9.12 (RUSTSEC-2026-0186), past an unchecked pointer offset. chacha20 moves from the yanked 0.10.1 to 0.10.2. Lockfile only.
+
 ## [1.4.1] - 2026-11-27
 
 A patch release. In daemon mode, a project whose path ends in a space or tab is refused before anything is sent, instead of reaching another folder's store. After `update`, an installed `dreamd service` keeps the binary it runs, and `update`, `status` and `doctor` report a service whose binary is gone. A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon too. Recall is still BM25 × salience. The record schema (`1.0.0`), the index schema (`index/1.3`) and `SPEC.md` (v0.2) are unchanged, so no store migration or index rebuild is needed.
@@ -14,7 +25,6 @@ A patch release. In daemon mode, a project whose path ends in a space or tab is 
 
 ### Security
 
-- **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
 - **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
 
 ### Fixed

@@ -130,6 +130,12 @@ BM25 × salience.
   reported. A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` also stops
   the native daemon.
 
+## Shipped — v1.4.2
+
+- **Dependency security fixes**, listed in [`CHANGELOG.md`](CHANGELOG.md).
+  rmcp moves to 3.12.0, clearing five advisories, and rustix, anyhow and
+  memmap2 move past unsound advisories. No behavior change.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

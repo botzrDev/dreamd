@@ -10,7 +10,7 @@
 # Debian 13 (trixie).
 FROM node:22-trixie-slim
 
-ARG DREAMD_MCP_VERSION=1.4.1
+ARG DREAMD_MCP_VERSION=1.4.2
 
 RUN npm install -g "dreamd-mcp@${DREAMD_MCP_VERSION}" \
     && dreamd-mcp version
