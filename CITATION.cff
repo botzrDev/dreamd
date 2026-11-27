@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use dreamd in your research, please cite it as below."
+type: software
+title: "dreamd: auditable memory for AI coding agents"
+abstract: >-
+  dreamd is a local-first, single-binary memory layer for AI coding agents.
+  Claude Code, Cursor, Cline and other MCP clients share one store of plain
+  JSONL and Markdown. Every lesson cites the events it came from, a
+  provenance ledger records which event fed which lesson and index entry,
+  and a bad memory can be traced and removed with a receipt.
+authors:
+  - given-names: Phillip Austin
+    family-names: Green
+    affiliation: Botzr Research Labs
+repository-code: "https://github.com/botzrDev/dreamd"
+url: "https://dreamd.dev"
+license: Apache-2.0
+version: 1.4.0
+date-released: "2026-11-20"
+keywords:
+  - agent memory
+  - AI agents
+  - coding agents
+  - model context protocol
+  - MCP
+  - provenance
+  - local-first
+  - Rust

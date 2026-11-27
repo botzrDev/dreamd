@@ -1,9 +1,14 @@
 # dreamd
 
+[![CI](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/botzrDev/dreamd/actions/workflows/ci.yml?query=branch%3Amain)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/botzrDev/dreamd/badge)](https://scorecard.dev/viewer/?uri=github.com/botzrDev/dreamd)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/17149/badge)](https://www.bestpractices.dev/projects/17149)
+[![Release](https://img.shields.io/github/v/release/botzrDev/dreamd?sort=semver)](https://github.com/botzrDev/dreamd/releases/latest)
+[![npm](https://img.shields.io/npm/v/dreamd-mcp?label=npm%20dreamd-mcp)](https://www.npmjs.com/package/dreamd-mcp)
+[![crates.io](https://img.shields.io/crates/v/dreamd)](https://crates.io/crates/dreamd)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
 ![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms)
-[![Status](https://img.shields.io/badge/version-1.4.1-brightgreen.svg)](#status)
 
 [![dreamd MCP server](https://mcprush.com/badge/dreamd-mcp/card.svg)](https://mcprush.com/to/dreamd-mcp?ref=badge)
 
@@ -102,10 +107,10 @@ dreamd is built for that response:
 
 | You need to | dreamd gives you |
 |---|---|
-| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
+| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, `skill_action`, content, layer and score. `dreamd recall --explain` prints the salience factors for each hit |
 | Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
 | Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
-| Remove a bad memory | `dreamd forget <event-id>` removes the event and the lesson state built from it. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.0` file |
+| Remove a bad memory | `dreamd forget <event-id>` removes the event, the lesson state built from it, and the copies dreamd keeps (decay archive, autosnaps and memory branches, search index). It does not rewrite git history: it lists the commits that still hold the event and prints the command to rewrite them. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.1` file that lists what was cleared and what remains |
 | Review what agents learned | `.agent/` is committed with your code: commit it once after `setup`, which prints the command, and each dream cycle commits its output as `dreamd: cycle YYYY-MM-DD`. Review new lessons with `git diff` or in a pull request, and undo a cycle with `git revert` |
 | Read everything yourself | Plain JSONL and Markdown. `cat`, `grep` and `git log` work on every byte |
 
@@ -170,11 +175,11 @@ The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is
 | Command | What it does |
 |---|---|
 | `dreamd recall <query>` | Ranked search as a markdown table. `--explain` prints the salience factors per hit; `--without <id>` / `--without-cluster <prefix>` drop hits before top-k, so you can see the answer without a suspect memory |
-| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, bm25, salience, total, layer. `--json` for one compact array |
+| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, content, bm25, salience, total, layer. `--json` for one compact array |
 | `dreamd score` | Top memories by salience alone, no query |
 | `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from seven days earlier. See [docs/observability.md](./docs/observability.md) |
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
-| `dreamd forget <event-id>` | Remove one episodic event and the lesson state built from it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.0` file (a receipt, not a signed proof). Refuses while the daemon is running |
+| `dreamd forget <event-id>` | Remove one episodic event, the lesson state built from it, and the copies dreamd keeps under `.agent/`. Prints what it cleared and where copies remain; git history keeps the event until you rewrite it. `--dry-run` writes nothing; `--proof <path>` writes a `forget-receipt/1.1` file (a receipt, not a signed proof). Refuses while the daemon is running |
 | `dreamd doctor --provenance` | Recompute the provenance ledger's Merkle root and list orphan edges, missing edges and corrupt lines. Read-only. See [docs/provenance.md](./docs/provenance.md) |
 | `dreamd memory branch\|checkout\|branches\|delete\|diff\|bisect` | Deprecated in 1.2.0, removed in 2.0. `.agent/` is plain files, so use git. See [docs/branching-guide.md](./docs/branching-guide.md) |
 
@@ -239,7 +244,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.4.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.4.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. `blame`, `forget`, `doctor --provenance`, `recall --without` and `salience-drift` need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|
@@ -287,7 +292,7 @@ The prebuilt Linux x86_64 binary is one static build with no glibc requirement, 
 
 ## Support dreamd
 
-dreamd is open source under Apache-2.0 and built by a small team. A star on the repo helps others find it. When a memory goes wrong, an issue with the `blame` output helps us fix it. Sponsorship funds core maintenance. You can sponsor dreamd on:
+dreamd is open source under Apache-2.0 and built by a small team. A star on the repo helps others find it. When a memory goes wrong, a post in [Discussions](https://github.com/botzrDev/dreamd/discussions) with the `blame` output helps us fix it. Sponsorship funds core maintenance. You can sponsor dreamd on:
 
 - [GitHub Sponsors](https://github.com/sponsors/botzrDev)
 - [Patreon](https://www.patreon.com/c/dreamd_dev)
@@ -311,7 +316,7 @@ None yet.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md) (do not open a public issue for vulnerabilities).
+dreamd is built by the core team and does not take outside pull requests. Bugs, questions and ideas go to [Discussions](https://github.com/botzrDev/dreamd/discussions); see [CONTRIBUTING.md](./CONTRIBUTING.md) for where each belongs and for building from source. By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md). Security reports: [SECURITY.md](./SECURITY.md), never a public thread.
 
 ## License
 

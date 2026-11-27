@@ -1,6 +1,6 @@
 # CI/CD pipeline reference
 
-dreamd runs four GitHub Actions workflows:
+dreamd runs six GitHub Actions workflows:
 
 | Workflow | File | Triggers |
 |---|---|---|
@@ -8,10 +8,12 @@ dreamd runs four GitHub Actions workflows:
 | **Release** | [`.github/workflows/release.yml`](../.github/workflows/release.yml) | Version tags (`v[0-9]+.[0-9]+.[0-9]+*`, e.g. `v1.0.0`, `v0.1.0-rc.5`) |
 | **Nightly** | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) | Daily at 06:00 UTC, or manual dispatch |
 | **MCP manifest** | [`.github/workflows/mcp-manifest.yml`](../.github/workflows/mcp-manifest.yml) | Manual dispatch only |
+| **CodeQL** | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) | Push and PR to `main`, weekly, or manual dispatch |
+| **Scorecard** | [`.github/workflows/scorecard.yml`](../.github/workflows/scorecard.yml) | Push to `main`, branch-protection changes, weekly, or manual dispatch |
 
-This document mostly covers the **CI** workflow. Contributors hit these gates on every pull request. The other three are summarized [at the end](#release-workflow-tags-only).
+This document mostly covers the **CI** workflow. Contributors hit these gates on every pull request. The others are summarized [at the end](#release-workflow-tags-only).
 
-Every Rust job in all four workflows installs the same pinned toolchain, `dtolnay/rust-toolchain@1.95.0`. [`rust-toolchain.toml`](../rust-toolchain.toml) pins the same `1.95.0` (with `rustfmt` and `clippy`) for local builds, so `cargo` in a checkout uses the CI compiler.
+Every Rust job installs the same pinned toolchain, `dtolnay/rust-toolchain` on its `1.95.0` branch. Every action in every workflow is pinned to a full commit SHA, with the release in a trailing comment; update the SHA and the comment together. [`rust-toolchain.toml`](../rust-toolchain.toml) pins the same `1.95.0` (with `rustfmt` and `clippy`) for local builds, so `cargo` in a checkout uses the CI compiler.
 
 ---
 
@@ -77,7 +79,7 @@ cargo install cargo-audit   # one-time
 cargo audit
 ```
 
-Fails when a dependency matches an advisory in the [RustSec database](https://rustsec.org/). It skips the advisories listed in `.cargo/audit.toml`. That list must match `[advisories] ignore` in `deny.toml` (which the next job reads, not this one), where each entry gives its crate version, why the risk is accepted, and when it is due for removal. One advisory is ignored today: RUSTSEC-2026-0462 (rmcp 1.7.0), whose affected HTTP clients dreamd does not compile.
+Fails when a dependency matches an advisory in the [RustSec database](https://rustsec.org/). It skips the advisories listed in `.cargo/audit.toml`. That list must match `[advisories] ignore` in `deny.toml` (which the next job reads, not this one), where each entry gives its crate version, why the risk is accepted, and when it is due for removal. One advisory is ignored today: RUSTSEC-2026-0543 (chrono 0.4.44), which marks chrono unmaintained and is not a vulnerability.
 
 ---
 
@@ -305,7 +307,7 @@ To promote 85% to a blocking gate, uncomment `exit 1` in the workflow's "Summari
 
 ## Notify on main CI failure
 
-Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny. Requires `SLACK_WEBHOOK_URL` secret. Does not run on PRs.
+Posts to Slack when a **push to `main`** fails any of: lint, test, size-gate, tarball-sentinel, idle-rss-gate, linux-compat, audit, deny. Requires the `SLACK_WEBHOOK_URL` secret; without it the step logs a notice and passes. Does not run on PRs.
 
 ---
 
@@ -323,7 +325,7 @@ Triggered by pushing a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. Not a PR gate for 
    | `x86_64-pc-windows-msvc` | `windows-x86_64` | `continue-on-error`; not stripped, no size check, no manifest entry |
 
    Linux and macOS binaries are stripped and fail the build above 24 MB (25,165,824 bytes, NFR-2).
-2. **Release** — regenerates `packages/dreamd-mcp/manifest.json` from those exact binaries with `scripts/update-mcp-manifest.sh` (sha256 of the *extracted* `dreamd`, three shim platforms), writes `checksums.txt`, pulls the `## [X.Y.Z]` block out of `CHANGELOG.md` as the release notes, and creates a **draft** GitHub Release with the tarballs, `checksums.txt`, and `manifest.json` attached. A tag whose name contains a hyphen (`v0.1.0-rc.5`) is marked a prerelease; a hyphen-free tag (`v1.0.0`) is a stable release once the draft is published.
+2. **Release** — regenerates `packages/dreamd-mcp/manifest.json` from those exact binaries with `scripts/update-mcp-manifest.sh` (sha256 of the *extracted* `dreamd`, three shim platforms), writes `checksums.txt`, signs SLSA build provenance for each tarball (`actions/attest-build-provenance`; check one with `gh attestation verify <file> --repo botzrDev/dreamd`), pulls the `## [X.Y.Z]` block out of `CHANGELOG.md` as the release notes, and creates a **draft** GitHub Release with the tarballs, `checksums.txt`, and `manifest.json` attached. A tag whose name contains a hyphen (`v0.1.0-rc.5`) is marked a prerelease; a hyphen-free tag (`v1.0.0`) is a stable release once the draft is published.
 3. **Manifest PR** — the same job pushes a `chore/mcp-manifest-vX.Y.Z` branch with the regenerated manifest (a DCO-signed bot commit) and opens a PR to `main`. It never pushes to `main`.
 
 Nothing here publishes to npm or the MCP Registry, and nothing takes the release out of draft. Those are human steps; the full procedure is [`RELEASING.md`](../RELEASING.md).
@@ -349,6 +351,18 @@ Nightly does not run the size gate, lint, or the full suite, so a green nightly 
 ## MCP manifest workflow
 
 Manual dispatch only, with a `version` input (semver, no leading `v`). A pre-release helper: it builds the three shim targets (`linux-x86_64`, `darwin-x86_64`, `darwin-aarch64`), runs `scripts/update-mcp-manifest.sh`, and uploads the resulting `manifest.json` as the `mcp-manifest` artifact. It commits nothing and opens no PR. The normal release path does not need it — `release.yml` produces the manifest that ships.
+
+---
+
+## CodeQL workflow
+
+Static analysis of the Rust workspace (`rust`), the Node shim (`javascript-typescript`) and the workflow files (`actions`), one matrix job per language, all with `build-mode: none`. Results show under the repository's Security tab → Code scanning. It is not a required check.
+
+---
+
+## Scorecard workflow
+
+Runs the [OpenSSF Scorecard](https://github.com/ossf/scorecard) and publishes the result to the public Scorecard API (the source for a README badge) and to code scanning. The publish API rejects a workflow that adds steps, top-level write permissions, or workflow-level `env`/`defaults`, so keep the job as it is.
 
 ---
 

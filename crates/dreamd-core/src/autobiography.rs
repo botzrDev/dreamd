@@ -261,14 +261,14 @@ fn log_is_dreamds(
 }
 
 /// The repo, its canonical workdir, and the project root's path inside it.
-struct RepoView {
-    repo: Repository,
-    workdir: PathBuf,
-    prefix: PathBuf,
+pub(crate) struct RepoView {
+    pub(crate) repo: Repository,
+    pub(crate) workdir: PathBuf,
+    pub(crate) prefix: PathBuf,
 }
 
 /// `Ok(None)` when no repo is found at or above `project_root`.
-fn open_repo(project_root: &Path) -> Result<Option<RepoView>, AutobiographyError> {
+pub(crate) fn open_repo(project_root: &Path) -> Result<Option<RepoView>, AutobiographyError> {
     let repo = match Repository::discover(project_root) {
         Ok(r) => r,
         Err(e) if e.code() == ErrorCode::NotFound => return Ok(None),

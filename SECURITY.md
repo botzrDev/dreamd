@@ -4,7 +4,12 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Email `austin@botzr.com` with the subject line `dreamd security: <short description>`. Please include:
+Report it privately in either of these ways:
+
+- Open a private advisory: [Report a vulnerability](https://github.com/botzrDev/dreamd/security/advisories/new) (Security tab → Report a vulnerability). Only the maintainers can see it.
+- Email `austin@botzr.com` with the subject line `dreamd security: <short description>`.
+
+Please include:
 
 - A description of the issue and its impact.
 - Steps to reproduce, or a proof-of-concept.
@@ -26,6 +31,18 @@ Security fixes land on `main` and the latest release.
 | Anything else | No |
 
 `1.4.x` is the current release line. Fixes land on `main` and the latest release.
+
+## Verifying a release
+
+Release tarballs built by `release.yml` carry signed SLSA build provenance that names
+the repository, workflow, commit and tag that built them. Releases before the first
+one with provenance have only `checksums.txt`. To check a download:
+
+```sh
+gh attestation verify linux-x86_64.tar.gz --repo botzrDev/dreamd
+```
+
+`checksums.txt` on each release lists the SHA-256 of every asset.
 
 ## Threat model (summary)
 

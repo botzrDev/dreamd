@@ -13,7 +13,7 @@ rust-version.workspace = true
 authors.workspace = true
 readme = "README.md"
 
-# `vectors` downloads a model at compile time. docs.rs should build the engine
+# `vectors` fetches a prebuilt ONNX Runtime at compile time. docs.rs should build the engine
 # people link, not that optional embedder.
 [package.metadata.docs.rs]
 all-features = false

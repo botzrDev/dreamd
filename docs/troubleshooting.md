@@ -447,5 +447,5 @@ A clone or a `git worktree` of a project has the committed memory, but not what 
 
 1. `npx -y dreamd-mcp doctor` — dream-cycle mode and index health; `dreamd status` for last cycle (cargo-installed binary)
 2. [docs/ci.md](./ci.md) — reproduce CI gates locally
-3. [GitHub Discussions](https://github.com/botzrDev/dreamd/discussions) for usage questions
-4. [SECURITY.md](../SECURITY.md) for vulnerability reports (not public issues)
+3. [GitHub Discussions](https://github.com/botzrDev/dreamd/discussions) for usage questions and bug reports
+4. [SECURITY.md](../SECURITY.md) for vulnerability reports (never a public thread)

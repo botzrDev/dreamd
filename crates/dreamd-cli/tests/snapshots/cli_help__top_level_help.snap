@@ -11,7 +11,7 @@ Commands:
   blame           Show which stored memories drove a query's recall ranking
   doctor          Run health checks and print status (dream-cycle mode, etc.)
   dream           Run a dream cycle: write LESSONS.md and prune decayed episodic events. Uses a configured LLM, or the deterministic exemplar when there is no key
-  forget          Remove one episodic event and the lesson state built from it
+  forget          Remove one episodic event, the lesson state built from it, and the copies dreamd keeps of it
   init            Scaffold a new per-project .agent/ store and register it
   mcp             Start the MCP server, bridged to the running daemon or, on Unix, in-process when none is running
   memory          Deprecated, removed in 2.0. Name memory snapshots as branches and check them out
@@ -24,7 +24,7 @@ Commands:
   setup           Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps
   status          Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall       Stop local dreamd servers, unregister this project, and clear caches
-  update          Stop local dreamd servers, keep this version's cached binary and remove the others
+  update          Stop local dreamd servers, keep the cached binaries of this version and of an installed service, and remove the others
   watch           Run the daemon in the foreground until it gets SIGINT or SIGTERM
   vectors         Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged
   version         Print structured version information (semver, commit, build date, target, schema)

@@ -21,7 +21,7 @@ as `X.Y.Z` (e.g. `1.0.0`, or `0.1.0-rc.5` for a pre-release); substitute through
 
 ## 1. Bump every version-coupled surface (ONE commit)
 
-The version lives in **seven** places that MUST move together. Missing any one is how
+The version lives in **eight** places that MUST move together. Missing any one is how
 drift ships. Bump `X.Y.Z-1` → `X.Y.Z`:
 
 | # | File | What to change |
@@ -33,6 +33,7 @@ drift ships. Bump `X.Y.Z-1` → `X.Y.Z`:
 | 5 | `packages/dreamd-mcp/manifest.json` | `"version"` only — set the three `sha256` values to `PENDING_*` placeholders (they are filled in step 4 from the build) |
 | 6 | `crates/dreamd-cli/tests/snapshots/cli_help__version_short.snap` and `…__version_long.snap` | the embedded `dreamd X.Y.Z` string (the binary reports `CARGO_PKG_VERSION`) |
 | 7 | `crates/dreamd-core/Cargo.toml` and `crates/dreamd-cli/Cargo.toml` | the three path-dependency `version` fields (`dreamd-core` on `dreamd-protocol`; `dreamd-cli` on `dreamd-core` and `dreamd-protocol`) — set each to the same string as the workspace version |
+| 8 | `CITATION.cff` | `version` and `date-released` (the day the release is published, `YYYY-MM-DD`) |
 
 A bare `version = "0.1.0-rc.2"` is a caret requirement (`^0.1.0-rc.2`), which stops
 below `0.2.0`. `cargo check` rejects a workspace version of `0.2.0-alpha.1` until
@@ -48,9 +49,8 @@ Also:
   section" leaves the GitHub Release without the content. Add the `[X.Y.Z]` link
   reference at the bottom of the file and repoint `[Unreleased]` at `vX.Y.Z...HEAD`.
 
-- Move the version in seven places no test checks: the root `Dockerfile`'s
-  `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version badge at the
-  top of `README.md`, the version line in `GUIDE.md`'s first section, the `Version:`
+- Move the version in six places no test checks: the root `Dockerfile`'s
+  `ARG DREAMD_MCP_VERSION` (the MCP-directory build image), the version line in `GUIDE.md`'s first section, the `Version:`
   line in `llms.txt`, the version note and scope heading in `llms-full.txt`, and both
   fields in `plugins/dreamd/.claude-plugin/plugin.json`: `"version"` and the
   `dreamd-mcp@X.Y.Z` pin in `mcpServers`, and the release line in `SECURITY.md`'s
@@ -113,19 +113,25 @@ Watch it: `gh run watch $(gh run list --workflow release.yml --limit 1 --json da
 
 ## 3. (nothing — wait for the draft release)
 
-When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 7 assets: five
+When the run finishes, `gh release view vX.Y.Z` shows a **draft** with 8 assets: five
 tarballs (`linux-x86_64`, `linux-x86_64-musl`, `darwin-x86_64`, `darwin-aarch64`,
-`windows-x86_64`, each `.tar.gz`), `checksums.txt`, and `manifest.json`.
+`windows-x86_64`, each `.tar.gz`), `checksums.txt`, `manifest.json`, and
+`dreamd-vX.Y.Z-provenance.sigstore.json` (the signed build provenance for the tarballs;
+`gh attestation verify <tarball> --repo botzrDev/dreamd` checks one).
 `linux-x86_64` is the static musl build, and `linux-x86_64-musl` is the same binary
 under its old name; there is no glibc Linux asset (BZR-1438). If the
-Windows build failed (it is `continue-on-error`) there are 6 and the release is still
+Windows build failed (it is `continue-on-error`) there are 7 and the release is still
 usable — the npm shim has no Windows manifest entry.
 
-## 4. Fill the bundled manifest FROM the release build (CI PR)
+## 4. Fill the bundled manifest FROM the release build (manifest PR)
 
 The `release.yml` run already regenerated `manifest.json` from the exact release
-binaries, attached it to the draft release, and opened a PR
-`chore/mcp-manifest-vX.Y.Z` with that fill. Review the PR: the shas in the diff must
+binaries, attached it to the draft release, and pushed the branch
+`chore/mcp-manifest-vX.Y.Z` with that fill. GitHub Actions is not allowed to open pull
+requests in this repository, so the run does not open the PR. Its summary page has an
+**Open the PR** link (also shown as a notice on the run) that opens the compare view
+with the title filled in. Open the PR from that link, or with the command below. Review
+the PR: the shas in the diff must
 match the `manifest.json` attached to the draft release (they are the same build —
 **take them from the release, do not regenerate separately**; local rebuilds are not
 byte-reproducible and would mismatch). Merge it with a merge commit. The PR branch is
@@ -143,12 +149,7 @@ gh pr merge --repo botzrDev/dreamd chore/mcp-manifest-vX.Y.Z --merge --admin
 git merge-base --is-ancestor vX.Y.Z origin/main && echo "tag is on main"   # after git fetch
 ```
 
-**If the run ends red at "Open PR with regenerated manifest":** the draft release and
-the pushed branch `chore/mcp-manifest-vX.Y.Z` both exist, and only `gh pr create`
-failed. That is what happens when the repository setting *Allow GitHub Actions to
-create and approve pull requests* is off (`GitHub Actions is not permitted to create or
-approve pull requests`). Open the PR by hand from the branch the workflow pushed, then
-review and merge as above:
+To open the PR from a terminal instead of the link:
 
 ```sh
 gh pr create --repo botzrDev/dreamd --base main --head chore/mcp-manifest-vX.Y.Z \
@@ -156,12 +157,9 @@ gh pr create --repo botzrDev/dreamd --base main --head chore/mcp-manifest-vX.Y.Z
   --body "Fills packages/dreamd-mcp/manifest.json from the binaries attached to draft release vX.Y.Z."
 ```
 
-A PR opened by a human this way does run CI.
-
-A PR opened by the workflow's `GITHUB_TOKEN` does not run CI (GitHub's recursion guard); `node --test`
-in `packages/dreamd-mcp` still runs on the merge to `main` (step 5 watch). If branch
-protection refuses the merge because checks never started, that is a founder
-PAT/GitHub-App follow-up — do not invent a secret here.
+A PR opened by a human runs CI. Releases up to v1.4.0 ended red at the old "Open PR
+with regenerated manifest" step for this reason (`GitHub Actions is not permitted to
+create or approve pull requests`); the draft release and branch were fine.
 
 ## 5. Publish the GitHub Release
 
@@ -287,8 +285,8 @@ docs.rs builds `dreamd` and `dreamd-core` without the `vectors` feature
   `require('../package.json').version`; a guard test (`test/version-consistency.test.js`)
   and the CI `mcp-shim` job keep it honest.
 - **Manifest sha drift:** `release.yml` regenerates `packages/dreamd-mcp/manifest.json`
-  on the runner and uploads it as a release asset, then opens a `chore/mcp-manifest-v*`
-  PR that writes it back to `main`. Step 4 is now "review and merge that PR" rather
+  on the runner and uploads it as a release asset, then pushes a `chore/mcp-manifest-v*`
+  branch and links the PR that writes it back to `main`. Step 4 is now "open, review and merge that PR" rather
   than a hand-sync, so the checked-in copy that ships in the npm package always matches
   the published binaries.
 - **Masked CI:** the `test` job's `needs: lint` means a fmt error skips every test.

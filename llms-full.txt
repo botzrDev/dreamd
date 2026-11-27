@@ -140,8 +140,8 @@ the next index commit (up to 5 s); an empty result right after an append is that
 
 All files are UTF-8 plaintext. `.agent/` is checked into git. You can cat, grep, and
 git diff any file. Durable appends to the JSONL go through `append_node` / the daemon
-(single writer). A line fixed by hand needs `dreamd doctor --repair`; the dream cycle
-rewrites LESSONS.md wholesale.
+(single writer). A line fixed by hand needs `dreamd doctor --repair`. A dream cycle
+keeps a hand-edited LESSONS.md, makes no model call, and says so.
 
 ## Episodic record schema (schema_version: "1.0.0")
 
@@ -179,7 +179,8 @@ rewrites LESSONS.md wholesale.
   dreamd vectors enable    # model download on a `--features vectors` build; exits 2 on
                            # the default binary; recall is unchanged either way
   dreamd uninstall         # stop local servers, unregister project, clear caches
-  dreamd update            # stop local servers, keep this version's cached binary
+  dreamd update            # stop local servers, keep the cached binaries of this
+                           # version and of an installed service, remove the others
   dreamd version           # structured version output
   dreamd reset workspace   # re-scaffold working/WORKSPACE.md
 
@@ -205,7 +206,8 @@ is a stub that answers 501. Full reference: docs/http-api.md.
 
 All well under the <5ms P50 warm target. Run `cargo bench -p dreamd-core --bench recall` to
 reproduce (docs/benchmarks.md).
-Read-after-write visibility: up to commit_cadence_seconds (default 5s).
+Read-after-write: a search sees every append that returned before it. When the index
+has not committed one yet, the search waits for that commit, at most one second.
 
 ## Privacy
 

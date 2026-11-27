@@ -6,6 +6,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+
+- **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
+
+### Changed
+
+- **`dreamd forget` clears the copies dreamd keeps, and says what it cleared and what remains** (DRM-168). It removed the event from the live log, `LESSONS.md`, the recurrence sidecar and recall, but full copies stayed in every autosnap and memory branch object under `.agent/.dreamd/branches/objects/`, in the decay archive, in `AGENT_LEARNINGS.jsonl.bak`, and in the index's segment files, and `dreamd memory checkout` of an autosnap brought the event back. Now one redo WAL commits the live files together with:
+  - each branch object that holds the event, written again without it. Every ref, and a detached `HEAD`, that named the old object moves to the new one and keeps its name and timestamp. The old object is deleted after the commit. An object that fails its hash check is left as it is and reported;
+  - the event's line removed from the decay archive and the migrate backup. An event that decay had already archived is now removed there too: `removed=false` with `cleared: decay_archive`, where it used to change nothing.
+
+  After the index refresh, it merges every segment that holds a deleted document, so the event's text leaves the segment files. Before, the text stayed there until a merge or `dreamd doctor --repair`.
+- **`dreamd forget` reports git history and never rewrites it.** When committed `.agent/` files hold the event, it prints how many commits, the first and last, and a `git filter-repo` command you can run yourself, with a warning that clones, forks and remotes keep their copies until each one rewrites too.
+- **`dreamd forget` prints more lines.** Line 1 is unchanged. Then stdout has `cleared: <places>`, and one `remaining: <place> …` line per place a copy is still kept. `--dry-run` prints `would_clear:`, one `would_touch:` line per file, object or ref it would change, and `remaining:`. A script that compared the whole stdout to one line should read the first line. The git note goes to stderr.
+- **The forget receipt is `forget-receipt/1.1`.** It keeps every 1.0 key, in order and with its meaning, and adds `cleared` and `remaining`. `removed` is `false` when only copies held the event. It holds ids, commit ids, relative paths and counts, never content, and it is still unsigned.
+
+  Library: new `copies` module (`find`, `git_history`, `rewrite_command`) and `server::{compact_deletes, Compaction}`. New `forget::{Place, Remaining, ForgetOutcome, IndexOutcome}` and `ForgetError::{Copies, Branches}`. `ForgetReport` gains `cleared`, `copies` and `left` and is no longer `Copy`. `render_receipt` takes the report and a `ForgetOutcome`.
+
 ## [1.4.1] - 2026-11-27
 
 A patch release. In daemon mode, a project whose path ends in a space or tab is refused before anything is sent, instead of reaching another folder's store. After `update`, an installed `dreamd service` keeps the binary it runs, and `update`, `status` and `doctor` report a service whose binary is gone. A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon too. Recall is still BM25 × salience. The record schema (`1.0.0`), the index schema (`index/1.3`) and `SPEC.md` (v0.2) are unchanged, so no store migration or index rebuild is needed.

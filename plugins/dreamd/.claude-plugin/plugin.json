@@ -8,7 +8,7 @@
   "license": "Apache-2.0",
   "icon": "./logo.png",
   "privacyPolicyUrl": "https://dreamd.dev/privacy",
-  "supportUrl": "https://github.com/botzrDev/dreamd/issues",
+  "supportUrl": "https://github.com/botzrDev/dreamd/discussions",
   "mcpServers": {
     "dreamd": { "command": "npx", "args": ["-y", "dreamd-mcp@1.4.1"] }
   }

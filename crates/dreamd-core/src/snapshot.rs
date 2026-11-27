@@ -305,6 +305,126 @@ pub fn stage_autosnap(stage: &mut Stage, now_sec: i64) -> Result<String, Snapsho
     Ok(id)
 }
 
+/// Every complete object id under `objects/`, sorted. A missing directory is
+/// an empty list. `<id>.partial/` directories are not objects.
+pub(crate) fn object_ids(agent_root: &AgentRoot) -> Result<Vec<String>, SnapshotError> {
+    let dir = agent_root.branches_objects_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(&dir)(e)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_err(&dir))?;
+        if let Some(name) = entry.file_name().to_str() {
+            if is_object_id(name) && entry.path().is_dir() {
+                ids.push(name.to_string());
+            }
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+/// The files of object `id` as (`path` relative to `.agent/`, bytes), in
+/// manifest order. The manifest must hash to `id` and every file to its
+/// manifest `sha256`, or this is [`SnapshotError::BadObject`].
+pub(crate) fn read_object(
+    agent_root: &AgentRoot,
+    id: &str,
+) -> Result<Vec<(String, Vec<u8>)>, SnapshotError> {
+    let obj = agent_root.branches_objects_dir().join(id);
+    let manifest_path = obj.join(MANIFEST_FILE);
+    let raw = fs::read(&manifest_path).map_err(io_err(&manifest_path))?;
+    let bad = |reason: String| SnapshotError::BadObject {
+        id: id.to_string(),
+        reason,
+    };
+    if sha256_hex(&raw) != id {
+        return Err(bad("manifest hash does not match the object id".to_string()));
+    }
+    let manifest: Manifest = serde_json::from_slice(&raw)?;
+    let mut out = Vec::with_capacity(manifest.files.len());
+    for entry in manifest.files {
+        let path = obj.join(&entry.path);
+        let bytes = fs::read(&path).map_err(io_err(&path))?;
+        if sha256_hex(&bytes) != entry.sha256 {
+            return Err(bad(format!(
+                "{} does not match its manifest sha256",
+                entry.path
+            )));
+        }
+        out.push((entry.path, bytes));
+    }
+    Ok(out)
+}
+
+/// Write `files` (`path` relative to `.agent/`, bytes) as a content-addressed
+/// object, the same way an autosnap writes one, and return its id. An object
+/// with the same id already on disk is left as it is.
+pub(crate) fn put_object(
+    agent_root: &AgentRoot,
+    files: &[(String, Vec<u8>)],
+) -> Result<String, SnapshotError> {
+    let mut entries: Vec<(ManifestFile, Vec<u8>)> = files
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                ManifestFile {
+                    path: path.clone(),
+                    sha256: sha256_hex(bytes),
+                    size: bytes.len() as u64,
+                },
+                bytes.clone(),
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.path.as_bytes().cmp(b.0.path.as_bytes()));
+    let manifest_files: Vec<ManifestFile> = entries.iter().map(|(m, _)| m.clone()).collect();
+    let manifest = manifest_bytes(&manifest_files)?;
+    let id = sha256_hex(&manifest);
+    write_object(&agent_root.branches_objects_dir(), &id, &entries, &manifest)?;
+    Ok(id)
+}
+
+/// Every file directly under `refs/` as (file name, body), sorted by name.
+/// Dot-prefixed temp files are included: [`crate::retention::collect_objects`]
+/// counts them as naming their object too. A missing `refs/` is an empty list.
+pub(crate) fn ref_files(agent_root: &AgentRoot) -> Result<Vec<(String, String)>, SnapshotError> {
+    let dir = agent_root.branches_refs_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(&dir)(e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_err(&dir))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let body = fs::read_to_string(&path).map_err(io_err(&path))?;
+        out.push((name, body));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The body of `branches/HEAD`, or `None` when it is absent.
+pub(crate) fn head_body(agent_root: &AgentRoot) -> Result<Option<String>, SnapshotError> {
+    let path = agent_root.branches_dir().join(HEAD_FILE);
+    match fs::read_to_string(&path) {
+        Ok(body) => Ok(Some(body)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(&path)(e)),
+    }
+}
+
 /// Filename of the branch pointer inside `branches/`.
 pub const HEAD_FILE: &str = "HEAD";
 

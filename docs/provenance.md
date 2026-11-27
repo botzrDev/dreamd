@@ -1,6 +1,6 @@
 # Provenance ledger format (`provenance/1.0`)
 
-**Status: recording, a library check, and `dreamd forget` are implemented; signed proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). `provenance::verify` in `dreamd-core` (BZR-148) recomputes the Merkle root from the well-formed lines and lists orphan edges, missing lesson and recurrence edges, and corrupt line numbers; it only reads, and it does not rewrite the file. `dreamd doctor --provenance` prints the `provenance::verify` report and does not rewrite the ledger. `dreamd doctor --repair` rebuilds the Tantivy index and does not touch the ledger. Ledger repair is not implemented. `forget::cascade` in `dreamd-core` (BZR-158) removes one event from the live JSONL and leaves existing ledger lines in place, so the forgotten id's old edge stays and `verify` reports it as an orphan; `dreamd forget <id>` removes one event through `forget::cascade` and refuses while a daemon is live. `--dry-run` writes nothing. `--proof <path>` writes a `forget-receipt/1.0` file (event id, lesson effect, recomputed root, and the orphan edges whose `from` is that id). That receipt is not the signed membership proof in the Proof object section below. Signatures and `embedding` edges are not implemented. This format is not part of the v0.2 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (branch objects and refs; see [`branching.md`](./branching.md)).
+**Status: recording, a library check, and `dreamd forget` are implemented; signed proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). `provenance::verify` in `dreamd-core` (BZR-148) recomputes the Merkle root from the well-formed lines and lists orphan edges, missing lesson and recurrence edges, and corrupt line numbers; it only reads, and it does not rewrite the file. `dreamd doctor --provenance` prints the `provenance::verify` report and does not rewrite the ledger. `dreamd doctor --repair` rebuilds the Tantivy index and does not touch the ledger. Ledger repair is not implemented. `forget::cascade` in `dreamd-core` (BZR-158) removes one event from the live JSONL and leaves existing ledger lines in place, so the forgotten id's old edge stays and `verify` reports it as an orphan; `dreamd forget <id>` removes one event through `forget::cascade`, along with the copies dreamd keeps of it under `.agent/`, and refuses while a daemon is live. It does not rewrite git history; it reports the commits that hold the event. `--dry-run` writes nothing. `--proof <path>` writes a `forget-receipt/1.1` file (event id, lesson effect, recomputed root, the orphan edges whose `from` is that id, and the places cleared and remaining). That receipt is not the signed membership proof in the Proof object section below. Signatures and `embedding` edges are not implemented. This format is not part of the v0.2 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (branch objects and refs; see [`branching.md`](./branching.md)).
 
 This page specifies how dreamd records which derived artifacts each episodic event feeds, how that set is committed to with a Merkle root, and how one event's membership is proved with a signed proof. It is the format. The signed proof and the verifier program are still later work. `dreamd forget --proof` writes the forget receipt named in the status paragraph and does not write the Proof object below.
 
@@ -13,7 +13,7 @@ This page specifies how dreamd records which derived artifacts each episodic eve
 | Merkle root | Recomputed on demand by `dreamd doctor --provenance` and `dreamd forget --proof`. It is not stored anywhere, so there is no earlier root to compare against. |
 | Proof object (membership path + Ed25519 signature) | Reserved. Not implemented: there is no provenance key, nothing signs, and no command writes this object. |
 | Verification procedure for a proof | Reserved. No verifier program or crate ships. |
-| Forget receipt (`forget-receipt/1.0`) | Written by `dreamd forget --proof`. It is a different, unsigned file, described under [Commands](#commands) below. |
+| Forget receipt (`forget-receipt/1.1`) | Written by `dreamd forget --proof`. It is a different, unsigned file, described under [Commands](#commands) below. dreamd 1.4 and earlier wrote `forget-receipt/1.0`, whose keys 1.1 keeps. |
 | Ledger repair | Not implemented. No command rewrites or truncates complete ledger lines. |
 
 **Why this format also matters beyond forgetting (future).** The ledger records which derived artifacts each event feeds. The same edges are the substrate a trust label would ride on: a scalar per event saying where it came from and how far to trust it, joined along these edges on derivation, so that whatever releases an effect can refuse one built on data below its label. That rule is direction, not shipped (see `ROADMAP.md`, "Direction — provenance and trust"). This page specifies no label, no join rule, and no consumer of one; a trust label MUST NOT be inferred from any field defined here.
@@ -151,16 +151,44 @@ Orphans are expected, and permanent, after anything that removes an event from t
 
 ### `dreamd forget <EVENT_ID>`
 
-Removes one event from the live episodic log, pinned or not, and the lesson state built from it or naming it.
+Removes one event from the live episodic log, pinned or not, the lesson state built from it or naming it, and the copies of it that dreamd keeps under `.agent/`. It does not rewrite git history: it reports the commits that still hold the event and prints a command you can run (see [Git history](#git-history)).
 
 ```text
 $ dreamd forget --dry-run evt_01M3YEGYSZVX7594HBPM64XHR6
 would_remove=true lesson=unlinked
+would_clear: live_log lessons recurrence_sidecar branch_objects index
+would_touch: .agent/episodic/AGENT_LEARNINGS.jsonl
+would_touch: .agent/semantic/LESSONS.md
+would_touch: .agent/semantic/recurrence_counts.json
+would_touch: .agent/.dreamd/branches/objects/3f5c…a91e
+would_touch: .agent/.dreamd/branches/refs/snap-20261126t081300z
+would_touch: .agent/.dreamd/index/
+remaining: git_history commits=2 first=a7cde9d… last=461bf14… paths=.agent/episodic/AGENT_LEARNINGS.jsonl
 $ dreamd forget --proof receipt.json evt_01M3YEGYSZVX7594HBPM64XHR6
 removed=true lesson=unlinked proof=receipt.json
+cleared: live_log lessons recurrence_sidecar branch_objects index
+remaining: git_history commits=2 first=a7cde9d… last=461bf14… paths=.agent/episodic/AGENT_LEARNINGS.jsonl
 ```
 
-The result line goes to stdout. `removed` is `false` when the id is not in the live log; nothing is written in that case, including the receipt. `lesson` is one of:
+These lines go to stdout (commit ids are shortened here; the command prints them in full). The note about git history goes to stderr.
+
+- Line 1 is the result. `removed` is `true` when the id was in the live log. `lesson` is described below.
+- `cleared:` lists the places the command removed the event from, in the order of the table below. There is no `cleared:` line when it found the event nowhere it can clear; then it writes nothing, not even the receipt.
+- Each `remaining:` line names one place where a copy is still kept.
+
+| `cleared` | What the command did there |
+|---|---|
+| `live_log` | Removed the event's line from `episodic/AGENT_LEARNINGS.jsonl`. Every other line keeps its bytes. |
+| `lessons` | Rewrote or deleted `semantic/LESSONS.md`; see `lesson` below. |
+| `recurrence_sidecar` | Recounted `semantic/recurrence_counts.json` without the event. The file holds counts per cluster, never ids or content. |
+| `decay_archive` | Removed the event's line from each `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl` that held it, where the decay pruner archives events. A day file left empty is deleted. |
+| `migrate_backup` | Removed the event's line from `episodic/AGENT_LEARNINGS.jsonl.bak`, which `dreamd migrate` writes. A backup left empty is deleted. |
+| `branch_objects` | Every autosnap and memory branch object under `.agent/.dreamd/branches/objects/` that held the event was rewritten without it, its refs were moved to the new object, and the old object was deleted. Objects that held the event and that no ref named were deleted once more than an hour old, the grace period object collection uses: `dreamd memory branch` names its object only after writing it. See [`branching.md`](./branching.md). |
+| `index` | Deleted the event's document from `.agent/.dreamd/index/` and re-indexed the lesson layer, then merged every segment holding a deleted document and deleted the files the merge replaced. A Tantivy delete only marks a document deleted; until a merge, its stored text stays in the segment files. |
+
+The changes to the live files, the decay archive, the migrate backup, the refs and `HEAD` commit through one redo WAL, the same one a dream cycle uses: after a crash the next writer rolls it forward, so those files are either as they were or fully forgotten. New branch objects are written before that commit, as a dream cycle writes its autosnap object, and nothing names them until it lands; the old objects are deleted after it, and a crash in between leaves an unnamed old object that the next forget of the id, or the next dream cycle, deletes once it is an hour old. The index pass runs after the commit, and the git history check only reads.
+
+`lesson` is one of:
 
 | `lesson=` | What happened to `semantic/LESSONS.md` |
 |---|---|
@@ -168,35 +196,61 @@ The result line goes to stdout. `removed` is `false` when the id is not in the l
 | `citation_dropped` | The lesson is deterministic (`prompt_version` `deterministic-only`), and the id was in `citations` but was not its exemplar. Only a hand-edited file has that shape. The id was removed from `citations`, and the file was rewritten. |
 | `unlinked` | The id was the lesson's exemplar. Or the lesson was written by a model, and the event was in its cluster (its `skill_action` is the lesson's `cluster_key` or under it) or among its citations: the model saw every event of the cluster, so its prose can hold any of them. The file was deleted, and no replacement lesson is selected until the next dream cycle. |
 
-Pins on the lesson's other citations stay; `dreamd archive --force-unpin <id>` removes one. Older copies of `LESSONS.md` stay in the autosnap objects under `.agent/.dreamd/branches/objects/` until retention prunes them; the newest 20 `snap-*` refs are kept.
+The same rule decides what happens to the `LESSONS.md` inside each branch object. Pins on the lesson's other citations stay; `dreamd archive --force-unpin <id>` removes one. The command does not run a dream cycle and does not decay other events.
 
-After a removal the command also recounts `semantic/recurrence_counts.json` and, when `.agent/.dreamd/index/` exists, deletes the event's document from the recall index and re-indexes the lesson layer. It does not run a dream cycle and does not decay other events.
+| `remaining` | Meaning |
+|---|---|
+| `git_history` | Commits in the project's git repository that hold the event. See [Git history](#git-history). `unchecked` instead of a count means the repository could not be read. |
+| `branch_object` | An object the command could not clear. `reason` is `failed_hash_check` (the object was edited or is corrupt), `unfinished_write` (a `.partial` directory left by a crash), or `not_cleared` (no ref names it and it is less than an hour old, or it could not be rewritten or deleted, or it holds the id only in a file the command does not rewrite). `refs` and `head` say what names it. |
+| `decay_archive`, `migrate_backup` | The file still holds the event after the commit. |
+| `index` | `refresh_failed`: the delete or the re-index failed, and recall may still return the event. `merge_pending`: the merge failed or left a segment holding deleted documents. `files_not_removed`: the merge worked, but some replaced files could not be deleted. `dreamd doctor --repair` deletes the index and rebuilds it from the log. |
 
-- `--dry-run` prints the same line prefixed with `dry-run`, plus `dreamd: dry run; nothing written` on stderr. It writes nothing and does not check for a running daemon. It cannot be combined with `--proof`.
-- `--proof <PATH>` writes a forget receipt to `PATH` after a removal.
+- `--dry-run` prints `would_remove=`, `would_clear:` and one `would_touch:` line per file, object or ref it would change, plus the `remaining:` lines and, on stderr, the git note and `dreamd: dry run; nothing written`. It writes nothing and does not check for a running daemon. It cannot be combined with `--proof`. `would_touch:` lists memory files, copies, objects and refs; every forget also updates `state.json`, and may append ledger edges for a lesson that stays.
+- `--proof <PATH>` writes a forget receipt to `PATH` after a forget that cleared anything.
 - Stop `dreamd watch` first. With a live daemon the command refuses: `dreamd: error — daemon is running; stop it first`.
 
 | Exit | When |
 |---|---|
-| 0 | Removed, the id was not in the log (`removed=false`), or a dry run. |
-| 1 | Daemon running, a dream cycle is marked in progress, or an I/O, index, or receipt-write failure. An index or receipt failure is reported after the result line; the removal itself is not rolled back. |
+| 0 | Something was cleared, the id was found nowhere (`removed=false` and no `cleared:` line), or a dry run. A copy listed as `remaining` does not change the exit code. |
+| 1 | Daemon running, a dream cycle is marked in progress, or an I/O, index refresh, or receipt-write failure. An index or receipt failure is reported after the result lines; the removal itself is not rolled back. |
 | 2 | The argument is not an event id (`evt_` + 26 Crockford base32 characters), no `.agent/` store was found, or a usage error. |
 
 `dreamd forget` is not supported on Windows, where the atomic file replace it depends on is unavailable.
 
-**The forget receipt.** One line of compact JSON with a trailing newline, keys in this order:
+#### Git history
 
-```json
-{"schema_version":"forget-receipt/1.0","event_id":"evt_01M3YEGYTBD28RKHZKAEDN1BVD","removed":true,"lesson":"untouched","root":"947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969","orphans":[{"line":2,"kind":"index_doc","from":"evt_01M3YEGYTBD28RKHZKAEDN1BVD","to":"evt_01M3YEGYTBD28RKHZKAEDN1BVD"}]}
+`dreamd forget` never rewrites git history. When the project is in a git repository, it reads every commit reachable from `HEAD` and from every ref (branches, tags, remote-tracking branches, the stash) and counts the ones whose `.agent/episodic/AGENT_LEARNINGS.jsonl` or `.agent/semantic/LESSONS.md` holds the event id. A dream cycle commits both files after each cycle, so an event that lived through one cycle is usually in at least one commit. The count, the first and last of those commits (by ancestry), and the paths go to stdout and the receipt. Reflogs and unreachable objects are not read.
+
+On stderr it prints a command you can run yourself:
+
+```sh
+git filter-repo --blob-callback 'blob.data = (b"" if blob.data.startswith(b"---\nlast_updated:") else b"".join(l for l in blob.data.splitlines(True) if b"\"id\":\"evt_01M3YEGYSZVX7594HBPM64XHR6\"" not in l)) if b"evt_01M3YEGYSZVX7594HBPM64XHR6" in blob.data else blob.data'
 ```
 
-`root` is the Merkle root recomputed from the ledger after the removal. `orphans` lists the ledger lines whose `from` is the forgotten id. The receipt is a record of what the command did. It is not signed, it has no `path` or `signature` key, and it is not the Proof object above. Because ledger lines are never removed, the forgotten id is still a leaf under `root`; the receipt shows the id's edges are now orphans, not that the id left the ledger.
+In every file of every commit that holds the id, it empties a `LESSONS.md` (as `forget` deletes a lesson built from the event) and drops the line holding the record's `"id":"<id>"` from any other file, which in dreamd's files is the event's own log line. Before you run it:
 
-**What `dreamd forget` does not remove.** It rewrites the live files only. The event can still be present in:
+- It needs [git-filter-repo](https://github.com/newren/git-filter-repo), a separate install.
+- It rewrites the id of every commit on every branch, and ends with `git reset --hard`: commit or stash your work first.
+- It refuses a repository that is not a fresh clone unless you add `--force`.
+- Clones, forks and remotes keep their copies until each of them rewrites too, and pushing the rewrite needs `--force`. A hosting service can keep copies longer (pull request refs, caches).
 
-- the ledger, as the event id in old edge lines (ids only, never content);
-- the Tantivy index's segment files under `.agent/.dreamd/index/`. The deleted document's stored copy stays there, marked deleted and never returned by recall, until a segment merge rewrites that segment. `dreamd doctor --repair` deletes the index and rebuilds it from the log, which no longer holds the event;
-- every memory snapshot object taken while the event was in the log (`.agent/.dreamd/branches/objects/`, one per dream cycle and per `dreamd memory branch`; see [`branching.md`](./branching.md)), and checking out such a snapshot brings the event back;
-- your git history, if a dream cycle committed the episodic log or `LESSONS.md` (the autobiography commit that `dreamd dream --no-commit` skips).
+The receipt never states that the event is gone from git. `remaining` lists the commits as they were when the command ran.
 
-An event the decay pruner already archived to `.agent/.dreamd/snapshots/<YYYY-MM-DD>.jsonl` is no longer in the live log, so `dreamd forget` reports `removed=false` for it and leaves the archive file as it is.
+**The forget receipt.** One line of compact JSON with a trailing newline. The `forget-receipt/1.0` keys come first, in their 1.0 order and meaning, then `cleared` and `remaining`:
+
+```json
+{"schema_version":"forget-receipt/1.1","event_id":"evt_01M3YEGYTBD28RKHZKAEDN1BVD","removed":true,"lesson":"untouched","root":"947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969","orphans":[{"line":2,"kind":"index_doc","from":"evt_01M3YEGYTBD28RKHZKAEDN1BVD","to":"evt_01M3YEGYTBD28RKHZKAEDN1BVD"}],"cleared":["live_log","recurrence_sidecar","branch_objects","index"],"remaining":[{"place":"git_history","commits":2,"first":"a7cde9dc6e15a637a3264dc9abf0964b6aa4a6a2","last":"461bf14c8ec229de9cc9e429784eab056f0fb9a0","paths":[".agent/episodic/AGENT_LEARNINGS.jsonl"]}]}
+```
+
+`root` is the Merkle root recomputed from the ledger after the removal. `orphans` lists the ledger lines whose `from` is the forgotten id. `removed` is `false` only when the id was not in the live log and only copies of it were cleared (for example, an event the decay pruner had archived). `cleared` holds the tokens of the first table above. Each `remaining` entry is an object with a `place` key and the fields of the second table: `git_history` has `commits`, `first`, `last` and `paths` (or `unchecked`); `branch_object` has `object`, `refs`, `head` and `reason`; `decay_archive` and `migrate_backup` have `file`; `index` has `reason`. The receipt holds ids, commit ids, paths relative to the project and counts. It never holds the memory's content. It is a record of what the command did and found. It is not signed, it has no `signature` key, and it is not the Proof object above. Because ledger lines are never removed, the forgotten id is still a leaf under `root`; the receipt shows the id's edges are now orphans, not that the id left the ledger.
+
+**What `dreamd forget` does not remove.**
+
+- Git history, until you rewrite it, and every clone, fork and remote until each one rewrites too.
+- The messages of dream cycle commits, which list cited and pinned ids (`cited:`, `pinned:`). The printed command does not rewrite messages. They hold ids, not content.
+- The ledger keeps the event id in its old edge lines (ids only, never content).
+- Anything listed under `remaining`.
+- The logs. The daemon log (`~/.agent/dreamd.log`, and `dreamd.log.1`) can hold the id in warning lines. With `DREAMD_LOG=debug` or `trace`, `dreamd mcp` logs each request in full, content included, to its stderr, which your harness may keep ([SECURITY.md](../SECURITY.md)).
+- Another event whose own content repeats the text. `forget` removes one event, by id.
+- Copies outside dreamd's files: another checkout of the project, backups, and any text already read out of dreamd, such as an agent's context or transcript, or another tool's memory.
+- A branch object's recurrence sidecar keeps counts that include the event (counts only).

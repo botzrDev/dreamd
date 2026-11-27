@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; each job lists what it needs.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -723,7 +727,13 @@ jobs:
       - name: Post failure to Slack
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        # Without the secret there is nowhere to post; skip instead of failing
+        # the job with curl's blank-URL error.
         run: |
+          if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+            echo "::notice title=Slack alert skipped::SLACK_WEBHOOK_URL is not set; add it in repo secrets to get Slack alerts."
+            exit 0
+          fi
           curl -fsS -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"🔴 dreamd CI failed on main — ${GITHUB_SHA::8} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
             "$SLACK_WEBHOOK_URL"
