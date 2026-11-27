@@ -21,6 +21,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
   Library: new `service::InstalledService` and `service::read_installed_service`; `update::UpdateRequest` has a new `service` field.
 
+- **A test's fake daemon no longer panics on macOS when `dreamd mcp`'s reachability probe has already closed its connection** (DRM-165). macOS answers `setsockopt` on such a socket with EINVAL; the fake daemon in `tests/project_root.rs` now skips that connection, as `daemon_client`'s own test does. Every other fake daemon already ignored the error, and the remaining `.expect` calls are on client connections to a live daemon. Tests only.
+
 ### Changed
 
 - **`dreamd forget` clears the copies dreamd keeps, and says what it cleared and what remains** (DRM-168). It removed the event from the live log, `LESSONS.md`, the recurrence sidecar and recall, but full copies stayed in every autosnap and memory branch object under `.agent/.dreamd/branches/objects/`, in the decay archive, in `AGENT_LEARNINGS.jsonl.bak`, and in the index's segment files, and `dreamd memory checkout` of an autosnap brought the event back. Now one redo WAL commits the live files together with:
