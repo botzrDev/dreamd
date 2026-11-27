@@ -19,4 +19,4 @@ On-disk record types live in [`dreamd-protocol`](https://crates.io/crates/dreamd
 
 `cargo install dreamd-core` is the wrong command. The helper bins in this package exist so the workspace tests can spawn them.
 
-Rust 1.95.0 or newer. The optional `vectors` feature downloads a model at compile time and does not change recall ranking. The default build does not include it.
+Rust 1.95.0 or newer. The optional `vectors` feature fetches a prebuilt ONNX Runtime at compile time and adds a command that downloads an embedding model at run time. It does not change recall ranking. The default build does not include it.

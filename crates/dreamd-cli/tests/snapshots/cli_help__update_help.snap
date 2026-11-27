@@ -2,7 +2,7 @@
 source: crates/dreamd-cli/tests/cli_help.rs
 expression: "subcommand_help(\"update\")"
 ---
-Stop local dreamd servers, keep this version's cached binary and remove the others
+Stop local dreamd servers, keep the cached binaries of this version and of an installed service, and remove the others
 
 Usage: update [OPTIONS]
 

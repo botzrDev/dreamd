@@ -24,7 +24,7 @@ Commands:
   setup           Set up dreamd in this project: scaffold .agent/, wire the harness MCP config, and print the next steps
   status          Print daemon liveness, resolved project, last dream cycle, and recent log
   uninstall       Stop local dreamd servers, unregister this project, and clear caches
-  update          Stop local dreamd servers, keep this version's cached binary and remove the others
+  update          Stop local dreamd servers, keep the cached binaries of this version and of an installed service, and remove the others
   watch           Run the daemon in the foreground until it gets SIGINT or SIGTERM
   vectors         Deprecated, removed in 2.0. Download the optional embedding model. Recall is unchanged
   version         Print structured version information (semver, commit, build date, target, schema)
