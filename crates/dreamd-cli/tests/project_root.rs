@@ -298,9 +298,21 @@ fn fake_daemon(listener: UnixListener) -> Receiver<Option<Vec<u8>>> {
             let Ok(mut stream) = stream else {
                 return;
             };
-            stream
-                .set_read_timeout(Some(TIMEOUT))
-                .expect("set read timeout");
+            match stream.set_read_timeout(Some(TIMEOUT)) {
+                Ok(()) => {}
+                // DRM-165: macOS answers setsockopt with EINVAL once the peer
+                // has closed the connection, which is what the reachability
+                // probe does. That connection carries no request, so skip it,
+                // as `daemon_client`'s `a_timed_out_call_closes_its_connection`
+                // does.
+                Err(e)
+                    if cfg!(target_os = "macos")
+                        && e.kind() == std::io::ErrorKind::InvalidInput =>
+                {
+                    continue;
+                }
+                Err(e) => panic!("set read timeout: {e}"),
+            }
             let mut head = Vec::new();
             let mut buf = [0u8; 4096];
             let end = loop {

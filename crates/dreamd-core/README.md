@@ -12,7 +12,7 @@ Depend on this crate to link that engine into another Rust process. Pin the vers
 
 ```toml
 [dependencies]
-dreamd-core = "=1.4.0"
+dreamd-core = "=1.4.1"
 ```
 
 On-disk record types live in [`dreamd-protocol`](https://crates.io/crates/dreamd-protocol), which is the smaller crate to depend on when you only need to parse JSONL.
