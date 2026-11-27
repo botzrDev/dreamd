@@ -205,6 +205,7 @@ Direction, not dated commitments. Full view: [ROADMAP.md](./ROADMAP.md).
 
 | Version | What |
 |---|---|
+| **v1.4.1** (2026-11-27) | In daemon mode, a project whose path ends in a space or tab is refused instead of reaching another folder; after `update`, an installed `dreamd service` still starts, and one whose binary is gone is reported; a SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` also stops the native daemon |
 | **v1.4.0** (2026-11-20) | Recall takes any text, in one order, with `k` at most 100; each project is redacted and configured by its own config; an API key goes only to its own vendor; a dream cycle keeps a hand-edited `LESSONS.md` and commits only on a branch; every client call has a deadline and checks the daemon's version first; `setup` keeps a repo's `AGENTS.md` loaded in Claude Code |
 | **v1.3.2** (2026-11-17) | `dreamd watch` opens a project again when `git clean -fdX` deletes its `.agent/.dreamd/`, and no dreamd process writes into a store that replaced its own; an empty dedup key no longer drops learnings; `watch` no longer deletes a file at `DREAMD_SOCK` that is not a socket |
 | **v1.3.1** (2026-11-16) | A failed dream cycle no longer blocks the next one; an event's content can no longer forge a lesson; the first requests to a project, at once or after it idles, no longer fail on the daemon's own writer lock; an idle `dreamd mcp` session no longer holds a connection to the daemon |
@@ -243,7 +244,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.4.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. `blame`, `forget`, `doctor --provenance`, `recall --without` and `salience-drift` need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.4.1** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. `blame`, `forget`, `doctor --provenance`, `recall --without` and `salience-drift` need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|

@@ -81,8 +81,8 @@ git checkout -b release/vX.Y.Z
 git commit -am "chore: release vX.Y.Z (manifest shas pending build)"
 ```
 
-CI runs on pushes to `main` and on pull requests, not on a pushed `release/*` branch,
-so the local run above is the only test of the bump commit unless you open a PR for it.
+CI runs on pushes to `main` and to `release/**` branches, and on pull requests into
+either, so pushing `release/vX.Y.Z` tests the bump commit on the branch's own code.
 Before cutting the branch, check `Cargo.toml` on `origin/main`: a fix branch can be
 merged into `main` ahead of its bump commit (1.2.1's fixes landed with the version
 still at 1.2.0), and the bump has to be made on top of what `main` holds.

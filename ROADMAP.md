@@ -122,6 +122,14 @@ BM25 × salience.
   version first, and `dreamd setup` keeps a repo's `AGENTS.md` loaded in
   Claude Code.
 
+## Shipped — v1.4.1
+
+- **Fixes**, listed in [`CHANGELOG.md`](CHANGELOG.md). In daemon mode, a
+  project whose path ends in a space or tab is refused. After `update`, an
+  installed `dreamd service` still starts, and one whose binary is gone is
+  reported. A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` also stops
+  the native daemon.
+
 ## Next
 
 - **More harness adapters**, including OpenCode.

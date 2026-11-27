@@ -9,20 +9,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Security
 
 - **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
-- **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
-
-### Fixed
-
-- **In daemon mode, a project whose path ends in a space or tab is refused, and the message names the path** (DRM-161). HTTP drops a trailing space or tab from a header value, so `dreamd mcp`, setup's first lesson and `dreamd dream` sent such a project to the daemon as another folder's path: it got "not registered", or a write meant for `foo ` landed in a registered `foo`. Now all three refuse the project before they send anything that carries `X-Agent-Root`, quoting the path so the space or tab shows. `dreamd mcp` answers `-32600`. `dreamd dream` exits with the error while a daemon answers, and does not run the cycle in-process. With no daemon running, nothing changes.
-
-  Library: new `daemon_client::agent_root_header_refusal`.
-- **After `update`, an installed `dreamd service` still starts, and a service whose binary is gone is reported** (DRM-164). `update` removed every cached version but its own, including the one the service's unit, plist or task names, so on Linux systemd failed to start it (203/EXEC) every 5 seconds with nothing saying so; one machine counted 15,841 restarts in about 22 hours. Now `update` keeps the cached version an installed service runs and prints the `service install` and `service restart` commands that move the service to the new version, even under `--quiet`. When the binary a service names is already gone, `update`, `dreamd status` and `dreamd doctor` say so with the same commands, and `doctor` exits 1.
-- **The Linux user unit stops restarting after 5 starts in 5 minutes** (DRM-164). It now carries `StartLimitIntervalSec=300` and `StartLimitBurst=5`; with `RestartSec=5`, systemd's default limit never tripped. `service install`, `start` and `restart` run `systemctl --user reset-failed dreamd.service` first, so they work on a unit that hit the limit. Rerun `service install` to get the new unit.
-
-  Library: new `service::InstalledService` and `service::read_installed_service`; `update::UpdateRequest` has a new `service` field.
-
-- **A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon** (DRM-160). npm runs the shim through `sh -c`, and where `/bin/sh` is dash (Debian, Ubuntu) a SIGTERM to `npm exec` killed only that shell. The shim and `dreamd watch` kept running and held the project's writer lock, so `forget`, `archive` and `memory checkout` refused. Now the shim checks every half second whether the process it started under is gone. When it is, the shim sends `dreamd` a SIGTERM, and `watch` stops and removes its socket. Any harness that kills `npm exec` now also stops the server it started. `dreamd mcp` already ended on stdin EOF, so nothing changes for it. Not on Windows.
-- **A test's fake daemon no longer panics on macOS when `dreamd mcp`'s reachability probe has already closed its connection** (DRM-165). macOS answers `setsockopt` on such a socket with EINVAL; the fake daemon in `tests/project_root.rs` now skips that connection, as `daemon_client`'s own test does. Every other fake daemon already ignored the error, and the remaining `.expect` calls are on client connections to a live daemon. Tests only.
 
 ### Changed
 
@@ -36,6 +22,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **The forget receipt is `forget-receipt/1.1`.** It keeps every 1.0 key, in order and with its meaning, and adds `cleared` and `remaining`. `removed` is `false` when only copies held the event. It holds ids, commit ids, relative paths and counts, never content, and it is still unsigned.
 
   Library: new `copies` module (`find`, `git_history`, `rewrite_command`) and `server::{compact_deletes, Compaction}`. New `forget::{Place, Remaining, ForgetOutcome, IndexOutcome}` and `ForgetError::{Copies, Branches}`. `ForgetReport` gains `cleared`, `copies` and `left` and is no longer `Copy`. `render_receipt` takes the report and a `ForgetOutcome`.
+
+## [1.4.1] - 2026-11-27
+
+A patch release. In daemon mode, a project whose path ends in a space or tab is refused before anything is sent, instead of reaching another folder's store. After `update`, an installed `dreamd service` keeps the binary it runs, and `update`, `status` and `doctor` report a service whose binary is gone. A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon too. Recall is still BM25 × salience. The record schema (`1.0.0`), the index schema (`index/1.3`) and `SPEC.md` (v0.2) are unchanged, so no store migration or index rebuild is needed.
+
+**Upgrading from 1.4.0.** A client refuses a daemon of another version, so a 1.4.0 `dreamd watch` left running answers every 1.4.1 MCP tool call with `version mismatch: client 1.4.1, daemon 1.4.0` until it stops. Run `npx -y dreamd-mcp update`, which stops the `dreamd mcp` and `dreamd watch` processes under your home. Then run `npx -y dreamd-mcp watch` and reload your MCP harness. If a `dreamd service` unit runs the daemon, `update` keeps the binary that unit names and prints the two commands to run in place of `watch`: `npx -y dreamd-mcp service install` (add `--force` on macOS) and `npx -y dreamd-mcp service restart`. Rerunning `service install` also gives Linux the new unit's start limit. With a cargo-installed `dreamd`, stop the old daemon and run `dreamd watch`.
+
+### Security
+
+- **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
+
+### Fixed
+
+- **In daemon mode, a project whose path ends in a space or tab is refused, and the message names the path** (DRM-161). HTTP drops a trailing space or tab from a header value, so `dreamd mcp`, setup's first lesson and `dreamd dream` sent such a project to the daemon as another folder's path: it got "not registered", or a write meant for `foo ` landed in a registered `foo`. Now all three refuse the project before they send anything that carries `X-Agent-Root`, quoting the path so the space or tab shows. `dreamd mcp` answers `-32600`. `dreamd dream` exits with the error while a daemon answers, and does not run the cycle in-process. With no daemon running, nothing changes.
+
+  Library: new `daemon_client::agent_root_header_refusal`.
+- **After `update`, an installed `dreamd service` still starts, and a service whose binary is gone is reported** (DRM-164). `update` removed every cached version but its own, including the one the service's unit, plist or task names, so on Linux systemd failed to start it (203/EXEC) every 5 seconds with nothing saying so; one machine counted 15,841 restarts in about 22 hours. Now `update` keeps the cached version an installed service runs and prints the `service install` and `service restart` commands that move the service to the new version, even under `--quiet`. When the binary a service names is already gone, `update`, `dreamd status` and `dreamd doctor` say so with the same commands, and `doctor` exits 1.
+- **The Linux user unit stops restarting after 5 starts in 5 minutes** (DRM-164). It now carries `StartLimitIntervalSec=300` and `StartLimitBurst=5`; with `RestartSec=5`, systemd's default limit never tripped. `service install`, `start` and `restart` run `systemctl --user reset-failed dreamd.service` first, so they work on a unit that hit the limit. Rerun `service install` to get the new unit.
+
+  Library: new `service::InstalledService` and `service::read_installed_service`; `update::UpdateRequest` has a new `service` field.
+- **A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon** (DRM-160). npm runs the shim through `sh -c`, and where `/bin/sh` is dash (Debian, Ubuntu) a SIGTERM to `npm exec` killed only that shell. The shim and `dreamd watch` kept running and held the project's writer lock, so `forget`, `archive` and `memory checkout` refused. Now the shim checks every half second whether the process it started under is gone. When it is, the shim sends `dreamd` a SIGTERM, and `watch` stops and removes its socket. Any harness that kills `npm exec` now also stops the server it started. `dreamd mcp` already ended on stdin EOF, so nothing changes for it. Not on Windows.
+- **A test's fake daemon no longer panics on macOS when `dreamd mcp`'s reachability probe has already closed its connection** (DRM-165). macOS answers `setsockopt` on such a socket with EINVAL; the fake daemon in `tests/project_root.rs` now skips that connection, as `daemon_client`'s own test does. Every other fake daemon already ignored the error, and the remaining `.expect` calls are on client connections to a live daemon. Tests only.
 
 ## [1.4.0] - 2026-11-20
 
@@ -542,7 +550,8 @@ There is no 1.1.0 tag. This release ships the deprecations prepared for that ver
 - `~/.agent/` is created atomically at mode `0700` and `registry.toml` is stamped `0600`, closing the brief world-readable window during directory creation.
 - `schema_version` is now server-stamped on the raw `POST /api/v1/learn` path (previously client-trusted).
 
-[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/botzrDev/dreamd/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/botzrDev/dreamd/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/botzrDev/dreamd/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/botzrDev/dreamd/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/botzrDev/dreamd/compare/v1.3.0...v1.3.1

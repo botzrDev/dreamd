@@ -17,7 +17,7 @@
 > Memory is plain files a person owns, with provenance. No trust label ships
 > today; see ROADMAP.md, "Direction".
 >
-> Version: 1.4.0 (GitHub release `v1.4.0` and npm `dreamd-mcp` 1.4.0). Recall is
+> Version: 1.4.1 (GitHub release `v1.4.1` and npm `dreamd-mcp` 1.4.1). Recall is
 > lexical BM25 × salience — no vector or hybrid recall.
 
 ## Documentation
