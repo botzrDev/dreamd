@@ -407,7 +407,9 @@ impl MemoryStore for NotSetUpStore {
 /// an error message.
 ///
 /// `agent_root_header` is the canonicalized project-root string sent as
-/// `X-Agent-Root` (matches `resolve_project`'s server-side lookup).
+/// `X-Agent-Root` (matches `resolve_project`'s server-side lookup). A root
+/// ending in a space or tab is refused first, as `InvalidRequest`, and
+/// nothing is sent, not even the version probe (DRM-161).
 /// `not_registered` is the daemon's `404` answer for that store, built once
 /// from the header and the launcher ([`not_registered_message`], DRM-107).
 pub struct DaemonStore {
@@ -557,12 +559,17 @@ fn percent_encode_query(value: &str) -> String {
 /// built, with the daemon's `414` message (BZR-1301). Below that limit the
 /// encoded URI always fits the `http` crate's 65,534 bytes. A `k` over
 /// [`MAX_RECALL_K`] is refused the same way, with the daemon's `400` message
-/// (DRM-109), so nothing is sent that the daemon would refuse.
+/// (DRM-109), so nothing is sent that the daemon would refuse. A root ending
+/// in a space or tab is refused first, before the query and `k`, as
+/// `InvalidRequest` (DRM-161).
 pub(crate) fn build_recall_request(
     query: &str,
     k: u32,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
+    if let Some(msg) = crate::daemon_client::agent_root_header_refusal(agent_root_header) {
+        return Err(MemoryStoreError::invalid(msg));
+    }
     if query.len() > MAX_RECALL_QUERY_BYTES {
         return Err(MemoryStoreError::params(query_too_long_message()));
     }
@@ -590,13 +597,17 @@ pub(crate) fn build_recall_request(
 /// `importance`, then redaction), so both modes answer a bad append the same
 /// way (DRM-104). The client converts nothing: the fields go as given, `f64`
 /// scores included, and an omitted score is [`DEFAULT_SCORE`], as in process.
-/// It refuses nothing: a score JSON cannot carry goes as [`wire_score`] makes
+/// It refuses no field: a score JSON cannot carry goes as [`wire_score`] makes
 /// it. The daemon mints `id` and `timestamp`. Pure: unit-tested directly, and
-/// cfg-free — see [`build_recall_request`].
+/// cfg-free — see [`build_recall_request`]. A root ending in a space or tab is
+/// refused first, as `InvalidRequest` (DRM-161).
 pub(crate) fn build_learn_request(
     req: &AppendRequest,
     agent_root_header: &str,
 ) -> Result<hyper::Request<Full<Bytes>>, MemoryStoreError> {
+    if let Some(msg) = crate::daemon_client::agent_root_header_refusal(agent_root_header) {
+        return Err(MemoryStoreError::invalid(msg));
+    }
     let pain = wire_score(req.pain.unwrap_or(DEFAULT_SCORE));
     let importance = wire_score(req.importance.unwrap_or(DEFAULT_SCORE));
     let body = serde_json::to_vec(&LearnRequest {
@@ -1367,6 +1378,55 @@ mod tests {
         assert_eq!(fake.count("POST /api/v1/learn"), 1);
     }
 
+    /// DRM-161 test 4: a daemon-mode store whose root ends in a space sends
+    /// nothing, not even the version probe. Recall and append are both
+    /// `InvalidRequest`, though the fake would answer either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_store_sends_nothing_for_a_root_ending_in_a_space_drm161() {
+        use crate::launcher::Launcher;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("spaced.sock");
+        let fake = FakeDaemon::start(&sock, |line| {
+            Some(if line.starts_with("GET /api/v1/health ") {
+                fake_response("400 Bad Request", Some(THIS_VERSION), "{}")
+            } else {
+                fake_response("200 OK", Some(THIS_VERSION), r#"{"results":[]}"#)
+            })
+        });
+        let store = DaemonStore::uds(sock, "/r/proj ".to_string(), Launcher::Binary)
+            .with_deadline(std::time::Duration::from_millis(200));
+
+        // Bounded, so a call with no deadline fails here instead of hanging.
+        let bound = std::time::Duration::from_secs(5);
+        let recalled = tokio::time::timeout(bound, store.recall_json("spaced", 5))
+            .await
+            .expect("the recall ran 5 s past its deadline");
+        match recalled {
+            Err(MemoryStoreError::InvalidRequest(m)) => {
+                assert!(m.contains("\"/r/proj \""), "{m}");
+                assert!(m.contains("ends in a space or tab"), "{m}");
+            }
+            other => panic!("recall: expected InvalidRequest, got {other:?}"),
+        }
+        let appended = tokio::time::timeout(
+            bound,
+            store.append(learn("rust::spaced", Some(5.0), Some(5.0))),
+        )
+        .await
+        .expect("the append ran 5 s past its deadline");
+        match appended {
+            Err(MemoryStoreError::InvalidRequest(m)) => {
+                assert!(m.contains("\"/r/proj \""), "{m}");
+                assert!(m.contains("ends in a space or tab"), "{m}");
+            }
+            other => panic!("append: expected InvalidRequest, got {other:?}"),
+        }
+        let seen = fake.seen.lock().unwrap().clone();
+        assert!(seen.is_empty(), "no probe and no call: {seen:?}");
+    }
+
     /// Test 8: a query at the limit builds, and its URI fits the `http`
     /// crate's 65,534 bytes even when every byte is percent-encoded.
     #[test]
@@ -1440,6 +1500,50 @@ mod tests {
         let req = build_recall_request("tokio", MAX_RECALL_K, "/home/u/project")
             .expect("k at the limit builds");
         assert_eq!(req.uri().to_string(), "/api/v1/recall?q=tokio&k=100");
+    }
+
+    /// The `X-Agent-Root` a built request carries, as a string.
+    fn sent_root(req: &hyper::Request<Full<Bytes>>) -> Option<&str> {
+        req.headers()
+            .get("x-agent-root")
+            .and_then(|v| v.to_str().ok())
+    }
+
+    /// DRM-161 test 2: the recall builder refuses a root that ends in a
+    /// space or a tab, as `InvalidRequest` naming it, before it checks `k`.
+    /// A space inside the root builds and travels as it is.
+    #[test]
+    fn build_recall_request_refuses_a_root_ending_in_a_space_or_tab_drm161() {
+        for root in ["/p/x ", "/p/x\t"] {
+            for k in [5, MAX_RECALL_K + 1] {
+                match build_recall_request("tokio", k, root) {
+                    Err(MemoryStoreError::InvalidRequest(m)) => {
+                        assert!(m.contains(&format!("{root:?}")), "{root:?}, k {k}: {m}");
+                        assert!(m.contains("ends in a space or tab"), "{root:?}, k {k}: {m}");
+                    }
+                    other => panic!("{root:?}, k {k}: expected InvalidRequest, got {other:?}"),
+                }
+            }
+        }
+        let req = build_recall_request("tokio", 5, "/p/a b/x").expect("an inner space builds");
+        assert_eq!(sent_root(&req), Some("/p/a b/x"));
+    }
+
+    /// DRM-161 test 3: the learn builder refuses the same roots the same way.
+    #[test]
+    fn build_learn_request_refuses_a_root_ending_in_a_space_or_tab_drm161() {
+        for root in ["/p/x ", "/p/x\t"] {
+            match build_learn_request(&learn("rust::x", None, None), root) {
+                Err(MemoryStoreError::InvalidRequest(m)) => {
+                    assert!(m.contains(&format!("{root:?}")), "{root:?}: {m}");
+                    assert!(m.contains("ends in a space or tab"), "{root:?}: {m}");
+                }
+                other => panic!("{root:?}: expected InvalidRequest, got {other:?}"),
+            }
+        }
+        let req = build_learn_request(&learn("rust::x", None, None), "/p/a b/x")
+            .expect("an inner space builds");
+        assert_eq!(sent_root(&req), Some("/p/a b/x"));
     }
 
     fn learn(skill_action: &str, pain: Option<f64>, importance: Option<f64>) -> AppendRequest {
