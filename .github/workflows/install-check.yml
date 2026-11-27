@@ -1,0 +1,77 @@
+name: Install check
+
+# Runs the published dreamd-mcp package from npm in four clean Linux containers:
+# `version` must print the release, and `setup --yes` must scaffold a project.
+# Run it by hand (Actions > Install check > Run workflow) after the Publish workflow,
+# for RELEASING.md step 7. It reads only public npm and GitHub Release downloads.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "dreamd-mcp version on npm, e.g. 1.4.2 (no leading v)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Images that ship Node use their own.
+          - image: node:22-bookworm
+            own_node: true
+          - image: node:22-alpine
+            own_node: true
+          # Images without Node get the runner's Node 22, mounted read-only.
+          - image: ubuntu:22.04
+            own_node: false
+          - image: debian:12
+            own_node: false
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ !matrix.own_node }}
+        with:
+          node-version: "22"
+      - name: version and setup --yes
+        env:
+          IMAGE: ${{ matrix.image }}
+          OWN_NODE: ${{ matrix.own_node }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$VERSION" in
+            v*) echo "::error::pass the version without a leading v"; exit 1 ;;
+          esac
+          node_args=()
+          if [ "$OWN_NODE" != "true" ]; then
+            node_root="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
+            node_args=(-v "$node_root:/node:ro" -e PATH=/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+          fi
+          cat > check.sh <<'EOF'
+          set -eu
+          pkg="dreamd-mcp@$VERSION"
+          out="$(npx --yes "$pkg" version)"
+          echo "$out"
+          case "$out" in
+            "dreamd $VERSION "*|"dreamd $VERSION") ;;
+            *) echo "version printed '$out', expected dreamd $VERSION"; exit 1 ;;
+          esac
+          mkdir -p /tmp/proj
+          cd /tmp/proj
+          echo '{}' > package.json
+          npx --yes "$pkg" setup --yes --harness claude
+          test -d .agent || { echo "setup did not create .agent/"; exit 1; }
+          echo "ok: $pkg in $IMAGE"
+          EOF
+          docker run --rm "${node_args[@]}" \
+            -e VERSION="$VERSION" -e IMAGE="$IMAGE" \
+            -v "$PWD/check.sh:/check.sh:ro" \
+            "$IMAGE" sh /check.sh

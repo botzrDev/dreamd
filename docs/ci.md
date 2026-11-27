@@ -360,6 +360,10 @@ Manual dispatch only (Actions > Publish > Run workflow), with `tag` (e.g. `v1.4.
 
 ---
 
+## Install check workflow
+
+Manual dispatch only (Actions > Install check > Run workflow), with `version` (e.g. `1.4.2`, no leading `v`). Run it after the Publish workflow. In each of `node:22-bookworm`, `node:22-alpine`, `ubuntu:22.04` and `debian:12` it runs the published package at that version with `npx --yes`: `version`, which must print `dreamd <version>`, then `setup --yes --harness claude` in an empty project, which must create `.agent/`. The two images without Node get the runner's Node 22 mounted read-only. It downloads only from npm and the GitHub Release, so it checks what users get, not a local build. This is the container check in RELEASING.md step 7.
+
 ## CodeQL workflow
 
 Static analysis of the Rust workspace (`rust`), the Node shim (`javascript-typescript`) and the workflow files (`actions`), one matrix job per language, all with `build-mode: none`. Results show under the repository's Security tab → Code scanning. It is not a required check.

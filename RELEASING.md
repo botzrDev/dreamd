@@ -226,8 +226,11 @@ npx --yes dreamd-mcp@X.Y.Z version    # downloads the native binary, sha-verifie
 npx --yes dreamd-mcp@X.Y.Z init       # scaffolds .agent/ in a project with a root sentinel
 ```
 
-Then run the published package on two older Linux userlands. Both must print
-`dreamd X.Y.Z`:
+Then run the published package in clean Linux containers. From CI, with no local
+Docker: Actions > Install check > Run workflow, version `X.Y.Z`. It runs `version` and
+`setup --yes` in node:22-bookworm, node:22-alpine, ubuntu:22.04 and debian:12
+([docs/ci.md](./docs/ci.md#install-check-workflow)). With Docker locally, both of these
+must print `dreamd X.Y.Z`:
 
 ```sh
 docker run --rm node:22-bookworm npx --yes dreamd-mcp@X.Y.Z version
