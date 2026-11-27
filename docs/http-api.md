@@ -125,6 +125,8 @@ Validates `X-Agent-Root` and resolves the project via `~/.agent/registry.toml`.
 
 Value is the **project root** (parent of `.agent/`), not the `.agent/` directory itself.
 
+HTTP removes trailing spaces and tabs from a header value, so a project path that ends in one reaches the daemon without it, as another folder's path. dreamd's own clients (`dreamd mcp` in daemon mode, `dreamd setup`'s first lesson and the `dreamd dream` proxy) refuse such a root in daemon mode before they send anything that carries the header. A curl or script caller must not send one: the daemon cannot tell it from the path without the space or tab.
+
 The value is the path's UTF-8 text sent as raw bytes, with no percent-encoding, so `-H "X-Agent-Root: $PWD"` works for any UTF-8 path, accented letters included. A path that is not valid UTF-8 is not supported.
 
 ---

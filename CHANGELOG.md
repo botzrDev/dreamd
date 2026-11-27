@@ -11,6 +11,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **rmcp moves from 1.7.0 to 3.12.0, clearing five advisories.** GHSA-9pj6-vhgr-3mwh (high): an unauthenticated client could grow the Streamable HTTP server's session table without limit, a remote denial of service. It affected only builds with the `mcp-http` feature (`dreamd mcp --bind`); the release binaries and `npx -y dreamd-mcp` are stdio-only. The other four were in rmcp code dreamd never compiles: its OAuth client (GHSA-33f5-2c5q-wgwj, GHSA-c9xm-49cp-xcr9) and its HTTP client (GHSA-9g45-5xwm-f3wc, RUSTSEC-2026-0462). The MCP tools, their names (`search_nodes`, `append_node`) and their results are unchanged. `deny.toml` and `.cargo/audit.toml` no longer ignore RUSTSEC-2026-0462.
 - **`url` and `cookie` are updated** (RUSTSEC-2026-0592, RUSTSEC-2026-0594). `url` moves from 2.5.8 to 2.5.9, past a stack overflow in `Url::origin()` on nested `blob:` URLs; `reqwest` and `tower-http` pull it in. `cookie` moves from 0.18.2 to 0.18.3, past private-cookie nonces that can repeat after a fork. It is in the lockfile only behind `ureq`'s cookie support, which no dreamd build enables.
 
+### Fixed
+
+- **In daemon mode, a project whose path ends in a space or tab is refused, and the message names the path** (DRM-161). HTTP drops a trailing space or tab from a header value, so `dreamd mcp`, setup's first lesson and `dreamd dream` sent such a project to the daemon as another folder's path: it got "not registered", or a write meant for `foo ` landed in a registered `foo`. Now all three refuse the project before they send anything that carries `X-Agent-Root`, quoting the path so the space or tab shows. `dreamd mcp` answers `-32600`. `dreamd dream` exits with the error while a daemon answers, and does not run the cycle in-process. With no daemon running, nothing changes.
+
+  Library: new `daemon_client::agent_root_header_refusal`.
+
 ### Changed
 
 - **`dreamd forget` clears the copies dreamd keeps, and says what it cleared and what remains** (DRM-168). It removed the event from the live log, `LESSONS.md`, the recurrence sidecar and recall, but full copies stayed in every autosnap and memory branch object under `.agent/.dreamd/branches/objects/`, in the decay archive, in `AGENT_LEARNINGS.jsonl.bak`, and in the index's segment files, and `dreamd memory checkout` of an autosnap brought the event back. Now one redo WAL commits the live files together with:
