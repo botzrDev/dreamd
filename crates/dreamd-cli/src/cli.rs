@@ -211,7 +211,7 @@ pub enum Command {
     ///
     /// The systemd unit, LaunchAgent, or scheduled task stays installed; removing it is `dreamd service uninstall`.
     Uninstall(UninstallArgs),
-    /// Stop local dreamd servers, keep this version's cached binary and remove the others.
+    /// Stop local dreamd servers, keep the cached binaries of this version and of an installed service, and remove the others.
     Update(UpdateArgs),
     /// Run the daemon in the foreground until it gets SIGINT or SIGTERM.
     Watch(WatchArgs),

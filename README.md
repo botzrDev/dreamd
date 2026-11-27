@@ -107,7 +107,7 @@ dreamd is built for that response:
 
 | You need to | dreamd gives you |
 |---|---|
-| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, source and score. `dreamd recall --explain` prints the salience factors for each hit |
+| See what drove an answer | `dreamd blame <query>` lists the stored memories behind a recall, with ids, timestamps, `skill_action`, content, layer and score. `dreamd recall --explain` prints the salience factors for each hit |
 | Know where a lesson came from | Every lesson in `LESSONS.md` cites the episodic events it was promoted from, and the provenance ledger records which event fed which lesson and index entry |
 | Check the record is consistent | `dreamd doctor --provenance` recomputes the ledger's Merkle root and lists orphan, missing and corrupt edges. Read-only |
 | Remove a bad memory | `dreamd forget <event-id>` removes the event, the lesson state built from it, and the copies dreamd keeps (decay archive, autosnaps and memory branches, search index). It does not rewrite git history: it lists the commits that still hold the event and prints the command to rewrite them. `--dry-run` shows what would change; `--proof <path>` writes a `forget-receipt/1.1` file that lists what was cleared and what remains |
@@ -175,7 +175,7 @@ The MCP surface is two tools (`search_nodes`, `append_node`). Everything else is
 | Command | What it does |
 |---|---|
 | `dreamd recall <query>` | Ranked search as a markdown table. `--explain` prints the salience factors per hit; `--without <id>` / `--without-cluster <prefix>` drop hits before top-k, so you can see the answer without a suspect memory |
-| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, bm25, salience, total, layer. `--json` for one compact array |
+| `dreamd blame <query>` | Which stored memories drove a query's ranking: id, timestamp, `skill_action`, content, bm25, salience, total, layer. `--json` for one compact array |
 | `dreamd score` | Top memories by salience alone, no query |
 | `dreamd salience-drift` | Salience distribution, top clusters, and drift against the snapshot from seven days earlier. See [docs/observability.md](./docs/observability.md) |
 | `dreamd dream --dry` | Print the `LESSONS.md` the next cycle would write, without writing |
@@ -243,7 +243,7 @@ More: [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 ## Status
 
-**v1.4.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. Commands marked as 1.0.0 features above need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
+**v1.4.0** is tagged and published on npm (`dreamd-mcp`, `latest`). Linux, macOS and Windows. `blame`, `forget`, `doctor --provenance`, `recall --without` and `salience-drift` need 1.0.0 or later. If you upgrade a cargo-installed binary in place and run the daemon under the per-user service, restart it with `dreamd service restart` ([docs/install.md](./docs/install.md)).
 
 | Layer | Status |
 |---|---|

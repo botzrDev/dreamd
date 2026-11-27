@@ -306,9 +306,9 @@ Windows binary to forward to — see above). The `ExecStart` /
 path (`current_exe`, canonicalized) — under `npx` that is the cached native
 `dreamd` the shim downloaded (`~/.cache/dreamd-mcp/<version>/dreamd`), not
 `npx` or `node`. That directory is per version. `dreamd uninstall` clears it,
-and `dreamd update` removes every version's directory but its own. So after an
-uninstall, an update run by another version, or a new `dreamd-mcp` release,
-reinstall the service so the unit points at the binary you run now (`--force`
+and `dreamd update` removes every version's directory but its own and the one
+an installed service names. So after an uninstall, or a new `dreamd-mcp`
+release, reinstall the service so the unit points at the binary you run now (`--force`
 on macOS).
 
 ## Fallback: foreground `dreamd watch`

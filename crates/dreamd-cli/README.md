@@ -9,7 +9,7 @@ dreamd setup
 
 `--version ^1.3` skips the `0.0.0` name reservation on crates.io. Rust 1.95.0 or newer.
 
-`dreamd setup` writes `.agent/` and the MCP config for Claude Code, Cursor, or both. The harness then spawns `dreamd mcp` over stdio (`search_nodes`, `append_node`). A shared writer is `dreamd watch`.
+`dreamd setup` writes `.agent/` and the MCP config for Claude Code, Cursor, or both. That config runs `npx -y dreamd-mcp`, so the harness needs Node 18 or later and runs the prebuilt binary the npm shim downloads, not this one. To have the harness run this binary instead, point the config's `dreamd` entry at it: `"command": "dreamd", "args": ["mcp"]`. Either way the server speaks MCP over stdio (`search_nodes`, `append_node`). A shared writer is `dreamd watch`.
 
 The files are plain JSONL and Markdown. `dreamd blame` shows what a recall used. `dreamd forget` removes an event and the lesson state built from it.
 
