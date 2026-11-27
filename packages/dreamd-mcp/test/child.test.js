@@ -143,6 +143,39 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   });
 }
 
+// DRM-160: npm runs the shim under `sh -c`. Where that shell dies of a
+// SIGTERM it does not pass on (dash), the shim is orphaned and must stop the
+// child itself. The trailing `; :` keeps sh from exec'ing the shim, so sh
+// stays its parent, as under npm.
+test('an orphaned shim stops its child with SIGTERM', { skip: POSIX_ONLY }, async () => {
+  const dir = tempDir('dreamd-shim-');
+  const ready = path.join(dir, 'ready');
+  const out = path.join(dir, 'out');
+  const bin = fake(
+    dir,
+    `trap 'echo SIGTERM > "${out}"; kill $SPID 2>/dev/null; exit 0' TERM\n` +
+      'sleep 30 &\nSPID=$!\n' +
+      `echo $$ > "${ready}"\n` +
+      'wait $SPID',
+  );
+  let fakePid = 0;
+  try {
+    const sh = spawn('/bin/sh', ['-c', `"${process.execPath}" "${SHIM}" watch; :`], {
+      env: shimEnv(dir, bin),
+      stdio: 'ignore',
+    });
+    fakePid = await waitFor('the fake\'s ready file', () => readPid(ready), 5000);
+
+    sh.kill('SIGKILL');
+    await waitFor('the fake to get SIGTERM', () => fs.existsSync(out), 5000);
+    assert.strictEqual(fs.readFileSync(out, 'utf8').trim(), 'SIGTERM');
+    await waitFor('the fake to be gone', () => !alive(fakePid), 2000);
+  } finally {
+    killIfAlive(fakePid);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a child that dies of a signal takes the shim with it', { skip: POSIX_ONLY }, () => {
   for (const [body, want] of [
     ['kill -KILL $$', 'SIGKILL'],
