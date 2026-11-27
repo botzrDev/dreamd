@@ -21,6 +21,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
   Library: new `service::InstalledService` and `service::read_installed_service`; `update::UpdateRequest` has a new `service` field.
 
+- **A SIGTERM to `npm exec` for `npx -y dreamd-mcp watch` now stops the native daemon** (DRM-160). npm runs the shim through `sh -c`, and where `/bin/sh` is dash (Debian, Ubuntu) a SIGTERM to `npm exec` killed only that shell. The shim and `dreamd watch` kept running and held the project's writer lock, so `forget`, `archive` and `memory checkout` refused. Now the shim checks every half second whether the process it started under is gone. When it is, the shim sends `dreamd` a SIGTERM, and `watch` stops and removes its socket. Any harness that kills `npm exec` now also stops the server it started. `dreamd mcp` already ended on stdin EOF, so nothing changes for it. Not on Windows.
 - **A test's fake daemon no longer panics on macOS when `dreamd mcp`'s reachability probe has already closed its connection** (DRM-165). macOS answers `setsockopt` on such a socket with EINVAL; the fake daemon in `tests/project_root.rs` now skips that connection, as `daemon_client`'s own test does. Every other fake daemon already ignored the error, and the remaining `.expect` calls are on client connections to a live daemon. Tests only.
 
 ### Changed

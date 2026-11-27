@@ -282,6 +282,9 @@ function exitCodeFor(code, signal) {
   return typeof n === 'number' ? 128 + n : 1;
 }
 
+// How often the shim checks whether its parent is gone (DRM-160).
+const ORPHAN_POLL_MS = 500;
+
 // Run the native binary and settle when it is gone. Never rejects. The child
 // shares the shim's stdio, so the JSON-RPC bytes of `dreamd mcp` pass straight
 // through; the shim itself writes nothing to stdout.
@@ -295,10 +298,12 @@ function runChild(bin, args, env) {
       for (const [sig, fn] of listeners) process.removeListener(sig, fn);
       listeners.length = 0;
     };
+    let orphanTimer = null;
     const settle = () => {
       if (done) return false;
       done = true;
       removeListeners();
+      if (orphanTimer) clearInterval(orphanTimer);
       return true;
     };
     try {
@@ -326,6 +331,26 @@ function runChild(bin, args, env) {
       const fn = () => {};
       process.on(sig, fn);
       listeners.push([sig, fn]);
+    }
+    // The orphan rule (DRM-160). Under `npx`, the shim's parent is npm's
+    // `sh -c`. Where /bin/sh is dash, a SIGTERM to `npm exec` kills that
+    // shell and is never passed on, so the shim and the native `watch` kept
+    // running. When the parent the shim started under is gone, the shim is
+    // reparented: it then stops the child as if it had got SIGTERM. For
+    // `dreamd mcp` this changes nothing, since stdin EOF already ends it.
+    if (process.platform !== 'win32') {
+      const parent = process.ppid;
+      orphanTimer = setInterval(() => {
+        if (process.ppid === parent) return;
+        clearInterval(orphanTimer);
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // The child is already gone; its 'exit' settles.
+        }
+      }, ORPHAN_POLL_MS);
+      // The child keeps the shim alive; the timer must not.
+      orphanTimer.unref();
     }
     child.on('error', (err) => {
       if (!settle()) return;
