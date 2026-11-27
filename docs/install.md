@@ -42,9 +42,15 @@ dreamd service install
 
 This writes `~/.config/systemd/user/dreamd.service` (`Type=simple`,
 `ExecStart=<this binary> watch`, `WorkingDirectory=<project root>`,
-`Restart=on-failure`), then runs `systemctl --user daemon-reload` and
-`systemctl --user enable --now dreamd.service`. Re-running it overwrites the
-unit silently; `--force` is accepted and ignored on Linux.
+`Restart=on-failure`, and at most 5 starts in 5 minutes through
+`StartLimitIntervalSec=300` and `StartLimitBurst=5`), then runs
+`systemctl --user daemon-reload` and `systemctl --user enable --now
+dreamd.service`. Re-running it overwrites the unit silently; `--force` is
+accepted and ignored on Linux. A unit that keeps failing, such as one whose
+binary is gone, stops after the fifth start in `failed` state instead of
+restarting forever. `install`, `start` and `restart` each run
+`systemctl --user reset-failed dreamd.service` first, so they work on such a
+unit right away.
 
 To start it later without reinstalling:
 
@@ -245,6 +251,13 @@ crates/dreamd-cli` over the same path, say: the path is unchanged, so a bounce
 picks up the new build. If the binary **moved** — an npx cache bump, a
 different install prefix — restart would just relaunch the old path, so rerun
 `dreamd service install` (`--force` on macOS and Windows) first.
+
+`dreamd update` keeps the cached binary an installed service names, so the
+service still starts after an update, and prints the commands that move the
+service to the new version: `service install` from the project the service
+serves, then `service restart`. If the binary a service names is gone,
+`update`, `dreamd status` and `dreamd doctor` say so with the same commands,
+and `doctor` exits 1.
 
 `dreamd update --restart` is a different verb. Every `dreamd update` stops local
 `mcp` / `watch` processes — `--restart` only says so out loud — and that includes
