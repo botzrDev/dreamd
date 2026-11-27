@@ -354,6 +354,12 @@ Manual dispatch only, with a `version` input (semver, no leading `v`). A pre-rel
 
 ---
 
+## Publish workflow
+
+Manual dispatch only (Actions > Publish > Run workflow), with `tag` (e.g. `v1.4.1`), `npm_ref` (the head of `chore/mcp-manifest-<tag>`, which holds the filled manifest) and `targets`. It publishes `dreamd-mcp` to npm and `server.json` to the MCP Registry from `npm_ref`, and the three crates to crates.io from the tag, all with trusted publishing (GitHub OIDC), so no registry token is stored here. Each job first checks that its version matches the tag. npm and crates.io each need a one-time trusted-publisher entry naming `botzrDev/dreamd` and `publish.yml`; the steps are in the workflow's header comment. It does not move npm's `next` dist-tag, which needs a logged-in `npm dist-tag add`.
+
+---
+
 ## CodeQL workflow
 
 Static analysis of the Rust workspace (`rust`), the Node shim (`javascript-typescript`) and the workflow files (`actions`), one matrix job per language, all with `build-mode: none`. Results show under the repository's Security tab → Code scanning. It is not a required check.
