@@ -28,6 +28,13 @@
 //! [`verify`] (BZR-148) is read-only: it recomputes the Merkle root from the
 //! good lines and reports orphans, missing edges, and corrupt lines. It does
 //! not rewrite the ledger; the format forbids that.
+//!
+//! Stored roots (DMD-125): every dream cycle or `dreamd forget` commit ends
+//! with [`Ledger::record_root`], which appends one line to
+//! `provenance/roots.jsonl`: the ledger's byte length, line count, SHA-256 of
+//! those bytes, and the Merkle root over them. [`verify_roots`] checks each
+//! stored line against the ledger as it is now, so a hand edit of any line a
+//! stored root covers is reported. Nothing signs the roots yet (DMD-38).
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -48,6 +55,12 @@ use crate::writer_lock::{StoreGuard, StoreReplaced};
 /// The ledger's `schema_version` token. It is not the episodic record token
 /// and not the daemon state token.
 pub const PROVENANCE_SCHEMA_VERSION: &str = "provenance/1.0";
+
+/// The `schema_version` of a stored root line in [`ROOTS_FILE_NAME`].
+pub const ROOT_SCHEMA_VERSION: &str = "provenance-root/1.0";
+
+/// The stored root history, beside `ledger.jsonl` in `provenance/`.
+pub const ROOTS_FILE_NAME: &str = "roots.jsonl";
 
 /// The edge kinds this writer emits. A redo WAL carries them, so they read
 /// back too.
@@ -164,12 +177,14 @@ impl Ledger {
     }
 
     fn build(path: PathBuf, guard: Option<StoreGuard>) -> Self {
-        if let Err(e) = cut_torn_tail(&path) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "could not check the provenance ledger for a torn final line"
-            );
+        for file in [path.clone(), path.with_file_name(ROOTS_FILE_NAME)] {
+            if let Err(e) = cut_torn_tail(&file) {
+                tracing::warn!(
+                    path = %file.display(),
+                    error = %e,
+                    "could not check a provenance file for a torn final line"
+                );
+            }
         }
         Self {
             inner: Arc::new(LedgerInner {
@@ -258,6 +273,69 @@ impl Ledger {
         Ok(())
     }
 
+    /// The stored root history beside the ledger.
+    pub fn roots_path(&self) -> PathBuf {
+        self.inner.path.with_file_name(ROOTS_FILE_NAME)
+    }
+
+    /// Store the ledger's current root (DMD-125): append one line to
+    /// `roots.jsonl` with the ledger's byte length, line count, SHA-256 of
+    /// those bytes and the Merkle root over them. `now_sec` stamps `at`.
+    ///
+    /// Holds the append mutex while it reads, so no edge of this process
+    /// lands mid-read; the writer lock keeps other processes out. Only
+    /// complete lines are covered. Writes nothing when the ledger is missing
+    /// or empty, or when the last stored line already covers the same bytes,
+    /// so a retried roll-forward stores one line. Never rewrites a stored
+    /// line.
+    pub fn record_root(&self, now_sec: i64) -> Result<(), ProvenanceError> {
+        self.check_store()?;
+        let _held = self.inner.open.lock().expect("ledger mutex poisoned");
+        let bytes = match fs::read(&self.inner.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let covered = &bytes[..bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1)];
+        if covered.is_empty() {
+            return Ok(());
+        }
+        let line = StoredRootLine {
+            schema_version: ROOT_SCHEMA_VERSION.to_owned(),
+            at: chrono::DateTime::from_timestamp(now_sec, 0)
+                .unwrap_or_default()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ledger_lines: covered.iter().filter(|b| **b == b'\n').count() as u64,
+            ledger_bytes: covered.len() as u64,
+            ledger_sha256: to_hex(&Sha256::digest(covered)),
+            root: root_of(covered),
+        };
+
+        let roots = self.roots_path();
+        let history = match fs::read(&roots) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let last = history
+            .split(|b| *b == b'\n')
+            .rev()
+            .find(|l| !l.is_empty())
+            .and_then(|l| serde_json::from_slice::<StoredRootLine>(l).ok());
+        if last.is_some_and(|l| {
+            l.ledger_bytes == line.ledger_bytes && l.ledger_sha256 == line.ledger_sha256
+        }) {
+            return Ok(());
+        }
+
+        let mut out = serde_json::to_vec(&line)?;
+        out.push(b'\n');
+        let mut file = OpenOptions::new().append(true).create(true).open(&roots)?;
+        file.write_all(&out)?;
+        file.sync_data()?;
+        Ok(())
+    }
+
     /// Open the file for append and read every triple it holds, through the
     /// same fd. `O_APPEND` still sends every write to the end.
     fn open_and_load(&self) -> Result<Open, ProvenanceError> {
@@ -330,7 +408,7 @@ pub fn lesson_edges(file: &LessonsFile, cluster_listed: bool) -> Vec<(Kind, Stri
 }
 
 /// Result of [`verify`]. `root` is the Merkle root recomputed from the good
-/// lines; nothing on disk stores a root to compare it against.
+/// lines. [`verify_roots`] compares the ledger with the stored roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenanceReport {
     pub root: String,
@@ -431,6 +509,48 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// The ledger's lines, sorted by [`classify`].
+struct Parsed {
+    good: Vec<(u64, VerifyLine)>,
+    corrupt_lines: Vec<u64>,
+    skipped_unknown_kind: u64,
+}
+
+fn parse(bytes: &[u8]) -> Parsed {
+    let mut parsed = Parsed {
+        good: Vec::new(),
+        corrupt_lines: Vec::new(),
+        skipped_unknown_kind: 0,
+    };
+    for (idx, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let line_no = idx as u64 + 1;
+        let Ok(line) = serde_json::from_slice::<VerifyLine>(raw) else {
+            parsed.corrupt_lines.push(line_no);
+            continue;
+        };
+        match classify(&line) {
+            LineClass::Good => parsed.good.push((line_no, line)),
+            LineClass::Corrupt => parsed.corrupt_lines.push(line_no),
+            LineClass::UnknownKind => parsed.skipped_unknown_kind += 1,
+        }
+    }
+    parsed
+}
+
+/// The hex Merkle root over the `from` of every good line.
+fn root_over(good: &[(u64, VerifyLine)]) -> String {
+    let leaves: BTreeSet<&str> = good.iter().map(|(_, l)| l.from.as_str()).collect();
+    to_hex(&merkle_root(leaves.into_iter()))
+}
+
+/// The hex Merkle root of ledger bytes, as [`verify`] computes it.
+fn root_of(bytes: &[u8]) -> String {
+    root_over(&parse(bytes).good)
+}
+
 /// Check the ledger against the live memory files. Read-only: it never
 /// writes the ledger or `LESSONS.md` and never repairs a line.
 ///
@@ -447,27 +567,12 @@ pub fn verify(agent_root: &AgentRoot) -> Result<ProvenanceReport, ProvenanceErro
         Err(e) => return Err(e.into()),
     };
 
-    let mut good: Vec<(u64, VerifyLine)> = Vec::new();
-    let mut corrupt_lines = Vec::new();
-    let mut skipped_unknown_kind = 0u64;
-    for (idx, raw) in bytes.split(|b| *b == b'\n').enumerate() {
-        if raw.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let line_no = idx as u64 + 1;
-        let Ok(line) = serde_json::from_slice::<VerifyLine>(raw) else {
-            corrupt_lines.push(line_no);
-            continue;
-        };
-        match classify(&line) {
-            LineClass::Good => good.push((line_no, line)),
-            LineClass::Corrupt => corrupt_lines.push(line_no),
-            LineClass::UnknownKind => skipped_unknown_kind += 1,
-        }
-    }
-
-    let leaves: BTreeSet<&str> = good.iter().map(|(_, l)| l.from.as_str()).collect();
-    let root = to_hex(&merkle_root(leaves.into_iter()));
+    let Parsed {
+        good,
+        corrupt_lines,
+        skipped_unknown_kind,
+    } = parse(&bytes);
+    let root = root_over(&good);
 
     let live: HashSet<String> = episodic::read_all(&agent_root.episodic_jsonl())?
         .into_iter()
@@ -518,6 +623,170 @@ pub fn verify(agent_root: &AgentRoot) -> Result<ProvenanceReport, ProvenanceErro
         missing,
         corrupt_lines,
         skipped_unknown_kind,
+    })
+}
+
+/// One line of `roots.jsonl`. Field order is the key order on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredRootLine {
+    /// [`ROOT_SCHEMA_VERSION`].
+    pub schema_version: String,
+    /// When the root was stored, RFC 3339 UTC.
+    pub at: String,
+    /// Complete ledger lines covered: the count of `\n` in the covered bytes.
+    pub ledger_lines: u64,
+    /// Ledger bytes covered, from the start of the file.
+    pub ledger_bytes: u64,
+    /// SHA-256 of those bytes, 64 lowercase hex.
+    pub ledger_sha256: String,
+    /// Merkle root of those bytes, 64 lowercase hex.
+    pub root: String,
+}
+
+/// Why a stored root no longer matches the ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootMismatch {
+    /// The ledger is shorter than the bytes the stored root covers: lines
+    /// were removed or the file was truncated or deleted.
+    LedgerShorter,
+    /// The covered bytes have a different SHA-256: a covered line was edited,
+    /// removed, reordered or inserted.
+    BytesChanged,
+    /// The covered bytes match, but their Merkle root is not the stored one:
+    /// the stored line itself was edited.
+    RootChanged,
+}
+
+impl RootMismatch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LedgerShorter => "ledger_shorter",
+            Self::BytesChanged => "bytes_changed",
+            Self::RootChanged => "root_changed",
+        }
+    }
+}
+
+/// One stored root [`verify_roots`] flagged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootFault {
+    /// 1-based line in `roots.jsonl`.
+    pub line: u64,
+    pub reason: RootMismatch,
+    pub stored: StoredRootLine,
+}
+
+/// Result of [`verify_roots`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootsReport {
+    /// Well-formed stored root lines.
+    pub stored: u64,
+    /// The last well-formed stored line, if any.
+    pub last: Option<StoredRootLine>,
+    pub faults: Vec<RootFault>,
+    /// `roots.jsonl` lines that are not a stored root. An unterminated final
+    /// fragment (a torn write the next writer cuts) is not counted.
+    pub corrupt_lines: Vec<u64>,
+}
+
+impl RootsReport {
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.faults.is_empty() && self.corrupt_lines.is_empty()
+    }
+}
+
+/// Compare every stored root with the ledger as it is now (DMD-125).
+/// Read-only. A missing `roots.jsonl` is an empty, clean report.
+///
+/// Each stored line must still describe a prefix of the ledger: the ledger
+/// must be at least `ledger_bytes` long, and those bytes must hash to
+/// `ledger_sha256`. Edges appended after a stored root are not faults. The
+/// Merkle root is recomputed for the longest stored prefix that matches, and
+/// for any stored line covering those same bytes. One pass over the ledger.
+pub fn verify_roots(agent_root: &AgentRoot) -> Result<RootsReport, ProvenanceError> {
+    let history = match fs::read(agent_root.provenance_roots()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let ledger = match fs::read(agent_root.provenance_ledger()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut stored: Vec<(u64, StoredRootLine)> = Vec::new();
+    let mut corrupt_lines = Vec::new();
+    let terminated = history
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    for (idx, raw) in history[..terminated].split(|b| *b == b'\n').enumerate() {
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let line_no = idx as u64 + 1;
+        match serde_json::from_slice::<StoredRootLine>(raw) {
+            Ok(l) if l.schema_version == ROOT_SCHEMA_VERSION => stored.push((line_no, l)),
+            _ => corrupt_lines.push(line_no),
+        }
+    }
+
+    // Hash the ledger once, in order of covered length.
+    let mut order: Vec<usize> = (0..stored.len()).collect();
+    order.sort_by_key(|&i| (stored[i].1.ledger_bytes, i));
+    let mut hasher = Sha256::new();
+    let mut hashed = 0usize;
+    let mut faults: Vec<RootFault> = Vec::new();
+    let mut matched: Vec<usize> = Vec::new();
+    for i in order {
+        let (line, entry) = &stored[i];
+        let fault = |reason| RootFault {
+            line: *line,
+            reason,
+            stored: entry.clone(),
+        };
+        let Ok(end) = usize::try_from(entry.ledger_bytes) else {
+            faults.push(fault(RootMismatch::LedgerShorter));
+            continue;
+        };
+        if end > ledger.len() {
+            faults.push(fault(RootMismatch::LedgerShorter));
+            continue;
+        }
+        hasher.update(&ledger[hashed..end]);
+        hashed = end;
+        if to_hex(&hasher.clone().finalize()) == entry.ledger_sha256 {
+            matched.push(i);
+        } else {
+            faults.push(fault(RootMismatch::BytesChanged));
+        }
+    }
+    if let Some(longest) = matched.last().map(|&i| stored[i].1.ledger_bytes) {
+        let end = usize::try_from(longest).expect("checked above");
+        let root = root_of(&ledger[..end]);
+        for &i in matched
+            .iter()
+            .filter(|&&i| stored[i].1.ledger_bytes == longest)
+        {
+            let (line, entry) = &stored[i];
+            if entry.root != root {
+                faults.push(RootFault {
+                    line: *line,
+                    reason: RootMismatch::RootChanged,
+                    stored: entry.clone(),
+                });
+            }
+        }
+    }
+    faults.sort_by_key(|f| f.line);
+
+    Ok(RootsReport {
+        stored: stored.len() as u64,
+        last: stored.last().map(|(_, l)| l.clone()),
+        faults,
+        corrupt_lines,
     })
 }
 
@@ -990,5 +1259,225 @@ mod tests {
         let report = verify(&root).unwrap();
         assert_eq!(report.corrupt_lines, vec![1]);
         assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    // ---- stored roots (DMD-125) ----
+
+    /// A store whose ledger holds two edges and one stored root over them.
+    fn store_with_one_root() -> (tempfile::TempDir, AgentRoot, Ledger) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        let ledger = Ledger::open(root.provenance_ledger());
+        ledger
+            .append(&[
+                (Kind::IndexDoc, EVT_A.into(), EVT_A.into()),
+                (Kind::LessonCitation, EVT_A.into(), format!("lsn_{EVT_A}")),
+            ])
+            .unwrap();
+        ledger.record_root(1_751_500_800).unwrap();
+        (dir, root, ledger)
+    }
+
+    fn stored_lines(root: &AgentRoot) -> Vec<StoredRootLine> {
+        fs::read_to_string(root.provenance_roots())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn roots_file_sits_beside_the_ledger() {
+        let root = AgentRoot::new(Path::new("/p"));
+        let ledger = Ledger::open(root.provenance_ledger());
+        assert_eq!(ledger.roots_path(), root.provenance_roots());
+    }
+
+    #[test]
+    fn record_root_line_bytes_are_exact() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let ledger_bytes = fs::read(root.provenance_ledger()).unwrap();
+        let expected = format!(
+            "{{\"schema_version\":\"provenance-root/1.0\",\"at\":\"2025-07-03T00:00:00Z\",\
+             \"ledger_lines\":2,\"ledger_bytes\":{},\"ledger_sha256\":\"{}\",\"root\":\"{}\"}}\n",
+            ledger_bytes.len(),
+            hex(&sha256(&ledger_bytes)),
+            verify(&root).unwrap().root,
+        );
+        assert_eq!(
+            fs::read_to_string(root.provenance_roots()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn record_root_of_a_missing_ledger_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        Ledger::open(root.provenance_ledger())
+            .record_root(0)
+            .unwrap();
+        assert!(!root.provenance_dir().exists());
+    }
+
+    #[test]
+    fn record_root_twice_over_the_same_bytes_stores_one_line() {
+        let (_dir, root, ledger) = store_with_one_root();
+        ledger.record_root(1_751_500_900).unwrap();
+        assert_eq!(stored_lines(&root).len(), 1);
+    }
+
+    #[test]
+    fn record_root_appends_and_never_rewrites() {
+        let (_dir, root, ledger) = store_with_one_root();
+        let first = fs::read(root.provenance_roots()).unwrap();
+        ledger
+            .append(&[(Kind::IndexDoc, EVT_B.into(), EVT_B.into())])
+            .unwrap();
+        ledger.record_root(1_751_500_900).unwrap();
+        let after = fs::read(root.provenance_roots()).unwrap();
+        assert!(after.starts_with(&first));
+        let lines = stored_lines(&root);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].ledger_lines, 3);
+        assert_eq!(lines[1].root, verify(&root).unwrap().root);
+    }
+
+    #[test]
+    fn record_root_covers_complete_lines_only() {
+        let (_dir, root, ledger) = store_with_one_root();
+        let before = fs::read(root.provenance_ledger()).unwrap();
+        let mut torn = before.clone();
+        torn.extend_from_slice(b"{\"schema_version\":\"prov");
+        fs::write(root.provenance_ledger(), &torn).unwrap();
+        ledger.record_root(1_751_500_900).unwrap();
+        assert_eq!(stored_lines(&root).len(), 1, "same complete bytes");
+        assert_eq!(stored_lines(&root)[0].ledger_bytes, before.len() as u64);
+    }
+
+    #[test]
+    fn verify_roots_without_a_history_is_clean_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentRoot::new(dir.path());
+        write_ledger(&root, &[edge("index_doc", EVT_A, EVT_A)]);
+        let report = verify_roots(&root).unwrap();
+        assert!(report.is_ok());
+        assert_eq!(report.stored, 0);
+        assert_eq!(report.last, None);
+    }
+
+    #[test]
+    fn verify_roots_accepts_edges_appended_after_the_stored_root() {
+        let (_dir, root, ledger) = store_with_one_root();
+        ledger
+            .append(&[(Kind::IndexDoc, EVT_B.into(), EVT_B.into())])
+            .unwrap();
+        let report = verify_roots(&root).unwrap();
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.stored, 1);
+        assert_eq!(report.last.unwrap().ledger_lines, 2);
+    }
+
+    #[test]
+    fn verify_roots_reports_an_edited_covered_line() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let path = root.provenance_ledger();
+        let edited = fs::read_to_string(&path).unwrap().replacen(EVT_A, EVT_B, 1);
+        fs::write(&path, edited).unwrap();
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.faults.len(), 1, "{report:?}");
+        assert_eq!(report.faults[0].line, 1);
+        assert_eq!(report.faults[0].reason, RootMismatch::BytesChanged);
+    }
+
+    #[test]
+    fn verify_roots_reports_reordered_lines_that_keep_the_merkle_root() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let before = verify(&root).unwrap().root;
+        let path = root.provenance_ledger();
+        let lines = ledger_lines(&path);
+        write_ledger(&root, &[lines[1].clone(), lines[0].clone()]);
+        assert_eq!(verify(&root).unwrap().root, before, "same leaves");
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.faults[0].reason, RootMismatch::BytesChanged);
+    }
+
+    #[test]
+    fn verify_roots_reports_a_truncated_ledger() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let path = root.provenance_ledger();
+        let lines = ledger_lines(&path);
+        write_ledger(&root, &lines[..1]);
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.faults[0].reason, RootMismatch::LedgerShorter);
+    }
+
+    #[test]
+    fn verify_roots_reports_an_edited_stored_root() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let path = root.provenance_roots();
+        let mut line = stored_lines(&root).remove(0);
+        line.root = hex(&sha256(b"forged"));
+        fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.faults.len(), 1);
+        assert_eq!(report.faults[0].reason, RootMismatch::RootChanged);
+    }
+
+    #[test]
+    fn verify_roots_checks_every_stored_line_not_only_the_last() {
+        let (_dir, root, ledger) = store_with_one_root();
+        ledger
+            .append(&[(Kind::IndexDoc, EVT_B.into(), EVT_B.into())])
+            .unwrap();
+        ledger.record_root(1_751_500_900).unwrap();
+        // Edit the first line, then forge the last stored root to match.
+        let path = root.provenance_ledger();
+        let edited = fs::read_to_string(&path).unwrap().replacen(
+            &format!("\"to\":\"{EVT_A}\""),
+            &format!("\"to\":\"{EVT_A}\" "),
+            1,
+        );
+        fs::write(&path, &edited).unwrap();
+        let mut lines = stored_lines(&root);
+        lines[1].ledger_bytes = edited.len() as u64;
+        lines[1].ledger_sha256 = hex(&sha256(edited.as_bytes()));
+        lines[1].root = root_of(edited.as_bytes());
+        let body: String = lines
+            .iter()
+            .map(|l| serde_json::to_string(l).unwrap() + "\n")
+            .collect();
+        fs::write(root.provenance_roots(), body).unwrap();
+
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.faults.len(), 1, "{report:?}");
+        assert_eq!(report.faults[0].line, 1);
+        assert_eq!(report.faults[0].reason, RootMismatch::BytesChanged);
+    }
+
+    #[test]
+    fn verify_roots_skips_a_torn_tail_and_reports_a_corrupt_line() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let path = root.provenance_roots();
+        let mut body = fs::read_to_string(&path).unwrap();
+        body.insert_str(0, "not json\n");
+        body.push_str("{\"schema_vers");
+        fs::write(&path, &body).unwrap();
+        let report = verify_roots(&root).unwrap();
+        assert_eq!(report.corrupt_lines, vec![1]);
+        assert!(report.faults.is_empty(), "{report:?}");
+        assert_eq!(report.stored, 1);
+    }
+
+    #[test]
+    fn a_new_appender_cuts_a_torn_roots_tail() {
+        let (_dir, root, _ledger) = store_with_one_root();
+        let path = root.provenance_roots();
+        let clean = fs::read(&path).unwrap();
+        let mut torn = clean.clone();
+        torn.extend_from_slice(b"{\"sche");
+        fs::write(&path, &torn).unwrap();
+        let _again = Ledger::open(root.provenance_ledger());
+        assert_eq!(fs::read(&path).unwrap(), clean);
     }
 }

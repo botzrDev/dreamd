@@ -227,6 +227,13 @@ impl AgentRoot {
         self.provenance_dir().join("ledger.jsonl")
     }
 
+    /// `<project>/.agent/.dreamd/provenance/roots.jsonl` — append-only stored
+    /// roots of the ledger (DMD-125), one line per dream cycle or forget commit.
+    pub fn provenance_roots(&self) -> PathBuf {
+        self.provenance_dir()
+            .join(crate::provenance::ROOTS_FILE_NAME)
+    }
+
     /// `<project>/.agent/.dreamd/snapshots/<date>.jsonl`
     /// `date` is caller-supplied as `"YYYY-MM-DD"` — no wall-clock calls here.
     pub fn snapshot_file(&self, date: &str) -> PathBuf {

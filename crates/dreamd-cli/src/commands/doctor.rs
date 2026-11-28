@@ -1018,12 +1018,17 @@ fn report_next_cycle_cost(
     Ok(())
 }
 
-/// `--provenance`: print the `provenance::verify` report. Orphans, missing
-/// edges, corrupt lines, and a verify error fail the check;
-/// `skipped_unknown_kind` is printed and does not. Reads the ledger only.
+/// `--provenance`: print the `provenance::verify` report and compare the
+/// ledger with its stored roots (`provenance::verify_roots`, DMD-125).
+/// Orphans, missing edges, corrupt lines, a stored root the ledger no longer
+/// matches, a corrupt stored-root line, and a verify error fail the check;
+/// `skipped_unknown_kind` is printed and does not. Reads only.
 fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<bool> {
-    let report = match dreamd_core::provenance::verify(agent_root) {
-        Ok(report) => report,
+    let verified = dreamd_core::provenance::verify(agent_root).and_then(|report| {
+        dreamd_core::provenance::verify_roots(agent_root).map(|roots| (report, roots))
+    });
+    let (report, roots) = match verified {
+        Ok(both) => both,
         Err(e) => {
             writeln!(
                 out,
@@ -1032,7 +1037,9 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
             return Ok(false);
         }
     };
-    let faults = report.orphans.len() + report.missing.len() + report.corrupt_lines.len();
+    let edge_faults = report.orphans.len() + report.missing.len() + report.corrupt_lines.len();
+    let root_faults = roots.faults.len() + roots.corrupt_lines.len();
+    let faults = edge_faults + root_faults;
     if faults == 0 {
         writeln!(out, "provenance: ok root={}", report.root)?;
     } else {
@@ -1054,10 +1061,39 @@ fn check_provenance(agent_root: &AgentRoot, out: &mut impl Write) -> io::Result<
         for line in &report.corrupt_lines {
             writeln!(out, "provenance: corrupt line={line}")?;
         }
-        writeln!(
+        for fault in &roots.faults {
+            writeln!(
+                out,
+                "provenance: stored_root_mismatch roots_line={} reason={} at={} \
+                 ledger_lines={} root={}",
+                fault.line,
+                fault.reason.as_str(),
+                fault.stored.at,
+                fault.stored.ledger_lines,
+                fault.stored.root
+            )?;
+        }
+        for line in &roots.corrupt_lines {
+            writeln!(out, "provenance: corrupt_stored_root roots_line={line}")?;
+        }
+        let warning = if root_faults > 0 {
+            "the ledger changed after a stored root; it may have been edited"
+        } else {
+            "ledger disagrees with the live memory files"
+        };
+        writeln!(out, "provenance: {faults} fault(s)  [WARNING: {warning}]")?;
+    }
+    match &roots.last {
+        Some(last) if root_faults == 0 => writeln!(
             out,
-            "provenance: {faults} fault(s)  [WARNING: ledger disagrees with the live memory files]"
-        )?;
+            "provenance: stored_roots={} last_root={} last_at={} covers_lines={}",
+            roots.stored, last.root, last.at, last.ledger_lines
+        )?,
+        Some(_) => writeln!(out, "provenance: stored_roots={}", roots.stored)?,
+        None => writeln!(
+            out,
+            "provenance: stored_roots=0  (no dream cycle or forget has stored a root yet)"
+        )?,
     }
     if report.skipped_unknown_kind > 0 {
         writeln!(
