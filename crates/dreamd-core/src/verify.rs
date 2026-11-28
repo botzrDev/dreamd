@@ -49,6 +49,7 @@ use crate::copies::{self, holds};
 use crate::episodic;
 use crate::layout::AgentRoot;
 use crate::server::INDEX_DIR_NAME;
+use crate::writer_lock::WRITER_LOCK_FILENAME;
 
 /// Text shorter than this many bytes is not matched, only the id.
 pub const MIN_TEXT_BYTES: usize = 16;
@@ -417,9 +418,13 @@ pub fn rescan(agent_root: &AgentRoot, id: &EventId, content: Option<&str>) -> Ve
         still_present.insert(finding(path, Match::Unreadable));
     }
 
+    // The project writer lock, which the caller holds, holds only the
+    // holder's pid and kind. Windows locks it against reads, so it is not
+    // read at all.
+    let writer_lock = agent_root.dreamd_dir().join(WRITER_LOCK_FILENAME);
     let mut files_read = 0;
     let mut index_files = Vec::new();
-    for path in &files {
+    for path in files.iter().filter(|p| **p != writer_lock) {
         let f = finding(path, Match::Id);
         if f.area == Area::Index {
             index_files.push(path.clone());
@@ -568,6 +573,23 @@ mod tests {
         assert_eq!(v.kept_by_design[0].area, Area::Ledger);
         assert_eq!(v.index_documents_read, None);
         assert!(v.files_read >= 2);
+    }
+
+    /// The writer lock the forget holds is not read. Windows refuses reads
+    /// of a locked file, so reading it would report it as unreadable.
+    #[test]
+    fn the_held_writer_lock_is_not_read() {
+        let (root, _g) = store("verify-lock");
+        write(
+            &root.episodic_jsonl(),
+            &line(&learning('B', "another memory entirely")),
+        );
+        let _lock =
+            crate::writer_lock::WriterLock::acquire(&root, crate::writer_lock::WriterKind::Forget)
+                .unwrap();
+        let v = rescan(&root, &eid('A'), Some(TEXT));
+        assert_eq!(v.status, Status::CompleteInStore, "{v:?}");
+        assert!(v.still_present.is_empty(), "{v:?}");
     }
 
     /// One copy seeded in every area the rescan reads, each found and

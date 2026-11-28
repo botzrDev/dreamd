@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(
             out,
             "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n\
-             verified: complete_in_store files=4 index_documents=none text=too_short\n\
+             verified: complete_in_store files=3 index_documents=none text=too_short\n\
              not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
@@ -670,7 +670,7 @@ mod tests {
             out,
             format!(
                 "removed=true lesson=untouched proof={}\ncleared: live_log recurrence_sidecar\n\
-                 verified: complete_in_store files=5 index_documents=none text=too_short\n\
+                 verified: complete_in_store files=4 index_documents=none text=too_short\n\
                  not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n",
                 proof.display()
             )
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(
             out,
             "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n\
-             verified: complete_in_store files=4 index_documents=none text=too_short\n\
+             verified: complete_in_store files=3 index_documents=none text=too_short\n\
              not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
@@ -831,7 +831,7 @@ mod tests {
         assert_eq!(
             out,
             "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar index\n\
-             verified: complete_in_store files=18 index_documents=1 text=checked\n\
+             verified: complete_in_store files=17 index_documents=1 text=checked\n\
              not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
 
