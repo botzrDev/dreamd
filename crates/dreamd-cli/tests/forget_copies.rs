@@ -11,7 +11,11 @@
 //! - `--dry-run` changes no byte under `.agent/` and no git ref;
 //! - after the forget, no file under `.agent/.dreamd/` holds the marker;
 //! - the receipt (`forget-receipt/1.1`) lists the git commits that still
-//!   hold the event under `remaining`, and holds no content.
+//!   hold the event under `remaining`, and holds no content;
+//! - the rescan after the forget reads the store and finds it clear
+//!   (`verified: complete_in_store`), and the receipt says so;
+//! - a copy an agent wrote into `working/WORKSPACE.md` is reported, left as
+//!   it is, and makes the forget exit 3 with `verified: partial`.
 //!
 //! Subprocess test in the shape of `search_nodes_id.rs` (test files share no
 //! helpers, so the stdio MCP harness is copied). Every child gets `HOME` set
@@ -359,6 +363,18 @@ fn forget_clears_dreamds_copies_and_reports_the_git_commits() {
         .unwrap_or_else(|| panic!("no cleared line: {out}"));
     assert!(cleared.contains("live_log"), "{out}");
     assert!(cleared.contains("branch_objects"), "{out}");
+    let verified = out
+        .lines()
+        .find_map(|l| l.strip_prefix("verified: "))
+        .unwrap_or_else(|| panic!("no verified line: {out}"));
+    assert!(verified.starts_with("complete_in_store "), "{out}");
+    assert!(verified.contains(" text=checked"), "{out}");
+    assert!(!out.contains("still_present:"), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("not_checked: ") && l.contains("mcp_client_transcripts")),
+        "{out}"
+    );
     assert!(err.contains("git filter-repo --blob-callback"), "{err}");
     assert!(
         err.contains("clones, forks and remotes keep their copies"),
@@ -384,12 +400,27 @@ fn forget_clears_dreamds_copies_and_reports_the_git_commits() {
     assert!(refs.contains(&"keep".to_string()), "{refs:?}");
     assert!(refs.iter().any(|r| r.starts_with("snap-")), "{refs:?}");
 
-    // The receipt: 1.1, the git commits under `remaining`, no content.
+    // The receipt: 1.1, the git commits under `remaining`, the rescan, no
+    // content.
     let text = std::fs::read_to_string(&receipt).unwrap();
     assert!(!holds(text.as_bytes(), MARK), "{text}");
     assert!(!text.contains("6543"), "{text}");
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["schema_version"], "forget-receipt/1.1");
+    assert_eq!(v["verification"]["status"], "complete_in_store");
+    assert_eq!(v["verification"]["text"], "checked");
+    assert_eq!(v["verification"]["still_present"], serde_json::json!([]));
+    assert!(v["verification"]["files_read"].as_u64().unwrap() > 0);
+    assert!(v["verification"]["kept_by_design"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["area"] == "ledger" && f["match"] == "id"));
+    assert!(v["verification"]["not_checked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "git_history_contents"));
     assert_eq!(v["event_id"], id.as_str());
     assert_eq!(v["removed"], true);
     let cleared: Vec<&str> = v["cleared"]
@@ -434,4 +465,65 @@ fn forget_clears_dreamds_copies_and_reports_the_git_commits() {
         );
         assert!(!holds(&log, &id), "checkout of {name} brought the id back");
     }
+}
+
+#[test]
+fn a_copy_an_agent_wrote_is_reported_and_left_in_place() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let (project, home) = (project.path(), home.path());
+
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"forget_partial\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    let init = run(project, home, &["init"]);
+    assert!(init.status.success(), "dreamd init: {}", describe(&init));
+    let id = append(project, home);
+    // An agent copied the memory into its scratch file.
+    let workspace = project.join(".agent/working/WORKSPACE.md");
+    let mut notes = std::fs::read_to_string(&workspace).unwrap_or_default();
+    notes.push_str(&format!(
+        "\n- Staging Postgres listens on port 6543 ({MARK})\n"
+    ));
+    std::fs::write(&workspace, &notes).unwrap();
+
+    let receipt = home.join("receipt.json");
+    let forget = run(
+        project,
+        home,
+        &["forget", &id, "--proof", receipt.to_str().unwrap()],
+    );
+    assert_eq!(
+        forget.status.code(),
+        Some(3),
+        "forget: {}",
+        describe(&forget)
+    );
+    let out = String::from_utf8_lossy(&forget.stdout);
+    let err = String::from_utf8_lossy(&forget.stderr);
+    assert!(out.starts_with("removed=true "), "{out}");
+    assert!(out.contains("\nverified: partial "), "{out}");
+    assert!(
+        out.contains("still_present: agent_files .agent/working/WORKSPACE.md match=text"),
+        "{out}"
+    );
+    assert!(err.contains("see the still_present lines"), "{err}");
+    // The live log is clear; the agent's file is not edited.
+    assert!(!holds(&std::fs::read(project.join(LOG)).unwrap(), MARK));
+    assert_eq!(std::fs::read_to_string(&workspace).unwrap(), notes);
+
+    let text = std::fs::read_to_string(&receipt).unwrap();
+    assert!(!holds(text.as_bytes(), MARK), "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["verification"]["status"], "partial");
+    assert_eq!(
+        v["verification"]["still_present"],
+        serde_json::json!([{
+            "area": "agent_files",
+            "path": ".agent/working/WORKSPACE.md",
+            "match": "text",
+        }])
+    );
 }

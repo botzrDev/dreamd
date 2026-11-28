@@ -25,10 +25,20 @@
 //! whose dreamd files hold the id, prints the first and last, and prints a
 //! `git filter-repo` command the user can run.
 //!
+//! **Rescan:** after the index pass, the command reads every file under
+//! `.agent/` and every stored index document, deleted ones included, for the
+//! event id and the event's text ([`dreamd_core::verify::rescan`]). It prints
+//! `verified: complete_in_store` when nothing holds either (the ledger keeps
+//! the id by design), or `verified: partial` and one `still_present:` line
+//! per file that does, and exits 3. Git history and the places in
+//! [`dreamd_core::verify::NOT_CHECKED`] are outside that check and listed on
+//! a `not_checked:` line.
+//!
 //! **Receipt:** `--proof <path>` writes a `forget-receipt/1.1` file
-//! ([`dreamd_core::forget::render_receipt`]), which lists what was cleared and
-//! where copies remain. It is unsigned, and it is not the signed membership
-//! proof in `docs/provenance.md`; this tree has no provenance key.
+//! ([`dreamd_core::forget::render_receipt`]), which lists what was cleared,
+//! where copies remain, and what the rescan found. It is unsigned, and it is
+//! not the signed membership proof in `docs/provenance.md`; this tree has no
+//! provenance key.
 
 use std::io::Write;
 use std::path::Path;
@@ -37,6 +47,7 @@ use dreamd_core::copies::{self, GitScan};
 use dreamd_core::forget::{
     self, ForgetError, ForgetOutcome, ForgetReport, IndexOutcome, LessonEffect, Remaining,
 };
+use dreamd_core::verify::{self, Status, Verification};
 use dreamd_core::writer_lock::{WriterKind, WriterLock, WriterLockError};
 use dreamd_core::{AgentRoot, LayoutError};
 use dreamd_protocol::EventId;
@@ -59,6 +70,9 @@ pub enum ForgetCliError {
     Forget(ForgetError),
     /// The JSONL removal landed but the index refresh failed.
     Index(String),
+    /// The forget ran, and the rescan found a file under `.agent/` that still
+    /// holds the event id or text, or could not read one. Exit code 3.
+    Partial,
     /// Output sink or receipt write failure.
     Io(std::io::Error),
 }
@@ -88,6 +102,10 @@ impl std::fmt::Display for ForgetCliError {
             Self::InProgress => write!(f, "dream cycle already in progress"),
             Self::Forget(e) => write!(f, "{e}"),
             Self::Index(e) => write!(f, "index: {e}"),
+            Self::Partial => write!(
+                f,
+                "the rescan found copies of the event under .agent/; see the still_present lines"
+            ),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -118,13 +136,15 @@ fn daemon_liveness(path: &Path) -> bool {
 /// Tokio runtime: the index refresh builds its own current-thread runtime.
 ///
 /// stdout: line 1 is `removed=<bool> lesson=<effect>[ proof=<path>]`; then a
-/// `cleared:` line naming the places cleared, and one `remaining:` line per
-/// place a copy is still kept. stderr carries the git history note and the
-/// rewrite command.
+/// `cleared:` line naming the places cleared, one `remaining:` line per
+/// place a copy is still kept, the `verified:` line, one `still_present:`
+/// line per file the rescan found holding the event, and the `not_checked:`
+/// line. stderr carries the git history note and the rewrite command.
 ///
 /// A well-formed id found nowhere prints `removed=false` and returns `Ok`.
 /// A failed index refresh or receipt write is returned after the result
-/// lines; the removal is not rolled back.
+/// lines; the removal is not rolled back. Otherwise a rescan that found a
+/// copy returns [`ForgetCliError::Partial`].
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     cwd: &Path,
@@ -192,6 +212,8 @@ pub fn run(
     let lock =
         WriterLock::acquire(&root, WriterKind::Forget).map_err(ForgetCliError::WriterLock)?;
 
+    // Held in memory only, for the rescan. Never printed or written.
+    let content = verify::capture(&root, &event_id);
     let report = forget::cascade(&root, lock.ledger(), &event_id, now_sec)?;
     let git = copies::git_history(&root, &event_id);
     if report.cleared.is_empty() {
@@ -208,11 +230,14 @@ pub fn run(
         (IndexOutcome::Absent, None)
     };
     let outcome = ForgetOutcome::new(&root, &report, index, &git);
+    // After the commit, the index merge and every writer's shutdown.
+    let verification = verify::rescan(&root, &event_id, content.as_deref());
+    drop(content);
 
     let mut proof_err = None;
     let mut proof_written = None;
     if let Some(path) = proof {
-        match write_receipt(&root, &event_id, &report, &outcome, path) {
+        match write_receipt(&root, &event_id, &report, &outcome, &verification, path) {
             Ok(()) => proof_written = Some(path),
             Err(e) => proof_err = Some(e),
         }
@@ -230,12 +255,40 @@ pub fn run(
     writeln!(out)?;
     write_places(out, "cleared", &outcome)?;
     write_remaining(out, &outcome.remaining)?;
+    write_verification(out, &verification)?;
     write_git_note(err, &event_id, &git)?;
 
     match (index_err, proof_err) {
         (Some(e), _) | (None, Some(e)) => Err(e),
+        (None, None) if verification.status == Status::Partial => Err(ForgetCliError::Partial),
         (None, None) => Ok(()),
     }
+}
+
+/// `verified: <status> files=<n> index_documents=<n|none> text=<check>`, one
+/// `still_present: <area> <path> match=<match>` line per finding, and the
+/// `not_checked:` line.
+fn write_verification(out: &mut impl Write, v: &Verification) -> std::io::Result<()> {
+    let docs = v
+        .index_documents_read
+        .map_or_else(|| "none".to_string(), |n| n.to_string());
+    writeln!(
+        out,
+        "verified: {} files={} index_documents={docs} text={}",
+        v.status.as_str(),
+        v.files_read,
+        v.text.as_str()
+    )?;
+    for f in &v.still_present {
+        writeln!(
+            out,
+            "still_present: {} {} match={}",
+            f.area.as_str(),
+            f.path,
+            f.matched.as_str()
+        )?;
+    }
+    writeln!(out, "not_checked: {}", verify::NOT_CHECKED.join(" "))
 }
 
 /// `<label>: <place> <place> …`, or nothing when no place is listed.
@@ -392,11 +445,12 @@ fn write_receipt(
     event_id: &EventId,
     report: &ForgetReport,
     outcome: &ForgetOutcome,
+    verification: &Verification,
     path: &Path,
 ) -> Result<(), ForgetCliError> {
     let provenance = dreamd_core::provenance::verify(root)
         .map_err(|e| ForgetCliError::Io(std::io::Error::other(e.to_string())))?;
-    let text = forget::render_receipt(event_id, report, outcome, &provenance);
+    let text = forget::render_receipt(event_id, report, outcome, verification, &provenance);
     dreamd_core::io::write_atomic(path, text.as_bytes())?;
     Ok(())
 }
@@ -577,7 +631,9 @@ mod tests {
         r.unwrap();
         assert_eq!(
             out,
-            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n"
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n\
+             verified: complete_in_store files=4 index_documents=none text=too_short\n\
+             not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
         assert!(!root.wal_path().exists());
@@ -613,7 +669,9 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "removed=true lesson=untouched proof={}\ncleared: live_log recurrence_sidecar\n",
+                "removed=true lesson=untouched proof={}\ncleared: live_log recurrence_sidecar\n\
+                 verified: complete_in_store files=5 index_documents=none text=too_short\n\
+                 not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n",
                 proof.display()
             )
         );
@@ -719,7 +777,9 @@ mod tests {
         r.unwrap();
         assert_eq!(
             out,
-            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n"
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar\n\
+             verified: complete_in_store files=4 index_documents=none text=too_short\n\
+             not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
         assert_eq!(ids(&jsonl), vec![evt_id('B')]);
         assert_ne!(
@@ -770,7 +830,9 @@ mod tests {
         r.unwrap();
         assert_eq!(
             out,
-            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar index\n"
+            "removed=true lesson=untouched\ncleared: live_log recurrence_sidecar index\n\
+             verified: complete_in_store files=18 index_documents=1 text=checked\n\
+             not_checked: git_history_contents git_reflogs_and_unreachable_objects git_remotes_and_clones mcp_client_transcripts llm_providers daemon_home backups_and_sync freed_disk_blocks\n"
         );
 
         assert!(!hits(&root).contains(&evt_id('A')));
