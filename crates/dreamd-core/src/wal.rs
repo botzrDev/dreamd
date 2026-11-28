@@ -439,6 +439,9 @@ fn roll_forward(
         .collect();
     ledger.append(&edges)?;
     crash_point()?;
+    // DMD-125: store the root the commit left, so a later edit is detectable.
+    // Recovery stamps it with the wall clock; a retry stores no second line.
+    ledger.record_root(cycle_at.unwrap_or_else(|| Utc::now().timestamp()))?;
 
     let cycle_at = cycle_at.map(|now_sec| {
         DateTime::from_timestamp(now_sec, 0)
@@ -1122,6 +1125,38 @@ mod tests {
             )
         );
         assert!(!root.wal_path().exists());
+    }
+
+    /// DMD-125: a commit stores the root of the ledger it left, and a
+    /// roll-forward of the same WAL stores no second line.
+    #[test]
+    fn commit_stores_the_ledger_root_once() {
+        let (root, _g) = setup_root("commit-stores-root");
+        let mut stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        stage.record_edges(&two_edges());
+        let redo = stage.redo();
+        let ledger = ledger(&root);
+        commit_cycle(stage, &ledger, NOW_SEC).unwrap();
+
+        let roots = fs::read_to_string(root.provenance_roots()).unwrap();
+        assert_eq!(roots.lines().count(), 1, "{roots}");
+        let stored: crate::provenance::StoredRootLine =
+            serde_json::from_str(roots.trim_end()).unwrap();
+        assert_eq!(stored.ledger_lines, 2);
+        assert_eq!(stored.root, crate::provenance::verify(&root).unwrap().root);
+        assert!(crate::provenance::verify_roots(&root).unwrap().is_ok());
+
+        roll_forward(&root, &redo, &ledger, Some(NOW_SEC)).unwrap();
+        assert_eq!(fs::read_to_string(root.provenance_roots()).unwrap(), roots);
+    }
+
+    /// A cycle that writes no edge and finds no ledger stores no root.
+    #[test]
+    fn commit_without_a_ledger_stores_no_root() {
+        let (root, _g) = setup_root("commit-no-ledger");
+        let stage = begin_cycle(&root, CycleKind::Dream, NOW_SEC).unwrap();
+        commit_cycle(stage, &ledger(&root), NOW_SEC).unwrap();
+        assert!(!root.provenance_roots().exists());
     }
 
     /// A reader built on the legacy struct fails closed on the new WAL.

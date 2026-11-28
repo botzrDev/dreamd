@@ -1,6 +1,6 @@
 # Provenance ledger format (`provenance/1.0`)
 
-**Status: recording, a library check, and `dreamd forget` are implemented; signed proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). `provenance::verify` in `dreamd-core` (BZR-148) recomputes the Merkle root from the well-formed lines and lists orphan edges, missing lesson and recurrence edges, and corrupt line numbers; it only reads, and it does not rewrite the file. `dreamd doctor --provenance` prints the `provenance::verify` report and does not rewrite the ledger. `dreamd doctor --repair` rebuilds the Tantivy index and does not touch the ledger. Ledger repair is not implemented. `forget::cascade` in `dreamd-core` (BZR-158) removes one event from the live JSONL and leaves existing ledger lines in place, so the forgotten id's old edge stays and `verify` reports it as an orphan; `dreamd forget <id>` removes one event through `forget::cascade`, along with the copies dreamd keeps of it under `.agent/`, and refuses while a daemon is live. It does not rewrite git history; it reports the commits that hold the event. `--dry-run` writes nothing. `--proof <path>` writes a `forget-receipt/1.1` file (event id, lesson effect, recomputed root, the orphan edges whose `from` is that id, and the places cleared and remaining). That receipt is not the signed membership proof in the Proof object section below. Signatures and `embedding` edges are not implemented. This format is not part of the v0.2 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (branch objects and refs; see [`branching.md`](./branching.md)).
+**Status: recording, a library check, and `dreamd forget` are implemented; signed proofs are not.** dreamd appends `lesson_citation`, `index_doc`, and `recurrence` edges to the ledger (BZR-155). `provenance::verify` in `dreamd-core` (BZR-148) recomputes the Merkle root from the well-formed lines and lists orphan edges, missing lesson and recurrence edges, and corrupt line numbers; it only reads, and it does not rewrite the file. Every dream cycle and `dreamd forget` commit stores the ledger's root in `provenance/roots.jsonl` (DMD-125). `dreamd doctor --provenance` prints the `provenance::verify` report, compares the ledger with every stored root (`provenance::verify_roots`), and does not rewrite either file. `dreamd doctor --repair` rebuilds the Tantivy index and does not touch the ledger. Ledger repair is not implemented. `forget::cascade` in `dreamd-core` (BZR-158) removes one event from the live JSONL and leaves existing ledger lines in place, so the forgotten id's old edge stays and `verify` reports it as an orphan; `dreamd forget <id>` removes one event through `forget::cascade`, along with the copies dreamd keeps of it under `.agent/`, and refuses while a daemon is live. It does not rewrite git history; it reports the commits that hold the event. `--dry-run` writes nothing. `--proof <path>` writes a `forget-receipt/1.1` file (event id, lesson effect, recomputed root, the orphan edges whose `from` is that id, and the places cleared and remaining). That receipt is not the signed membership proof in the Proof object section below. Signatures and `embedding` edges are not implemented. This format is not part of the v0.2 `.agent/` contract in `SPEC.md`. It is not `.agent/.dreamd/snapshots/` (decay archives) and not `.agent/.dreamd/branches/` (branch objects and refs; see [`branching.md`](./branching.md)).
 
 This page specifies how dreamd records which derived artifacts each episodic event feeds, how that set is committed to with a Merkle root, and how one event's membership is proved with a signed proof. It is the format. The signed proof and the verifier program are still later work. `dreamd forget --proof` writes the forget receipt named in the status paragraph and does not write the Proof object below.
 
@@ -10,7 +10,8 @@ This page specifies how dreamd records which derived artifacts each episodic eve
 |---|---|
 | Edge records (`lesson_citation`, `index_doc`, `recurrence`) | Written (`dreamd-core::provenance`). `index_doc` edges are appended after every indexer commit: for a live batch, and for every log id a coverage pass covers (at open and on resync). One appender per process and project writes the file. It opens the file with `O_APPEND`, and a torn final line is cut when the project writer lock is taken. `lesson_citation` and `recurrence` edges come from the plan of a dream cycle that writes or keeps a `LESSONS.md`, or of a `dreamd forget`. The plan's redo WAL carries them, and its commit appends them after the renames, so a rolled-forward cycle appends the same edges. A `(kind, from, to)` triple already in the file is not appended twice: the appender reads the file's triples once, at its first append, and keeps them. The file does not exist until the first edge. |
 | `embedding` edge kind | Reserved. Nothing writes it, and the checker counts such a line as corrupt. |
-| Merkle root | Recomputed on demand by `dreamd doctor --provenance` and `dreamd forget --proof`. It is not stored anywhere, so there is no earlier root to compare against. |
+| Merkle root | Recomputed on demand by `dreamd doctor --provenance` and `dreamd forget --proof`. |
+| Stored roots (`provenance-root/1.0`) | Written. Each dream cycle or `dreamd forget` commit appends the ledger's current root to `roots.jsonl`, after it appends its edges; see [Stored roots](#stored-roots). `dreamd doctor --provenance` reports a ledger that no longer matches a stored root. The roots are not signed, so someone who can edit both files can rewrite both. |
 | Proof object (membership path + Ed25519 signature) | Reserved. Not implemented: there is no provenance key, nothing signs, and no command writes this object. |
 | Verification procedure for a proof | Reserved. No verifier program or crate ships. |
 | Forget receipt (`forget-receipt/1.1`) | Written by `dreamd forget --proof`. It is a different, unsigned file, described under [Commands](#commands) below. dreamd 1.4 and earlier wrote `forget-receipt/1.0`, whose keys 1.1 keeps. |
@@ -29,6 +30,7 @@ The ledger MUST NOT live under `.agent/.dreamd/snapshots/`, which is the decay a
 ```
 <project>/.agent/.dreamd/provenance/
   ledger.jsonl
+  roots.jsonl
 ```
 
 ## Edge records
@@ -79,6 +81,34 @@ Roots and hashes are written as 64 lowercase hex characters.
 
 The implemented checker (`provenance::verify`) takes its leaves from well-formed lines of the three written kinds only. A line that does not parse, has another `schema_version`, has kind `embedding`, or has a known kind with a malformed `from` / `to` is reported as corrupt and contributes no leaf. A line with an unknown `kind` is skipped and counted, and contributes no leaf. An orphan edge (its `from` is no longer in the live episodic log) is still a leaf.
 
+## Stored roots
+
+`roots.jsonl` is the root history: append-only lines, one per stored root. A writer MUST NOT rewrite or reorder existing lines. Each line is compact UTF-8 JSON terminated by one `\n`, with keys in this order:
+
+```json
+{"schema_version":"provenance-root/1.0","at":"2026-11-28T16:50:00Z","ledger_lines":5,"ledger_bytes":612,"ledger_sha256":"<64 lowercase hex>","root":"<64 lowercase hex>"}
+```
+
+- `schema_version` MUST be exactly `provenance-root/1.0`.
+- `at` is when the root was stored, RFC 3339 UTC to the second. A commit uses the cycle's clock; a recovery roll-forward uses the wall clock.
+- `ledger_bytes` and `ledger_lines` say how much of `ledger.jsonl` the line covers: its first `ledger_bytes` bytes, which end at a `\n` and hold `ledger_lines` complete lines. A torn final ledger line is never covered.
+- `ledger_sha256` is the SHA-256 of those bytes.
+- `root` is the Merkle root of those bytes, computed as above.
+
+**When a root is stored.** Every commit of a dream cycle or `dreamd forget` (and a roll-forward of one after a crash) appends a line after it appends its ledger edges, whether or not it added any. Nothing is stored while the ledger is missing or empty, or when the last stored line already covers the same bytes, so a retried roll-forward stores one line. `index_doc` edges appended after the last stored root are covered by the next one.
+
+**What `doctor --provenance` checks.** Every stored line, not only the last, must still describe a prefix of the ledger as it is now. Edges appended after a stored root are expected and are not faults. The ledger is read once.
+
+| `reason=` | Meaning |
+|---|---|
+| `ledger_shorter` | The ledger is shorter than the bytes the stored line covers: lines were removed, or the file was truncated or deleted. |
+| `bytes_changed` | The covered bytes no longer hash to `ledger_sha256`: a covered line was edited, removed, inserted or moved. Swapping two lines keeps the Merkle root (the root commits to the set of event ids) and is still caught here. |
+| `root_changed` | The covered bytes match, but their Merkle root is not the stored `root`: the stored line itself was edited. Checked for the longest stored prefix that matches. |
+
+A line of `roots.jsonl` that does not parse, or has another `schema_version`, is reported as `corrupt_stored_root`. An unterminated final line is a torn write: `doctor` skips it, and the next writer to take the project lock cuts it. A store with no `roots.jsonl` (no dream cycle or forget has committed since the upgrade to a dreamd that stores roots) has nothing to compare and is not a fault.
+
+**What it does not show.** The roots are not signed (signing is DMD-38), so they show that the ledger changed after a root was stored, not who stored the root. Someone who rewrites the ledger and every line of `roots.jsonl` to match is not detected. Deleting `roots.jsonl` removes the history.
+
 ## Proof object
 
 **Reserved format; not implemented.** Nothing in dreamd writes or reads this object. `dreamd forget --proof` writes the forget receipt under [Commands](#commands), not this.
@@ -124,11 +154,14 @@ Two commands use the ledger. Both run from inside a project with an `.agent/` st
 
 ### `dreamd doctor --provenance`
 
-Runs the usual `dreamd doctor` checks and adds the ledger check. It reads the ledger and the live memory files and writes nothing. On a clean ledger (a missing ledger is clean, with the empty-ledger root) it prints one line:
+Runs the usual `dreamd doctor` checks and adds the ledger check. It reads the ledger, the stored roots and the live memory files and writes nothing. On a clean ledger (a missing ledger is clean, with the empty-ledger root) it prints the root and the last stored root:
 
 ```text
 provenance: ok root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969
+provenance: stored_roots=3 last_root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969 last_at=2026-11-28T16:50:00Z covers_lines=5
 ```
+
+With no stored root yet, the second line is `provenance: stored_roots=0  (no dream cycle or forget has stored a root yet)`.
 
 Otherwise it prints the root, one line per fault, and a count, and `doctor` exits 1:
 
@@ -136,6 +169,16 @@ Otherwise it prints the root, one line per fault, and a count, and `doctor` exit
 provenance: root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969
 provenance: orphan line=2 kind=index_doc from=evt_01M3YEGYTBD28RKHZKAEDN1BVD to=evt_01M3YEGYTBD28RKHZKAEDN1BVD
 provenance: 1 fault(s)  [WARNING: ledger disagrees with the live memory files]
+provenance: stored_roots=3 last_root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969 last_at=2026-11-28T16:50:00Z covers_lines=5
+```
+
+A ledger edited after a stored root:
+
+```text
+provenance: root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969
+provenance: stored_root_mismatch roots_line=1 reason=bytes_changed at=2026-11-28T16:50:00Z ledger_lines=5 root=947fd36f0f499ed5c8264760bed5f7dc24ee2dd216c5334946e5981897e04969
+provenance: 1 fault(s)  [WARNING: the ledger changed after a stored root; it may have been edited]
+provenance: stored_roots=1
 ```
 
 | Line | Meaning |
@@ -143,6 +186,9 @@ provenance: 1 fault(s)  [WARNING: ledger disagrees with the live memory files]
 | `provenance: orphan line=<n> kind=… from=… to=…` | Ledger line `<n>` is a well-formed edge whose `from` event is not in the live episodic log. |
 | `provenance: missing line=0 kind=… from=… to=…` | The current `LESSONS.md` (its `citations`, or its cluster in `recurrence_counts.json`) implies a `lesson_citation` or `recurrence` edge that the ledger does not have. |
 | `provenance: corrupt line=<n>` | Ledger line `<n>` is not a valid edge (see Merkle root above). |
+| `provenance: stored_root_mismatch roots_line=<n> reason=… at=… ledger_lines=… root=…` | Line `<n>` of `roots.jsonl` no longer matches the ledger; see [Stored roots](#stored-roots) for each `reason`. |
+| `provenance: corrupt_stored_root roots_line=<n>` | Line `<n>` of `roots.jsonl` is not a stored root. |
+| `provenance: stored_roots=<count> …` | How many roots are stored and, when none mismatches, the last one. Not a fault. |
 | `provenance: skipped_unknown_kind=<count>` | Lines with an unknown `kind` were skipped. Printed only when the count is above 0. Not a fault. |
 
 An event with no `index_doc` edge is not reported: the index may not have committed it yet.
