@@ -83,9 +83,10 @@ pub struct ForgetArgs {
     #[arg(long)]
     pub dry_run: bool,
     /// Write a forget-receipt/1.1 JSON file to PATH after a removal: the event
-    /// id, lesson effect, ledger root and orphan edges, plus `cleared` and
-    /// `remaining` (where copies are still kept, git history included). It
-    /// holds no memory content. Unsigned; not a proof.
+    /// id, lesson effect, ledger root and orphan edges, `cleared` and
+    /// `remaining` (where copies are still kept, git history included), and
+    /// `verification` (what the rescan of .agent/ found). It holds no memory
+    /// content. Unsigned; not a proof.
     #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
     pub proof: Option<PathBuf>,
 }
@@ -158,6 +159,14 @@ pub enum Command {
     /// index (pruned, then merged so the text leaves the segment files).
     /// Prints a `cleared:` line, and one `remaining:` line per place a copy
     /// is still kept.
+    ///
+    /// Then it rescans: it reads every file under .agent/ and every stored
+    /// index document, deleted ones included, for the event id and text. It
+    /// prints `verified: complete_in_store`, or `verified: partial` with one
+    /// `still_present:` line per file that holds either, and exits 3. The
+    /// provenance ledger keeps the id by design. A `not_checked:` line names
+    /// what the rescan does not read, such as git history and MCP client
+    /// transcripts.
     ///
     /// It never rewrites git history. When committed `.agent/` files hold the
     /// event, it prints how many commits, the first and last, and a
@@ -966,6 +975,11 @@ fn run_forget(args: ForgetArgs) -> ExitCode {
         // Usage / precondition — `run` already printed the hint.
         Err(commands::forget::ForgetCliError::NotFound)
         | Err(commands::forget::ForgetCliError::BadId(_)) => ExitCode::from(2),
+        // The forget committed; the rescan found a copy under .agent/.
+        Err(e @ commands::forget::ForgetCliError::Partial) => {
+            eprintln!("dreamd: warning: {e}");
+            ExitCode::from(3)
+        }
         Err(e) => {
             eprintln!("dreamd: error — {e}");
             ExitCode::from(1)

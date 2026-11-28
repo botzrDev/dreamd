@@ -6,6 +6,8 @@ Remove one episodic event, the lesson state built from it, and the copies dreamd
 
 Clears the live log, LESSONS.md, the recurrence counts, the decay archive, the migrate backup, every autosnap and memory branch (each is rewritten without the event; refs keep their names), and the search index (pruned, then merged so the text leaves the segment files). Prints a `cleared:` line, and one `remaining:` line per place a copy is still kept.
 
+Then it rescans: it reads every file under .agent/ and every stored index document, deleted ones included, for the event id and text. It prints `verified: complete_in_store`, or `verified: partial` with one `still_present:` line per file that holds either, and exits 3. The provenance ledger keeps the id by design. A `not_checked:` line names what the rescan does not read, such as git history and MCP client transcripts.
+
 It never rewrites git history. When committed `.agent/` files hold the event, it prints how many commits, the first and last, and a `git filter-repo` command you can run. Until you run it, and until every clone and remote rewrites too, those commits keep the text.
 
 Stop a live `dreamd watch` first; the command refuses while the daemon is running.
@@ -21,7 +23,7 @@ Options:
           Print what would be removed, and the memory files, branch objects and refs that would change, without writing anything
 
       --proof <PATH>
-          Write a forget-receipt/1.1 JSON file to PATH after a removal: the event id, lesson effect, ledger root and orphan edges, plus `cleared` and `remaining` (where copies are still kept, git history included). It holds no memory content. Unsigned; not a proof
+          Write a forget-receipt/1.1 JSON file to PATH after a removal: the event id, lesson effect, ledger root and orphan edges, `cleared` and `remaining` (where copies are still kept, git history included), and `verification` (what the rescan of .agent/ found). It holds no memory content. Unsigned; not a proof
 
   -h, --help
           Print help (see a summary with '-h')

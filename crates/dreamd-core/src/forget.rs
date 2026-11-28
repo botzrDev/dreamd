@@ -28,9 +28,11 @@
 //! the file, and `provenance::verify` reports it as an orphan.
 //!
 //! `dreamd forget` is the CLI. It calls [`cascade`] when no daemon is
-//! live, or [`preview`] for `--dry-run`. `--proof` writes a forget receipt
-//! ([`render_receipt`], `forget-receipt/1.1`). The receipt is unsigned; the
-//! signed membership proof in `docs/provenance.md` is still absent.
+//! live, or [`preview`] for `--dry-run`. After the forget it rescans the store
+//! ([`crate::verify::rescan`]). `--proof` writes a forget receipt
+//! ([`render_receipt`], `forget-receipt/1.1`) that carries the rescan's
+//! result. The receipt is unsigned; the signed membership proof in
+//! `docs/provenance.md` is still absent.
 
 use std::io;
 
@@ -492,6 +494,18 @@ struct Receipt<'a> {
     orphans: Vec<ReceiptOrphan<'a>>,
     cleared: Vec<&'static str>,
     remaining: &'a [Remaining],
+    verification: ReceiptVerification<'a>,
+}
+
+#[derive(Serialize)]
+struct ReceiptVerification<'a> {
+    status: &'static str,
+    files_read: usize,
+    index_documents_read: Option<usize>,
+    text: &'static str,
+    still_present: &'a [crate::verify::Finding],
+    kept_by_design: &'a [crate::verify::Finding],
+    not_checked: &'static [&'static str],
 }
 
 #[derive(Serialize)]
@@ -513,12 +527,24 @@ struct ReceiptOrphan<'a> {
 ///
 /// 1.1 adds `cleared`, the [`Place`] tokens of every place the forget
 /// cleared, and `remaining`, every place a copy is still kept
-/// ([`Remaining`]). The receipt never holds the memory's content. It is
-/// unsigned: it carries no inclusion path and no signature.
+/// ([`Remaining`]).
+///
+/// 1.1 also adds `verification`, the result of the rescan that read the store
+/// after the forget ([`crate::verify::rescan`]): `status`
+/// (`complete_in_store` or `partial`), how many files and stored index
+/// documents it read, whether the event's text was matched, every file that
+/// still holds the id or the text (`still_present`), the ledger files that
+/// keep the id by design (`kept_by_design`), and the places it does not read
+/// (`not_checked`, always listed). `complete_in_store` speaks of `.agent/`
+/// only: git history and the places in `not_checked` can still hold copies.
+///
+/// The receipt never holds the memory's content. It is unsigned: it carries
+/// no inclusion path and no signature.
 pub fn render_receipt(
     event_id: &EventId,
     report: &ForgetReport,
     outcome: &ForgetOutcome,
+    verification: &crate::verify::Verification,
     ledger: &crate::provenance::ProvenanceReport,
 ) -> String {
     let id = event_id.as_str();
@@ -541,6 +567,15 @@ pub fn render_receipt(
             .collect(),
         cleared: outcome.cleared.iter().map(|p| p.as_str()).collect(),
         remaining: &outcome.remaining,
+        verification: ReceiptVerification {
+            status: verification.status.as_str(),
+            files_read: verification.files_read,
+            index_documents_read: verification.index_documents_read,
+            text: verification.text.as_str(),
+            still_present: &verification.still_present,
+            kept_by_design: &verification.kept_by_design,
+            not_checked: crate::verify::NOT_CHECKED,
+        },
     };
     // Plain strings, integers, and bools: serialization cannot fail.
     let mut out = serde_json::to_string(&receipt).expect("receipt serializes");
@@ -902,7 +937,7 @@ mod tests {
         let root = AgentRoot::new(std::path::Path::new("/p"));
         let outcome = ForgetOutcome::new(&root, &report, IndexOutcome::Absent, &GitScan::NoRepo);
 
-        let text = render_receipt(&eid('A'), &report, &outcome, &ledger);
+        let text = render_receipt(&eid('A'), &report, &outcome, &clean(), &ledger);
 
         assert!(text.ends_with('\n') && !text.ends_with("\n\n"));
         assert!(!text.contains("\"signature\""), "{text}");
@@ -933,8 +968,14 @@ mod tests {
             workdir: std::path::PathBuf::from("/home/someone/project"),
         });
         let outcome = ForgetOutcome::new(&root, &report, IndexOutcome::Cleared, &git);
-        let v: serde_json::Value =
-            serde_json::from_str(&render_receipt(&eid('A'), &report, &outcome, &ledger)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&render_receipt(
+            &eid('A'),
+            &report,
+            &outcome,
+            &clean(),
+            &ledger,
+        ))
+        .unwrap();
         assert_eq!(
             v["cleared"],
             serde_json::json!(["live_log", "lessons", "recurrence_sidecar", "index"])
@@ -954,6 +995,94 @@ mod tests {
 
     fn text_of(v: &serde_json::Value) -> String {
         v.to_string()
+    }
+
+    /// A rescan that found nothing.
+    fn clean() -> crate::verify::Verification {
+        crate::verify::Verification {
+            status: crate::verify::Status::CompleteInStore,
+            files_read: 9,
+            index_documents_read: None,
+            text: crate::verify::TextCheck::Checked,
+            still_present: vec![],
+            kept_by_design: vec![],
+        }
+    }
+
+    /// `verification` states the rescan as it ran, lists what it does not
+    /// read every time, and holds paths and tokens, never content.
+    #[test]
+    fn receipt_1_1_states_the_rescan() {
+        use crate::provenance::ProvenanceReport;
+        use crate::verify::{Area, Finding, Match, Status, TextCheck, Verification};
+
+        let ledger = ProvenanceReport {
+            root: "ef".repeat(32),
+            orphans: vec![],
+            missing: vec![],
+            corrupt_lines: vec![],
+            skipped_unknown_kind: 0,
+        };
+        let report = ForgetReport::untouched(StoreCopies::default());
+        let root = AgentRoot::new(std::path::Path::new("/p"));
+        let outcome = ForgetOutcome::new(&root, &report, IndexOutcome::Cleared, &GitScan::NoRepo);
+        let v: serde_json::Value = serde_json::from_str(&render_receipt(
+            &eid('A'),
+            &report,
+            &outcome,
+            &clean(),
+            &ledger,
+        ))
+        .unwrap();
+        assert_eq!(v["verification"]["status"], "complete_in_store");
+        assert_eq!(v["verification"]["files_read"], 9);
+        assert_eq!(
+            v["verification"]["index_documents_read"],
+            serde_json::Value::Null
+        );
+        assert_eq!(v["verification"]["text"], "checked");
+        assert_eq!(v["verification"]["still_present"], serde_json::json!([]));
+        assert_eq!(
+            v["verification"]["not_checked"],
+            serde_json::json!(crate::verify::NOT_CHECKED)
+        );
+
+        let partial = Verification {
+            status: Status::Partial,
+            files_read: 12,
+            index_documents_read: Some(40),
+            text: TextCheck::TooShort,
+            still_present: vec![Finding {
+                area: Area::AgentFiles,
+                path: ".agent/working/WORKSPACE.md".to_string(),
+                matched: Match::Id,
+            }],
+            kept_by_design: vec![Finding {
+                area: Area::Ledger,
+                path: ".agent/.dreamd/provenance/ledger.jsonl".to_string(),
+                matched: Match::Id,
+            }],
+        };
+        let v: serde_json::Value = serde_json::from_str(&render_receipt(
+            &eid('A'),
+            &report,
+            &outcome,
+            &partial,
+            &ledger,
+        ))
+        .unwrap();
+        assert_eq!(v["verification"]["status"], "partial");
+        assert_eq!(v["verification"]["index_documents_read"], 40);
+        assert_eq!(v["verification"]["text"], "too_short");
+        assert_eq!(
+            v["verification"]["still_present"],
+            serde_json::json!([{
+                "area": "agent_files",
+                "path": ".agent/working/WORKSPACE.md",
+                "match": "id",
+            }])
+        );
+        assert_eq!(v["verification"]["kept_by_design"][0]["area"], "ledger");
     }
 
     /// The 1.0 keys keep their order and come before the 1.1 keys.
@@ -977,7 +1106,7 @@ mod tests {
             &GitScan::Failed("no".to_string()),
         );
 
-        let text = render_receipt(&eid('A'), &report, &outcome, &ledger);
+        let text = render_receipt(&eid('A'), &report, &outcome, &clean(), &ledger);
 
         let keys: Vec<&str> = [
             "schema_version",
@@ -988,6 +1117,7 @@ mod tests {
             "orphans",
             "cleared",
             "remaining",
+            "verification",
         ]
         .into_iter()
         .collect();

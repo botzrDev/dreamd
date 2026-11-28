@@ -48,8 +48,8 @@ BM25 × salience.
   Unsigned; no stored root; records derivation, not trust
   ([`docs/provenance.md`](docs/provenance.md)).
 - **`dreamd forget <id>`** — removes one event and the lesson state that names
-  it, with `--dry-run` and a `--proof` receipt (`forget-receipt/1.1`, not a
-  signed proof).
+  it, rescans `.agent/` for what still holds it, with `--dry-run` and a
+  `--proof` receipt (`forget-receipt/1.1`, not a signed proof).
 - **Recall inspection** — `dreamd blame`, `recall --without` /
   `--without-cluster`, `explain=1` citations and repeatable `exclude=` on
   `GET /api/v1/recall`, `dreamd salience-drift` and
